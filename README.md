@@ -341,15 +341,16 @@ twitch_miner.mine(followers=True, blacklist=["user1", "user2"])  # Blacklist exa
 ### Category-based Drops
 
 Use `categories` when you want the miner to find eligible live channels for a
-game instead of maintaining a fixed list of streamer usernames. Category names,
-Twitch category slugs, and full category URLs are accepted:
+game instead of maintaining a fixed list of streamer usernames. Twitch category
+slugs are the preferred input, followed by full category URLs. Displayed category
+names are also accepted:
 
 ```python
 twitch_miner.mine(
     categories=[
-        "Pokémon GO",
         "pokemon-go",
         "https://www.twitch.tv/directory/category/pokemon-go?filter=drops",
+        "Pokémon GO",
     ],
     category_limit=5,
     category_log_level=logging.INFO,
@@ -360,8 +361,8 @@ twitch_miner.mine(
 Category matching is accent-insensitive, so `Pokémon GO`, `Pokemon GO`, and
 `pokemon-go` resolve to the same Twitch category. This is useful when the Twitch
 display name contains accented characters but a configuration or copied URL uses
-plain ASCII. Prefer the displayed category name when you are unsure of its slug,
-or paste the full Twitch category URL.
+plain ASCII. For the most reliable matching, use the Twitch category slug when
+available; otherwise, paste the full Twitch category URL.
 
 If Twitch's campaign sources do not list any campaign for a configured game, the
 miner uses that game's `twitchdrops.app/game/<category>` page as a third-priority
@@ -390,7 +391,7 @@ The pipe avoids conflicts with punctuation in category names such as
 
 The miner periodically checks configured categories for new campaigns and live
 replacement streamers. `category_refresh_interval_hours` defaults to 6 hours,
-has a minimum of 30 minutes, and adds a random 20-second–5-minute delay. Set it to `0` to
+has a minimum of 30 minutes, and adds a random delay between 20-seconds to 5-minutes. Set it to `0` to
 disable periodic category refresh (not recommended).
 
 Set `category_log_level` to the severity you want for category discovery and
@@ -401,7 +402,7 @@ while unrelated debug records remain filtered out.
 
 ### By cloning the repository
 1. Clone this repository `git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2`
-2. Install all the requirements `pip install -r requirements.txt` . If you have problems with requirements, make sure to have at least Python3.6. You could also try to create a _virtualenv_ and then install all the requirements
+2. Install all the requirements `pip install -r requirements.txt` . If you have problems with requirements, make sure to have at least Python3.9. You could also try to create a _virtualenv_ and then install all the requirements
 ```sh
 pip install virtualenv
 virtualenv -p python3 venv
