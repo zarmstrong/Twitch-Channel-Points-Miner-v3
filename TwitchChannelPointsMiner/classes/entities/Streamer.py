@@ -185,7 +185,7 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
-            logger.debug(
+            logger.info(
                 "[watch-streak] "
                 f"Twitch confirmed streak for streamer={self.username}; "
                 f"local watched={self.stream.minute_watched:.2f}m"
