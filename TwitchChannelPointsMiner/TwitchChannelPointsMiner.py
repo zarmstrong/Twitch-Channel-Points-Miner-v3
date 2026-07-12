@@ -188,6 +188,7 @@ class TwitchChannelPointsMiner:
         port: int = 5000,
         refresh: int = 5,
         days_ago: int = 7,
+        password: str = None,
     ):
         # Analytics switch
         if Settings.enable_analytics is True:
@@ -200,6 +201,7 @@ class TwitchChannelPointsMiner:
                 refresh=refresh,
                 days_ago=days_ago,
                 username=self.username,
+                password=password,
             )
             http_server.daemon = True
             http_server.name = "Analytics Thread"

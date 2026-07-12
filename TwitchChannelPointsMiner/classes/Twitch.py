@@ -55,6 +55,7 @@ from twitchdrops_app_scraper import TwitchDropsAppScraper
 
 logger = logging.getLogger(__name__)
 JsonType = Dict[str, Any]
+TWITCHDROPS_APP_CHECK_DELAY_SECONDS = (0.5, 2.0)
 
 
 class Twitch(object):
@@ -988,6 +989,7 @@ class Twitch(object):
             for name, image_url in awarded_benefit_fingerprints
             if name and image_url == ""
         }
+        checked_twitchdrops_app = False
 
         for category in categories:
             category_name, _ = self.__split_category_streamer_selector(category)
@@ -995,6 +997,10 @@ class Twitch(object):
             requested_slug = self.__slugify(normalized.replace("-", " "))
             if not requested_slug or requested_slug in twitch_category_slugs:
                 continue
+
+            if checked_twitchdrops_app:
+                time.sleep(random.uniform(*TWITCHDROPS_APP_CHECK_DELAY_SECONDS))
+            checked_twitchdrops_app = True
 
             try:
                 report = scraper.scrape(normalized)

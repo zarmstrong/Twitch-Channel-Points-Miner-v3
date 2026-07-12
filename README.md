@@ -738,7 +738,7 @@ If you want you can toggle the dark theme with the dedicated checkbox.
 | ![Light theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-light.png) | ![Dark theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-dark.png) |
 
 For use this feature just call the `analytics()` method before start mining. Read more at: [#96](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/96)
-The chart will be autofreshed each `refresh` minutes. If you want to connect from one to second machine that have that webpanel you have to use `0.0.0.0` instead of `127.0.0.1`. With the `days_ago` arg you can select how many days you want to show by default in your analytics graph.
+The chart will be autofreshed each `refresh` minutes. To connect from another machine, bind to `0.0.0.0` and provide `password="a-strong-password"`; remote binds without a password are rejected. Sign in with your Twitch username and that password. Because the built-in server uses plain HTTP, expose it only on a trusted network or behind an HTTPS reverse proxy. With the `days_ago` arg you can select how many days you want to show by default in your analytics graph.
 ```python
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 twitch_miner = TwitchChannelPointsMiner("your-twitch-username")
@@ -753,7 +753,7 @@ Disabling Analytics significantly reduces memory consumption and saves some disk
 Set this option to `True` if you need Analytics. Otherwise set this option to `False` (default value).
 
 ## Migrating from an old repository (the original one):
-If you already have a `twitch-cookies.pkl` and you don't want to log in again, please create a `cookies/` folder in the current directory and then copy the .pkl file with a new name `your-twitch-username.pkl`
+If you already have a `twitch-cookies.pkl` and you don't want to log in again, please create a `cookies/` folder in the current directory and then copy the `.pkl` file with a new name `your-twitch-username.pkl`. The miner safely migrates valid legacy cookie files to its JSON format and restricts them to the owner on first load.
 ```
 .
 +-- run.py

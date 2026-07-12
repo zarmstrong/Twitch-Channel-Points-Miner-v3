@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
@@ -95,6 +96,10 @@ def filter_datas(start_date, end_date, datas):
 
         # Attempt to get the last known balance from before the provided timeframe
         df = df[(df.x >= new_start_date) & (df.x <= new_end_date)]
+        if df.empty:
+            datas["series"] = []
+            datas["annotations"] = []
+            return datas
         last_balance = (
             df.drop(columns="datetime")
             .sort_values(by=["x", "y"], ascending=True)
@@ -312,6 +317,7 @@ class AnalyticsServer(Thread):
         refresh: int = 5,
         days_ago: int = 7,
         username: str = None,
+        password: str = None,
     ):
         super(AnalyticsServer, self).__init__()
 
@@ -322,6 +328,10 @@ class AnalyticsServer(Thread):
         self.refresh = refresh
         self.days_ago = days_ago
         self.username = username
+        self.password = password
+
+        if host not in {"127.0.0.1", "localhost", "::1"} and not password:
+            raise ValueError("Analytics exposed beyond localhost requires a password")
 
         def generate_log():
             global last_sent_log_index  # Use the global variable
@@ -353,6 +363,26 @@ class AnalyticsServer(Thread):
             template_folder=get_assets_folder(),
             static_folder=get_assets_folder(),
         )
+
+        @self.app.before_request
+        def require_authentication():
+            if self.password is None:
+                return None
+            authorization = request.authorization
+            valid_username = authorization is not None and secrets.compare_digest(
+                authorization.username or "", self.username or ""
+            )
+            valid_password = authorization is not None and secrets.compare_digest(
+                authorization.password or "", self.password
+            )
+            if valid_username and valid_password:
+                return None
+            return Response(
+                "Authentication required.",
+                status=401,
+                headers={"WWW-Authenticate": 'Basic realm="Twitch analytics"'},
+            )
+
         self.app.add_url_rule(
             "/",
             "index",
