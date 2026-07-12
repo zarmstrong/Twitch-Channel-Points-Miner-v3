@@ -27,7 +27,7 @@ setuptools.setup(
     py_modules=["twitchdrops_app_scraper"],
     include_package_data=True,
     install_requires=[
-        "requests==2.31.0",
+        "requests==2.32.5",
         "websocket-client==1.7.0",
         "pillow==10.2.0",
         "python-dateutil==2.8.2",

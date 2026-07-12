@@ -84,6 +84,11 @@ class Twitch(object):
     ]
 
     def __init__(self, username, user_agent, password=None):
+        if (
+            not isinstance(username, str)
+            or re.fullmatch(r"[A-Za-z0-9_]{1,25}", username) is None
+        ):
+            raise ValueError("Invalid Twitch username")
         cookies_path = os.path.join(Path().absolute(), "cookies")
         Path(cookies_path).mkdir(parents=True, exist_ok=True)
         self.cookies_file = os.path.join(cookies_path, f"{username}.pkl")
@@ -488,13 +493,17 @@ class Twitch(object):
 
             headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
 
-            main_page_request = requests.get(streamer.streamer_url, headers=headers)
+            main_page_request = requests.get(
+                streamer.streamer_url, headers=headers, timeout=(5, 20)
+            )
             response = main_page_request.text
             # logger.info(response)
             regex_settings = "(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)"
             settings_url = re.search(regex_settings, response).group(1)
 
-            settings_request = requests.get(settings_url, headers=headers)
+            settings_request = requests.get(
+                settings_url, headers=headers, timeout=(5, 20)
+            )
             response = settings_request.text
             regex_spade = '"spade_url":"(.*?)"'
             streamer.stream.spade_url = re.search(regex_spade, response).group(1)
@@ -1597,6 +1606,7 @@ class Twitch(object):
                     "User-Agent": self.user_agent,
                     "X-Device-Id": self.device_id,
                 },
+                timeout=(5, 30),
             )
             logger.debug(
                 f"Data: {json_data}, Status code: {response.status_code}, Content: {response.text}"
@@ -1666,7 +1676,7 @@ class Twitch(object):
 
     def update_client_version(self):
         try:
-            response = requests.get(URL)
+            response = requests.get(URL, timeout=(5, 20))
             if response.status_code != 200:
                 logger.debug(
                     f"Error with update_client_version: {response.status_code}"

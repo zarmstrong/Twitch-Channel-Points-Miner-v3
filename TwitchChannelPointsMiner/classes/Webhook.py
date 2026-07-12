@@ -15,9 +15,12 @@ class Webhook(object):
         if str(event) in self.events:
             parameters = {"event_name": str(event), "message": message}
 
-            if self.method.lower() == "get":
-                requests.get(url=self.endpoint, params=parameters)
-            elif self.method.lower() == "post":
-                requests.post(url=self.endpoint, params=parameters)
-            else:
-                raise ValueError("Invalid method, use POST or GET")
+            try:
+                if self.method.lower() == "get":
+                    requests.get(url=self.endpoint, params=parameters, timeout=(5, 15))
+                elif self.method.lower() == "post":
+                    requests.post(url=self.endpoint, params=parameters, timeout=(5, 15))
+                else:
+                    raise ValueError("Invalid method, use POST or GET")
+            except requests.RequestException:
+                return

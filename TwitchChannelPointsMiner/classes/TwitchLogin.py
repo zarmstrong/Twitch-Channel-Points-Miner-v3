@@ -229,6 +229,7 @@ class TwitchLogin(object):
                 "User-Agent": USER_AGENTS["Android"]["TV"],
                 "X-Device-Id": self.device_id,
             },
+            timeout=(5, 30),
         )
         return response
 
@@ -409,7 +410,7 @@ class TwitchLogin(object):
     def __set_user_id(self):
         json_data = copy.deepcopy(GQLOperations.GetIDFromLogin)
         json_data["variables"]["login"] = self.username
-        response = self.session.post(GQLOperations.url, json=json_data)
+        response = self.session.post(GQLOperations.url, json=json_data, timeout=(5, 30))
 
         if response.status_code == 200:
             json_response = response.json()

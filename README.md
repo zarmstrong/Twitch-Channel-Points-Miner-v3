@@ -746,6 +746,31 @@ twitch_miner.analytics(host="127.0.0.1", port=5000, refresh=5, days_ago=7)   # A
 twitch_miner.mine(followers=True, blacklist=["user1", "user2"])
 ```
 
+### Analytics security and HTTPS reverse proxy
+
+The analytics server contains account activity and miner logs. Its built-in authentication uses HTTP Basic authentication, which does not encrypt credentials or response data. Binding it to `0.0.0.0` exposes it to every reachable network interface; use a strong, unique analytics password and do not expose port 5000 directly to the internet.
+
+For remote access, keep the miner bound to loopback and terminate HTTPS in a reverse proxy. A minimal nginx location looks like this:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name analytics.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/analytics.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/analytics.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+Run `twitch_miner.analytics(host="127.0.0.1", password="a-strong-password")` behind that proxy. Restrict the proxy further with a firewall, VPN, or IP allowlist where possible. nginx and certificate provisioning must be configured for your operating system and domain; the example only shows the relevant proxy boundary.
+
 ### `enable_analytics` option in `twitch_minerfile` toggles Analytics needed for the `analytics()` method
 
 Disabling Analytics significantly reduces memory consumption and saves some disk space by not creating and writing `/analytics/*.json`.

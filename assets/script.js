@@ -152,14 +152,17 @@ $(document).ready(function () {
     // Function to get the full log content
     function getLog() {
         if (isLogCheckboxChecked) {
-            $.get(`/log?lastIndex=${lastReceivedLogIndex}`, function (data) {
+            $.get(`/log?lastIndex=${lastReceivedLogIndex}`, function (data, _status, xhr) {
                 // Process and display the new log entries received
                 $("#log-content").append(data);
                 // Scroll to the bottom of the log content
                 $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
 
                 // Update the last received log index
-                lastReceivedLogIndex += data.length;
+                const nextPosition = Number(xhr.getResponseHeader("X-Log-Position"));
+                if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
+                    lastReceivedLogIndex = nextPosition;
+                }
 
                 if (autoUpdateLog) {
                     // Call getLog() again after a certain interval (e.g., 1 second)

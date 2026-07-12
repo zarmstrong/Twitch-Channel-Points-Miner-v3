@@ -11,7 +11,6 @@ from flask import Flask, Response, cli, render_template, request
 from werkzeug.serving import WSGIRequestHandler
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
-from TwitchChannelPointsMiner.utils import download_file
 
 cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
@@ -262,19 +261,6 @@ def streamers():
     )
 
 
-def download_assets(assets_folder, required_files):
-    Path(assets_folder).mkdir(parents=True, exist_ok=True)
-    logger.info(f"Downloading assets to {assets_folder}")
-
-    for f in required_files:
-        if os.path.isfile(os.path.join(assets_folder, f)) is False:
-            if (
-                download_file(os.path.join("assets", f), os.path.join(assets_folder, f))
-                is True
-            ):
-                logger.info(f"Downloaded {f}")
-
-
 def check_assets():
     required_files = [
         "banner.png",
@@ -284,18 +270,13 @@ def check_assets():
         "dark-theme.css",
     ]
     assets_folder = get_assets_folder()
-    if os.path.isdir(assets_folder) is False:
-        logger.info(f"Assets folder not found at {assets_folder}")
-        download_assets(assets_folder, required_files)
-    else:
-        for f in required_files:
-            if os.path.isfile(os.path.join(assets_folder, f)) is False:
-                logger.info(f"Missing file {f} in {assets_folder}")
-                download_assets(assets_folder, required_files)
-                break
-
-
-last_sent_log_index = 0
+    missing_files = [
+        f for f in required_files if not os.path.isfile(os.path.join(assets_folder, f))
+    ]
+    if missing_files:
+        raise FileNotFoundError(
+            f"Missing analytics assets in {assets_folder}: {', '.join(missing_files)}"
+        )
 
 
 class AnalyticsWSGIRequestHandler(WSGIRequestHandler):
@@ -334,26 +315,34 @@ class AnalyticsServer(Thread):
             raise ValueError("Analytics exposed beyond localhost requires a password")
 
         def generate_log():
-            global last_sent_log_index  # Use the global variable
-
-            # Get the last received log index from the client request parameters
-            last_received_index = int(
-                request.args.get("lastIndex", last_sent_log_index)
-            )
+            raw_position = request.args.get("lastIndex", "0")
+            try:
+                last_received_index = int(raw_position)
+            except (TypeError, ValueError):
+                return Response("Invalid log position.", status=400)
+            if last_received_index < 0:
+                return Response("Invalid log position.", status=400)
 
             logs_path = os.path.join(Path().absolute(), "logs")
             log_file_path = os.path.join(logs_path, f"{username}.log")
             try:
-                with open(log_file_path, "r", encoding="utf-8") as log_file:
-                    log_content = log_file.read()
+                file_size = os.path.getsize(log_file_path)
+                position = (
+                    last_received_index if last_received_index <= file_size else 0
+                )
+                with open(log_file_path, "rb") as log_file:
+                    log_file.seek(position)
+                    new_log_entries = log_file.read()
+                    next_position = log_file.tell()
 
-                # Extract new log entries since the last received index
-                new_log_entries = log_content[last_received_index:]
-                last_sent_log_index = len(log_content)  # Update the last sent index
+                return Response(
+                    new_log_entries,
+                    status=200,
+                    mimetype="text/plain",
+                    headers={"X-Log-Position": str(next_position)},
+                )
 
-                return Response(new_log_entries, status=200, mimetype="text/plain")
-
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 return Response(
                     "Log file not found.", status=404, mimetype="text/plain"
                 )

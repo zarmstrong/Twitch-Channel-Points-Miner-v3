@@ -3,6 +3,7 @@
 import logging
 import os
 import random
+import re
 import signal
 import sys
 import threading
@@ -97,6 +98,14 @@ class TwitchChannelPointsMiner:
             logger.error("Please edit your runner file (usually run.py) and try again.")
             logger.error("No username, exiting...")
             sys.exit(0)
+        if (
+            not isinstance(username, str)
+            or re.fullmatch(r"[A-Za-z0-9_]{1,25}", username) is None
+        ):
+            raise ValueError(
+                "username must contain only letters, numbers, or underscores "
+                "and be between 1 and 25 characters"
+            )
 
         # This disables certificate verification and allows the connection to proceed, but also makes it vulnerable to man-in-the-middle (MITM) attacks.
         Settings.disable_ssl_cert_verification = disable_ssl_cert_verification

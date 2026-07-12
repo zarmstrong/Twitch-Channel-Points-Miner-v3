@@ -18,12 +18,16 @@ class Telegram(object):
 
     def send(self, message: str, event: Events) -> None:
         if str(event) in self.events:
-            requests.post(
-                url=self.telegram_api,
-                data={
-                    "chat_id": self.chat_id,
-                    "text": dedent(message),
-                    "disable_web_page_preview": True,  # include link to twitch streamer?
-                    "disable_notification": self.disable_notification,  # no sound, notif just in tray
-                },
-            )
+            try:
+                requests.post(
+                    url=self.telegram_api,
+                    data={
+                        "chat_id": self.chat_id,
+                        "text": dedent(message),
+                        "disable_web_page_preview": True,
+                        "disable_notification": self.disable_notification,
+                    },
+                    timeout=(5, 15),
+                )
+            except requests.RequestException:
+                return
