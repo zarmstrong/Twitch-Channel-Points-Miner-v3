@@ -11,7 +11,13 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
-from TwitchChannelPointsMiner.classes.Settings import Priority, Events, FollowersOrder
+from TwitchChannelPointsMiner.classes.Settings import (
+    Priority,
+    Events,
+    FollowersOrder,
+    CategorySort,
+    CategoryCampaignOrder,
+)
 from TwitchChannelPointsMiner.classes.entities.Bet import Strategy, BetSettings, Condition, OutcomeKeys, FilterCondition, DelayMode
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
 
@@ -78,7 +84,7 @@ twitch_miner = TwitchChannelPointsMiner(
             endpoint="https://example.com/message?token=TOKEN",
             priority=8,
             events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION], 
+                    Events.BET_LOSE, Events.CHAT_MENTION],
         )
     ),
     streamer_settings=StreamerSettings(
@@ -132,5 +138,30 @@ twitch_miner.mine(
         "streamer-username11"
     ],                                  # Array of streamers (order = priority)
     followers=False,                    # Automatic download the list of your followers
-    followers_order=FollowersOrder.ASC  # Sort the followers list by follow date. ASC or DESC
+    followers_order=FollowersOrder.ASC, # Sort the followers list by follow date. ASC or DESC
+    categories=[
+        "rust",
+        "gray-zone-warfare",
+        "diablo-iv",
+        "arc-raiders",
+        "the-elder-scrolls-online",
+        "hitman-world-of-assassination",
+        "palworld",
+        "warframe",
+        # Force a specific live streamer for a category (also accepts "[category]|[streamer]"):
+        # "gray-zone-warfare|streamer-username01",
+        # You can also pass the full Twitch URL:
+        # "https://www.twitch.tv/directory/category/gray-zone-warfare?filter=drops"
+    ],
+    category_drops_enabled=True,                                # Filter category search to channels with DropsEnabled tag
+    category_limit=5,                                           # Max live channels to load per category search
+    category_sort=CategorySort.VIEWERS_DESC,                    # Options: ORDER, VIEWERS_DESC, VIEWERS_ASC, STARTED_AT_DESC, STARTED_AT_ASC, RANDOM
+    category_campaign_order=CategoryCampaignOrder.EXPIRATION,   # Category list order, or EXPIRATION for the closest viable deadline:
+    category_chat=ChatPresence.NEVER,                           # Chat setting for category-discovered streamers only
+    category_log_level=logging.INFO,                            # Category messages can be shown without enabling global DEBUG
+    drop_item_art=True,                                         # If True, store/display drop item art URL in analytics drops table
+    print_open_drop_campaigns_on_load=True,                     # If True, print all open drop campaigns to console at startup
+    scrape_drop_progress_on_load=True,                          # If True, scrape inventory drop progress immediately at startup
+    log_drop_checks=True,                                       # Keep False unless actively debugging drop GraphQL/inventory behavior
+    category_refresh_interval_hours=3,                          # Minimum 30m plus a random 20s-5m delay; 0 disables refresh
 )

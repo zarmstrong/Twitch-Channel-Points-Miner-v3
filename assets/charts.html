@@ -103,6 +103,35 @@
             </div>
         </div>
 
+        <div class="columns top-controls-row">
+            <div class="column is-narrow has-text-center">
+                <div id="dashboard-tabs" class="view-tabs">
+                    <button id="tab-points" class="button is-small is-link" type="button" onclick="switchDashboardTab('points')">Points</button>
+                    <button id="tab-drops" class="button is-small" type="button" onclick="switchDashboardTab('drops')">Drops</button>
+                </div>
+            </div>
+            <div class="column has-text-right top-controls" style="margin: auto">
+                <button id="auto-update-log">⏸️</button>
+                <label class="checkbox checkbox-label">
+                    Log
+                    <input type="checkbox" id="log">
+                </label>
+                <label class="checkbox checkbox-label">
+                    Annotations
+                    <input type="checkbox" checked="true" id="annotations">
+                </label>
+                <label class="checkbox checkbox-label">
+                    Dark mode
+                    <input type="checkbox" checked="true" id="dark-mode">
+                </label>
+                <label class="checkbox checkbox-label">
+                    Header
+                    <input type="checkbox" checked="true" id="toggle-header">
+                </label>
+            </div>
+        </div>
+
+        <div id="points-panel">
         <div class="columns">
             <div class="column is-narrow has-text-center">
                 <div class="dropdown">
@@ -144,25 +173,6 @@
             <div class="column is-2 has-text-left">
                 <input class="input" type="date" id="endDate">
             </div>
-            <div class="column has-text-right" style="margin: auto">
-                <button id="auto-update-log">⏸️</button>
-                <label class="checkbox checkbox-label">
-                    Log
-                    <input type="checkbox" id="log">
-                </label>
-                <label class="checkbox checkbox-label">
-                    Annotations
-                    <input type="checkbox" checked="true" id="annotations">
-                </label>
-                <label class="checkbox checkbox-label">
-                    Dark mode
-                    <input type="checkbox" checked="true" id="dark-mode">
-                </label>
-                <label class="checkbox checkbox-label">
-                    Header
-                    <input type="checkbox" checked="true" id="toggle-header">
-                </label>
-            </div>
         </div>
         <div class="columns">
             <div class="column is-narrow">
@@ -173,6 +183,43 @@
             <div class="column">
                 <div class="box" id="chart" style="padding: 0.30rem;"></div>
             </div>
+        </div>
+
+        </div>
+
+        <div id="drops-panel" style="display: none;">
+        <div class="columns">
+            <div class="column is-narrow">
+                <div class="tabs drops-tabs">
+                    <ul id="drops-categories-list"></ul>
+                </div>
+            </div>
+            <div class="column">
+                <div class="box" id="drops-box" style="padding: 0.75rem;">
+                    <h3 class="title is-5" style="margin-bottom: 0.50rem;">Drops By Category</h3>
+                    <div class="drops-toolbar">
+                        <p id="drops-category-title" class="drops-category-title"></p>
+                        <div class="select is-small drops-filter-select">
+                            <select id="drops-filter" onchange="changeDropsFilter(this.value)">
+                                <option value="active">Active drops</option>
+                                <option value="all">All drops</option>
+                                <option value="last_30">Last 30 days</option>
+                                <option value="last_60">Last 60 days</option>
+                                <option value="last_90">Last 90 days</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="drops-items" class="drops-items">
+                        <div class="drops-empty">No drop events yet.</div>
+                    </div>
+                    <div id="drops-pagination" class="drops-pagination" style="display: none;">
+                        <button id="drops-prev" class="button is-small" type="button" onclick="changeDropsPage(-1)">Prev</button>
+                        <span id="drops-page-info" class="drops-page-info"></span>
+                        <button id="drops-next" class="button is-small" type="button" onclick="changeDropsPage(1)">Next</button>
+                    </div>
+                </div>
+            </div>
+        </div>
         </div>
         <div class="columns">
             <div class="column is-12">

@@ -71,6 +71,8 @@ class StreamerSettings(object):
 class Streamer(object):
     __slots__ = [
         "username",
+        "from_category",
+        "explicitly_configured",
         "channel_id",
         "settings",
         "is_online",
@@ -88,10 +90,15 @@ class Streamer(object):
         "history",
         "streamer_url",
         "mutex",
+        "last_drop_watch_signature",
     ]
 
-    def __init__(self, username, settings=None):
+    def __init__(
+        self, username, settings=None, from_category=False, explicitly_configured=False
+    ):
         self.username: str = username.lower().strip()
+        self.from_category = from_category
+        self.explicitly_configured = explicitly_configured
         self.channel_id: str = ""
         self.settings = settings
         self.is_online = False
@@ -109,6 +116,7 @@ class Streamer(object):
 
         self.raid = None
         self.history = {}
+        self.last_drop_watch_signature = None
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -139,7 +147,7 @@ class Streamer(object):
             },
         )
 
-    def set_online(self):
+    def set_online(self, drops_description=None):
         if self.is_online is False:
             self.online_at = time.time()
             self.is_online = True
@@ -147,8 +155,13 @@ class Streamer(object):
 
         self.toggle_chat()
 
+        online_message = (
+            f"{self} is Online for {drops_description}"
+            if drops_description
+            else f"{self} is Online!"
+        )
         logger.info(
-            f"{self} is Online!",
+            online_message,
             extra={
                 "emoji": ":partying_face:",
                 "event": Events.STREAMER_ONLINE,
@@ -177,11 +190,15 @@ class Streamer(object):
         return self.stream_up == 0 or ((time.time() - self.stream_up) > 120)
 
     def drops_condition(self):
+        has_unclaimed_campaign_drops = any(
+            campaign.drops != [] for campaign in self.stream.campaigns
+        )
         return (
             self.settings.claim_drops is True
             and self.is_online is True
             # and self.stream.drops_tags is True
             and self.stream.campaigns_ids != []
+            and has_unclaimed_campaign_drops is True
         )
 
     def viewer_has_points_multiplier(self):

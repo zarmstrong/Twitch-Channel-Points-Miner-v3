@@ -1,11 +1,11 @@
 # Twitch endpoints
-URL = "https://www.twitch.tv"               # Browser, Apps
+URL = "https://www.twitch.tv"  # Browser, Apps
 # URL = "https://m.twitch.tv"               # Mobile Browser
 # URL = "https://android.tv.twitch.tv"      # TV
 IRC = "irc.chat.twitch.tv"
 IRC_PORT = 6667
 WEBSOCKET = "wss://pubsub-edge.twitch.tv/v1"
-CLIENT_ID = "ue6666qo983tsx6so1t0vnawi233wa"        # TV
+CLIENT_ID = "ue6666qo983tsx6so1t0vnawi233wa"  # TV
 # CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"      # Browser
 # CLIENT_ID = "r8s4dac0uhzifbpu9sjdiwzctle17ff"     # Mobile Browser
 # CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"     # Android App
@@ -16,7 +16,7 @@ CLIENT_VERSION = "ef928475-9403-42f2-8a34-55784bd08e16"  # Browser
 
 USER_AGENTS = {
     "Windows": {
-        'CHROME': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+        "CHROME": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
         "FIREFOX": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0",
     },
     "Linux": {
@@ -26,8 +26,8 @@ USER_AGENTS = {
     "Android": {
         # "App": "Dalvik/2.1.0 (Linux; U; Android 7.1.2; SM-G975N Build/N2G48C) tv.twitch.android.app/13.4.1/1304010"
         "App": "Dalvik/2.1.0 (Linux; U; Android 7.1.2; SM-G977N Build/LMY48Z) tv.twitch.android.app/14.3.2/1403020",
-        "TV": "Mozilla/5.0 (Linux; Android 7.1; Smart Box C1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
-    }
+        "TV": "Mozilla/5.0 (Linux; Android 7.1; Smart Box C1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+    },
 }
 
 BRANCH = "master"
@@ -148,7 +148,7 @@ class GQLOperations:
         "extensions": {
             "persistedQuery": {
                 "version": 1,
-                "sha256Hash": "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619",
+                "sha256Hash": "d9cae7761dafab85908c85e6683cb4201b449e66ac3bb5e894f15ff12aeafaa7",
             }
         },
     }
@@ -157,7 +157,7 @@ class GQLOperations:
         "extensions": {
             "persistedQuery": {
                 "version": 1,
-                "sha256Hash": "f6396f5ffdde867a8f6f6da18286e4baf02e5b98d14689a69b5af320a4c7b7b8",
+                "sha256Hash": "039277bf98f3130929262cc7c6efd9c141ca3749cb6dca442fc8ead9a53f77c1",
             }
         },
     }
@@ -215,16 +215,16 @@ class GQLOperations:
         "extensions": {
             "persistedQuery": {
                 "version": 1,
-                "sha256Hash": "23ff2c2d60708379131178742327ead913b93b1bd6f665517a6d9085b73f661f"
+                "sha256Hash": "23ff2c2d60708379131178742327ead913b93b1bd6f665517a6d9085b73f661f",
             }
-        }
+        },
     }
     ContributeCommunityPointsCommunityGoal = {
         "operationName": "ContributeCommunityPointsCommunityGoal",
         "extensions": {
             "persistedQuery": {
                 "version": 1,
-                "sha256Hash": "5774f0ea5d89587d73021a2e03c3c44777d903840c608754a1be519f51e37bb6"
+                "sha256Hash": "5774f0ea5d89587d73021a2e03c3c44777d903840c608754a1be519f51e37bb6",
             }
-        }
+        },
     }

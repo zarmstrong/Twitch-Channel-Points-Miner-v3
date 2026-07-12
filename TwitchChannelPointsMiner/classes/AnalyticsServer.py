@@ -7,6 +7,7 @@ from threading import Thread
 
 import pandas as pd
 from flask import Flask, Response, cli, render_template, request
+from werkzeug.serving import WSGIRequestHandler
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.utils import download_file
@@ -15,12 +16,23 @@ cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
 
 
+def get_assets_folder():
+    repository_assets = Path(__file__).resolve().parents[2] / "assets"
+    if repository_assets.is_dir():
+        return str(repository_assets)
+
+    return str(Path().absolute() / "assets")
+
+
 def streamers_available():
     path = Settings.analytics_path
+    excluded_files = {"drops_by_category.json"}
     return [
         f
         for f in os.listdir(path)
-        if os.path.isfile(os.path.join(path, f)) and f.endswith(".json")
+        if os.path.isfile(os.path.join(path, f))
+        and f.endswith(".json")
+        and f not in excluded_files
     ]
 
 
@@ -28,12 +40,10 @@ def aggregate(df, freq="30Min"):
     df_base_events = df[(df.z == "Watch") | (df.z == "Claim")]
     df_other_events = df[(df.z != "Watch") & (df.z != "Claim")]
 
-    be = df_base_events.groupby(
-        [pd.Grouper(freq=freq, key="datetime"), "z"]).max()
+    be = df_base_events.groupby([pd.Grouper(freq=freq, key="datetime"), "z"]).max()
     be = be.reset_index()
 
-    oe = df_other_events.groupby(
-        [pd.Grouper(freq=freq, key="datetime"), "z"]).max()
+    oe = df_other_events.groupby([pd.Grouper(freq=freq, key="datetime"), "z"]).max()
     oe = oe.reset_index()
 
     result = pd.concat([be, oe])
@@ -53,7 +63,7 @@ def filter_datas(start_date, end_date, datas):
         else datetime.now()
     ).replace(hour=23, minute=59, second=59).timestamp() * 1000
 
-    original_series = datas["series"]
+    original_series = datas.get("series", [])
 
     if "series" in datas:
         df = pd.DataFrame(datas["series"])
@@ -72,6 +82,12 @@ def filter_datas(start_date, end_date, datas):
     # If no data is found within the timeframe, that usually means the streamer hasn't streamed within that timeframe
     # We create a series that shows up as a straight line on the dashboard, with 'No Stream' as labels
     if len(datas["series"]) == 0:
+        if len(original_series) == 0:
+            datas["series"] = []
+            if "annotations" not in datas:
+                datas["annotations"] = []
+            return datas
+
         new_end_date = start_date
         new_start_date = 0
         df = pd.DataFrame(original_series)
@@ -79,11 +95,16 @@ def filter_datas(start_date, end_date, datas):
 
         # Attempt to get the last known balance from before the provided timeframe
         df = df[(df.x >= new_start_date) & (df.x <= new_end_date)]
-        last_balance = df.drop(columns="datetime").sort_values(
-            by=["x", "y"], ascending=True).to_dict("records")[-1]['y']
+        last_balance = (
+            df.drop(columns="datetime")
+            .sort_values(by=["x", "y"], ascending=True)
+            .to_dict("records")[-1]["y"]
+        )
 
-        datas["series"] = [{'x': start_date, 'y': last_balance, 'z': 'No Stream'}, {
-            'x': end_date, 'y': last_balance, 'z': 'No Stream'}]
+        datas["series"] = [
+            {"x": start_date, "y": last_balance, "z": "No Stream"},
+            {"x": end_date, "y": last_balance, "z": "No Stream"},
+        ]
 
     if "annotations" in datas:
         df = pd.DataFrame(datas["annotations"])
@@ -114,25 +135,35 @@ def read_json(streamer, return_response=True):
         error_message = f"File '{streamer}' not found."
         logger.error(error_message)
         if return_response:
-            return Response(json.dumps({"error": error_message}), status=404, mimetype="application/json")
+            return Response(
+                json.dumps({"error": error_message}),
+                status=404,
+                mimetype="application/json",
+            )
         else:
             return {"error": error_message}
 
     try:
-        with open(os.path.join(path, streamer), 'r') as file:
+        with open(os.path.join(path, streamer), "r") as file:
             data = json.load(file)
     except json.JSONDecodeError as e:
         error_message = f"Error decoding JSON in file '{streamer}': {str(e)}"
         logger.error(error_message)
         if return_response:
-            return Response(json.dumps({"error": error_message}), status=500, mimetype="application/json")
+            return Response(
+                json.dumps({"error": error_message}),
+                status=500,
+                mimetype="application/json",
+            )
         else:
             return {"error": error_message}
 
     # Handle filtering data, if applicable
     filtered_data = filter_datas(start_date, end_date, data)
     if return_response:
-        return Response(json.dumps(filtered_data), status=200, mimetype="application/json")
+        return Response(
+            json.dumps(filtered_data), status=200, mimetype="application/json"
+        )
     else:
         return filtered_data
 
@@ -167,6 +198,40 @@ def json_all():
     )
 
 
+def drops_by_category():
+    drops_file = os.path.join(Settings.analytics_path, "drops_by_category.json")
+    if os.path.isfile(drops_file) is False:
+        return Response(
+            json.dumps({"categories": {}, "drops": []}),
+            status=200,
+            mimetype="application/json",
+        )
+
+    try:
+        with open(drops_file, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        return Response(
+            json.dumps({"categories": {}, "drops": []}),
+            status=200,
+            mimetype="application/json",
+        )
+
+    drops = data.get("drops", [])
+    grouped = {}
+    for drop in drops:
+        category = drop.get("category", "Unknown")
+        if category not in grouped:
+            grouped[category] = []
+        grouped[category].append(drop)
+
+    return Response(
+        json.dumps({"categories": grouped, "drops": drops}),
+        status=200,
+        mimetype="application/json",
+    )
+
+
 def index(refresh=5, days_ago=7):
     return render_template(
         "charts.html",
@@ -179,8 +244,11 @@ def streamers():
     return Response(
         json.dumps(
             [
-                {"name": s, "points": get_challenge_points(
-                    s), "last_activity": get_last_activity(s)}
+                {
+                    "name": s,
+                    "points": get_challenge_points(s),
+                    "last_activity": get_last_activity(s),
+                }
                 for s in sorted(streamers_available())
             ]
         ),
@@ -196,8 +264,7 @@ def download_assets(assets_folder, required_files):
     for f in required_files:
         if os.path.isfile(os.path.join(assets_folder, f)) is False:
             if (
-                download_file(os.path.join("assets", f),
-                              os.path.join(assets_folder, f))
+                download_file(os.path.join("assets", f), os.path.join(assets_folder, f))
                 is True
             ):
                 logger.info(f"Downloaded {f}")
@@ -211,7 +278,7 @@ def check_assets():
         "style.css",
         "dark-theme.css",
     ]
-    assets_folder = os.path.join(Path().absolute(), "assets")
+    assets_folder = get_assets_folder()
     if os.path.isdir(assets_folder) is False:
         logger.info(f"Assets folder not found at {assets_folder}")
         download_assets(assets_folder, required_files)
@@ -222,7 +289,20 @@ def check_assets():
                 download_assets(assets_folder, required_files)
                 break
 
+
 last_sent_log_index = 0
+
+
+class AnalyticsWSGIRequestHandler(WSGIRequestHandler):
+    def log_error(self, format, *args):
+        message = format % args if args else format
+
+        # Ignore TLS handshake bytes sent to the plain HTTP analytics endpoint.
+        if "Bad request version" in message and "\\x" in message:
+            return
+
+        super().log_error(format, *args)
+
 
 class AnalyticsServer(Thread):
     def __init__(
@@ -231,7 +311,7 @@ class AnalyticsServer(Thread):
         port: int = 5000,
         refresh: int = 5,
         days_ago: int = 7,
-        username: str = None
+        username: str = None,
     ):
         super(AnalyticsServer, self).__init__()
 
@@ -247,7 +327,9 @@ class AnalyticsServer(Thread):
             global last_sent_log_index  # Use the global variable
 
             # Get the last received log index from the client request parameters
-            last_received_index = int(request.args.get("lastIndex", last_sent_log_index))
+            last_received_index = int(
+                request.args.get("lastIndex", last_sent_log_index)
+            )
 
             logs_path = os.path.join(Path().absolute(), "logs")
             log_file_path = os.path.join(logs_path, f"{username}.log")
@@ -262,12 +344,14 @@ class AnalyticsServer(Thread):
                 return Response(new_log_entries, status=200, mimetype="text/plain")
 
             except FileNotFoundError:
-                return Response("Log file not found.", status=404, mimetype="text/plain")
+                return Response(
+                    "Log file not found.", status=404, mimetype="text/plain"
+                )
 
         self.app = Flask(
             __name__,
-            template_folder=os.path.join(Path().absolute(), "assets"),
-            static_folder=os.path.join(Path().absolute(), "assets"),
+            template_folder=get_assets_folder(),
+            static_folder=get_assets_folder(),
         )
         self.app.add_url_rule(
             "/",
@@ -276,20 +360,28 @@ class AnalyticsServer(Thread):
             defaults={"refresh": refresh, "days_ago": days_ago},
             methods=["GET"],
         )
-        self.app.add_url_rule("/streamers", "streamers",
-                              streamers, methods=["GET"])
+        self.app.add_url_rule("/streamers", "streamers", streamers, methods=["GET"])
         self.app.add_url_rule(
             "/json/<string:streamer>", "json", read_json, methods=["GET"]
         )
-        self.app.add_url_rule("/json_all", "json_all",
-                              json_all, methods=["GET"])
+        self.app.add_url_rule("/json_all", "json_all", json_all, methods=["GET"])
         self.app.add_url_rule(
-            "/log", "log", generate_log, methods=["GET"])
+            "/drops_by_category",
+            "drops_by_category",
+            drops_by_category,
+            methods=["GET"],
+        )
+        self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
 
     def run(self):
         logger.info(
             f"Analytics running on http://{self.host}:{self.port}/",
             extra={"emoji": ":globe_with_meridians:"},
         )
-        self.app.run(host=self.host, port=self.port,
-                     threaded=True, debug=False)
+        self.app.run(
+            host=self.host,
+            port=self.port,
+            threaded=True,
+            debug=False,
+            request_handler=AnalyticsWSGIRequestHandler,
+        )

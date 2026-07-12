@@ -3,6 +3,7 @@ from datetime import datetime
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
+
 def parse_datetime(datetime_str):
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -10,6 +11,7 @@ def parse_datetime(datetime_str):
         except ValueError:
             continue
     raise ValueError(f"time data '{datetime_str}' does not match format")
+
 
 class Campaign(object):
     __slots__ = [
@@ -76,6 +78,6 @@ class Campaign(object):
                     self.drops[i].update(drop["self"])
                     # If after update we all conditions are meet we can claim the drop
                     if self.drops[i].is_claimable is True:
-                        claimed = callback(self.drops[i])
+                        claimed = callback(self.drops[i], campaign=self)
                         self.drops[i].is_claimed = claimed
                     break

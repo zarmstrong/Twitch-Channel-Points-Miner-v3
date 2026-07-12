@@ -18,7 +18,12 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     StreamerSettings,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
-from TwitchChannelPointsMiner.classes.Settings import FollowersOrder, Priority, Settings
+from TwitchChannelPointsMiner.classes.Settings import (
+    CategoryCampaignOrder,
+    FollowersOrder,
+    Priority,
+    Settings,
+)
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
@@ -86,6 +91,7 @@ class TwitchChannelPointsMiner:
         # Default values for all streamers
         streamer_settings: StreamerSettings = StreamerSettings(),
     ):
+
         # Fixes TypeError: 'NoneType' object is not subscriptable
         if not username or username == "your-twitch-username":
             logger.error("Please edit your runner file (usually run.py) and try again.")
@@ -207,8 +213,39 @@ class TwitchChannelPointsMiner:
         blacklist: list = [],
         followers: bool = False,
         followers_order: FollowersOrder = FollowersOrder.ASC,
+        categories: list = [],
+        category_drops_enabled: bool = True,
+        category_limit: int = 30,
+        category_sort="VIEWERS_DESC",
+        category_campaign_order: CategoryCampaignOrder = (CategoryCampaignOrder.ORDER),
+        category_chat=None,
+        category_log_level: int = logging.INFO,
+        drop_item_art: bool = False,
+        print_open_drop_campaigns_on_load: bool = False,
+        scrape_drop_progress_on_load: bool = False,
+        log_drop_checks: bool = False,
+        track_category_streamer_points: bool = False,
+        category_refresh_interval_hours: float = 6,
     ):
-        self.run(streamers=streamers, blacklist=blacklist, followers=followers)
+        self.run(
+            streamers=streamers,
+            blacklist=blacklist,
+            followers=followers,
+            followers_order=followers_order,
+            categories=categories,
+            category_drops_enabled=category_drops_enabled,
+            category_limit=category_limit,
+            category_sort=category_sort,
+            category_campaign_order=category_campaign_order,
+            category_chat=category_chat,
+            category_log_level=category_log_level,
+            drop_item_art=drop_item_art,
+            print_open_drop_campaigns_on_load=print_open_drop_campaigns_on_load,
+            scrape_drop_progress_on_load=scrape_drop_progress_on_load,
+            log_drop_checks=log_drop_checks,
+            track_category_streamer_points=track_category_streamer_points,
+            category_refresh_interval_hours=category_refresh_interval_hours,
+        )
 
     def run(
         self,
@@ -216,6 +253,19 @@ class TwitchChannelPointsMiner:
         blacklist: list = [],
         followers: bool = False,
         followers_order: FollowersOrder = FollowersOrder.ASC,
+        categories: list = [],
+        category_drops_enabled: bool = True,
+        category_limit: int = 30,
+        category_sort="VIEWERS_DESC",
+        category_campaign_order: CategoryCampaignOrder = (CategoryCampaignOrder.ORDER),
+        category_chat=None,
+        category_log_level: int = logging.INFO,
+        drop_item_art: bool = False,
+        print_open_drop_campaigns_on_load: bool = False,
+        scrape_drop_progress_on_load: bool = False,
+        log_drop_checks: bool = False,
+        track_category_streamer_points: bool = False,
+        category_refresh_interval_hours: float = 6,
     ):
         if self.running:
             logger.error("You can't start multiple sessions of this instance!")
@@ -227,12 +277,25 @@ class TwitchChannelPointsMiner:
             self.start_datetime = datetime.now()
 
             self.twitch.login()
+            self.twitch.track_drop_item_art = drop_item_art
+            self.twitch.scrape_drop_progress_on_load = scrape_drop_progress_on_load
+            self.twitch.log_drop_checks = log_drop_checks
+            self.twitch.category_log_level = category_log_level
+            Settings.track_category_streamer_points = track_category_streamer_points
+
+            if print_open_drop_campaigns_on_load is True:
+                self.twitch.log_open_drop_campaigns()
+
+            if self.twitch.scrape_drop_progress_on_load is True:
+                self.twitch.scrape_drop_progress_from_inventory(reason="run_load")
 
             if self.claim_drops_startup is True:
                 self.twitch.claim_all_drops_from_inventory()
 
             streamers_name: list = []
             streamers_dict: dict = {}
+            category_usernames = set()
+            explicitly_configured_usernames = set()
 
             for streamer in streamers:
                 username = (
@@ -243,6 +306,7 @@ class TwitchChannelPointsMiner:
                 if username not in blacklist:
                     streamers_name.append(username)
                     streamers_dict[username] = streamer
+                    explicitly_configured_usernames.add(username)
 
             if followers is True:
                 followers_array = self.twitch.get_followers(order=followers_order)
@@ -255,6 +319,37 @@ class TwitchChannelPointsMiner:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
 
+            if categories:
+                eligible_categories = self.twitch.filter_categories_with_active_drops(
+                    categories,
+                    order=category_campaign_order,
+                    drops_enabled=category_drops_enabled,
+                )
+
+                if categories and eligible_categories == []:
+                    logger.log(
+                        category_log_level,
+                        "Skipping category stream discovery: no configured categories have active incomplete campaigns",
+                        extra={"emoji": ":sleeping:", "category_log": True},
+                    )
+
+                all_category_usernames = []
+                for category in eligible_categories:
+                    all_category_usernames.extend(
+                        self.twitch.get_live_streamers_for_category(
+                            category,
+                            drops_enabled=category_drops_enabled,
+                            limit=category_limit,
+                            sort_by=category_sort,
+                        )
+                    )
+
+                for username in all_category_usernames:
+                    category_usernames.add(username)
+                    if username not in streamers_dict and username not in blacklist:
+                        streamers_name.append(username)
+                        streamers_dict[username] = username.lower().strip()
+
             logger.info(
                 f"Loading data for {len(streamers_name)} streamers. Please wait...",
                 extra={"emoji": ":nerd_face:"},
@@ -263,10 +358,26 @@ class TwitchChannelPointsMiner:
                 if username in streamers_name:
                     time.sleep(random.uniform(0.3, 0.7))
                     try:
+                        is_category_streamer = username in category_usernames
                         streamer = (
                             streamers_dict[username]
                             if isinstance(streamers_dict[username], Streamer) is True
-                            else Streamer(username)
+                            else Streamer(
+                                username,
+                                settings=(
+                                    StreamerSettings(chat=category_chat)
+                                    if is_category_streamer is True
+                                    and category_chat is not None
+                                    else None
+                                ),
+                                from_category=is_category_streamer,
+                                explicitly_configured=(
+                                    username in explicitly_configured_usernames
+                                ),
+                            )
+                        )
+                        streamer.explicitly_configured = (
+                            username in explicitly_configured_usernames
                         )
                         streamer.channel_id = self.twitch.get_channel_id(username)
                         streamer.settings = set_default_settings(
@@ -389,6 +500,24 @@ class TwitchChannelPointsMiner:
                     )
 
             refresh_context = time.time()
+            category_refresh_interval_seconds = (
+                max(category_refresh_interval_hours, 0.5) * 60 * 60
+                if category_refresh_interval_hours > 0
+                else 0
+            )
+            effective_category_refresh_seconds = (
+                min(category_refresh_interval_seconds, 5 * 60)
+                if self.twitch.twitchdrops_app_campaigns
+                and category_refresh_interval_seconds > 0
+                else category_refresh_interval_seconds
+            )
+            next_category_refresh_at = (
+                time.time()
+                + effective_category_refresh_seconds
+                + random.randint(20, 5 * 60)
+                if effective_category_refresh_seconds > 0
+                else None
+            )
             while self.running:
                 time.sleep(random.uniform(20, 60))
                 # Do an external control for WebSocket. Check if the thread is running
@@ -412,10 +541,149 @@ class TwitchChannelPointsMiner:
                                 self.streamers[index]
                             )
 
+                if (
+                    categories
+                    and next_category_refresh_at is not None
+                    and time.time() >= next_category_refresh_at
+                ):
+                    self.__refresh_category_streamers(
+                        categories=categories,
+                        blacklist=blacklist,
+                        drops_enabled=category_drops_enabled,
+                        limit=category_limit,
+                        sort_by=category_sort,
+                        campaign_order=category_campaign_order,
+                        category_chat=category_chat,
+                        category_log_level=category_log_level,
+                    )
+                    effective_category_refresh_seconds = (
+                        min(category_refresh_interval_seconds, 5 * 60)
+                        if self.twitch.twitchdrops_app_campaigns
+                        else category_refresh_interval_seconds
+                    )
+                    next_category_refresh_at = (
+                        time.time()
+                        + effective_category_refresh_seconds
+                        + random.randint(20, 5 * 60)
+                    )
+
+    def __refresh_category_streamers(
+        self,
+        categories,
+        blacklist,
+        drops_enabled,
+        limit,
+        sort_by,
+        campaign_order,
+        category_chat,
+        category_log_level,
+    ):
+        logger.log(
+            category_log_level,
+            "Refreshing configured categories and drop campaigns",
+            extra={
+                "emoji": ":arrows_counterclockwise:",
+                "category_log": True,
+            },
+        )
+
+        # Force live campaign discovery to run again instead of reusing startup data.
+        self.twitch.discovered_open_drop_campaigns = None
+        eligible_categories = self.twitch.filter_categories_with_active_drops(
+            categories,
+            order=campaign_order,
+            drops_enabled=drops_enabled,
+        )
+        discovered_usernames = []
+        for category in eligible_categories:
+            discovered_usernames.extend(
+                self.twitch.get_live_streamers_for_category(
+                    category,
+                    drops_enabled=drops_enabled,
+                    limit=limit,
+                    sort_by=sort_by,
+                )
+            )
+
+        existing_usernames = {streamer.username for streamer in self.streamers}
+        blacklist_usernames = {str(username).lower().strip() for username in blacklist}
+        added = 0
+        for username in dict.fromkeys(discovered_usernames):
+            username = username.lower().strip()
+            if username in existing_usernames or username in blacklist_usernames:
+                continue
+
+            try:
+                streamer = Streamer(
+                    username,
+                    settings=(
+                        StreamerSettings(chat=category_chat)
+                        if category_chat is not None
+                        else None
+                    ),
+                    from_category=True,
+                )
+                streamer.channel_id = self.twitch.get_channel_id(username)
+                streamer.settings = set_default_settings(
+                    streamer.settings, Settings.streamer_settings
+                )
+                streamer.settings.bet = set_default_settings(
+                    streamer.settings.bet, Settings.streamer_settings.bet
+                )
+                if streamer.settings.chat != ChatPresence.NEVER:
+                    streamer.irc_chat = ThreadChat(
+                        self.username,
+                        self.twitch.twitch_login.get_auth_token(),
+                        streamer.username,
+                    )
+
+                self.twitch.load_channel_points_context(streamer)
+                self.twitch.check_streamer_online(streamer)
+                self.streamers.append(streamer)
+                existing_usernames.add(username)
+                added += 1
+
+                self.ws_pool.submit(
+                    PubsubTopic("video-playback-by-id", streamer=streamer)
+                )
+                if streamer.settings.follow_raid is True:
+                    self.ws_pool.submit(PubsubTopic("raid", streamer=streamer))
+                if streamer.settings.make_predictions is True:
+                    self.ws_pool.submit(
+                        PubsubTopic("predictions-channel-v1", streamer=streamer)
+                    )
+                if streamer.settings.claim_moments is True:
+                    self.ws_pool.submit(
+                        PubsubTopic("community-moments-channel-v1", streamer=streamer)
+                    )
+                if streamer.settings.community_goals is True:
+                    self.ws_pool.submit(
+                        PubsubTopic("community-points-channel-v1", streamer=streamer)
+                    )
+            except StreamerDoesNotExistException:
+                logger.info(
+                    f"Streamer {username} does not exist",
+                    extra={"emoji": ":cry:"},
+                )
+
+        if added > 0 and self.sync_campaigns_thread is None:
+            self.sync_campaigns_thread = threading.Thread(
+                target=self.twitch.sync_campaigns,
+                args=(self.streamers,),
+            )
+            self.sync_campaigns_thread.name = "Sync campaigns/inventory"
+            self.sync_campaigns_thread.start()
+
+        logger.log(
+            category_log_level,
+            f"Category refresh complete: {len(eligible_categories)} active categories, {added} new streamers",
+            extra={"emoji": ":white_check_mark:", "category_log": True},
+        )
+
     def end(self, signum, frame):
         if not self.running:
             return
-        
+
         logger.info("CTRL+C Detected! Please wait just a moment!")
 
         for streamer in self.streamers:
@@ -494,19 +762,25 @@ class TwitchChannelPointsMiner:
                     self.streamers[streamer_index].channel_points
                     - self.original_streamers[streamer_index]
                 )
-                
+
                 from colorama import Fore
+
                 streamer_highlight = Fore.YELLOW
-                
+
                 streamer_gain = (
                     f"{streamer_highlight}{self.streamers[streamer_index]}{Fore.RESET}, Total Points Gained: {_millify(gained)}"
                     if Settings.logger.less
                     else f"{streamer_highlight}{repr(self.streamers[streamer_index])}{Fore.RESET}, Total Points Gained (after farming - before farming): {_millify(gained)}"
                 )
-                
-                indent = ' ' * 25
-                streamer_history = '\n'.join(f"{indent}{history}" for history in self.streamers[streamer_index].print_history().split('; ')) 
-                
+
+                indent = " " * 25
+                streamer_history = "\n".join(
+                    f"{indent}{history}"
+                    for history in self.streamers[streamer_index]
+                    .print_history()
+                    .split("; ")
+                )
+
                 logger.info(
                     f"{streamer_gain}\n{streamer_history}",
                     extra={"emoji": ":moneybag:"},

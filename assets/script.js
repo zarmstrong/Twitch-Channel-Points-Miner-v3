@@ -86,14 +86,39 @@ var annotations = [];
 var streamersList = [];
 var sortBy = "Name ascending";
 var sortField = 'name';
+var dropsRefreshTimeout = null;
+var dropsState = { categories: {}, orderedCategories: [] };
+var currentDropCategory = null;
+var dropsFilter = 'active';
+var dropsPage = 1;
+var dropsPerPage = 10;
+
+function switchDashboardTab(tabName) {
+    var isPoints = tabName !== 'drops';
+    $('#points-panel').toggle(isPoints);
+    $('#drops-panel').toggle(!isPoints);
+
+    $('#tab-points').toggleClass('is-link', isPoints);
+    $('#tab-drops').toggleClass('is-link', !isPoints);
+
+    localStorage.setItem('dashboardTab', isPoints ? 'points' : 'drops');
+}
 
 var startDate = new Date();
 startDate.setDate(startDate.getDate() - daysAgo);
 var endDate = new Date();
 
 $(document).ready(function () {
+    var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
+    switchDashboardTab(savedDashboardTab);
+    dropsFilter = localStorage.getItem('dropsFilter') || 'active';
+    $('#drops-filter').val(dropsFilter);
+
     // Variable to keep track of whether log checkbox is checked
-    var isLogCheckboxChecked = $('#log').prop('checked');
+    if (!localStorage.getItem('log-enabled')) localStorage.setItem('log-enabled', true);
+    var isLogCheckboxChecked = localStorage.getItem('log-enabled') === 'true';
+    $('#log').prop('checked', isLogCheckboxChecked);
+    $('#log-box').toggle(isLogCheckboxChecked);
 
     // Variable to keep track of whether auto-update log is active
     var autoUpdateLog = true;
@@ -109,6 +134,20 @@ $(document).ready(function () {
             getLog();
         }
     });
+
+    $('#log').change(function () {
+        isLogCheckboxChecked = $(this).prop('checked');
+        localStorage.setItem('log-enabled', isLogCheckboxChecked);
+        $('#log-box').toggle(isLogCheckboxChecked);
+
+        if (isLogCheckboxChecked) {
+            getLog();
+        }
+    });
+
+    if (isLogCheckboxChecked) {
+        getLog();
+    }
 
     // Function to get the full log content
     function getLog() {
@@ -137,19 +176,23 @@ $(document).ready(function () {
     if (headerVisibility === 'hidden') {
         $('#toggle-header').prop('checked', false);
         $('#header').hide();
+        $('body').addClass('header-hidden');
     } else {
         $('#toggle-header').prop('checked', true);
         $('#header').show();
+        $('body').removeClass('header-hidden');
     }
 
     // Handle the toggle header change event
     $('#toggle-header').change(function () {
         if (this.checked) {
             $('#header').show();
+            $('body').removeClass('header-hidden');
             // Save the header visibility preference as 'visible' in localStorage
             localStorage.setItem('headerVisibility', 'visible');
         } else {
             $('#header').hide();
+            $('body').addClass('header-hidden');
             // Save the header visibility preference as 'hidden' in localStorage
             localStorage.setItem('headerVisibility', 'hidden');
         }
@@ -188,6 +231,7 @@ $(document).ready(function () {
     else sortField = 'name';
     $('#sorting-by').text(sortBy);
     getStreamers();
+    getDropsByCategory();
 
     updateAnnotations();
     toggleDarkMode();
@@ -364,6 +408,365 @@ function clearAnnotations() {
             chart.removeAnnotation(annotation['id'])
         })
     chart.clearAnnotations();
+}
+
+function getDropsByCategory() {
+    $.getJSON('./drops_by_category', function (response) {
+        renderDropsByCategory(response);
+        if (dropsRefreshTimeout) {
+            clearTimeout(dropsRefreshTimeout);
+        }
+        dropsRefreshTimeout = setTimeout(function () {
+            getDropsByCategory();
+        }, refresh);
+    }).fail(function () {
+        renderDropsByCategory({ drops: [] });
+        if (dropsRefreshTimeout) {
+            clearTimeout(dropsRefreshTimeout);
+        }
+        dropsRefreshTimeout = setTimeout(function () {
+            getDropsByCategory();
+        }, refresh);
+    });
+}
+
+function getDropTimestamp(drop) {
+    if (drop && drop.x) {
+        return drop.x;
+    }
+    if (drop && drop.datetime) {
+        var parsed = Date.parse(drop.datetime);
+        if (!isNaN(parsed)) return parsed;
+    }
+    return 0;
+}
+
+function getDropProgressPercent(drop) {
+    if (!drop) return 0;
+
+    var progress = Number(drop.percentage_progress);
+    if (!isNaN(progress)) {
+        return progress;
+    }
+
+    var currentMinutes = Number(drop.current_minutes_watched || 0);
+    var requiredMinutes = Number(drop.minutes_required || 0);
+    if (requiredMinutes > 0) {
+        return (currentMinutes / requiredMinutes) * 100;
+    }
+
+    return 0;
+}
+
+function compareDropsForTable(a, b) {
+    var primaryDiff = getDropTimestamp(b) - getDropTimestamp(a);
+    if (primaryDiff !== 0) {
+        return primaryDiff;
+    }
+
+    var progressDiff = getDropProgressPercent(a) - getDropProgressPercent(b);
+    if (progressDiff !== 0) {
+        return progressDiff;
+    }
+
+    return (b.current_minutes_watched || 0) - (a.current_minutes_watched || 0);
+}
+
+function getDropEndTimestamp(drop) {
+    if (!drop) return -1;
+
+    var rawEnd = drop.drop_end_at || drop.end_at || drop.ends_at || drop.endAt || null;
+    if (rawEnd) {
+        var parsed = Date.parse(rawEnd);
+        if (!isNaN(parsed)) return parsed;
+
+        // Handle legacy values missing timezone marker (treat as UTC).
+        if (typeof rawEnd === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/.test(rawEnd) && !rawEnd.endsWith('Z')) {
+            parsed = Date.parse(`${rawEnd}Z`);
+            if (!isNaN(parsed)) return parsed;
+        }
+    }
+    return -1;
+}
+
+function getFilteredDropsForCategory(category) {
+    var drops = (dropsState.categories[category] || []).slice();
+    var now = Date.now();
+
+    if (dropsFilter === 'active') {
+        drops = drops.filter((drop) => {
+            var endTs = getDropEndTimestamp(drop);
+            return endTs === -1 || endTs >= now;
+        });
+    } else if (dropsFilter === 'last_30' || dropsFilter === 'last_60' || dropsFilter === 'last_90') {
+        var days = parseInt(dropsFilter.split('_')[1], 10);
+        var cutoff = now - (days * 24 * 60 * 60 * 1000);
+        drops = drops.filter((drop) => getDropTimestamp(drop) >= cutoff);
+    }
+
+    // Collapse repeated snapshots so each drop appears once using the latest data.
+    var dedupedDropsById = {};
+    drops.forEach((drop) => {
+        var dropKey = [
+            drop.drop_id || '',
+            drop.item_art_url || '',
+            drop.item_name || 'unknown',
+            drop.campaign || 'unknown',
+            category || 'unknown',
+        ].join('|');
+        var existing = dedupedDropsById[dropKey];
+        if (!existing || getDropTimestamp(drop) > getDropTimestamp(existing)) {
+            // Keep a known expiry date when the newer snapshot is missing it.
+            if (existing && !drop.drop_end_at && existing.drop_end_at) {
+                drop.drop_end_at = existing.drop_end_at;
+            }
+            dedupedDropsById[dropKey] = drop;
+        } else if (existing && !existing.drop_end_at && drop.drop_end_at) {
+            existing.drop_end_at = drop.drop_end_at;
+        }
+    });
+    drops = Object.values(dedupedDropsById);
+
+    drops.sort((a, b) => {
+        var endDiff = getDropEndTimestamp(b) - getDropEndTimestamp(a);
+        if (endDiff !== 0) {
+            return endDiff;
+        }
+        return compareDropsForTable(a, b);
+    });
+
+    return drops;
+}
+
+function getVisibleDropCategories() {
+    return dropsState.orderedCategories.filter((category) => {
+        return getFilteredDropsForCategory(category).length > 0;
+    });
+}
+
+function changeDropsFilter(value) {
+    dropsFilter = value;
+    dropsPage = 1;
+    localStorage.setItem('dropsFilter', value);
+    renderDropCategoryList();
+    renderDropRows();
+}
+
+function changeDropsPage(offset) {
+    dropsPage += offset;
+    renderDropRows();
+}
+
+function normalizeDropsData(response) {
+    var grouped = (response && response.categories && typeof response.categories === 'object')
+        ? response.categories
+        : {};
+
+    var drops = (response && Array.isArray(response.drops)) ? response.drops : [];
+
+    if (Object.keys(grouped).length === 0 && drops.length > 0) {
+        grouped = {};
+        drops.forEach((drop) => {
+            var category = drop.category || 'Unknown';
+            if (!grouped[category]) grouped[category] = [];
+            grouped[category].push(drop);
+        });
+    }
+
+    Object.keys(grouped).forEach((category) => {
+        grouped[category] = grouped[category].slice().sort(compareDropsForTable);
+    });
+
+    var orderedCategories = Object.keys(grouped).sort((a, b) => {
+        var aLatest = grouped[a][0] ? (grouped[a][0].x || 0) : 0;
+        var bLatest = grouped[b][0] ? (grouped[b][0].x || 0) : 0;
+        if (bLatest !== aLatest) {
+            return bLatest - aLatest;
+        }
+
+        var aProgress = grouped[a][0] ? getDropProgressPercent(grouped[a][0]) : 0;
+        var bProgress = grouped[b][0] ? getDropProgressPercent(grouped[b][0]) : 0;
+        return bProgress - aProgress;
+    });
+
+    return {
+        categories: grouped,
+        orderedCategories: orderedCategories
+    };
+}
+
+function changeDropCategory(category) {
+    currentDropCategory = category;
+    dropsPage = 1;
+    localStorage.setItem('selectedDropCategory', category);
+    renderDropCategoryList();
+    renderDropRows();
+}
+
+function renderDropCategoryList() {
+    var categoriesList = $('#drops-categories-list');
+    categoriesList.empty();
+    var visibleCategories = getVisibleDropCategories();
+
+    if (visibleCategories.length === 0) {
+        currentDropCategory = null;
+        categoriesList.append('<li class="is-active"><a href="#">No categories yet</a></li>');
+        return;
+    }
+
+    if (!currentDropCategory || visibleCategories.indexOf(currentDropCategory) === -1) {
+        currentDropCategory = visibleCategories[0];
+        dropsPage = 1;
+    }
+
+    visibleCategories.forEach((category) => {
+        var isActive = currentDropCategory === category;
+        var activeClass = isActive ? 'is-active' : '';
+        var dropsCount = getFilteredDropsForCategory(category).length;
+        var categoryLabel = `${category} (${dropsCount} ${dropsCount === 1 ? 'drop' : 'drops'})`;
+
+        categoriesList.append(`
+            <li class="${activeClass}">
+                <a href="#" data-category="${escapeHtml(category)}">
+                    ${escapeHtml(categoryLabel)}
+                </a>
+            </li>
+        `);
+    });
+
+    $('#drops-categories-list a[data-category]').off('click').on('click', function (e) {
+        e.preventDefault();
+        changeDropCategory($(this).data('category'));
+    });
+}
+
+function renderDropRows() {
+    var dropsItems = $('#drops-items');
+    var dropsCategoryTitle = $('#drops-category-title');
+    dropsItems.empty();
+
+    if (!currentDropCategory || !dropsState.categories[currentDropCategory]) {
+        dropsCategoryTitle.text('');
+        dropsItems.append('<div class="drops-empty">No drop events yet.</div>');
+        $('#drops-pagination').hide();
+        return;
+    }
+
+    var drops = getFilteredDropsForCategory(currentDropCategory);
+    dropsCategoryTitle.text(`${currentDropCategory} (${drops.length})`);
+
+    if (drops.length === 0) {
+        dropsItems.append('<div class="drops-empty">No drops match this filter in this category.</div>');
+        $('#drops-pagination').hide();
+        return;
+    }
+
+    var totalPages = Math.max(1, Math.ceil(drops.length / dropsPerPage));
+    if (dropsPage < 1) dropsPage = 1;
+    if (dropsPage > totalPages) dropsPage = totalPages;
+
+    var pageStart = (dropsPage - 1) * dropsPerPage;
+    var pageDrops = drops.slice(pageStart, pageStart + dropsPerPage);
+
+    $('#drops-page-info').text(`Page ${dropsPage} / ${totalPages}`);
+    $('#drops-prev').prop('disabled', dropsPage <= 1);
+    $('#drops-next').prop('disabled', dropsPage >= totalPages);
+    $('#drops-pagination').toggle(totalPages > 1);
+
+    pageDrops.forEach((drop) => {
+        var timestamp = drop.datetime || '';
+        var status = drop.status || '';
+        var currentMinutes = drop.current_minutes_watched || 0;
+        var requiredMinutes = drop.minutes_required || 0;
+        var displayedMinutes = Math.min(currentMinutes, requiredMinutes || currentMinutes);
+        var progressPercent = Math.max(0, Math.min(100, drop.percentage_progress || 0));
+        var progress = `${displayedMinutes}/${requiredMinutes} minutes (${progressPercent}%)`;
+        var artUrl = drop.item_art_url || '';
+        var itemName = drop.item_name || '';
+        var campaign = drop.campaign || '';
+        var streamer = drop.streamer || '';
+        var dropEndAt = drop.drop_end_at || '';
+        var endAtTimestamp = Date.parse(dropEndAt);
+        var isExpired = !isNaN(endAtTimestamp) && Date.now() > endAtTimestamp;
+        var isCompleted = requiredMinutes > 0 && currentMinutes >= requiredMinutes;
+        var isFailed = drop.failed_to_achieve === true || (isExpired && !isCompleted && status !== 'captured');
+        var statusClass = status === 'captured' ? 'is-captured' : 'is-progress';
+        var expiresAtText = !isNaN(endAtTimestamp) ? new Date(endAtTimestamp).toLocaleString() : '';
+        var progressBarClass = statusClass;
+        var statusDisplay = String(status || 'unknown').replace(/_/g, ' ');
+
+        if (isFailed) {
+            status = 'EXPIRED - Failed to achieve';
+            statusClass = 'is-failed';
+            progressBarClass = 'is-failed';
+        } else if (status === 'in_progress') {
+            statusDisplay = 'in progress';
+        }
+
+        var metadataSpans = [
+            `<span>${escapeHtml(progress)}</span>`,
+            campaign ? `<span>${escapeHtml(campaign)}</span>` : '',
+            streamer ? `<span>${escapeHtml(streamer)}</span>` : '',
+            expiresAtText ? `<span>Expires: ${escapeHtml(expiresAtText)}</span>` : '',
+            timestamp ? `<span>${escapeHtml(timestamp)}</span>` : '',
+        ].filter(Boolean).join('');
+
+        var failedIcon = isFailed
+            ? '<span class="drop-failed-icon" title="Failed to achieve">✕</span>'
+            : '';
+
+        var artHtml = artUrl
+            ? `<img class="drop-art-thumb" src="${escapeHtml(artUrl)}" alt="${escapeHtml(itemName)} art">`
+            : '<div class="drop-art-placeholder"><i class="fa fa-gift" aria-hidden="true"></i></div>';
+
+        dropsItems.append(`
+            <div class="drop-row">
+                <div class="drop-row-art">${artHtml}</div>
+                <div class="drop-row-body">
+                    <div class="drop-row-top">
+                        <div class="drop-item-name">${failedIcon}${escapeHtml(itemName || 'Unknown Drop')}</div>
+                        <span class="drop-status ${statusClass}">${escapeHtml(statusDisplay)}</span>
+                    </div>
+                    <div class="drop-progress-block">
+                        <div class="drop-progress-bar" aria-hidden="true">
+                            <div class="drop-progress-fill ${progressBarClass}" style="width: ${progressPercent}%;"></div>
+                        </div>
+                        <div class="drop-progress-label">${escapeHtml(progress)}</div>
+                    </div>
+                    <div class="drop-row-meta">
+                        ${metadataSpans}
+                    </div>
+                </div>
+            </div>
+        `);
+    });
+}
+
+function renderDropsByCategory(response) {
+    dropsState = normalizeDropsData(response);
+
+    var savedDropCategory = localStorage.getItem('selectedDropCategory');
+    if (savedDropCategory && dropsState.categories[savedDropCategory]) {
+        currentDropCategory = savedDropCategory;
+    }
+
+    if (!currentDropCategory || !dropsState.categories[currentDropCategory]) {
+        currentDropCategory = dropsState.orderedCategories.length > 0
+            ? dropsState.orderedCategories[0]
+            : null;
+    }
+
+    renderDropCategoryList();
+    renderDropRows();
+}
+
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 
 // Toggle

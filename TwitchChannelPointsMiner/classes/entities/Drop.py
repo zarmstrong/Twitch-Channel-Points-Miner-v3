@@ -3,6 +3,7 @@ from datetime import datetime
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.utils import percentage
 
+
 def parse_datetime(datetime_str):
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -11,11 +12,14 @@ def parse_datetime(datetime_str):
             continue
     raise ValueError(f"time data '{datetime_str}' does not match format")
 
+
 class Drop(object):
     __slots__ = [
         "id",
         "name",
         "benefit",
+        "benefit_edges",
+        "item_art_url",
         "minutes_required",
         "has_preconditions_met",
         "current_minutes_watched",
@@ -32,9 +36,11 @@ class Drop(object):
     def __init__(self, dict):
         self.id = dict["id"]
         self.name = dict["name"]
+        self.benefit_edges = dict.get("benefitEdges", []) or []
         self.benefit = ", ".join(
             list(set([bf["benefit"]["name"] for bf in dict["benefitEdges"]]))
         )
+        self.item_art_url = self.__extract_item_art_url(dict.get("benefitEdges", []))
         self.minutes_required = dict["requiredMinutesWatched"]
 
         self.has_preconditions_met = None  # [True, False], None we don't know
@@ -48,6 +54,21 @@ class Drop(object):
         self.end_at = parse_datetime(dict["endAt"])
         self.start_at = parse_datetime(dict["startAt"])
         self.dt_match = self.start_at < datetime.now() < self.end_at
+
+    def __extract_item_art_url(self, benefit_edges):
+        for edge in benefit_edges:
+            benefit = edge.get("benefit", {}) if isinstance(edge, dict) else {}
+            for key in [
+                "imageAssetURL",
+                "imageAssetUrl",
+                "imageURL",
+                "imageUrl",
+                "thumbnailURL",
+                "thumbnailUrl",
+            ]:
+                if benefit.get(key):
+                    return benefit.get(key)
+        return None
 
     def update(
         self,

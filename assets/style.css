@@ -62,9 +62,254 @@ a {
 }
 
 #auto-update-log {
-    display: none;
     background-color: transparent;
     font-size: 20px;
     padding: 0;
     border-radius: 5px;
+}
+
+.view-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.top-controls {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.top-controls .checkbox-label {
+    font-size: 16px;
+    padding-left: 8px;
+}
+
+body.header-hidden .top-controls-row {
+    padding-top: 12px;
+}
+
+@media (max-width: 1024px) {
+    .top-controls-row {
+        align-items: flex-start;
+    }
+
+    .top-controls {
+        justify-content: flex-start;
+    }
+
+    .top-controls .checkbox-label {
+        font-size: 14px;
+    }
+}
+
+#drops-box .table {
+    text-align: left;
+}
+
+#drops-box td,
+#drops-box th {
+    white-space: nowrap;
+}
+
+.drops-tabs {
+    max-height: 520px;
+    min-width: 240px;
+}
+
+.drops-count {
+    float: right;
+    margin-left: 10px;
+    color: #f9826c;
+    font-size: 0.85rem;
+}
+
+.drops-category-title {
+    text-align: left;
+    font-size: 0.95rem;
+    margin-bottom: 0;
+    color: rgba(255, 255, 255, 0.72);
+}
+
+.drops-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 0.65rem;
+}
+
+.drops-filter-select select {
+    min-width: 165px;
+}
+
+.drops-items {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.drop-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid rgba(249, 130, 108, 0.25);
+    border-radius: 8px;
+    background: rgba(52, 62, 89, 0.35);
+    text-align: left;
+}
+
+.drop-row-art {
+    flex: 0 0 40px;
+}
+
+.drop-row-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.drop-row-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+
+.drop-progress-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.drop-progress-bar {
+    width: 100%;
+    height: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.drop-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.2s ease;
+    background: #f9826c;
+}
+
+.drop-progress-fill.is-progress {
+    background: linear-gradient(90deg, #7d5fff, #a56bff);
+}
+
+.drop-progress-fill.is-captured {
+    background: linear-gradient(90deg, #35c96b, #7ae89a);
+}
+
+.drop-progress-fill.is-failed {
+    background: linear-gradient(90deg, #ff5d5d, #ff8a8a);
+}
+
+.drop-progress-label {
+    font-size: 0.82rem;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.drop-item-name {
+    font-weight: 700;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.drop-failed-icon {
+    color: #ff5d5d;
+    margin-right: 8px;
+    font-weight: 700;
+}
+
+.drop-status {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: 999px;
+    padding: 2px 8px;
+    border: 1px solid transparent;
+}
+
+.drop-status.is-progress {
+    color: #ffdf85;
+    border-color: rgba(255, 223, 133, 0.45);
+    background: rgba(255, 223, 133, 0.08);
+}
+
+.drop-status.is-captured {
+    color: #95f6ac;
+    border-color: rgba(149, 246, 172, 0.45);
+    background: rgba(149, 246, 172, 0.08);
+}
+
+.drop-status.is-failed {
+    color: #ff9f9f;
+    border-color: rgba(255, 93, 93, 0.5);
+    background: rgba(255, 93, 93, 0.14);
+}
+
+.drop-row-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.82rem;
+}
+
+.drop-row-meta span {
+    background: rgba(18, 21, 32, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+
+.drop-art-placeholder {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.65);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.drops-empty {
+    text-align: left;
+    padding: 8px 2px;
+    color: rgba(255, 255, 255, 0.72);
+}
+
+.drops-pagination {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.drops-page-info {
+    font-size: 0.88rem;
+    color: rgba(255, 255, 255, 0.82);
+}
+
+.drop-art-thumb {
+    width: 36px;
+    height: 36px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
 }

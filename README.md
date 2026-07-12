@@ -265,7 +265,7 @@ twitch_miner = TwitchChannelPointsMiner(
             endpoint="https://example.com/message?token=TOKEN",
             priority=8,
             events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION], 
+                    Events.BET_LOSE, Events.CHAT_MENTION],
         )
     ),
     streamer_settings=StreamerSettings(
@@ -338,6 +338,67 @@ twitch_miner = TwitchChannelPointsMiner("your-twitch-username")
 twitch_miner.mine(followers=True, blacklist=["user1", "user2"])  # Blacklist example
 ```
 
+### Category-based Drops
+
+Use `categories` when you want the miner to find eligible live channels for a
+game instead of maintaining a fixed list of streamer usernames. Category names,
+Twitch category slugs, and full category URLs are accepted:
+
+```python
+twitch_miner.mine(
+    categories=[
+        "Pokémon GO",
+        "pokemon-go",
+        "https://www.twitch.tv/directory/category/pokemon-go?filter=drops",
+    ],
+    category_limit=5,
+    category_log_level=logging.INFO,
+    category_refresh_interval_hours=6,
+)
+```
+
+Category matching is accent-insensitive, so `Pokémon GO`, `Pokemon GO`, and
+`pokemon-go` resolve to the same Twitch category. This is useful when the Twitch
+display name contains accented characters but a configuration or copied URL uses
+plain ASCII. Prefer the displayed category name when you are unsure of its slug,
+or paste the full Twitch category URL.
+
+If Twitch's campaign sources do not list any campaign for a configured game, the
+miner uses that game's `twitchdrops.app/game/<category>` page as a third-priority
+fallback. Restricted campaign channel lists are checked in full for live users
+about every five minutes while the campaign is active. A twitchdrops.app game URL
+can also be used directly as the category value, which is useful when its slug
+differs from Twitch's slug. Setting `category_refresh_interval_hours=0` still
+disables all periodic category checks.
+
+Eligible logins shared by multiple active campaigns are checked first. The miner
+selects up to 20 live channels per campaign and queries the remaining channel list
+in standby batches only when a campaign has not reached that target.
+
+To force a particular live streamer for a category, separate the category and
+streamer with a pipe:
+
+```python
+categories=[
+    "Call of Duty: Warzone|streamer-name",
+    "[Pokémon GO]|[another-streamer]",
+]
+```
+
+The pipe avoids conflicts with punctuation in category names such as
+`Call of Duty: Warzone`.
+
+The miner periodically checks configured categories for new campaigns and live
+replacement streamers. `category_refresh_interval_hours` defaults to 6 hours,
+has a minimum of 30 minutes, and adds a random 20-second–5-minute delay. Set it to `0` to
+disable periodic category refresh (not recommended).
+
+Set `category_log_level` to the severity you want for category discovery and
+refresh messages. This lets those messages pass an `INFO` console threshold
+without enabling global `DEBUG` logging. For example,
+`category_log_level=logging.DEBUG` shows category debug records in Docker logs
+while unrelated debug records remain filtered out.
+
 ### By cloning the repository
 1. Clone this repository `git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2`
 2. Install all the requirements `pip install -r requirements.txt` . If you have problems with requirements, make sure to have at least Python3.6. You could also try to create a _virtualenv_ and then install all the requirements
@@ -381,7 +442,7 @@ services:
       - ./analytics:/usr/src/app/analytics
       - ./cookies:/usr/src/app/cookies
       - ./logs:/usr/src/app/logs
-      - ./run.py:/usr/src/app/run.py:ro
+      - ./run.py:/usr/src/app/run.py
     ports:
       - "5000:5000"
 ```
@@ -392,27 +453,33 @@ docker run \
     -v $(pwd)/analytics:/usr/src/app/analytics \
     -v $(pwd)/cookies:/usr/src/app/cookies \
     -v $(pwd)/logs:/usr/src/app/logs \
-    -v $(pwd)/run.py:/usr/src/app/run.py:ro \
+    -v $(pwd)/run.py:/usr/src/app/run.py \
     -p 5000:5000 \
     rdavidoff/twitch-channel-points-miner-v2
 ```
 
 `$(pwd)` Could not work on Windows (cmd), please use the absolute path instead, like: `/path/of/your/cookies:/usr/src/app/cookies`.
 
-The correct solution for Windows lies in the correct command line: `docker run -v C:\Absolute\Path\To\Twitch-Channel-Points-Miner-v2\run.py:/usr/src/app/run.py:ro rdavidoff/twitch-channel-points-miner-v2`.
+The correct solution for Windows lies in the correct command line: `docker run -v C:\Absolute\Path\To\Twitch-Channel-Points-Miner-v2\run.py:/usr/src/app/run.py rdavidoff/twitch-channel-points-miner-v2`.
 
 `run.py` MUST be mounted as a volume (`-v`).
+
+Do not add the read-only `:ro` suffix to the `run.py` mount. The miner's runner
+migration updates this file when new configuration options are introduced. A
+read-only mount prevents those updates from being saved to the host. If you used
+an older Docker configuration containing `run.py:/usr/src/app/run.py:ro`, remove
+`:ro` and recreate the container.
 
 If you don't mount the volume for the analytics (or cookies or logs) folder, the folder will be automatically created on the Docker container, and you will lose all the data when it is stopped.
 
 If you don't have a cookie or it's your first time running the script, you will need to login to Twitch and start the container with `-it` args. If you need to run multiple containers you can bind different ports (only if you need also the analytics) and mount dirrent run.py file, like
 
 ```sh
-docker run --name user1 -v $(pwd)/user1.py:/usr/src/app/run.py:ro -p 5001:5000 rdavidoff/twitch-channel-points-miner-v2
+docker run --name user1 -v $(pwd)/user1.py:/usr/src/app/run.py -p 5001:5000 rdavidoff/twitch-channel-points-miner-v2
 ```
 
 ```sh
-docker run --name user2 -v $(pwd)/user2.py:/usr/src/app/run.py:ro -p 5002:5000 rdavidoff/twitch-channel-points-miner-v2
+docker run --name user2 -v $(pwd)/user2.py:/usr/src/app/run.py -p 5002:5000 rdavidoff/twitch-channel-points-miner-v2
 ```
 
 #### Portainer

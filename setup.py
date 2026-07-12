@@ -24,6 +24,7 @@ setuptools.setup(
     keywords="python bot streaming script miner twtich channel-points",
     url="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2",
     packages=setuptools.find_packages(),
+    py_modules=["twitchdrops_app_scraper"],
     include_package_data=True,
     install_requires=[
         "requests",
