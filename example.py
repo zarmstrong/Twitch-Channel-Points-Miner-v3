@@ -121,7 +121,7 @@ twitch_miner = TwitchChannelPointsMiner(
 # For example, if in the mine function you don't provide any value for 'make_prediction' but you have set it on TwitchChannelPointsMiner instance, the script will take the value from here.
 # If you haven't set any value even in the instance the default one will be used
 
-#twitch_miner.analytics(host="127.0.0.1", port=5000, refresh=5, days_ago=7)   # Add password="..." when binding beyond localhost
+#twitch_miner.analytics(host="127.0.0.1", port=5000, refresh=5, days_ago=7, log_poll_interval=5)   # Add password="..." when binding beyond localhost
 
 twitch_miner.mine(
     [

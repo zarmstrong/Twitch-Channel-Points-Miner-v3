@@ -233,7 +233,7 @@
 
 <script type="text/javascript">
     // n.b. Seems that we are unable to call Flask variable in JS code imported from JS file.
-    // That's why "link[href='{{url_for('static', filename='dark-theme.css')}}']", {{ refresh }}, {{ daysAgo }} are here.
+    // That's why the Flask-provided dashboard settings are declared here.
 
     function toggleDarkMode() {
         var darkMode = $('#dark-mode').prop("checked")
@@ -250,6 +250,7 @@
     }
     var refresh = parseInt("{{ refresh }}");
     var daysAgo = parseInt("{{ daysAgo }}");
+    var logPollInterval = parseInt("{{ logPollInterval }}");
 </script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js')}}"></script>
 

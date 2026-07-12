@@ -1215,6 +1215,41 @@ class Twitch(object):
             return "Unknown"
         return stream.game.get("displayName") or stream.game.get("name") or "Unknown"
 
+    def __log_watched_streamers(self, streamers, streamers_watching):
+        points_streams = [streamers[index].username for index in streamers_watching]
+        drops_streams = []
+
+        for index in streamers_watching:
+            streamer = streamers[index]
+            if streamer.drops_condition() is not True:
+                continue
+
+            campaigns = self.__describe_campaigns(streamer.stream.campaigns)
+            drops_streams.append(
+                f"{streamer.username} ({campaigns})"
+                if campaigns
+                else (
+                    f"{streamer.username} "
+                    f"({self.__stream_game_label(streamer.stream)} drops)"
+                )
+            )
+
+        logger.info(
+            f"{Fore.GREEN}Watching for points: "
+            f"{', '.join(points_streams) if points_streams else 'none'}; "
+            "watching for drops: "
+            f"{', '.join(drops_streams) if drops_streams else 'none'}{Fore.RESET}",
+            extra={
+                "emoji": ":eye:",
+                "event": Events.DROP_STATUS,
+                "skip_telegram": True,
+                "skip_discord": True,
+                "skip_webhook": True,
+                "skip_matrix": True,
+                "skip_gotify": True,
+            },
+        )
+
     def __helix_get(
         self,
         endpoint: str,
@@ -1822,22 +1857,11 @@ class Twitch(object):
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
 
+                self.__log_watched_streamers(streamers, streamers_watching)
+
                 for index in streamers_watching:
                     # next_iteration = time.time() + 60 / len(streamers_watching)
                     next_iteration = time.time() + 20 / len(streamers_watching)
-
-                    if getattr(streamers[index], "from_category", False) is True:
-                        watch_signature = self.__watch_signature(streamers[index])
-                        if (
-                            streamers[index].last_drop_watch_signature
-                            != watch_signature
-                        ):
-                            streamers[index].last_drop_watch_signature = watch_signature
-                            timestamp = datetime.now().strftime("%d/%m/%y %H:%M:%S")
-                            print(
-                                f"{timestamp} - INFO - [send_minute_watched_events]: {Fore.GREEN}👁️  Watching category channel {streamers[index].username} for {self.__stream_game_label(streamers[index].stream)} drops{Fore.RESET}",
-                                flush=True,
-                            )
 
                     try:
                         ####################################

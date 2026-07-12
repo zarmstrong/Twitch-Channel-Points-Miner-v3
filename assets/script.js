@@ -82,6 +82,8 @@ var options = {
 var chart = new ApexCharts(document.querySelector("#chart"), options);
 var currentStreamer = null;
 var annotations = [];
+var streamerRefreshTimeout = null;
+var streamerDataRequest = 0;
 
 var streamersList = [];
 var sortBy = "Name ascending";
@@ -125,6 +127,7 @@ $(document).ready(function () {
 
     // Variable to keep track of the last received log index
     var lastReceivedLogIndex = 0;
+    var initialLogTailBytes = 128 * 1024;
 
     $('#auto-update-log').click(() => {
         autoUpdateLog = !autoUpdateLog;
@@ -149,10 +152,10 @@ $(document).ready(function () {
         getLog();
     }
 
-    // Function to get the full log content
+    // Load a recent tail first, then request only entries appended after it.
     function getLog() {
         if (isLogCheckboxChecked) {
-            $.get(`/log?lastIndex=${lastReceivedLogIndex}`, function (data, _status, xhr) {
+            $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`, function (data, _status, xhr) {
                 // Process and display the new log entries received
                 $("#log-content").append(data);
                 // Scroll to the bottom of the log content
@@ -165,8 +168,7 @@ $(document).ready(function () {
                 }
 
                 if (autoUpdateLog) {
-                    // Call getLog() again after a certain interval (e.g., 1 second)
-                    setTimeout(getLog, 1000);
+                    setTimeout(getLog, logPollInterval);
                 }
             });
         }
@@ -297,11 +299,20 @@ function changeStreamer(streamer, index) {
 }
 
 function getStreamerData(streamer) {
-    if (currentStreamer == streamer) {
+    if (streamerRefreshTimeout) {
+        clearTimeout(streamerRefreshTimeout);
+        streamerRefreshTimeout = null;
+    }
+
+    if (streamer && currentStreamer == streamer) {
+        var request = ++streamerDataRequest;
         $.getJSON(`./json/${streamer}`, {
             startDate: formatDate(startDate),
             endDate: formatDate(endDate)
         }, function (response) {
+            // Ignore a response for a range or streamer that has since changed.
+            if (request !== streamerDataRequest || currentStreamer !== streamer) return;
+
             chart.updateSeries([{
                 name: streamer.replace(".json", ""),
                 data: response["series"]
@@ -309,7 +320,7 @@ function getStreamerData(streamer) {
             clearAnnotations();
             annotations = response["annotations"];
             updateAnnotations();
-            setTimeout(function () {
+            streamerRefreshTimeout = setTimeout(function () {
                 getStreamerData(streamer);
             }, 300000); // 5 minutes
         });
@@ -531,11 +542,20 @@ function getFilteredDropsForCategory(category) {
     drops = Object.values(dedupedDropsById);
 
     drops.sort((a, b) => {
-        var endDiff = getDropEndTimestamp(b) - getDropEndTimestamp(a);
-        if (endDiff !== 0) {
-            return endDiff;
+        var aEndTimestamp = getDropEndTimestamp(a);
+        var bEndTimestamp = getDropEndTimestamp(b);
+        var aCampaignClosed = aEndTimestamp !== -1 && aEndTimestamp < now;
+        var bCampaignClosed = bEndTimestamp !== -1 && bEndTimestamp < now;
+        if (aCampaignClosed !== bCampaignClosed) {
+            return aCampaignClosed ? 1 : -1;
         }
-        return compareDropsForTable(a, b);
+
+        var progressDiff = getDropProgressPercent(b) - getDropProgressPercent(a);
+        if (progressDiff !== 0) {
+            return progressDiff;
+        }
+
+        return getDropTimestamp(b) - getDropTimestamp(a);
     });
 
     return drops;
@@ -786,10 +806,10 @@ $('.dropdown').click(() => {
 
 // Input date
 $('#startDate').change(() => {
-    startDate = new Date($('#startDate').val());
+    startDate = new Date(`${$('#startDate').val()}T00:00:00`);
     getStreamerData(currentStreamer);
 });
 $('#endDate').change(() => {
-    endDate = new Date($('#endDate').val());
+    endDate = new Date(`${$('#endDate').val()}T00:00:00`);
     getStreamerData(currentStreamer);
 });

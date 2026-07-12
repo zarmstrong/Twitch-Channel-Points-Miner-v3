@@ -15,6 +15,8 @@ from TwitchChannelPointsMiner.classes.Settings import Settings
 cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
 
+MAX_LOG_TAIL_BYTES = 1024 * 1024
+
 
 def get_assets_folder():
     repository_assets = Path(__file__).resolve().parents[2] / "assets"
@@ -110,7 +112,7 @@ def filter_datas(start_date, end_date, datas):
             {"x": end_date, "y": last_balance, "z": "No Stream"},
         ]
 
-    if "annotations" in datas:
+    if datas.get("annotations"):
         df = pd.DataFrame(datas["annotations"])
         df["datetime"] = pd.to_datetime(df.x // 1000, unit="s")
 
@@ -236,11 +238,12 @@ def drops_by_category():
     )
 
 
-def index(refresh=5, days_ago=7):
+def index(refresh=5, days_ago=7, log_poll_interval=5):
     return render_template(
         "charts.html",
         refresh=(refresh * 60 * 1000),
         daysAgo=days_ago,
+        logPollInterval=(log_poll_interval * 1000),
     )
 
 
@@ -299,10 +302,18 @@ class AnalyticsServer(Thread):
         days_ago: int = 7,
         username: str = None,
         password: str = None,
+        log_poll_interval: int = 5,
     ):
         super(AnalyticsServer, self).__init__()
 
         check_assets()
+
+        if not isinstance(log_poll_interval, int) or isinstance(
+            log_poll_interval, bool
+        ):
+            raise TypeError("Log polling interval must be an integer number of seconds")
+        if not 1 <= log_poll_interval <= 180:
+            raise ValueError("Log polling interval must be between 1 and 180 seconds")
 
         self.host = host
         self.port = port
@@ -316,12 +327,22 @@ class AnalyticsServer(Thread):
 
         def generate_log():
             raw_position = request.args.get("lastIndex", "0")
+            raw_tail_bytes = request.args.get("tailBytes")
             try:
                 last_received_index = int(raw_position)
             except (TypeError, ValueError):
                 return Response("Invalid log position.", status=400)
             if last_received_index < 0:
                 return Response("Invalid log position.", status=400)
+
+            tail_bytes = None
+            if raw_tail_bytes is not None:
+                try:
+                    tail_bytes = int(raw_tail_bytes)
+                except (TypeError, ValueError):
+                    return Response("Invalid log tail size.", status=400)
+                if tail_bytes <= 0 or tail_bytes > MAX_LOG_TAIL_BYTES:
+                    return Response("Invalid log tail size.", status=400)
 
             logs_path = os.path.join(Path().absolute(), "logs")
             log_file_path = os.path.join(logs_path, f"{username}.log")
@@ -331,7 +352,17 @@ class AnalyticsServer(Thread):
                     last_received_index if last_received_index <= file_size else 0
                 )
                 with open(log_file_path, "rb") as log_file:
-                    log_file.seek(position)
+                    if (
+                        position == 0
+                        and tail_bytes is not None
+                        and file_size > tail_bytes
+                    ):
+                        position = file_size - tail_bytes
+                        log_file.seek(position)
+                        # Avoid displaying the partial first line in the tailed chunk.
+                        log_file.readline()
+                    else:
+                        log_file.seek(position)
                     new_log_entries = log_file.read()
                     next_position = log_file.tell()
 
@@ -376,7 +407,11 @@ class AnalyticsServer(Thread):
             "/",
             "index",
             index,
-            defaults={"refresh": refresh, "days_ago": days_ago},
+            defaults={
+                "refresh": refresh,
+                "days_ago": days_ago,
+                "log_poll_interval": log_poll_interval,
+            },
             methods=["GET"],
         )
         self.app.add_url_rule("/streamers", "streamers", streamers, methods=["GET"])
