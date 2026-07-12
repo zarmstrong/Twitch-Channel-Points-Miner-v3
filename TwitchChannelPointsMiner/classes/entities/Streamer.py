@@ -185,6 +185,11 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
+            logger.debug(
+                "[watch-streak] "
+                f"Twitch confirmed streak for streamer={self.username}; "
+                f"local watched={self.stream.minute_watched:.2f}m"
+            )
 
     def stream_up_elapsed(self):
         return self.stream_up == 0 or ((time.time() - self.stream_up) > 120)

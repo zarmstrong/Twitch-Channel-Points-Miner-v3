@@ -1815,7 +1815,7 @@ class Twitch(object):
                                     > 30
                                 )
                                 # fix #425
-                                and streamers[index].stream.minute_watched < 7
+                                and streamers[index].stream.minute_watched < 11
                             ):
                                 streamers_watching.add(index)
                                 if remaining_watch_amount() <= 0:
