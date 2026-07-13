@@ -1,12 +1,9 @@
 FROM python:3.11-bookworm
 
-ARG BUILDX_QEMU_ENV
-
 WORKDIR /usr/src/app
 
 COPY ./requirements.txt ./
 
-ENV CRYPTOGRAPHY_DONT_BUILD_RUST=1
 ENV PYTHONUNBUFFERED=1
 
 RUN pip install --upgrade pip
@@ -15,11 +12,7 @@ RUN apt-get update
 RUN apt-get upgrade -y
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --fix-missing --no-install-recommends \
     gcc \
-    libffi-dev \
-    rustc \
     zlib1g-dev \
-    libjpeg-dev \
-    libssl-dev \
     libblas-dev \
     liblapack-dev \
     make \
@@ -28,12 +21,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --fix-missing --no-ins
     ninja-build \
     g++ \
     subversion \
-  && if [ "${BUILDX_QEMU_ENV}" = "true" ] && [ "$(getconf LONG_BIT)" = "32" ]; then \
-        pip install -U cryptography==3.3.2; \
-     fi \
   && pip install -r requirements.txt \
   && pip cache purge \
-  && apt-get remove -y gcc rustc \
+  && apt-get remove -y gcc \
   && apt-get autoremove -y \
   && apt-get autoclean -y \
   && apt-get clean -y \

@@ -165,7 +165,9 @@ $(document).ready(function () {
         if (isLogCheckboxChecked) {
             $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`, function (data, _status, xhr) {
                 // Process and display the new log entries received
-                $("#log-content").append(data);
+                // Logs contain Twitch-controlled text (for example prediction
+                // titles), so never interpret them as HTML.
+                $("#log-content").append(document.createTextNode(data));
                 // Scroll to the bottom of the log content
                 $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
 
@@ -750,7 +752,7 @@ function renderDropRows() {
         var statusDisplay = String(status || 'unknown').replace(/_/g, ' ');
 
         if (isFailed) {
-            status = 'EXPIRED - Failed to achieve';
+            statusDisplay = 'EXPIRED - Failed to achieve';
             statusClass = 'is-failed';
             progressBarClass = 'is-failed';
         } else if (status === 'in_progress') {

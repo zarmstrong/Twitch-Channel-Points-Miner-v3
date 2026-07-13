@@ -837,8 +837,8 @@ pkg upgrade
 
 **2. Install packages to Termux**
 ```
-pkg install python git rust libjpeg-turbo libcrypt ndk-sysroot clang zlib binutils tur-repo python-cryptography
-LDFLAGS="-L${PREFIX}/lib/" CFLAGS="-I${PREFIX}/include/" pip install --upgrade wheel pillow
+pkg install python git libcrypt ndk-sysroot clang zlib binutils tur-repo
+LDFLAGS="-L${PREFIX}/lib/" CFLAGS="-I${PREFIX}/include/" pip install --upgrade wheel
 ```
 Note: `pkg install tur-repo` will basically enable the [user repository](https://github.com/termux-user-repository/tur) _(Very similar to Arch AUR)_ and `python-pandas` pre-compiled package comes exactly from this repository.
 
@@ -877,11 +877,7 @@ Read more at [#92](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/is
 
 **Note**
 
-If you can't install `cryptography`, please try:
-
-`export RUSTFLAGS=" -C lto=no" && export CARGO_BUILD_TARGET="$(rustc -vV | sed -n 's|host: ||p')" && pip install cryptography`
-
-⚠️ Installation of `pandas`, `maturin` and `cryptography` takes a long time.
+⚠️ Installation of `pandas` and its build dependencies can take a long time.
 
 ## Disclaimer
 This project comes with no guarantee or warranty. You are responsible for whatever happens from using this project. It is possible to get soft or hard banned by using this project if you are not careful. This is a personal project and is in no way affiliated with Twitch.

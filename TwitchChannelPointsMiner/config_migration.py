@@ -120,8 +120,19 @@ def convert_runner(runner_path, config_path):
     )
     config.parent.mkdir(parents=True, exist_ok=True)
     temporary = config.with_name(config.name + ".migrating")
-    temporary.write_text(converted, encoding="utf-8")
-    os.replace(temporary, config)
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as config_file:
+            config_file.write(converted)
+        os.replace(temporary, config)
+        os.chmod(config, 0o600)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     digest = hashlib.sha256(runner.read_bytes()).hexdigest()
     config.with_name(".converted-from-run-py").write_text(
         f"source={runner.resolve()}\nsha256={digest}\n", encoding="utf-8"
