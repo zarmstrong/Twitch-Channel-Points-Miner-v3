@@ -143,6 +143,23 @@ class Twitch(object):
         extra["category_log"] = True
         logger.log(self.category_log_level, message, **kwargs)
 
+    def __replace_category_campaign_eligibility(
+        self, game_slug: str, eligibility_by_login: dict
+    ):
+        """Atomically replace cached eligibility for one game category."""
+        updated_eligibility = {
+            key: value
+            for key, value in self.category_campaign_eligibility.items()
+            if key[0] != game_slug
+        }
+        updated_eligibility.update(
+            {
+                (game_slug, login): eligibility
+                for login, eligibility in eligibility_by_login.items()
+            }
+        )
+        self.category_campaign_eligibility = updated_eligibility
+
     def __drop_tracking_key(self, drop, campaign_name=None, category_name=None):
         return "|".join(
             [
@@ -1173,6 +1190,8 @@ class Twitch(object):
             )
         )
         if active_category_deadlines == {}:
+            for requested_slug in requested_category_slugs:
+                self.__replace_category_campaign_eligibility(requested_slug, {})
             self.__log_category(
                 "No active incomplete drop campaigns found for category discovery",
                 extra={"emoji": ":sleeping:"},
@@ -1189,6 +1208,7 @@ class Twitch(object):
             if requested_slug in active_category_deadlines:
                 filtered_categories.append(category)
             else:
+                self.__replace_category_campaign_eligibility(requested_slug, {})
                 self.__log_category(
                     f"Skip category '{category}' because no active incomplete campaign matches it",
                     extra={"emoji": ":no_entry:"},
@@ -1471,6 +1491,11 @@ class Twitch(object):
                 f"Using forced category streamer '{forced_streamer_username}' for '{game_name}'",
                 extra={"emoji": ":satellite:"},
             )
+            game_slug = self.__slugify(game_name)
+            self.__replace_category_campaign_eligibility(
+                game_slug,
+                ({forced_streamer_username: (1, 1)} if drops_enabled is True else {}),
+            )
             return [forced_streamer_username]
 
         log_suffix = " with DropsEnabled tag" if drops_enabled else ""
@@ -1557,6 +1582,17 @@ class Twitch(object):
             if username:
                 usernames.append(username)
 
+        game_slug = self.__slugify(game_name)
+        total_campaigns = len(fallback_campaigns) or 1
+        self.__replace_category_campaign_eligibility(
+            game_slug,
+            (
+                {username: (total_campaigns, total_campaigns) for username in usernames}
+                if drops_enabled is True
+                else {}
+            ),
+        )
+
         self.__log_category(
             f"Found {len(usernames)} live channels for '{game_name}' (sort: {sort_key})",
             extra={"emoji": ":satellite_antenna:"},
@@ -1624,13 +1660,6 @@ class Twitch(object):
             + sum(1 for logins in campaign_logins if login in logins)
             for login in live_streams
         }
-        game_slug = self.__slugify(game_name)
-        for login, eligible_count in eligible_campaign_counts.items():
-            self.category_campaign_eligibility[(game_slug, login)] = (
-                eligible_count,
-                len(campaigns),
-            )
-
         usernames = []
         selected = set()
         for logins in campaign_logins:
@@ -1646,6 +1675,14 @@ class Twitch(object):
                 if campaign_selected >= target_per_campaign:
                     break
         usernames.sort(key=lambda login: -eligible_campaign_counts.get(login, 0))
+        game_slug = self.__slugify(game_name)
+        self.__replace_category_campaign_eligibility(
+            game_slug,
+            {
+                login: (eligible_campaign_counts[login], len(campaigns))
+                for login in usernames
+            },
+        )
         self.__log_category(
             f"Checked {checked}/{len(ranked_logins)} twitchdrops.app channels for "
             f"'{game_name}'; selected {len(usernames)} live across "
