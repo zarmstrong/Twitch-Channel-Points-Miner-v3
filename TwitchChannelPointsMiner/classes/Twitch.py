@@ -1215,13 +1215,59 @@ class Twitch(object):
             return "Unknown"
         return stream.game.get("displayName") or stream.game.get("name") or "Unknown"
 
+    def __category_drops_condition(self, streamer):
+        if (
+            getattr(streamer, "from_category", False) is not True
+            or streamer.settings.claim_drops is not True
+            or streamer.is_online is not True
+        ):
+            return False
+
+        game_name = streamer.stream.game_name()
+        if not game_name:
+            return False
+
+        game_slug = self.__slugify(game_name)
+        eligibility = self.category_campaign_eligibility.get(
+            (game_slug, streamer.username)
+        )
+        if eligibility is not None:
+            eligible_campaigns, _ = eligibility
+            return eligible_campaigns > 0
+
+        # Category discovery has already removed fully collected campaigns.
+        # Use its remaining twitchdrops.app campaign data when Twitch's private
+        # campaign query fails to populate Stream.campaigns.
+        for campaign in self.twitchdrops_app_campaigns.get(game_slug, []):
+            channels = {
+                str(login).lower().strip()
+                for login in campaign.get("channels", []) or []
+            }
+            if not channels or streamer.username in channels:
+                return True
+
+        return False
+
+    def __drops_condition(self, streamer):
+        if streamer.drops_condition() is True:
+            return True
+
+        category_eligible = self.__category_drops_condition(streamer)
+        if category_eligible:
+            logger.debug(
+                "[drops-check] Using category campaign eligibility fallback for "
+                f"streamer={streamer.username} "
+                f"game={self.__stream_game_label(streamer.stream)}"
+            )
+        return category_eligible
+
     def __log_watched_streamers(self, streamers, streamers_watching):
         points_streams = [streamers[index].username for index in streamers_watching]
         drops_streams = []
 
         for index in streamers_watching:
             streamer = streamers[index]
-            if streamer.drops_condition() is not True:
+            if self.__drops_condition(streamer) is not True:
                 continue
 
             campaigns = self.__describe_campaigns(streamer.stream.campaigns)
@@ -1823,7 +1869,7 @@ class Twitch(object):
 
                     elif prior == Priority.DROPS:
                         for index in streamers_index:
-                            if streamers[index].drops_condition() is True:
+                            if self.__drops_condition(streamers[index]) is True:
                                 streamers_watching.add(index)
                                 if remaining_watch_amount() <= 0:
                                     break
