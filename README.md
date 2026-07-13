@@ -483,11 +483,24 @@ read-only because conversion never changes it. To disable automatic conversion,
 set `TCPM_DISABLE_AUTO_CONVERSION=1`. To use another container path, set
 `TCPM_CONFIG_DIR` and mount that directory.
 
-The miner watches `config/config.py` every five seconds. New entries in
-`STREAMERS` and changes to `MINE_CONFIG["categories"]` are applied without a
-restart. Removing existing streamers or changing constructor, analytics, or
-other mining settings still requires a restart. Set `TCPM_CONFIG_RELOAD_SECONDS`
-to change the polling interval (minimum one second).
+The miner polls `config/config.py` every five seconds, so a saved change may
+take up to five seconds to be detected. Set `TCPM_CONFIG_RELOAD_SECONDS` to
+change the polling interval (minimum one second).
+
+#### Configuration reload limitations
+
+- New entries in `STREAMERS` are applied without a restart. Removing a streamer
+  from `STREAMERS` does not remove its already-loaded state, chat connection, or
+  PubSub subscriptions; restart the miner to remove it completely.
+- Changes to `MINE_CONFIG["categories"]` trigger category discovery immediately
+  after the configuration is detected. Streamers already discovered from a
+  removed category remain loaded until the miner restarts. Because the runtime
+  still considers them category streamers, watch selection may remain limited
+  to one channel until restart.
+- Changes to existing streamer settings, constructor options, analytics
+  settings, and non-category mining options require a restart.
+- Invalid configuration is logged and ignored. The watcher retries after the
+  file changes again.
 
 If you don't mount the volume for the analytics (or cookies or logs) folder, the folder will be automatically created on the Docker container, and you will lose all the data when it is stopped.
 
