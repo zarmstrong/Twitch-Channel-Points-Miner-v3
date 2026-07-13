@@ -712,26 +712,6 @@ class Twitch(object):
 
         return active_slugs
 
-    def __completed_campaign_ids_from_inventory(self, inventory: dict) -> set:
-        completed_ids = set()
-        for campaign in inventory.get("completedRewardCampaigns", []) or []:
-            if not isinstance(campaign, dict):
-                continue
-
-            for candidate in [
-                campaign.get("id"),
-                (campaign.get("dropCampaign") or {}).get("id")
-                if isinstance(campaign.get("dropCampaign"), dict)
-                else None,
-                (campaign.get("campaign") or {}).get("id")
-                if isinstance(campaign.get("campaign"), dict)
-                else None,
-            ]:
-                if candidate not in [None, ""]:
-                    completed_ids.add(str(candidate))
-
-        return completed_ids
-
     def __completed_drop_ids_from_inventory(self, inventory: dict) -> set:
         completed_ids = set()
 
@@ -746,6 +726,43 @@ class Twitch(object):
                     completed_ids.add(str(drop["id"]))
 
         return completed_ids
+
+    def __merge_campaign_inventory_progress(
+        self, campaign: dict, inventory_campaign: dict
+    ) -> dict:
+        """Keep fresh campaign drops while applying the user's inventory progress."""
+        if not campaign.get("timeBasedDrops"):
+            return inventory_campaign
+        if not inventory_campaign.get("timeBasedDrops"):
+            return campaign
+
+        merged_campaign = copy.deepcopy(campaign)
+        merged_drops = merged_campaign.get("timeBasedDrops", [])
+        merged_drop_ids = {
+            str(drop.get("id"))
+            for drop in merged_drops
+            if isinstance(drop, dict) and drop.get("id") not in [None, ""]
+        }
+        inventory_drops = {
+            str(drop.get("id")): drop
+            for drop in inventory_campaign.get("timeBasedDrops", []) or []
+            if isinstance(drop, dict) and drop.get("id") not in [None, ""]
+        }
+
+        for drop in merged_drops:
+            if not isinstance(drop, dict) or drop.get("id") in [None, ""]:
+                continue
+            inventory_drop = inventory_drops.get(str(drop["id"]))
+            if isinstance(inventory_drop, dict) and isinstance(
+                inventory_drop.get("self"), dict
+            ):
+                drop["self"] = inventory_drop["self"]
+
+        for drop_id, drop in inventory_drops.items():
+            if drop_id not in merged_drop_ids:
+                merged_drops.append(copy.deepcopy(drop))
+
+        return merged_campaign
 
     def __awarded_benefits(self, inventory: dict) -> Tuple[set, set]:
         benefit_ids = set()
@@ -907,7 +924,6 @@ class Twitch(object):
     def __active_drop_category_slugs_from_campaigns(
         self,
         inventory: dict,
-        completed_campaign_ids: set,
         requested_category_slugs: set,
     ) -> Dict[str, datetime]:
         active_deadlines = {}
@@ -931,13 +947,17 @@ class Twitch(object):
             ):
                 campaigns_by_id[campaign_id] = campaign
 
-        campaigns_needing_details = [
-            campaign
-            for campaign_id, campaign in campaigns_by_id.items()
-            if campaign_id not in completed_campaign_ids
-            and not campaign.get("timeBasedDrops")
-        ]
-        for campaign in self.__get_campaigns_details(campaigns_needing_details):
+        # Campaigns can be extended after Twitch has already returned a populated
+        # dashboard summary. Always refresh their details so a newly appended drop
+        # is not hidden by that stale summary.
+        campaigns_to_refresh = []
+        for campaign in campaigns_by_id.values():
+            game = campaign.get("game") or {}
+            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            if game_name and self.__slugify(game_name) in requested_category_slugs:
+                campaigns_to_refresh.append(campaign)
+
+        for campaign in self.__get_campaigns_details(campaigns_to_refresh):
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
@@ -956,18 +976,21 @@ class Twitch(object):
         awarded_benefit_ids, awarded_benefit_fingerprints = self.__awarded_benefits(
             inventory
         )
+        campaign_evaluations = []
 
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
                 continue
-            campaign = inventory_campaigns.get(campaign_id, campaign)
+            inventory_campaign = inventory_campaigns.get(campaign_id)
+            if inventory_campaign is not None:
+                campaign = self.__merge_campaign_inventory_progress(
+                    campaign, inventory_campaign
+                )
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             game_slug = self.__slugify(game_name) if game_name else ""
             if game_slug:
                 twitch_category_slugs.add(game_slug)
-            if campaign_id in completed_campaign_ids:
-                continue
             if game_slug not in requested_category_slugs:
                 continue
 
@@ -977,6 +1000,19 @@ class Twitch(object):
                 awarded_benefit_ids,
                 awarded_benefit_fingerprints,
             )
+            campaign_evaluations.append(
+                {
+                    "campaign": campaign.get("name"),
+                    "campaign_id": campaign_id,
+                    "game": game_name,
+                    "drops": [
+                        drop.get("name")
+                        for drop in campaign.get("timeBasedDrops", []) or []
+                        if isinstance(drop, dict)
+                    ],
+                    "active_incomplete": deadline is not None,
+                }
+            )
             if deadline is None:
                 continue
 
@@ -984,10 +1020,17 @@ class Twitch(object):
             if current_deadline is None or deadline < current_deadline:
                 active_deadlines[game_slug] = deadline
 
+        self.__log_drop_check_json(
+            "Twitch campaign evaluation for configured categories",
+            campaign_evaluations,
+            level=self.category_log_level,
+            category_log=True,
+        )
+
         return active_deadlines, twitch_category_slugs
 
     def __twitchdrops_app_fallback(
-        self, categories, twitch_category_slugs, awarded_benefit_fingerprints
+        self, categories, active_twitch_category_slugs, awarded_benefit_fingerprints
     ):
         deadlines = {}
         self.twitchdrops_app_campaigns = {}
@@ -1004,7 +1047,7 @@ class Twitch(object):
             category_name, _ = self.__split_category_streamer_selector(category)
             normalized = self.__normalize_category(category_name)
             requested_slug = self.__slugify(normalized.replace("-", " "))
-            if not requested_slug or requested_slug in twitch_category_slugs:
+            if not requested_slug or requested_slug in active_twitch_category_slugs:
                 continue
 
             if checked_twitchdrops_app:
@@ -1106,7 +1149,6 @@ class Twitch(object):
             )
             return categories
 
-        completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
         requested_category_slugs = set()
         for category in categories:
             category_name, _ = self.__split_category_streamer_selector(category)
@@ -1117,17 +1159,16 @@ class Twitch(object):
                 )
         (
             active_category_deadlines,
-            twitch_category_slugs,
+            _twitch_category_slugs,
         ) = self.__active_drop_category_slugs_from_campaigns(
             inventory,
-            completed_campaign_ids,
             requested_category_slugs,
         )
         _, awarded_benefit_fingerprints = self.__awarded_benefits(inventory)
         active_category_deadlines.update(
             self.__twitchdrops_app_fallback(
                 categories,
-                twitch_category_slugs,
+                set(active_category_deadlines),
                 awarded_benefit_fingerprints,
             )
         )
