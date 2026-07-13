@@ -546,8 +546,9 @@ class TwitchChannelPointsMiner:
                 if effective_category_refresh_seconds > 0
                 else None
             )
-            while self.running:
-                time.sleep(random.uniform(20, 60))
+            while self.running and self.twitch.running:
+                if self.twitch.restart_requested.wait(random.uniform(20, 60)):
+                    break
                 # Do an external control for WebSocket. Check if the thread is running
                 # Check if is not None because maybe we have already created a new connection on array+1 and now index is None
                 for index in range(0, len(self.ws_pool.ws)):

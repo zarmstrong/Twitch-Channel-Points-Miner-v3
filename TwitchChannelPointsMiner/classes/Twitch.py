@@ -16,7 +16,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from secrets import choice, token_hex
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -81,6 +81,7 @@ class Twitch(object):
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
         "category_campaign_eligibility",
+        "restart_requested",
     ]
 
     def __init__(self, username, user_agent, password=None):
@@ -118,6 +119,45 @@ class Twitch(object):
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
         self.category_campaign_eligibility = {}
+        self.restart_requested = Event()
+
+    @staticmethod
+    def __is_unauthorized_response(response):
+        return isinstance(response, dict) and response.get("status") == 401
+
+    def __request_authentication_restart(self):
+        if self.restart_requested.is_set():
+            return
+
+        logger.error(
+            f"Twitch rejected the saved authorization token for "
+            f"{self.twitch_login.username}. The cached login will be cleared and "
+            "the miner restarted; follow the reauthentication instructions in "
+            "the logs.",
+            extra={
+                "emoji": ":warning:",
+                "event": Events.CONFIGURATION,
+                "force_alert": True,
+            },
+        )
+        try:
+            Path(self.cookies_file).unlink(missing_ok=True)
+        except OSError as error:
+            logger.error(
+                f"Unable to clear the cached Twitch login: {error}. Restarting "
+                "without clearing it could cause a restart loop, so the miner "
+                "will stop instead.",
+                extra={
+                    "emoji": ":warning:",
+                    "event": Events.CONFIGURATION,
+                    "force_alert": True,
+                },
+            )
+            self.running = False
+            return
+
+        self.restart_requested.set()
+        self.running = False
 
     def __log_drop_check(self, message, level=logging.INFO):
         if self.log_drop_checks is True:
@@ -1997,7 +2037,7 @@ class Twitch(object):
                             "isLive": True,
                             "isVod": False,
                             "vodID": "",
-                            "playerType": "site"
+                            "playerType": "site",
                             # "playerType": "picture-by-picture",
                         }
 
@@ -2009,6 +2049,12 @@ class Twitch(object):
                             logger.debug(
                                 f"Sent PlaybackAccessToken request for {streamers[index]}"
                             )
+
+                            if self.__is_unauthorized_response(
+                                responsePlaybackAccessToken
+                            ):
+                                self.__request_authentication_restart()
+                                return
 
                             if "data" not in responsePlaybackAccessToken:
                                 logger.error(
@@ -2205,28 +2251,61 @@ class Twitch(object):
         json_data["variables"] = {"channelLogin": streamer.username}
 
         response = self.post_gql_request(json_data)
-        if response != {}:
-            if response["data"]["community"] is None:
-                raise StreamerDoesNotExistException
-            channel = response["data"]["community"]["channel"]
-            community_points = channel["self"]["communityPoints"]
-            streamer.channel_points = community_points["balance"]
-            streamer.activeMultipliers = community_points["activeMultipliers"]
+        if not isinstance(response, dict) or response == {}:
+            return
 
-            if streamer.settings.community_goals is True:
-                streamer.community_goals = {
-                    goal["id"]: CommunityGoal.from_gql(goal)
-                    for goal in channel["communityPointsSettings"]["goals"]
-                }
+        data = response.get("data")
+        if not isinstance(data, dict) or "community" not in data:
+            logger.debug(
+                f"Channel points response for {streamer.username} did not contain "
+                "community data; keeping the current point state"
+            )
+            return
 
-            if community_points["availableClaim"] is not None:
-                self.claim_bonus(streamer, community_points["availableClaim"]["id"])
+        community = data["community"]
+        if community is None:
+            raise StreamerDoesNotExistException
 
-            if streamer.settings.community_goals is True:
-                self.contribute_to_community_goals(streamer)
+        channel = community.get("channel") if isinstance(community, dict) else None
+        viewer = channel.get("self") if isinstance(channel, dict) else None
+        community_points = (
+            viewer.get("communityPoints") if isinstance(viewer, dict) else None
+        )
+        if not isinstance(community_points, dict):
+            logger.debug(
+                f"Channel points are unavailable for {streamer.username}; keeping "
+                "the current point state"
+            )
+            return
 
-            if streamer.settings.community_goals is True:
-                self.contribute_to_community_goals(streamer)
+        balance = community_points.get("balance")
+        if balance is None:
+            logger.debug(
+                f"Channel points response for {streamer.username} has no balance; "
+                "keeping the current point state"
+            )
+            return
+
+        streamer.channel_points = balance
+        streamer.activeMultipliers = community_points.get("activeMultipliers")
+
+        if streamer.settings.community_goals is True:
+            points_settings = channel.get("communityPointsSettings") or {}
+            goals = (
+                points_settings.get("goals", [])
+                if isinstance(points_settings, dict)
+                else []
+            )
+            streamer.community_goals = {
+                goal["id"]: CommunityGoal.from_gql(goal) for goal in goals
+            }
+
+        available_claim = community_points.get("availableClaim")
+        if isinstance(available_claim, dict) and available_claim.get("id") is not None:
+            self.claim_bonus(streamer, available_claim["id"])
+
+        if streamer.settings.community_goals is True:
+            self.contribute_to_community_goals(streamer)
 
     def make_predictions(self, event):
         decision = event.bet.calculate(event.streamer.channel_points)

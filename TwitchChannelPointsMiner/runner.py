@@ -154,6 +154,10 @@ def run_config(config, path):
     )
     watcher.start()
     miner.mine(config.STREAMERS, **config.MINE_CONFIG)
+    if miner.twitch.restart_requested.is_set():
+        # Flush the forced authentication alert before replacing the process.
+        miner.queue_listener.stop()
+        os.execv(sys.executable, [sys.executable, "-u", *sys.argv])
 
 
 def _run_legacy(runner, reason):
