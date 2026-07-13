@@ -48,4 +48,5 @@ ADD ./TwitchChannelPointsMiner ./TwitchChannelPointsMiner
 ADD ./twitchdrops_app_scraper.py ./twitchdrops_app_scraper.py
 ADD ./assets ./assets
 ADD ./example.py ./example.py
-ENTRYPOINT [ "python", "-u", "run.py" ]
+ADD ./config.example.py ./config.example.py
+ENTRYPOINT [ "python", "-u", "-m", "TwitchChannelPointsMiner.runner" ]

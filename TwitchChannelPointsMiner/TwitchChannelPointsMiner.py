@@ -21,6 +21,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
 from TwitchChannelPointsMiner.classes.Settings import (
     CategoryCampaignOrder,
+    Events,
     FollowersOrder,
     Priority,
     Settings,
@@ -75,6 +76,7 @@ class TwitchChannelPointsMiner:
         "original_streamers",
         "logs_file",
         "queue_listener",
+        "config_reload_lock",
     ]
 
     def __init__(
@@ -167,10 +169,23 @@ class TwitchChannelPointsMiner:
         self.running = False
         self.start_datetime = None
         self.original_streamers = []
+        self.config_reload_lock = threading.Lock()
 
         self.logs_file, self.queue_listener = configure_loggers(
             self.username, logger_settings
         )
+
+        if os.environ.pop("TCPM_LEGACY_CONFIG_NOTICE", None):
+            logger.warning(
+                "Docker configuration update required: mount "
+                "/usr/src/app/config to enable automatic conversion from run.py. "
+                "The existing run.py is still running and has not been modified.",
+                extra={
+                    "emoji": ":warning:",
+                    "event": Events.CONFIGURATION,
+                    "force_alert": True,
+                },
+            )
 
         # Check for the latest version of the script
         current_version, github_version = check_versions()
@@ -559,16 +574,17 @@ class TwitchChannelPointsMiner:
                     and next_category_refresh_at is not None
                     and time.time() >= next_category_refresh_at
                 ):
-                    self.__refresh_category_streamers(
-                        categories=categories,
-                        blacklist=blacklist,
-                        drops_enabled=category_drops_enabled,
-                        limit=category_limit,
-                        sort_by=category_sort,
-                        campaign_order=category_campaign_order,
-                        category_chat=category_chat,
-                        category_log_level=category_log_level,
-                    )
+                    with self.config_reload_lock:
+                        self.__refresh_category_streamers(
+                            categories=categories,
+                            blacklist=blacklist,
+                            drops_enabled=category_drops_enabled,
+                            limit=category_limit,
+                            sort_by=category_sort,
+                            campaign_order=category_campaign_order,
+                            category_chat=category_chat,
+                            category_log_level=category_log_level,
+                        )
                     effective_category_refresh_seconds = (
                         min(category_refresh_interval_seconds, 5 * 60)
                         if self.twitch.twitchdrops_app_campaigns
@@ -692,6 +708,90 @@ class TwitchChannelPointsMiner:
             f"Category refresh complete: {len(eligible_categories)} active categories, {added} new streamers",
             extra={"emoji": ":white_check_mark:", "category_log": True},
         )
+
+    def add_streamers(self, streamers):
+        """Add explicitly configured streamers to a running miner."""
+        if not self.running or self.ws_pool is None:
+            raise RuntimeError("The miner is not ready for live configuration changes")
+        with self.config_reload_lock:
+            self._add_streamers(streamers)
+
+    def _add_streamers(self, streamers):
+        existing = {streamer.username for streamer in self.streamers}
+        for configured in streamers:
+            username = (
+                configured.username
+                if isinstance(configured, Streamer)
+                else str(configured).lower().strip()
+            )
+            if username in existing:
+                continue
+            try:
+                streamer = (
+                    configured
+                    if isinstance(configured, Streamer)
+                    else Streamer(username)
+                )
+                streamer.explicitly_configured = True
+                streamer.channel_id = self.twitch.get_channel_id(username)
+                streamer.settings = set_default_settings(
+                    streamer.settings, Settings.streamer_settings
+                )
+                streamer.settings.bet = set_default_settings(
+                    streamer.settings.bet, Settings.streamer_settings.bet
+                )
+                if streamer.settings.chat != ChatPresence.NEVER:
+                    streamer.irc_chat = ThreadChat(
+                        self.username,
+                        self.twitch.twitch_login.get_auth_token(),
+                        streamer.username,
+                    )
+                self.twitch.load_channel_points_context(streamer)
+                self.twitch.check_streamer_online(streamer)
+                self.streamers.append(streamer)
+                existing.add(username)
+                self.ws_pool.submit(
+                    PubsubTopic("video-playback-by-id", streamer=streamer)
+                )
+                if streamer.settings.follow_raid is True:
+                    self.ws_pool.submit(PubsubTopic("raid", streamer=streamer))
+                if streamer.settings.make_predictions is True:
+                    self.ws_pool.submit(
+                        PubsubTopic("predictions-channel-v1", streamer=streamer)
+                    )
+                if streamer.settings.claim_moments is True:
+                    self.ws_pool.submit(
+                        PubsubTopic("community-moments-channel-v1", streamer=streamer)
+                    )
+                if streamer.settings.community_goals is True:
+                    self.ws_pool.submit(
+                        PubsubTopic("community-points-channel-v1", streamer=streamer)
+                    )
+                logger.info(
+                    f"Added {streamer.username} from the reloaded configuration",
+                    extra={"emoji": ":heavy_plus_sign:"},
+                )
+            except StreamerDoesNotExistException:
+                logger.info(
+                    f"Streamer {username} does not exist",
+                    extra={"emoji": ":cry:"},
+                )
+
+    def refresh_categories(self, mine_config):
+        """Apply the current configured category list to a running miner."""
+        with self.config_reload_lock:
+            self.__refresh_category_streamers(
+                categories=mine_config.get("categories", []),
+                blacklist=mine_config.get("blacklist", []),
+                drops_enabled=mine_config.get("category_drops_enabled", True),
+                limit=mine_config.get("category_limit", 30),
+                sort_by=mine_config.get("category_sort", "VIEWERS_DESC"),
+                campaign_order=mine_config.get(
+                    "category_campaign_order", CategoryCampaignOrder.ORDER
+                ),
+                category_chat=mine_config.get("category_chat"),
+                category_log_level=mine_config.get("category_log_level", logging.INFO),
+            )
 
     def end(self, signum, frame):
         if not self.running:

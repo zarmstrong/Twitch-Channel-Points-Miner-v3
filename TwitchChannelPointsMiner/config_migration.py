@@ -1,0 +1,129 @@
+# -*- coding: utf-8 -*-
+
+"""Convert a conventional user-owned run.py into a declarative config.py."""
+
+import ast
+import hashlib
+import os
+from pathlib import Path
+
+
+class ConfigMigrationError(ValueError):
+    pass
+
+
+def _call_name(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _find_calls(tree, name):
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node.func) == name
+    ]
+
+
+def _source(source, node):
+    value = ast.get_source_segment(source, node)
+    if value is None:
+        raise ConfigMigrationError("Unable to preserve a configuration expression")
+    return value
+
+
+def _is_runner_import(node):
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.module == "TwitchChannelPointsMiner"
+        and any(alias.name == "TwitchChannelPointsMiner" for alias in node.names)
+    )
+
+
+def _render_dict(source, call, positional_names=(), ignore_args=False):
+    if not ignore_args and len(call.args) > len(positional_names):
+        raise ConfigMigrationError(
+            f"Too many positional arguments in {_call_name(call.func)}()"
+        )
+    entries = (
+        []
+        if ignore_args
+        else [
+            (name, _source(source, value))
+            for name, value in zip(positional_names, call.args)
+        ]
+    )
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            raise ConfigMigrationError("Expanded **kwargs cannot be converted safely")
+        entries.append((keyword.arg, _source(source, keyword.value)))
+    if not entries:
+        return "{}"
+    body = "\n".join(f"    {name!r}: {value}," for name, value in entries)
+    return "{\n" + body + "\n}"
+
+
+def convert_runner_source(source, source_name="run.py"):
+    try:
+        tree = ast.parse(source, filename=source_name)
+    except SyntaxError as error:
+        raise ConfigMigrationError(f"Cannot parse {source_name}: {error}") from error
+
+    constructors = _find_calls(tree, "TwitchChannelPointsMiner")
+    mines = _find_calls(tree, "mine")
+    analytics = _find_calls(tree, "analytics")
+    if len(constructors) != 1 or len(mines) != 1 or len(analytics) > 1:
+        raise ConfigMigrationError(
+            "Expected exactly one TwitchChannelPointsMiner() and mine() call, "
+            "and at most one analytics() call"
+        )
+
+    mine = mines[0]
+    if len(mine.args) > 1:
+        raise ConfigMigrationError("mine() has more than one positional argument")
+    streamers = _source(source, mine.args[0]) if mine.args else "[]"
+    imports = [
+        _source(source, node)
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and not _is_runner_import(node)
+    ]
+    output = [
+        "# -*- coding: utf-8 -*-",
+        f"# Automatically converted from {source_name}; review before editing.",
+        "",
+        *imports,
+        "",
+        f"MINER_CONFIG = {_render_dict(source, constructors[0], ('username',))}",
+        "",
+        f"STREAMERS = {streamers}",
+        "",
+        f"MINE_CONFIG = {_render_dict(source, mine, ignore_args=True)}",
+        "",
+        "ANALYTICS_CONFIG = "
+        + (_render_dict(source, analytics[0]) if analytics else "None"),
+        "",
+    ]
+    return "\n".join(output)
+
+
+def convert_runner(runner_path, config_path):
+    runner = Path(runner_path)
+    config = Path(config_path)
+    if config.exists():
+        raise ConfigMigrationError(f"Refusing to overwrite existing {config}")
+    converted = convert_runner_source(
+        runner.read_text(encoding="utf-8"), source_name=runner.name
+    )
+    config.parent.mkdir(parents=True, exist_ok=True)
+    temporary = config.with_name(config.name + ".migrating")
+    temporary.write_text(converted, encoding="utf-8")
+    os.replace(temporary, config)
+    digest = hashlib.sha256(runner.read_bytes()).hexdigest()
+    config.with_name(".converted-from-run-py").write_text(
+        f"source={runner.resolve()}\nsha256={digest}\n", encoding="utf-8"
+    )
+    return config

@@ -417,9 +417,18 @@ Start mining! `python run.py` 🥳
 #### Docker Hub
 Official Docker images are on https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2 for `linux/amd64`, `linux/arm64` and `linux/arm/v7`.
 
-The following file is mounted :
+The miner now loads user configuration from a persistent directory:
 
-- run.py : this is your starter script with your configuration
+- `config/config.py`: user-owned configuration
+
+When upgrading an existing container, keep the existing `run.py` mount and add
+the config directory mount. On first start the miner converts `run.py` into
+`config/config.py` without modifying `run.py`. After verifying the converted
+configuration, the old `run.py` mount can be removed.
+
+If the config directory is not mounted, the miner prints a migration notice,
+sends it to every configured alert service, and continues to run the existing
+`run.py` unchanged.
 
 These folders are mounted :
 
@@ -443,7 +452,9 @@ services:
       - ./analytics:/usr/src/app/analytics
       - ./cookies:/usr/src/app/cookies
       - ./logs:/usr/src/app/logs
-      - ./run.py:/usr/src/app/run.py
+      - ./config:/usr/src/app/config
+      # Keep this during the first upgraded start; remove after conversion:
+      - ./run.py:/usr/src/app/run.py:ro
     ports:
       - "5000:5000"
 ```
@@ -454,33 +465,40 @@ docker run \
     -v $(pwd)/analytics:/usr/src/app/analytics \
     -v $(pwd)/cookies:/usr/src/app/cookies \
     -v $(pwd)/logs:/usr/src/app/logs \
-    -v $(pwd)/run.py:/usr/src/app/run.py \
+    -v $(pwd)/config:/usr/src/app/config \
+    -v $(pwd)/run.py:/usr/src/app/run.py:ro \
     -p 5000:5000 \
     rdavidoff/twitch-channel-points-miner-v2
 ```
 
 `$(pwd)` Could not work on Windows (cmd), please use the absolute path instead, like: `/path/of/your/cookies:/usr/src/app/cookies`.
 
-The correct solution for Windows lies in the correct command line: `docker run -v C:\Absolute\Path\To\Twitch-Channel-Points-Miner-v2\run.py:/usr/src/app/run.py rdavidoff/twitch-channel-points-miner-v2`.
+On Windows, use absolute host paths for both mounts. For example, mount
+`C:\Absolute\Path\config` at `/usr/src/app/config` and the legacy `run.py` at
+`/usr/src/app/run.py` during conversion.
 
-`run.py` MUST be mounted as a volume (`-v`).
+New installations can copy `config.example.py` to `config/config.py`, edit it,
+and mount only the config directory. Existing installations may keep `run.py`
+read-only because conversion never changes it. To disable automatic conversion,
+set `TCPM_DISABLE_AUTO_CONVERSION=1`. To use another container path, set
+`TCPM_CONFIG_DIR` and mount that directory.
 
-Do not add the read-only `:ro` suffix to the `run.py` mount. The miner's runner
-migration updates this file when new configuration options are introduced. A
-read-only mount prevents those updates from being saved to the host. If you used
-an older Docker configuration containing `run.py:/usr/src/app/run.py:ro`, remove
-`:ro` and recreate the container.
+The miner watches `config/config.py` every five seconds. New entries in
+`STREAMERS` and changes to `MINE_CONFIG["categories"]` are applied without a
+restart. Removing existing streamers or changing constructor, analytics, or
+other mining settings still requires a restart. Set `TCPM_CONFIG_RELOAD_SECONDS`
+to change the polling interval (minimum one second).
 
 If you don't mount the volume for the analytics (or cookies or logs) folder, the folder will be automatically created on the Docker container, and you will lose all the data when it is stopped.
 
-If you don't have a cookie or it's your first time running the script, you will need to login to Twitch and start the container with `-it` args. If you need to run multiple containers you can bind different ports (only if you need also the analytics) and mount dirrent run.py file, like
+If you don't have a cookie or it's your first time running the script, you will need to login to Twitch and start the container with `-it` args. For multiple accounts, mount a separate config directory and bind a separate analytics port for each container, for example:
 
 ```sh
-docker run --name user1 -v $(pwd)/user1.py:/usr/src/app/run.py -p 5001:5000 rdavidoff/twitch-channel-points-miner-v2
+docker run --name user1 -v $(pwd)/user1:/usr/src/app/config -p 5001:5000 rdavidoff/twitch-channel-points-miner-v2
 ```
 
 ```sh
-docker run --name user2 -v $(pwd)/user2.py:/usr/src/app/run.py -p 5002:5000 rdavidoff/twitch-channel-points-miner-v2
+docker run --name user2 -v $(pwd)/user2:/usr/src/app/config -p 5002:5000 rdavidoff/twitch-channel-points-miner-v2
 ```
 
 #### Portainer

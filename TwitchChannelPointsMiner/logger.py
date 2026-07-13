@@ -222,7 +222,7 @@ class GlobalFormatter(logging.Formatter):
             and skip_telegram is False
             and self.settings.telegram.chat_id != 123456789
         ):
-            self.settings.telegram.send(record.msg, record.event)
+            self._send(self.settings.telegram, record)
 
     def discord(self, record):
         skip_discord = False if hasattr(record, "skip_discord") is False else True
@@ -233,7 +233,7 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.discord.webhook_api
             != "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J"
         ):
-            self.settings.discord.send(record.msg, record.event)
+            self._send(self.settings.discord, record)
 
     def webhook(self, record):
         skip_webhook = False if hasattr(record, "skip_webhook") is False else True
@@ -243,7 +243,7 @@ class GlobalFormatter(logging.Formatter):
             and skip_webhook is False
             and self.settings.webhook.endpoint != "https://example.com/webhook"
         ):
-            self.settings.webhook.send(record.msg, record.event)
+            self._send(self.settings.webhook, record)
 
     def matrix(self, record):
         skip_matrix = False if hasattr(record, "skip_matrix") is False else True
@@ -254,7 +254,7 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.matrix.room_id != "..."
             and self.settings.matrix.access_token
         ):
-            self.settings.matrix.send(record.msg, record.event)
+            self._send(self.settings.matrix, record)
 
     def pushover(self, record):
         skip_pushover = False if hasattr(record, "skip_pushover") is False else True
@@ -265,7 +265,7 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.pushover.userkey != "YOUR-ACCOUNT-TOKEN"
             and self.settings.pushover.token != "YOUR-APPLICATION-TOKEN"
         ):
-            self.settings.pushover.send(record.msg, record.event)
+            self._send(self.settings.pushover, record)
 
     def gotify(self, record):
         skip_gotify = False if hasattr(record, "skip_gotify") is False else True
@@ -276,7 +276,21 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.gotify.endpoint
             != "https://example.com/message?token=TOKEN"
         ):
-            self.settings.gotify.send(record.msg, record.event)
+            self._send(self.settings.gotify, record)
+
+    @staticmethod
+    def _send(notifier, record):
+        """Send a record, optionally bypassing a notifier's event allowlist."""
+        event = str(record.event)
+        force_alert = getattr(record, "force_alert", False)
+        added = force_alert and event not in notifier.events
+        if added:
+            notifier.events.append(event)
+        try:
+            notifier.send(record.msg, record.event)
+        finally:
+            if added:
+                notifier.events.remove(event)
 
 
 def configure_loggers(username, settings):
