@@ -158,12 +158,27 @@ body.header-hidden .top-controls-row {
     padding: 10px;
     border: 1px solid rgba(249, 130, 108, 0.25);
     border-radius: 8px;
-    background: rgba(52, 62, 89, 0.35);
+    background: rgba(52, 62, 89, 0.72);
     text-align: left;
 }
 
 .drop-row-art {
-    flex: 0 0 40px;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(249, 130, 108, 0.3);
+    border-radius: 6px;
+    background: #0b0e18;
+    position: relative;
+    z-index: 1;
+}
+
+.drop-row-art:hover {
+    z-index: 10;
 }
 
 .drop-row-body {
@@ -309,7 +324,14 @@ body.header-hidden .top-controls-row {
 .drop-art-thumb {
     width: 36px;
     height: 36px;
-    object-fit: cover;
+    object-fit: contain;
     border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    filter: drop-shadow(0 0 5px rgba(249, 130, 108, 0.75));
+    transition: transform 0.18s ease-out, filter 0.18s ease-out;
+    transform-origin: center;
+}
+
+.drop-row-art:hover .drop-art-thumb {
+    transform: scale(3.5);
+    filter: drop-shadow(0 0 9px rgba(249, 130, 108, 0.95));
 }

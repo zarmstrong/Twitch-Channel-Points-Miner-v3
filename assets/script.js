@@ -111,6 +111,14 @@ startDate.setDate(startDate.getDate() - daysAgo);
 var endDate = new Date();
 
 $(document).ready(function () {
+    var savedDarkMode = localStorage.getItem('dark-mode');
+    if (savedDarkMode === null) {
+        savedDarkMode = 'true';
+        localStorage.setItem('dark-mode', savedDarkMode);
+    }
+    $('#dark-mode').prop('checked', savedDarkMode === 'true');
+    $('#dark-theme').prop('disabled', savedDarkMode !== 'true');
+
     var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
     switchDashboardTab(savedDashboardTab);
     dropsFilter = localStorage.getItem('dropsFilter') || 'active';
@@ -206,12 +214,10 @@ $(document).ready(function () {
     chart.render();
 
     if (!localStorage.getItem("annotations")) localStorage.setItem("annotations", true);
-    if (!localStorage.getItem("dark-mode")) localStorage.setItem("dark-mode", true);
     if (!localStorage.getItem("sort-by")) localStorage.setItem("sort-by", "Name ascending");
 
     // Restore settings from localStorage on page load
     $('#annotations').prop("checked", localStorage.getItem("annotations") === "true");
-    $('#dark-mode').prop("checked", localStorage.getItem("dark-mode") === "true");
 
     // Handle the annotation toggle click event
     $('#annotations').click(() => {
@@ -503,6 +509,26 @@ function getDropEndTimestamp(drop) {
     return -1;
 }
 
+function getDropStatusSortPriority(drop, now) {
+    var status = String(drop.status || '').toLowerCase();
+    var currentMinutes = drop.current_minutes_watched || 0;
+    var requiredMinutes = drop.minutes_required || 0;
+    var endTimestamp = getDropEndTimestamp(drop);
+    var isExpired = endTimestamp !== -1 && endTimestamp < now;
+    var isCompleted = requiredMinutes > 0 && currentMinutes >= requiredMinutes;
+
+    if (drop.failed_to_achieve === true || (isExpired && !isCompleted && status !== 'captured')) {
+        return 3;
+    }
+    if (status === 'in_progress' || (!isCompleted && currentMinutes > 0)) {
+        return 0;
+    }
+    if (status === 'captured' || isCompleted) {
+        return 2;
+    }
+    return 1;
+}
+
 function getFilteredDropsForCategory(category) {
     var drops = (dropsState.categories[category] || []).slice();
     var now = Date.now();
@@ -548,6 +574,11 @@ function getFilteredDropsForCategory(category) {
         var bCampaignClosed = bEndTimestamp !== -1 && bEndTimestamp < now;
         if (aCampaignClosed !== bCampaignClosed) {
             return aCampaignClosed ? 1 : -1;
+        }
+
+        var statusDiff = getDropStatusSortPriority(a, now) - getDropStatusSortPriority(b, now);
+        if (statusDiff !== 0) {
+            return statusDiff;
         }
 
         var progressDiff = getDropProgressPercent(b) - getDropProgressPercent(a);

@@ -18,7 +18,12 @@
         integrity="sha512-1ycn6IcaQQ40/MKBW2W4Rhis/DbILU74C1vSrLJxCq57o941Ym01SwNsOMqvEBFlcgUa6xLiPY/NS5R+E6ztJQ=="
         crossorigin="anonymous" referrerpolicy="no-referrer" />
 
-    <link href="{{url_for('static', filename='dark-theme.css')}}" rel="stylesheet" />
+    <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css')}}" rel="stylesheet" />
+    <script>
+        if (localStorage.getItem('dark-mode') === 'false') {
+            document.getElementById('dark-theme').disabled = true;
+        }
+    </script>
     <link href="{{url_for('static', filename='style.css')}}" rel="stylesheet" />
 
 </head>
@@ -237,7 +242,7 @@
 
     function toggleDarkMode() {
         var darkMode = $('#dark-mode').prop("checked")
-        $("link[href='{{url_for('static', filename='dark-theme.css')}}']").prop("disabled", !darkMode);
+        $('#dark-theme').prop("disabled", !darkMode);
         chart.updateOptions({
             colors: darkMode === true ? ["#f9826c"] : ['#008ffb'],
             chart: {

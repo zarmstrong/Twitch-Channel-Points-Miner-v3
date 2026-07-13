@@ -45,3 +45,7 @@ a:hover {
 #drops-category-title {
     color: rgba(255, 255, 255, 0.82);
 }
+
+body .drop-row {
+    background: rgba(52, 62, 89, 0.35);
+}
