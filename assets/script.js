@@ -731,7 +731,7 @@ function renderDropRows() {
 
     pageDrops.forEach((drop) => {
         var timestamp = drop.datetime || '';
-        var status = drop.status || '';
+        var status = String(drop.status || '').toLowerCase();
         var currentMinutes = drop.current_minutes_watched || 0;
         var requiredMinutes = drop.minutes_required || 0;
         var displayedMinutes = Math.min(currentMinutes, requiredMinutes || currentMinutes);
@@ -749,14 +749,18 @@ function renderDropRows() {
         var statusClass = status === 'captured' ? 'is-captured' : 'is-progress';
         var expiresAtText = !isNaN(endAtTimestamp) ? new Date(endAtTimestamp).toLocaleString() : '';
         var progressBarClass = statusClass;
-        var statusDisplay = String(status || 'unknown').replace(/_/g, ' ');
+        var statusTooltip = '';
+        var statusDisplay = status === 'captured'
+            ? 'Captured'
+            : status === 'in_progress'
+                ? 'In Progress'
+                : String(status || 'Unknown').replace(/_/g, ' ');
 
         if (isFailed) {
-            statusDisplay = 'EXPIRED - Failed to achieve';
+            statusDisplay = 'Expired';
             statusClass = 'is-failed';
             progressBarClass = 'is-failed';
-        } else if (status === 'in_progress') {
-            statusDisplay = 'in progress';
+            statusTooltip = 'Drop expired before completion';
         }
 
         var metadataSpans = [
@@ -768,7 +772,10 @@ function renderDropRows() {
         ].filter(Boolean).join('');
 
         var failedIcon = isFailed
-            ? '<span class="drop-failed-icon" title="Failed to achieve">✕</span>'
+            ? '<span class="drop-failed-icon">✕</span>'
+            : '';
+        var statusTitle = statusTooltip
+            ? ` title="${escapeHtml(statusTooltip)}"`
             : '';
 
         var artHtml = artUrl
@@ -781,7 +788,7 @@ function renderDropRows() {
                 <div class="drop-row-body">
                     <div class="drop-row-top">
                         <div class="drop-item-name">${failedIcon}${escapeHtml(itemName || 'Unknown Drop')}</div>
-                        <span class="drop-status ${statusClass}">${escapeHtml(statusDisplay)}</span>
+                        <span class="drop-status ${statusClass}"${statusTitle}>${escapeHtml(statusDisplay)}</span>
                     </div>
                     <div class="drop-progress-block">
                         <div class="drop-progress-bar" aria-hidden="true">
