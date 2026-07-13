@@ -618,6 +618,10 @@ class TwitchChannelPointsMiner:
 
         # Force live campaign discovery to run again instead of reusing startup data.
         self.twitch.discovered_open_drop_campaigns = None
+        # Restricted-channel eligibility is rebuilt by category discovery below.
+        # Clear it first so channels rejected by this refresh cannot retain a
+        # positive result from an earlier campaign or inventory state.
+        self.twitch.category_campaign_eligibility.clear()
         eligible_categories = self.twitch.filter_categories_with_active_drops(
             categories,
             order=campaign_order,
