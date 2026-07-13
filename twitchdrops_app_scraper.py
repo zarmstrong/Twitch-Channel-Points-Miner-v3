@@ -93,6 +93,10 @@ def parse_drop(block):
     }
 
 
+def is_watch_drop(drop):
+    return (drop.get("requirement") or "").casefold().startswith("watch ")
+
+
 def parse_campaign(block, game_name):
     name = first_match(
         r'class=["\'][^"\']*\bcb-name\b[^"\']*["\'][^>]*>(.*?)</span>', block
@@ -155,8 +159,7 @@ def parse_game_page(source, url):
     watch_campaign_names = {
         drop["campaign"].casefold()
         for drop in drops
-        if drop["campaign"]
-        and (drop["requirement"] or "").casefold().startswith("watch ")
+        if drop["campaign"] and is_watch_drop(drop)
     }
     campaigns = [
         campaign
@@ -169,6 +172,7 @@ def parse_game_page(source, url):
             drop
             for drop in drops
             if (drop["campaign"] or "").casefold() == campaign_name
+            and is_watch_drop(drop)
         ]
     non_watch_campaigns = [
         campaign for campaign in all_campaigns if campaign not in campaigns
