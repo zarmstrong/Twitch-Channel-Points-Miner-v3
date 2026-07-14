@@ -123,6 +123,12 @@ a {
     margin-bottom: 8px;
 }
 
+.analytics-footer {
+    padding: 18px 12px 24px;
+    font-size: 0.85rem;
+    opacity: 0.75;
+}
+
 .top-controls {
     display: flex;
     justify-content: flex-end;
