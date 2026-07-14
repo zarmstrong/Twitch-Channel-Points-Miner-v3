@@ -2528,30 +2528,39 @@ class Twitch(object):
         return open_campaigns
 
     def __get_campaign_ids_from_streamer(self, streamer):
-        json_data = copy.deepcopy(GQLOperations.DropsHighlightService_AvailableDrops)
-        json_data["variables"] = {"channelID": streamer.channel_id}
-        response = self.post_gql_request(json_data)
-        try:
-            return (
-                []
-                if response["data"]["channel"]["viewerDropCampaigns"] is None
-                else [
-                    item["id"]
-                    for item in response["data"]["channel"]["viewerDropCampaigns"]
-                ]
-            )
-        except (ValueError, KeyError):
+        game_slug = self.__slugify(streamer.stream.game_name() or "")
+        if game_slug == "":
             return []
 
+        campaign_ids = set()
+        possible_campaigns = list(self.discovered_open_drop_campaigns or [])
+        possible_campaigns.extend(self.twitchdrops_app_campaigns.get(game_slug, []))
+        for campaign in possible_campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            game = campaign.get("game") or {}
+            campaign_game_slug = self.__slugify(
+                game.get("displayName")
+                or game.get("name")
+                or campaign.get("game_name")
+                or ""
+            )
+            if campaign_game_slug not in ("", game_slug):
+                continue
+            channels = {
+                str(login).lower().strip()
+                for login in campaign.get("channels", []) or []
+            }
+            campaign_id = campaign.get("id")
+            if campaign_id and (not channels or streamer.username in channels):
+                campaign_ids.add(str(campaign_id))
+        return list(campaign_ids)
+
     def __get_campaigns_from_channel_id(self, channel_id: str) -> List[dict]:
-        json_data = copy.deepcopy(GQLOperations.DropsHighlightService_AvailableDrops)
-        json_data["variables"] = {"channelID": channel_id}
-        response = self.post_gql_request(json_data)
-        try:
-            campaigns = response["data"]["channel"]["viewerDropCampaigns"]
-            return campaigns if isinstance(campaigns, list) else []
-        except (ValueError, KeyError, TypeError):
-            return []
+        # Twitch removed the channel-specific viewerDropCampaigns field. Campaign
+        # discovery now comes from the dashboard, raw query, Helix, and
+        # twitchdrops.app paths used by log_open_drop_campaigns().
+        return []
 
     def __get_reward_campaigns_raw_query(self):
         query_variants = [

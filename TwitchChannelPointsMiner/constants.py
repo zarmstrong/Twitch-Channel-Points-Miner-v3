@@ -78,12 +78,12 @@ class GQLOperations:
     }
     CommunityMomentCallout_Claim = {
         "operationName": "CommunityMomentCallout_Claim",
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": "e2d67415aead910f7f9ceb45a77b750a1e1d9622c936d832328a0689e054db62",
-            }
-        },
+        "query": (
+            "mutation CommunityMomentCallout_Claim("
+            "$input: ClaimCommunityMomentInput!) {"
+            "claimCommunityMoment(input: $input) { moment { id } }"
+            "}"
+        ),
     }
     DropsPage_ClaimDropRewards = {
         "operationName": "DropsPage_ClaimDropRewards",
@@ -96,12 +96,21 @@ class GQLOperations:
     }
     ChannelPointsContext = {
         "operationName": "ChannelPointsContext",
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": "1530a003a7d374b0380b79db0be0534f30ff46e61cffa2bc0e2468a909fbc024",
-            }
-        },
+        "query": (
+            "query ChannelPointsContext($channelLogin: String!) {"
+            "community: user(login: $channelLogin) {"
+            "channel {"
+            "self { communityPoints {"
+            "balance activeMultipliers { factor } availableClaim { id }"
+            "} }"
+            "communityPointsSettings { goals {"
+            "id title isInStock pointsContributed amountNeeded "
+            "perStreamUserMaximumContribution status"
+            "} }"
+            "}"
+            "}"
+            "}"
+        ),
     }
     JoinRaid = {
         "operationName": "JoinRaid",
@@ -114,12 +123,11 @@ class GQLOperations:
     }
     ModViewChannelQuery = {
         "operationName": "ModViewChannelQuery",
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": "df5d55b6401389afb12d3017c9b2cf1237164220c8ef4ed754eae8188068a807",
-            }
-        },
+        "query": (
+            "query ModViewChannelQuery($channelLogin: String!) {"
+            "user(login: $channelLogin) { self { isModerator } }"
+            "}"
+        ),
     }
     Inventory = {
         "operationName": "Inventory",
@@ -161,15 +169,6 @@ class GQLOperations:
             }
         },
     }
-    DropsHighlightService_AvailableDrops = {
-        "operationName": "DropsHighlightService_AvailableDrops",
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": "9a62a09bce5b53e26e64a671e530bc599cb6aab1e5ba3cbd5d85966d3940716f",
-            }
-        },
-    }
     GetIDFromLogin = {
         "operationName": "GetIDFromLogin",
         "variables": {"login": None},
@@ -180,26 +179,6 @@ class GQLOperations:
             }
         },
     }
-    PersonalSections = (
-        {
-            "operationName": "PersonalSections",
-            "variables": {
-                "input": {
-                    "sectionInputs": ["FOLLOWED_SECTION"],
-                    "recommendationContext": {"platform": "web"},
-                },
-                "channelLogin": None,
-                "withChannelUser": False,
-                "creatorAnniversariesExperimentEnabled": False,
-            },
-            "extensions": {
-                "persistedQuery": {
-                    "version": 1,
-                    "sha256Hash": "9fbdfb00156f754c26bde81eb47436dee146655c92682328457037da1a48ed39",
-                }
-            },
-        },
-    )
     ChannelFollows = {
         "operationName": "ChannelFollows",
         "variables": {"limit": 100, "order": "ASC"},
