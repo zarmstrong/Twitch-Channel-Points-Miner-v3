@@ -94,6 +94,11 @@ var currentDropCategory = null;
 var dropsFilter = 'active';
 var dropsPage = 1;
 var dropsPerPage = 10;
+var streamerDeleteSelectionMode = false;
+var selectedStreamerAnalytics = new Set();
+var lastStreamerCheckboxIndex = null;
+var pendingDeleteStreamers = [];
+var analyticsDeleteInProgress = false;
 
 function switchDashboardTab(tabName) {
     var isPoints = tabName !== 'drops';
@@ -238,6 +243,19 @@ $(document).ready(function () {
     $('#startDate').val(formatDate(startDate));
     $('#endDate').val(formatDate(endDate));
 
+    $('#delete-streamer-analytics').click(toggleStreamerAnalyticsDeletion);
+    $('#cancel-streamer-analytics-selection').click(function () {
+        setStreamerDeleteSelectionMode(false);
+    });
+    $('#analytics-delete-modal-cancel').click(closeAnalyticsDeleteModal);
+    $('#analytics-delete-modal-confirm').click(confirmStreamerAnalyticsDeletion);
+    $('#analytics-delete-modal').click(function (event) {
+        if (event.target === this) closeAnalyticsDeleteModal();
+    });
+    $(document).keydown(function (event) {
+        if (event.key === 'Escape') closeAnalyticsDeleteModal();
+    });
+
     sortBy = localStorage.getItem("sort-by");
     if (sortBy.includes("Points")) sortField = 'points';
     else if (sortBy.includes("Last activity")) sortField = 'last_activity';
@@ -292,9 +310,21 @@ function formatDate(date) {
 }
 
 function changeStreamer(streamer, index) {
+    if (!streamer) {
+        currentStreamer = null;
+        localStorage.removeItem("selectedStreamer");
+        updateStreamerDeleteControls();
+        options.title.text = 'Channel points (dates are displayed in UTC)';
+        chart.updateOptions(options);
+        chart.updateSeries([], true);
+        clearAnnotations();
+        return;
+    }
+
     $("li").removeClass("is-active")
     $("li").eq(index - 1).addClass('is-active');
     currentStreamer = streamer;
+    updateStreamerDeleteControls();
 
     // Update the chart title with the current streamer's name
     options.title.text = `${streamer.replace(".json", "")}'s channel points (dates are displayed in UTC)`;
@@ -350,15 +380,22 @@ function getStreamers() {
     $.getJSON('streamers', function (response) {
         streamersList = response;
         sortStreamers();
+        var availableStreamers = new Set(streamersList.map(streamer => streamer.name));
+        selectedStreamerAnalytics = new Set(
+            Array.from(selectedStreamerAnalytics).filter(streamer => availableStreamers.has(streamer))
+        );
+        if (streamersList.length === 0) streamerDeleteSelectionMode = false;
 
         // Restore the selected streamer from localStorage on page load
         var selectedStreamer = localStorage.getItem("selectedStreamer");
 
-        if (selectedStreamer) {
+        if (selectedStreamer && streamersList.some(streamer => streamer.name === selectedStreamer)) {
             currentStreamer = selectedStreamer;
         } else {
             // If no selected streamer is found, default to the first streamer in the list
             currentStreamer = streamersList.length > 0 ? streamersList[0].name : null;
+            if (currentStreamer) localStorage.setItem("selectedStreamer", currentStreamer);
+            else localStorage.removeItem("selectedStreamer");
         }
 
         // Ensure the selected streamer is still active and scrolled into view
@@ -368,31 +405,195 @@ function getStreamers() {
 
 function renderStreamers() {
     $("#streamers-list").empty();
-    var promised = new Promise((resolve, reject) => {
-        streamersList.forEach((streamer, index, array) => {
-            displayname = streamer.name.replace(".json", "");
-            if (sortField == 'points') displayname = "<font size='-2'>" + streamer['points'] + "</font>&nbsp;" + displayname;
-            else if (sortField == 'last_activity') displayname = "<font size='-2'>" + formatDate(streamer['last_activity']) + "</font>&nbsp;" + displayname;
-            var isActive = currentStreamer === streamer.name;
-            if (!isActive && localStorage.getItem("selectedStreamer") === null && index === 0) {
-                isActive = true;
-                currentStreamer = streamer.name;
-            }
-            var activeClass = isActive ? 'is-active' : '';
-            var listItem = `<li id="streamer-${streamer.name}" class="${activeClass}"><a onClick="changeStreamer('${streamer.name}', ${index + 1}); return false;">${displayname}</a></li>`;
-            $("#streamers-list").append(listItem);
-            if (isActive) {
-                // Scroll the selected streamer into view
-                document.getElementById(`streamer-${streamer.name}`).scrollIntoView({
-                    behavior: 'smooth',
-                    block: 'center'
+    streamersList.forEach((streamer, index) => {
+        var isActive = currentStreamer === streamer.name;
+        if (!isActive && localStorage.getItem("selectedStreamer") === null && index === 0) {
+            isActive = true;
+            currentStreamer = streamer.name;
+        }
+
+        var listItem = $('<li>').attr('id', `streamer-${index}`).toggleClass('is-active', isActive);
+        var row = $('<div>').addClass('streamer-list-row');
+        if (streamerDeleteSelectionMode) {
+            var checkbox = $('<input>')
+                .attr({
+                    type: 'checkbox',
+                    'aria-label': `Select ${streamer.name.replace(".json", "")} analytics data`,
+                    'data-index': index
+                })
+                .addClass('streamer-delete-checkbox')
+                .prop('checked', selectedStreamerAnalytics.has(streamer.name))
+                .click(function (event) {
+                    handleStreamerAnalyticsSelection(event, index, streamer.name);
                 });
-            }
-            if (index === array.length - 1) resolve();
+            row.append(checkbox);
+        }
+
+        var streamerLink = $('<a>').attr('href', '#').click(function (event) {
+            event.preventDefault();
+            changeStreamer(streamer.name, index + 1);
         });
+        streamerLink.append(
+            $('<span>').addClass('streamer-name').text(streamer.name.replace(".json", ""))
+        );
+        if (sortField == 'points') {
+            streamerLink.append($('<span>').addClass('streamer-sort-value').text(streamer.points));
+        } else if (sortField == 'last_activity') {
+            streamerLink.append(
+                $('<span>').addClass('streamer-sort-value').text(formatDate(streamer.last_activity))
+            );
+        }
+        row.append(streamerLink);
+        listItem.append(row);
+        $("#streamers-list").append(listItem);
+        if (isActive) {
+            // Scroll the selected streamer into view
+            listItem[0].scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
+        }
     });
-    promised.then(() => {
-        changeStreamer(currentStreamer, streamersList.findIndex(streamer => streamer.name === currentStreamer) + 1);
+
+    changeStreamer(currentStreamer, streamersList.findIndex(streamer => streamer.name === currentStreamer) + 1);
+    updateStreamerDeleteControls();
+}
+
+function toggleStreamerAnalyticsDeletion() {
+    if (!streamerDeleteSelectionMode) {
+        if (streamersList.length > 0) setStreamerDeleteSelectionMode(true);
+        return;
+    }
+    if (selectedStreamerAnalytics.size === 0) return;
+
+    pendingDeleteStreamers = streamersList
+        .filter(streamer => selectedStreamerAnalytics.has(streamer.name))
+        .map(streamer => streamer.name);
+    var displayNames = pendingDeleteStreamers.map(streamer => streamer.replace(".json", ""));
+    var displayPreview = displayNames.slice(0, 5).join(', ');
+    if (displayNames.length > 5) displayPreview += `, and ${displayNames.length - 5} more`;
+    var streamerLabel = displayNames.length === 1
+        ? displayNames[0]
+        : `${displayNames.length} streamers (${displayPreview})`;
+    $('#analytics-delete-modal').removeClass('is-error').addClass('is-active').attr('aria-hidden', 'false');
+    $('#analytics-delete-modal .analytics-modal-icon i').attr('class', 'fas fa-trash-alt');
+    $('#analytics-delete-modal-title').text('Delete analytics data?');
+    $('#analytics-delete-modal-message').text(`Permanently delete all analytics history for ${streamerLabel}?`);
+    $('#analytics-delete-modal-note').show();
+    $('#analytics-delete-modal-cancel').show();
+    $('#analytics-delete-modal-confirm').removeClass('is-loading').addClass('is-danger').text('Delete selected data').prop('disabled', false);
+    $('#analytics-delete-modal-cancel').prop('disabled', false).focus();
+}
+
+function setStreamerDeleteSelectionMode(enabled) {
+    streamerDeleteSelectionMode = enabled;
+    selectedStreamerAnalytics.clear();
+    lastStreamerCheckboxIndex = null;
+    renderStreamers();
+}
+
+function handleStreamerAnalyticsSelection(event, index, streamer) {
+    var isChecked = event.currentTarget.checked;
+    if (event.shiftKey && lastStreamerCheckboxIndex !== null) {
+        var start = Math.min(lastStreamerCheckboxIndex, index);
+        var end = Math.max(lastStreamerCheckboxIndex, index);
+        for (var currentIndex = start; currentIndex <= end; currentIndex++) {
+            var currentStreamerName = streamersList[currentIndex].name;
+            if (isChecked) selectedStreamerAnalytics.add(currentStreamerName);
+            else selectedStreamerAnalytics.delete(currentStreamerName);
+            $(`.streamer-delete-checkbox[data-index="${currentIndex}"]`).prop('checked', isChecked);
+        }
+    } else if (isChecked) {
+        selectedStreamerAnalytics.add(streamer);
+    } else {
+        selectedStreamerAnalytics.delete(streamer);
+    }
+
+    lastStreamerCheckboxIndex = index;
+    updateStreamerDeleteControls();
+}
+
+function updateStreamerDeleteControls() {
+    var selectedCount = selectedStreamerAnalytics.size;
+    var buttonLabel = streamerDeleteSelectionMode
+        ? `Delete selected (${selectedCount})`
+        : 'Delete analytics data';
+    $('#delete-streamer-analytics .delete-streamer-button-label').text(buttonLabel);
+    $('#delete-streamer-analytics')
+        .prop('disabled', analyticsDeleteInProgress || streamersList.length === 0 || (streamerDeleteSelectionMode && selectedCount === 0))
+        .attr('title', streamerDeleteSelectionMode
+            ? 'Permanently delete the selected analytics data'
+            : 'Select streamer analytics data to delete');
+    $('#cancel-streamer-analytics-selection').toggle(streamerDeleteSelectionMode);
+    $('#streamer-selection-hint').toggle(streamerDeleteSelectionMode);
+}
+
+function closeAnalyticsDeleteModal() {
+    if (analyticsDeleteInProgress) return;
+
+    pendingDeleteStreamers = [];
+    $('#analytics-delete-modal').removeClass('is-active is-error').attr('aria-hidden', 'true');
+    $('#delete-streamer-analytics').focus();
+}
+
+function showAnalyticsDeleteError(message) {
+    analyticsDeleteInProgress = false;
+    pendingDeleteStreamers = [];
+    $('#analytics-delete-modal').addClass('is-error');
+    $('#analytics-delete-modal .analytics-modal-icon i').attr('class', 'fas fa-exclamation-triangle');
+    $('#analytics-delete-modal-title').text('Could not delete analytics data');
+    $('#analytics-delete-modal-message').text(message);
+    $('#analytics-delete-modal-note').hide();
+    $('#analytics-delete-modal-cancel').hide();
+    $('#analytics-delete-modal-confirm').removeClass('is-loading is-danger').text('Close').prop('disabled', false).focus();
+    updateStreamerDeleteControls();
+}
+
+function confirmStreamerAnalyticsDeletion() {
+    if ($('#analytics-delete-modal').hasClass('is-error')) {
+        closeAnalyticsDeleteModal();
+        return;
+    }
+    if (pendingDeleteStreamers.length === 0 || analyticsDeleteInProgress) return;
+
+    var streamers = pendingDeleteStreamers.slice();
+    analyticsDeleteInProgress = true;
+    $('#analytics-delete-modal-cancel').prop('disabled', true);
+    $('#analytics-delete-modal-confirm').addClass('is-loading').prop('disabled', true);
+    $('#delete-streamer-analytics').prop('disabled', true);
+    var deleteRequests = streamers.map(streamer => $.ajax({
+        url: `streamers/${encodeURIComponent(streamer)}`,
+        method: 'DELETE'
+    }));
+    Promise.allSettled(deleteRequests).then(function (results) {
+        var deletedStreamers = streamers.filter((_streamer, index) => results[index].status === 'fulfilled');
+        var failedStreamers = streamers.filter((_streamer, index) => results[index].status === 'rejected');
+
+        if (deletedStreamers.includes(currentStreamer)) {
+            if (streamerRefreshTimeout) {
+                clearTimeout(streamerRefreshTimeout);
+                streamerRefreshTimeout = null;
+            }
+            streamerDataRequest++;
+            localStorage.removeItem("selectedStreamer");
+            currentStreamer = null;
+        }
+
+        analyticsDeleteInProgress = false;
+        $('#analytics-delete-modal-cancel').prop('disabled', false);
+        if (failedStreamers.length === 0) {
+            closeAnalyticsDeleteModal();
+            streamerDeleteSelectionMode = false;
+            selectedStreamerAnalytics.clear();
+            lastStreamerCheckboxIndex = null;
+        } else {
+            selectedStreamerAnalytics = new Set(failedStreamers);
+            var failureMessage = deletedStreamers.length > 0
+                ? `Deleted ${deletedStreamers.length} selection(s), but ${failedStreamers.length} could not be deleted. Please try again.`
+                : 'Unable to delete the selected analytics data. Please try again.';
+            showAnalyticsDeleteError(failureMessage);
+        }
+        getStreamers();
     });
 }
 
@@ -407,6 +608,7 @@ function changeSortBy(option) {
     if (sortBy.includes("Points")) sortField = 'points'
     else if (sortBy.includes("Last activity")) sortField = 'last_activity'
     else sortField = 'name';
+    lastStreamerCheckboxIndex = null;
     sortStreamers();
     renderStreamers();
     $('#sorting-by').text(sortBy);

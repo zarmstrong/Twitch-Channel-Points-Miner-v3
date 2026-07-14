@@ -178,6 +178,21 @@
             <div class="column is-2 has-text-left">
                 <input class="input" type="date" id="endDate">
             </div>
+            <div class="column has-text-right">
+                <div class="streamer-delete-actions">
+                    <span id="streamer-selection-hint" class="streamer-selection-hint" style="display: none;">
+                        Shift-click to select a range
+                    </span>
+                    <button id="cancel-streamer-analytics-selection" class="button" type="button" style="display: none;">
+                        Cancel selection
+                    </button>
+                    <button id="delete-streamer-analytics" class="button is-danger" type="button"
+                        title="Select streamer analytics data to delete">
+                        <span class="icon is-small"><i class="fas fa-trash" aria-hidden="true"></i></span>
+                        <span class="delete-streamer-button-label">Delete analytics data</span>
+                    </button>
+                </div>
+            </div>
         </div>
         <div class="columns">
             <div class="column is-narrow">
@@ -231,6 +246,28 @@
                 <div class="box" id="log-box" style="padding: 0.30rem; display: none;">
                     <pre id="log-content">In your run.py file set save=True in logger_settings to save logs to a file.&#10;&#13;</pre>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="analytics-delete-modal" class="analytics-modal" role="dialog" aria-modal="true"
+        aria-labelledby="analytics-delete-modal-title" aria-describedby="analytics-delete-modal-message" aria-hidden="true">
+        <div class="analytics-modal-card">
+            <div class="analytics-modal-icon" aria-hidden="true">
+                <i class="fas fa-trash-alt"></i>
+            </div>
+            <h2 id="analytics-delete-modal-title" class="analytics-modal-title">Delete analytics data?</h2>
+            <p id="analytics-delete-modal-message" class="analytics-modal-message"></p>
+            <div id="analytics-delete-modal-note" class="analytics-modal-note">
+                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                <span>This only removes analytics history. It does not remove the streamer from your miner configuration,
+                    and new activity may make them appear here again.</span>
+            </div>
+            <div class="analytics-modal-actions">
+                <button id="analytics-delete-modal-cancel" class="button" type="button">Cancel</button>
+                <button id="analytics-delete-modal-confirm" class="button is-danger" type="button">
+                    Delete analytics data
+                </button>
             </div>
         </div>
     </div>

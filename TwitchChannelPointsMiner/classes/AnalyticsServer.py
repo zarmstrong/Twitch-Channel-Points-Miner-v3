@@ -10,7 +10,7 @@ import pandas as pd
 from flask import Flask, Response, cli, render_template, request
 from werkzeug.serving import WSGIRequestHandler
 
-from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
 
 cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
@@ -264,6 +264,39 @@ def streamers():
     )
 
 
+def delete_streamer_analytics(streamer):
+    filename = streamer if streamer.endswith(".json") else f"{streamer}.json"
+
+    # Only files returned by streamers_available() may be deleted. Besides
+    # preventing path traversal, this protects non-streamer analytics files.
+    if filename not in streamers_available():
+        return Response(
+            json.dumps({"error": f"Analytics data for '{streamer}' not found."}),
+            status=404,
+            mimetype="application/json",
+        )
+
+    with ANALYTICS_FILE_MUTEX:
+        try:
+            os.remove(os.path.join(Settings.analytics_path, filename))
+        except FileNotFoundError:
+            return Response(
+                json.dumps({"error": f"Analytics data for '{streamer}' not found."}),
+                status=404,
+                mimetype="application/json",
+            )
+        except OSError as error:
+            logger.error(f"Unable to delete analytics data in '{filename}': {error}")
+            return Response(
+                json.dumps({"error": "Unable to delete streamer analytics data."}),
+                status=500,
+                mimetype="application/json",
+            )
+
+    logger.info(f"Deleted analytics data in '{filename}'")
+    return Response(status=204)
+
+
 def check_assets():
     required_files = [
         "banner.png",
@@ -415,6 +448,12 @@ class AnalyticsServer(Thread):
             methods=["GET"],
         )
         self.app.add_url_rule("/streamers", "streamers", streamers, methods=["GET"])
+        self.app.add_url_rule(
+            "/streamers/<string:streamer>",
+            "delete_streamer_analytics",
+            delete_streamer_analytics,
+            methods=["DELETE"],
+        )
         self.app.add_url_rule(
             "/json/<string:streamer>", "json", read_json, methods=["GET"]
         )

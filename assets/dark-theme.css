@@ -49,3 +49,21 @@ a:hover {
 body .drop-row {
     background: rgba(52, 62, 89, 0.35);
 }
+
+.analytics-modal-card {
+    background: #2b2d3e;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+
+.analytics-modal-title {
+    color: #fff;
+}
+
+.analytics-modal-message {
+    color: rgba(255, 255, 255, 0.82);
+}
+
+.analytics-modal-note {
+    color: rgba(255, 255, 255, 0.78);
+    background: rgba(52, 62, 89, 0.72);
+}

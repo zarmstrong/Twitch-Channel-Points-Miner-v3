@@ -1,4 +1,7 @@
 from enum import Enum, auto
+from threading import Lock
+
+ANALYTICS_FILE_MUTEX = Lock()
 
 
 class Priority(Enum):

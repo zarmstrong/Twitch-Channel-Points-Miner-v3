@@ -8,7 +8,11 @@ from threading import Lock
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
 from TwitchChannelPointsMiner.classes.entities.Stream import Stream
-from TwitchChannelPointsMiner.classes.Settings import Events, Settings
+from TwitchChannelPointsMiner.classes.Settings import (
+    ANALYTICS_FILE_MUTEX,
+    Events,
+    Settings,
+)
 from TwitchChannelPointsMiner.constants import URL
 from TwitchChannelPointsMiner.utils import _millify
 
@@ -271,7 +275,7 @@ class Streamer(object):
         fname = os.path.join(Settings.analytics_path, f"{self.username}.json")
         temp_fname = fname + ".temp"  # Temporary file name
 
-        with self.mutex:
+        with ANALYTICS_FILE_MUTEX, self.mutex:
             # Create and write to the temporary file
             with open(temp_fname, "w") as temp_file:
                 json_data = json.load(open(fname, "r")) if os.path.isfile(fname) else {}
