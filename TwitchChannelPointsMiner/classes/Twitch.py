@@ -86,6 +86,7 @@ class Twitch(object):
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
         "category_campaign_eligibility",
+        "completed_drop_campaigns",
         "restart_requested",
     ]
 
@@ -124,6 +125,7 @@ class Twitch(object):
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
         self.category_campaign_eligibility = {}
+        self.completed_drop_campaigns = set()
         self.restart_requested = Event()
 
     @staticmethod
@@ -1357,6 +1359,10 @@ class Twitch(object):
             return False
 
         game_slug = self.__slugify(game_name)
+        campaign_ids = set(getattr(streamer.stream, "campaigns_ids", []) or [])
+        if campaign_ids and campaign_ids.issubset(self.completed_drop_campaigns):
+            return False
+
         eligibility = self.category_campaign_eligibility.get(
             (game_slug, streamer.username)
         )
@@ -3295,6 +3301,20 @@ class Twitch(object):
                 response["data"]["claimDropRewards"]["status"]
                 in ["ELIGIBLE_FOR_ALL", "DROP_INSTANCE_ALREADY_CLAIMED"]
             ):
+                if campaign is not None:
+                    remaining_drops = [
+                        campaign_drop
+                        for campaign_drop in campaign.drops
+                        if campaign_drop.dt_match is True
+                        and campaign_drop.is_claimed is False
+                        and campaign_drop.id != drop.id
+                    ]
+                    if not remaining_drops:
+                        self.completed_drop_campaigns.add(campaign.id)
+                        self.__log_drop_check(
+                            f"campaign {campaign.id} completed after claiming drop "
+                            f"{drop.id}; suppressing stale category eligibility"
+                        )
                 for variant in self.__drop_variant_entries_from_drop(drop):
                     self.__save_drop_claim_analytics(
                         drop,
@@ -3324,9 +3344,11 @@ class Twitch(object):
                         or "Unknown"
                     )
                     campaign_name_override = campaign.get("name")
+                    campaign_drops = []
                     for drop_dict in campaign["timeBasedDrops"]:
                         drop = Drop(drop_dict)
                         drop.update(drop_dict["self"])
+                        campaign_drops.append(drop)
                         if drop.is_claimable is True:
                             drop.is_claimed = self.claim_drop(
                                 drop,
@@ -3334,6 +3356,16 @@ class Twitch(object):
                                 category_name_override=category_name_override,
                             )
                             time.sleep(random.uniform(5, 10))
+                    if campaign_drops and all(
+                        drop.is_claimed is True for drop in campaign_drops
+                    ):
+                        campaign_id = campaign.get("id")
+                        if campaign_id:
+                            self.completed_drop_campaigns.add(campaign_id)
+                            self.__log_drop_check(
+                                f"campaign {campaign_id} completed while claiming "
+                                "inventory drops; suppressing stale category eligibility"
+                            )
 
     def sync_campaigns(self, streamers, chunk_size=3):
         campaigns_update = 0
