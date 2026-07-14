@@ -70,6 +70,7 @@ class LoggerSettings:
         "console_level",
         "console_username",
         "time_zone",
+        "date_format",
         "file_level",
         "emoji",
         "colored",
@@ -91,6 +92,7 @@ class LoggerSettings:
         console_level: int = logging.INFO,
         console_username: bool = False,
         time_zone: str or None = None,
+        date_format: str = "dd/mm/yy",
         file_level: int = logging.DEBUG,
         emoji: bool = platform.system() != "Windows",
         colored: bool = False,
@@ -109,6 +111,18 @@ class LoggerSettings:
         self.console_level = console_level
         self.console_username = console_username
         self.time_zone = time_zone
+        if not isinstance(date_format, str):
+            raise TypeError("date_format must be a string")
+        date_parts = date_format.replace("-", "/").replace(".", "/").split("/")
+        if sorted(date_parts) != ["dd", "mm", "yy"] and sorted(date_parts) != [
+            "dd",
+            "mm",
+            "yyyy",
+        ]:
+            raise ValueError(
+                "date_format must contain dd, mm, and yy or yyyy, separated by /, -, or ."
+            )
+        self.date_format = date_format
         self.file_level = file_level
         self.emoji = emoji
         self.colored = colored
@@ -311,6 +325,13 @@ def configure_loggers(username, settings):
 
     settings.username = console_username
 
+    log_date_format = (
+        settings.date_format.replace("yyyy", "%Y")
+        .replace("yy", "%y")
+        .replace("mm", "%m")
+        .replace("dd", "%d")
+    )
+
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG)
     console_handler.addFilter(CategoryConsoleFilter(settings.console_level))
@@ -321,9 +342,7 @@ def configure_loggers(username, settings):
                 if settings.less is False
                 else "%(asctime)s - %(message)s"
             ),
-            datefmt=(
-                "%d/%m/%y %H:%M:%S" if settings.less is False else "%d/%m %H:%M:%S"
-            ),
+            datefmt=f"{log_date_format} %H:%M:%S",
             settings=settings,
         )
     )
@@ -360,7 +379,7 @@ def configure_loggers(username, settings):
         file_handler.setFormatter(
             FileFormatter(
                 fmt="%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s]: %(message)s",
-                datefmt="%d/%m/%y %H:%M:%S",
+                datefmt=f"{log_date_format} %H:%M:%S",
                 settings=settings,
             )
         )

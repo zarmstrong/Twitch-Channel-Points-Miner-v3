@@ -244,6 +244,7 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         refresh=(refresh * 60 * 1000),
         daysAgo=days_ago,
         logPollInterval=(log_poll_interval * 1000),
+        dateFormat=Settings.logger.date_format,
     )
 
 

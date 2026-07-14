@@ -271,6 +271,7 @@
     var refresh = parseInt("{{ refresh }}");
     var daysAgo = parseInt("{{ daysAgo }}");
     var logPollInterval = parseInt("{{ logPollInterval }}");
+    var dateFormat = {{ dateFormat | tojson }};
 </script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js')}}"></script>
 

@@ -633,6 +633,7 @@ Priorities can be combined in order. Avoid contradictory fallback rules such as
 | `console_level` | logging level | `logging.INFO` | Minimum level written to the console. |
 | `console_username` | bool | `False` | Include the account username in console and notification messages. |
 | `time_zone` | str or None | `None` | Log time zone, such as `America/Denver`. |
+| `date_format` | str | `"dd/mm/yy"` | Date format used in logs and analytics. Use `dd`, `mm`, and `yy` or `yyyy`, separated by `/`, `-`, or `.`. |
 | `file_level` | logging level | `logging.DEBUG` | Minimum level written to log files. |
 | `emoji` | bool | Platform-dependent | Enable emoji; defaults to disabled on Windows and enabled elsewhere. |
 | `colored` | bool | `False` | Enable colored console output. |

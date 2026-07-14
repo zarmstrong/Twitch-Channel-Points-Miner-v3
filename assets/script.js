@@ -45,7 +45,8 @@ var options = {
     xaxis: {
         type: 'datetime',
         labels: {
-            datetimeUTC: false
+            datetimeUTC: false,
+            format: dateFormat
         }
     },
     tooltip: {
@@ -53,7 +54,7 @@ var options = {
         shared: false,
         x: {
             show: true,
-            format: 'HH:mm:ss dd MMM',
+            format: `${dateFormat} HH:mm:ss`,
         },
         custom: ({
             series,
@@ -309,6 +310,21 @@ function formatDate(date) {
     return [year, month, day].join('-');
 }
 
+function formatDisplayDate(date) {
+    var d = new Date(date);
+    if (isNaN(d.getTime())) return '';
+
+    var values = {
+        yyyy: String(d.getFullYear()),
+        yy: String(d.getFullYear()).slice(-2),
+        mm: String(d.getMonth() + 1).padStart(2, '0'),
+        dd: String(d.getDate()).padStart(2, '0')
+    };
+    return dateFormat.replace(/yyyy|yy|mm|dd/g, function (token) {
+        return values[token];
+    });
+}
+
 function changeStreamer(streamer, index) {
     if (!streamer) {
         currentStreamer = null;
@@ -440,7 +456,7 @@ function renderStreamers() {
             streamerLink.append($('<span>').addClass('streamer-sort-value').text(streamer.points));
         } else if (sortField == 'last_activity') {
             streamerLink.append(
-                $('<span>').addClass('streamer-sort-value').text(formatDate(streamer.last_activity))
+                $('<span>').addClass('streamer-sort-value').text(formatDisplayDate(streamer.last_activity))
             );
         }
         row.append(streamerLink);
