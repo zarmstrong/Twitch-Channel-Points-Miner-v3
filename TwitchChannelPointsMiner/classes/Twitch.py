@@ -1925,7 +1925,9 @@ class Twitch(object):
             logger.error(f"Error with update_client_version: {e}")
             return self.client_version
 
-    def send_minute_watched_events(self, streamers, priority, chunk_size=3):
+    def send_minute_watched_events(
+        self, streamers, priority, chunk_size=3, streams_watched=2
+    ):
         while self.running:
             iteration_started_at = time.time()
             try:
@@ -1947,7 +1949,7 @@ class Twitch(object):
 
                 """
                 Twitch has a limit - you can't watch more than 2 channels at one time.
-                We'll take the first two streamers from the final list as they have the highest priority.
+                Take the configured number of streamers from the final list in priority order.
                 """
                 has_category_streamers = any(
                     getattr(streamer, "from_category", False) is True
@@ -1956,7 +1958,7 @@ class Twitch(object):
 
                 # Drops progress is counted on one stream at a time. When category
                 # discovery is enabled, keep watch selection to a single stream.
-                max_watch_amount = 1 if has_category_streamers else 2
+                max_watch_amount = 1 if has_category_streamers else streams_watched
                 streamers_watching = set()
 
                 def remaining_watch_amount():

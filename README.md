@@ -186,7 +186,12 @@ categories, and analytics.
 `MINER_CONFIG` contains account-wide and constructor settings. At minimum, set
 `username`. This is also where you configure the optional password, mining
 priority, analytics storage, SSL behavior, logging and notification integrations,
-and the default `StreamerSettings` inherited by channels without overrides.
+the number of concurrent streams watched, and the default `StreamerSettings`
+inherited by channels without overrides. `streams_watched` accepts `1` or `2`
+and defaults to `2`. This option allows Twitch Turbo users to limit the miner to
+one concurrent viewing session: reports in issue #787 indicate that continuously
+mining two channels alongside normal Twitch viewing may contribute to Turbo users
+being served ads. Invalid values are logged and replaced with `2`.
 
 See [Settings](#settings) for the available priority, logger, streamer, and bet
 objects. Keep credentials and integration tokens only in your private
@@ -601,7 +606,17 @@ Official Repl: https://replit.com/@rdavydov/Twitch-Channel-Points-Miner-v2
 Provided "as is" with no support. Testing purposes only. Updates may be delayed.
 
 ### Limits
-_**Twitch has a limit - you can't watch more than two channels at one time. We take the first two streamers from the list as they have the highest priority.**_
+_**Twitch has a limit - you can't watch more than two channels at one time. Set
+`streams_watched` to `1` or `2` in `MINER_CONFIG` to control how many are watched
+concurrently; the default is `2`. The highest-priority streamers are selected.**_
+
+The `streams_watched` option exists because each mined channel creates viewing
+activity on the account. Twitch Turbo users have reported that running two mined
+streams continuously, especially while also watching Twitch normally, may result
+in ads being served ([issue #787](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues/787)).
+Setting the option to `1` reduces the miner's concurrent viewing activity. It is
+a mitigation rather than a guarantee, because Twitch does not document this
+behavior.
 
 Make sure to write the streamers array in order of priority from left to right. If you use `followers=True` you can choose to download the followers sorted by follow date (ASC or DESC).
 

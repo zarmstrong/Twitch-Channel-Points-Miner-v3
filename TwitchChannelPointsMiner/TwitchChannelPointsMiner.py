@@ -57,6 +57,14 @@ logging.getLogger("websocket").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 
+def _normalize_streams_watched(streams_watched):
+    if type(streams_watched) is int and streams_watched in (1, 2):
+        return streams_watched
+
+    logger.error("streams_watched must be either 1 or 2; using the default value 2")
+    return 2
+
+
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
@@ -65,6 +73,7 @@ class TwitchChannelPointsMiner:
         "enable_analytics",
         "disable_ssl_cert_verification",
         "disable_at_in_nickname",
+        "streams_watched",
         "priority",
         "streamers",
         "events_predictions",
@@ -94,6 +103,7 @@ class TwitchChannelPointsMiner:
         logger_settings: LoggerSettings = LoggerSettings(),
         # Default values for all streamers
         streamer_settings: StreamerSettings = StreamerSettings(),
+        streams_watched: int = 2,
     ):
 
         # Fixes TypeError: 'NoneType' object is not subscriptable
@@ -114,6 +124,8 @@ class TwitchChannelPointsMiner:
         Settings.disable_ssl_cert_verification = disable_ssl_cert_verification
 
         Settings.disable_at_in_nickname = disable_at_in_nickname
+
+        self.streams_watched = _normalize_streams_watched(streams_watched)
 
         import socket
 
@@ -468,6 +480,7 @@ class TwitchChannelPointsMiner:
             self.minute_watcher_thread = threading.Thread(
                 target=self.twitch.send_minute_watched_events,
                 args=(self.streamers, self.priority),
+                kwargs={"streams_watched": self.streams_watched},
             )
             self.minute_watcher_thread.name = "Minute watcher"
             self.minute_watcher_thread.start()

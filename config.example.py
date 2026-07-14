@@ -33,6 +33,7 @@ MINER_CONFIG = {
     'enable_analytics': False,
     'disable_ssl_cert_verification': False,
     'disable_at_in_nickname': False,
+    'streams_watched': 2,                       # Watch 1 stream to reduce concurrent sessions (which may help Twitch Turbo users avoid ads), or 2 for the default maximum
     'logger_settings': LoggerSettings(
         save=True,                              # If you want to save logs in a file (suggested)
         console_level=logging.INFO,             # Level of logs - use logging.DEBUG for more info
