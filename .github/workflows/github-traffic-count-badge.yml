@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-      
+      - uses: actions/checkout@v6
+
       - name: gh login
         run: echo "${{ secrets.SECRET_TOKEN }}" | gh auth login --with-token
 
@@ -71,7 +71,7 @@ jobs:
             ```html' >> TRAFFIC.md
             echo "<a href='$repo'><img alt='GitHub Traffic' src='$shields$url&logo=github'></a>" >> TRAFFIC.md
             echo '```' >> TRAFFIC.md
-            
+
             git add TRAFFIC.md
             git config --global user.name "GitHub Action"
             git config --global user.email "action@github.com"
