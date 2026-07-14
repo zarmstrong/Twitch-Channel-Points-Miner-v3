@@ -23,7 +23,19 @@ def _load_config(path):
     source = path.read_text(encoding="utf-8")
     module = types.ModuleType("twitch_miner_user_config")
     module.__file__ = str(path)
-    exec(compile(source, str(path), "exec"), module.__dict__)
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+    except NameError as error:
+        traceback = error.__traceback__
+        while traceback.tb_next is not None:
+            traceback = traceback.tb_next
+        if traceback.tb_frame.f_code.co_filename != str(path):
+            raise
+        name = getattr(error, "name", None) or "A name"
+        raise RuntimeError(
+            f"Configuration error in {path}: {name} is used but not defined. "
+            "Add or correct the required import."
+        ) from error
     required = ("MINER_CONFIG", "STREAMERS", "MINE_CONFIG", "ANALYTICS_CONFIG")
     missing = [name for name in required if not hasattr(module, name)]
     if missing:

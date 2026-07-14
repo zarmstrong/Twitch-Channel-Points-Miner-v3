@@ -3,6 +3,7 @@
 """Convert a conventional user-owned run.py into a declarative config.py."""
 
 import ast
+import builtins
 import hashlib
 import os
 from pathlib import Path
@@ -66,6 +67,28 @@ def _render_dict(source, call, positional_names=(), ignore_args=False):
     return "{\n" + body + "\n}"
 
 
+def _undefined_names(source, source_name):
+    tree = ast.parse(source, filename=source_name)
+    loaded = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    defined = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+    }
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            defined.update(
+                alias.asname or alias.name.split(".")[0] for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            defined.update(alias.asname or alias.name for alias in node.names)
+    return sorted(loaded - defined - set(dir(builtins)))
+
+
 def convert_runner_source(source, source_name="run.py"):
     try:
         tree = ast.parse(source, filename=source_name)
@@ -107,7 +130,15 @@ def convert_runner_source(source, source_name="run.py"):
         + (_render_dict(source, analytics[0]) if analytics else "None"),
         "",
     ]
-    return "\n".join(output)
+    converted = "\n".join(output)
+    undefined = _undefined_names(converted, source_name)
+    if undefined:
+        names = ", ".join(undefined)
+        raise ConfigMigrationError(
+            f"Cannot convert {source_name}: configuration references names that "
+            f"are not imported: {names}"
+        )
+    return converted
 
 
 def convert_runner(runner_path, config_path):

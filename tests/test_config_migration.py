@@ -74,6 +74,21 @@ miner.mine([])
     assert namespace["MINER_CONFIG"]["priority"] == [namespace["Priority"].ORDER]
 
 
+def test_convert_runner_source_rejects_configuration_with_missing_imports():
+    source = '''\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+
+miner = TwitchChannelPointsMiner("alice")
+miner.mine([], category_sort=CategorySort.VIEWERS_DESC)
+'''
+
+    with pytest.raises(
+        ConfigMigrationError,
+        match=r"not imported: CategorySort",
+    ):
+        convert_runner_source(source)
+
+
 @pytest.mark.parametrize(
     "source",
     [
