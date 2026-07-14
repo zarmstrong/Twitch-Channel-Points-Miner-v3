@@ -32,32 +32,61 @@
 Read more about the channel points [here](https://help.twitch.tv/s/article/channel-points-guide).
 
 # README Contents
+
 1. 🤝 [Community](#community)
-2. 🚀 [Main differences from the original repository](#main-differences-from-the-original-repository)
-3. 🧾 [Logs feature](#logs-feature)
-    - [Full logs](#full-logs)
-    - [Less logs](#less-logs)
-    - [Final report](#final-report)
-4. 🧐 [How to use](#how-to-use)
-    - [Cloning](#by-cloning-the-repository)
+2. 🚀 [Features](#features)
+3. 🧐 [How to use](#how-to-use)
+    - [Configuration file](#configuration-file)
+    - [Configuration sections](#configuration-sections)
+        - [MINER_CONFIG](#miner_config)
+        - [STREAMERS](#streamers)
+        - [MINE_CONFIG](#mine_config)
+        - [Category-based Drops](#category-based-drops)
+            - [How category discovery works](#how-category-discovery-works)
+            - [Category configuration reference](#category-configuration-reference)
+            - [Category input formats](#category-input-formats)
+            - [Channel selection and sorting](#channel-selection-and-sorting)
+            - [Campaign filtering and ordering](#campaign-filtering-and-ordering)
+            - [Refresh behavior](#refresh-behavior)
+            - [Category logging and analytics](#category-logging-and-analytics)
+            - [Category examples](#category-examples)
+            - [Category troubleshooting](#category-troubleshooting)
+        - [ANALYTICS_CONFIG](#analytics_config)
+    - [Local installation](#local-installation)
+    - [Starting the miner](#starting-the-miner)
+        - [Configuration reload limitations](#configuration-reload-limitations)
     - [Docker](#docker)
-    	- [Docker Hub](#docker-hub)
-		- [Portainer](#portainer)
+        - [Docker Hub](#docker-hub)
+        - [Portainer](#portainer)
     - [Replit](#replit)
     - [Limits](#limits)
-5. 🔧 [Settings](#settings)
+4. 🔧 [Settings](#settings)
     - [LoggerSettings](#loggersettings)
+        - [Color Palette](#color-palette)
+        - [Telegram](#telegram)
+        - [Discord](#discord)
+        - [Generic Webhook](#generic-webhook)
+        - [Events](#events)
     - [StreamerSettings](#streamersettings)
     - [BetSettings](#betsettings)
         - [Bet strategy](#bet-strategy)
-    - [FilterCondition](#filtercondition)
-        - [Example](#example)
-6. 📈 [Analytics](#analytics)
-7. 🍪 [Migrating from an old repository (the original one)](#migrating-from-an-old-repository-the-original-one)
-8. 🪟 [Windows](#windows)
-9. 📱 [Termux](#termux)
-10. ⚠️ [Disclaimer](#disclaimer)
-
+        - [FilterCondition](#filtercondition)
+            - [Example](#example)
+        - [DelayMode](#delaymode)
+5. 📈 [Analytics](#analytics)
+    - [Analytics security and HTTPS reverse proxy](#analytics-security-and-https-reverse-proxy)
+    - [Enabling analytics storage](#enabling-analytics-storage)
+6. 🧾 [Logs](#logs)
+    - [Full format](#full-format)
+    - [Compact format](#compact-format)
+    - [Graceful-shutdown report](#graceful-shutdown-report)
+7. 🔄 [Migrating from run.py](#migrating-from-runpy)
+    - [Automatic Docker migration](#automatic-docker-migration)
+    - [What converts automatically](#what-converts-automatically)
+8. 🍪 [Legacy cookie migration (optional)](#legacy-cookie-migration-optional)
+9. 🪟 [Windows](#windows)
+10. 📱 [Termux](#termux)
+11. ⚠️ [Disclaimer](#disclaimer)
 
 ## Community
 If you want to help with this project, please leave a star 🌟 and share it with your friends! 😎
@@ -73,368 +102,423 @@ If you want to offer me a coffee, I would be grateful! ❤️
 
 If you have any issues or you want to contribute, you are welcome! But please read the [CONTRIBUTING.md](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/blob/master/CONTRIBUTING.md) file.
 
-## Main differences from the original repository:
+## Features
 
-- Improved logging: emojis, colors, files and much more ✔️
-- Final report with all the data ✔️
-- Rewritten codebase now uses classes instead of modules with global variables ✔️
-- Automatic downloading of the list of followers and using it as an input ✔️
-- Better 'Watch Streak' strategy in the priority system [#11](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/11) ✔️
-- Auto claiming [game drops](https://help.twitch.tv/s/article/mission-based-drops) from the Twitch inventory [#21](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/21) ✔️
-- Placing a bet / making a prediction with your channel points [#41](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/41) ([@lay295](https://github.com/lay295)) ✔️
-- Switchable analytics chart that shows the progress of your points with various annotations [#96](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/96) ✔️
-- Joining the IRC Chat to increase the watch time and get StreamElements points [#47](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/47) ✔️
-- [Moments](https://help.twitch.tv/s/article/moments) claiming [#182](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues/182) ✔️
-- Notifying on `@nickname` mention in the Twitch chat [#227](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues/227) ✔️
+- Automatically watches eligible channels and claims channel-point bonuses.
+- Waits for configured streamers to go live and follows eligible raids.
+- Prioritizes channels by watch streaks, Drops, subscriptions, configured order,
+  or channel-point balance.
+- Discovers live channels from configured game categories and active Drop
+  campaigns.
+- Tracks Drop progress and claims available Drop rewards and Moments.
+- Participates in channel-point predictions with configurable strategies,
+  spending limits, filters, and timing.
+- Supports per-streamer settings, follower imports, and blacklists.
+- Can join IRC chat and notify you when your username is mentioned.
+- Sends selected events through Telegram, Discord, Matrix, Pushover, Gotify, or a
+  generic webhook.
+- Provides colorized console logs, rotating log files, compact logging, and a
+  graceful-shutdown report.
+- Includes an optional analytics server for point history, Drops, and log viewing.
+- Supports persistent Docker configuration with automatic legacy-runner
+  conversion and limited live configuration reloads.
 
-## Logs feature
-### Full logs
-```
-%d/%m/%y %H:%M:%S - INFO - [run]: 💣  Start session: '9eb934b0-1684-4a62-b3e2-ba097bd67d35'
-%d/%m/%y %H:%M:%S - INFO - [run]: 🤓  Loading data for x streamers. Please wait ...
-%d/%m/%y %H:%M:%S - INFO - [set_offline]: 😴  Streamer(username=streamer-username1, channel_id=0000000, channel_points=67247) is Offline!
-%d/%m/%y %H:%M:%S - INFO - [set_offline]: 😴  Streamer(username=streamer-username2, channel_id=0000000, channel_points=4240) is Offline!
-%d/%m/%y %H:%M:%S - INFO - [set_offline]: 😴  Streamer(username=streamer-username3, channel_id=0000000, channel_points=61365) is Offline!
-%d/%m/%y %H:%M:%S - INFO - [set_offline]: 😴  Streamer(username=streamer-username4, channel_id=0000000, channel_points=3760) is Offline!
-%d/%m/%y %H:%M:%S - INFO - [set_online]: 🥳  Streamer(username=streamer-username, channel_id=0000000, channel_points=61365) is Online!
-%d/%m/%y %H:%M:%S - INFO - [start_bet]: 🔧  Start betting for EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx, title=Please star this repo) owned by Streamer(username=streamer-username, channel_id=0000000, channel_points=61365)
-%d/%m/%y %H:%M:%S - INFO - [__open_coins_menu]: 🔧  Open coins menu for EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx, title=Please star this repo)
-%d/%m/%y %H:%M:%S - INFO - [__click_on_bet]: 🔧  Click on the bet for EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx, title=Please star this repo)
-%d/%m/%y %H:%M:%S - INFO - [__enable_custom_bet_value]: 🔧  Enable input of custom value for EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx, title=Please star this repo)
-%d/%m/%y %H:%M:%S - INFO - [on_message]: ⏰  Place the bet after: 89.99s for: EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx-15c61914ef69, title=Please star this repo)
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +12 → Streamer(username=streamer-username, channel_id=0000000, channel_points=61377) - Reason: WATCH.
-%d/%m/%y %H:%M:%S - INFO - [make_predictions]: 🍀  Going to complete bet for EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx-15c61914ef69, title=Please star this repo) owned by Streamer(username=streamer-username, channel_id=0000000, channel_points=61377)
-%d/%m/%y %H:%M:%S - INFO - [make_predictions]: 🍀  Place 5k channel points on: SI (BLUE), Points: 848k, Users: 190 (70.63%), Odds: 1.24 (80.65%)
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +6675 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64206) - Reason: PREDICTION.
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 📊  EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx, title=Please star this repo) - Result: WIN, Points won: 6675
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +12 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64218) - Reason: WATCH.
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +12 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64230) - Reason: WATCH.
-%d/%m/%y %H:%M:%S - INFO - [claim_bonus]: 🎁  Claiming the bonus for Streamer(username=streamer-username, channel_id=0000000, channel_points=64230)!
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +60 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64290) - Reason: CLAIM.
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +12 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64326) - Reason: WATCH.
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +400 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64326) - Reason: WATCH_STREAK.
-%d/%m/%y %H:%M:%S - INFO - [claim_bonus]: 🎁  Claiming the bonus for Streamer(username=streamer-username, channel_id=0000000, channel_points=64326)!
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +60 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64386) - Reason: CLAIM.
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +12 → Streamer(username=streamer-username, channel_id=0000000, channel_points=64398) - Reason: WATCH.
-%d/%m/%y %H:%M:%S - INFO - [update_raid]: 🎭  Joining raid from Streamer(username=streamer-username, channel_id=0000000, channel_points=64398) to another-username!
-%d/%m/%y %H:%M:%S - INFO - [on_message]: 🚀  +250 → Streamer(username=streamer-username, channel_id=0000000, channel_points=6845) - Reason: RAID.
-```
-### Less logs
-```
-%d/%m %H:%M:%S - 💣  Start session: '9eb934b0-1684-4a62-b3e2-ba097bd67d35'
-%d/%m %H:%M:%S - 🤓  Loading data for 13 streamers. Please wait ...
-%d/%m %H:%M:%S - 😴  streamer-username1 (xxx points) is Offline!
-%d/%m %H:%M:%S - 😴  streamer-username2 (xxx points) is Offline!
-%d/%m %H:%M:%S - 😴  streamer-username3 (xxx points) is Offline!
-%d/%m %H:%M:%S - 😴  streamer-username4 (xxx points) is Offline!
-%d/%m %H:%M:%S - 🥳  streamer-username (xxx points) is Online!
-%d/%m %H:%M:%S - 🔧  Start betting for EventPrediction: Please star this repo owned by streamer-username (xxx points)
-%d/%m %H:%M:%S - 🔧  Open coins menu for EventPrediction: Please star this repo
-%d/%m %H:%M:%S - 🔧  Click on the bet for EventPrediction: Please star this repo
-%d/%m %H:%M:%S - 🔧  Enable input of custom value for EventPrediction: Please star this repo
-%d/%m %H:%M:%S - ⏰  Place the bet after: 89.99s EventPrediction: Please star this repo
-%d/%m %H:%M:%S - 🚀  +12 → streamer-username (xxx points) - Reason: WATCH.
-%d/%m %H:%M:%S - 🍀  Going to complete bet for EventPrediction: Please star this repo owned by streamer-username (xxx points)
-%d/%m %H:%M:%S - 🍀  Place 5k channel points on: SI (BLUE), Points: 848k, Users: 190 (70.63%), Odds: 1.24 (80.65%)
-%d/%m %H:%M:%S - 🚀  +6675 → streamer-username (xxx points) - Reason: PREDICTION.
-%d/%m %H:%M:%S - 📊  EventPrediction: Please star this repo - Result: WIN, Points won: 6675
-%d/%m %H:%M:%S - 🚀  +12 → streamer-username (xxx points) - Reason: WATCH.
-%d/%m %H:%M:%S - 🚀  +12 → streamer-username (xxx points) - Reason: WATCH.
-%d/%m %H:%M:%S - 🚀  +60 → streamer-username (xxx points) - Reason: CLAIM.
-%d/%m %H:%M:%S - 🚀  +12 → streamer-username (xxx points) - Reason: WATCH.
-%d/%m %H:%M:%S - 🚀  +400 → streamer-username (xxx points) - Reason: WATCH_STREAK.
-%d/%m %H:%M:%S - 🚀  +60 → streamer-username (xxx points) - Reason: CLAIM.
-%d/%m %H:%M:%S - 🚀  +12 → streamer-username (xxx points) - Reason: WATCH.
-%d/%m %H:%M:%S - 🎭  Joining raid from streamer-username (xxx points) to another-username!
-%d/%m %H:%M:%S - 🚀  +250 → streamer-username (xxx points) - Reason: RAID.
-```
-### Final report:
-```
-%d/%m/%y %H:%M:%S - 🛑  End session 'f738d438-cdbc-4cd5-90c4-1517576f1299'
-%d/%m/%y %H:%M:%S - 📄  Logs file: /.../path/Twitch-Channel-Points-Miner-v2/logs/username.timestamp.log
-%d/%m/%y %H:%M:%S - ⌛  Duration 10:29:19.547371
+## How to use
 
-%d/%m/%y %H:%M:%S - 📊  BetSettings(Strategy=Strategy.SMART, Percentage=7, PercentageGap=20, MaxPoints=7500
-%d/%m/%y %H:%M:%S - 📊  EventPrediction(event_id=xxxx-xxxx-xxxx-xxxx, title="Event Title1")
-		Streamer(username=streamer-username, channel_id=0000000, channel_points=67247)
-		Bet(TotalUsers=1k, TotalPoints=11M), Decision={'choice': 'B', 'amount': 5289, 'id': 'xxxx-yyyy-zzzz'})
-		Outcome0(YES (BLUE) Points: 7M, Users: 641 (58.49%), Odds: 1.6, (5}%)
-		Outcome1(NO (PINK),Points: 4M, Users: 455 (41.51%), Odds: 2.65 (37.74%))
-		Result: {'type': 'LOSE', 'won': 0}
-%d/%m/%y %H:%M:%S - 📊  EventPrediction(event_id=yyyy-yyyy-yyyy-yyyy, title="Event Title2")
-		Streamer(username=streamer-username, channel_id=0000000, channel_points=3453464)
-		Bet(TotalUsers=921, TotalPoints=11M), Decision={'choice': 'A', 'amount': 4926, 'id': 'xxxx-yyyy-zzzz'})
-		Outcome0(YES (BLUE) Points: 9M, Users: 562 (61.02%), Odds: 1.31 (76.34%))
-		Outcome1(YES (PINK) Points: 3M, Users: 359 (38.98%), Odds: 4.21 (23.75%))
-		Result: {'type': 'WIN', 'won': 6531}
-%d/%m/%y %H:%M:%S - 📊  EventPrediction(event_id=ad152117-251b-4666-b683-18e5390e56c3, title="Event Title3")
-		Streamer(username=streamer-username, channel_id=0000000, channel_points=45645645)
-		Bet(TotalUsers=260, TotalPoints=3M), Decision={'choice': 'A', 'amount': 5054, 'id': 'xxxx-yyyy-zzzz'})
-		Outcome0(YES (BLUE) Points: 689k, Users: 114 (43.85%), Odds: 4.24 (23.58%))
-		Outcome1(NO (PINK) Points: 2M, Users: 146 (56.15%), Odds: 1.31 (76.34%))
-		Result: {'type': 'LOSE', 'won': 0}
+The miner uses a persistent Python configuration file at `config/config.py`.
+The stable application runner creates the miner, starts analytics when
+configured, watches the file for supported changes, and starts mining.
 
-%d/%m/%y %H:%M:%S - 🤖  Streamer(username=streamer-username, channel_id=0000000, channel_points=67247), Total points gained (after farming - before farming): -7838
-%d/%m/%y %H:%M:%S - 💰  CLAIM(11 times, 550 gained), PREDICTION(1 times, 6531 gained), WATCH(35 times, 350 gained)
-%d/%m/%y %H:%M:%S - 🤖  Streamer(username=streamer-username2, channel_id=0000000, channel_points=61365), Total points gained (after farming - before farming): 977
-%d/%m/%y %H:%M:%S - 💰  CLAIM(4 times, 240 gained), REFUND(1 times, 605 gained), WATCH(11 times, 132 gained)
-%d/%m/%y %H:%M:%S - 🤖  Streamer(username=streamer-username5, channel_id=0000000, channel_points=25960), Total points gained (after farming - before farming): 1680
-%d/%m/%y %H:%M:%S - 💰  CLAIM(17 times, 850 gained), WATCH(53 times, 530 gained)
-%d/%m/%y %H:%M:%S - 🤖  Streamer(username=streamer-username6, channel_id=0000000, channel_points=9430), Total points gained (after farming - before farming): 1120
-%d/%m/%y %H:%M:%S - 💰  CLAIM(14 times, 700 gained), WATCH(42 times, 420 gained), WATCH_STREAK(1 times, 450 gained)
+Start with the maintained template:
+
+```sh
+mkdir -p config
+cp config.example.py config/config.py
 ```
 
-## How to use:
-First of all please create a run.py file. You can just copy [example.py](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/blob/master/example.py) and modify it according to your needs.
+Edit `config/config.py` and replace all placeholder usernames, passwords, webhook
+URLs, and notification credentials. Remove or set optional integrations to
+`None` when you do not use them. Never commit the populated file or share it in
+logs or issue reports.
+
+### Configuration file
+
+A minimal configuration looks like this:
+
 ```python
-# -*- coding: utf-8 -*-
-
-import logging
-from colorama import Fore
-from TwitchChannelPointsMiner import TwitchChannelPointsMiner
-from TwitchChannelPointsMiner.logger import LoggerSettings, ColorPalette
-from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.Discord import Discord
-from TwitchChannelPointsMiner.classes.Webhook import Webhook
-from TwitchChannelPointsMiner.classes.Telegram import Telegram
-from TwitchChannelPointsMiner.classes.Gotify import Gotify
-from TwitchChannelPointsMiner.classes.Settings import Priority, Events, FollowersOrder
-from TwitchChannelPointsMiner.classes.entities.Bet import Strategy, BetSettings, Condition, OutcomeKeys, FilterCondition, DelayMode
-from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
-
-twitch_miner = TwitchChannelPointsMiner(
-    username="your-twitch-username",
-    password="write-your-secure-psw",           # If no password will be provided, the script will ask interactively
-    claim_drops_startup=False,                  # If you want to auto claim all drops from Twitch inventory on the startup
-    priority=[                                  # Custom priority in this case for example:
-        Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
-        Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
-        Priority.ORDER                          # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
-    ],
-    enable_analytics=False,			# Disables Analytics if False. Disabling it significantly reduces memory consumption
-    disable_ssl_cert_verification=False,	# Set to True at your own risk and only to fix SSL: CERTIFICATE_VERIFY_FAILED error
-    disable_at_in_nickname=False,               # Set to True if you want to check for your nickname mentions in the chat even without @ sign
-    logger_settings=LoggerSettings(
-        save=True,                              # If you want to save logs in a file (suggested)
-        console_level=logging.INFO,             # Level of logs - use logging.DEBUG for more info
-        console_username=False,                 # Adds a username to every console log line if True. Also adds it to Telegram, Discord, etc. Useful when you have several accounts
-        auto_clear=True,                        # Create a file rotation handler with interval = 1D and backupCount = 7 if True (default)
-        time_zone="",                           # Set a specific time zone for console and file loggers. Use tz database names. Example: "America/Denver"
-        file_level=logging.DEBUG,               # Level of logs - If you think the log file it's too big, use logging.INFO
-        emoji=True,                             # On Windows, we have a problem printing emoji. Set to false if you have a problem
-        less=False,                             # If you think that the logs are too verbose, set this to True
-        colored=True,                           # If you want to print colored text
-        color_palette=ColorPalette(             # You can also create a custom palette color (for the common message).
-            STREAMER_online="GREEN",            # Don't worry about lower/upper case. The script will parse all the values.
-            streamer_offline="red",             # Read more in README.md
-            BET_wiN=Fore.MAGENTA                # Color allowed are: [BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET].
-        ),
-        telegram=Telegram(                                                          # You can omit or set to None if you don't want to receive updates on Telegram
-            chat_id=123456789,                                                      # Chat ID to send messages @getmyid_bot
-            token="123456789:shfuihreuifheuifhiu34578347",                          # Telegram API token @BotFather
-            events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],                          # Only these events will be sent to the chat
-            disable_notification=True,                                              # Revoke the notification (sound/vibration)
-        ),
-        discord=Discord(
-            webhook_api="https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J",  # Discord Webhook URL
-            events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],					                         # Only these events will be sent to the chat
-        ),
-        webhook=Webhook(
-            endpoint="https://example.com/webhook",                                                                    # Webhook URL
-            method="GET",                                                                   # GET or POST
-            events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],                                  # Only these events will be sent to the endpoint
-        ),
-        matrix=Matrix(
-            username="twitch_miner",                                                   # Matrix username (without homeserver)
-            password="...",                                                            # Matrix password
-            homeserver="matrix.org",                                                   # Matrix homeserver
-            room_id="...",                                                             # Room ID
-            events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE, Events.BET_LOSE], # Only these events will be sent
-        ),
-        pushover=Pushover(
-            userkey="YOUR-ACCOUNT-TOKEN",                                             # Login to https://pushover.net/, the user token is on the main page
-            token="YOUR-APPLICATION-TOKEN",                                           # Create a application on the website, and use the token shown in your application
-            priority=0,                                                               # Read more about priority here: https://pushover.net/api#priority
-            sound="pushover",                                                         # A list of sounds can be found here: https://pushover.net/api#sounds
-            events=[Events.CHAT_MENTION, Events.DROP_CLAIM],                          # Only these events will be sent
-        ),
-        gotify=Gotify(
-            endpoint="https://example.com/message?token=TOKEN",
-            priority=8,
-            events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],
-        )
-    ),
-    streamer_settings=StreamerSettings(
-        make_predictions=True,                  # If you want to Bet / Make prediction
-        follow_raid=True,                       # Follow raid to obtain more points
-        claim_drops=True,                       # We can't filter rewards base on stream. Set to False for skip viewing counter increase and you will never obtain a drop reward from this script. Issue #21
-        claim_moments=True,                     # If set to True, https://help.twitch.tv/s/article/moments will be claimed when available
-        watch_streak=True,                      # If a streamer go online change the priority of streamers array and catch the watch screak. Issue #11
-        community_goals=False,                  # If True, contributes the max channel points per stream to the streamers' community challenge goals
-        chat=ChatPresence.ONLINE,               # Join irc chat to increase watch-time [ALWAYS, NEVER, ONLINE, OFFLINE]
-        bet=BetSettings(
-            strategy=Strategy.SMART,            # Choose you strategy!
-            percentage=5,                       # Place the x% of your channel points
-            percentage_gap=20,                  # Gap difference between outcomesA and outcomesB (for SMART strategy)
-            max_points=50000,                   # If the x percentage of your channel points is gt bet_max_points set this value
-            stealth_mode=True,                  # If the calculated amount of channel points is GT the highest bet, place the highest value minus 1-2 points Issue #33
-            delay_mode=DelayMode.FROM_END,      # When placing a bet, we will wait until `delay` seconds before the end of the timer
-            delay=6,
-            minimum_points=20000,               # Place the bet only if we have at least 20k points. Issue #113
-            filter_condition=FilterCondition(
-                by=OutcomeKeys.TOTAL_USERS,     # Where apply the filter. Allowed [PERCENTAGE_USERS, ODDS_PERCENTAGE, ODDS, TOP_POINTS, TOTAL_USERS, TOTAL_POINTS]
-                where=Condition.LTE,            # 'by' must be [GT, LT, GTE, LTE] than value
-                value=800
-            )
-        )
-    )
-)
-
-# You can customize the settings for each streamer. If not settings were provided, the script would use the streamer_settings from TwitchChannelPointsMiner.
-# If no streamer_settings are provided in TwitchChannelPointsMiner the script will use default settings.
-# The streamers array can be a String -> username or Streamer instance.
-
-# The settings priority are: settings in mine function, settings in TwitchChannelPointsMiner instance, default settings.
-# For example, if in the mine function you don't provide any value for 'make_prediction' but you have set it on TwitchChannelPointsMiner instance, the script will take the value from here.
-# If you haven't set any value even in the instance the default one will be used
-
-#twitch_miner.analytics(host="127.0.0.1", port=5000, refresh=5, days_ago=7, log_poll_interval=5)   # Start the Analytics web-server (replit: host="0.0.0.0")
-
-twitch_miner.mine(
-    [
-        Streamer("streamer-username01", settings=StreamerSettings(make_predictions=True  , follow_raid=False , claim_drops=True  , watch_streak=True , community_goals=False , bet=BetSettings(strategy=Strategy.SMART      , percentage=5 , stealth_mode=True,  percentage_gap=20 , max_points=234   , filter_condition=FilterCondition(by=OutcomeKeys.TOTAL_USERS,      where=Condition.LTE, value=800 ) ) )),
-        Streamer("streamer-username02", settings=StreamerSettings(make_predictions=False , follow_raid=True  , claim_drops=False ,                                             bet=BetSettings(strategy=Strategy.PERCENTAGE , percentage=5 , stealth_mode=False, percentage_gap=20 , max_points=1234  , filter_condition=FilterCondition(by=OutcomeKeys.TOTAL_POINTS,     where=Condition.GTE, value=250 ) ) )),
-        Streamer("streamer-username03", settings=StreamerSettings(make_predictions=True  , follow_raid=False ,                     watch_streak=True , community_goals=True  , bet=BetSettings(strategy=Strategy.SMART      , percentage=5 , stealth_mode=False, percentage_gap=30 , max_points=50000 , filter_condition=FilterCondition(by=OutcomeKeys.ODDS,             where=Condition.LT,  value=300 ) ) )),
-        Streamer("streamer-username04", settings=StreamerSettings(make_predictions=False , follow_raid=True  ,                     watch_streak=True ,                                                                                                                                                                                                                                                       )),
-        Streamer("streamer-username05", settings=StreamerSettings(make_predictions=True  , follow_raid=True  , claim_drops=True ,  watch_streak=True , community_goals=True  , bet=BetSettings(strategy=Strategy.HIGH_ODDS  , percentage=7 , stealth_mode=True,  percentage_gap=20 , max_points=90    , filter_condition=FilterCondition(by=OutcomeKeys.PERCENTAGE_USERS, where=Condition.GTE, value=300 ) ) )),
-        Streamer("streamer-username06"),
-        Streamer("streamer-username07"),
-        Streamer("streamer-username08"),
-        "streamer-username09",
-        "streamer-username10",
-        "streamer-username11"
-    ],                                  # Array of streamers (order = priority)
-    followers=False,                    # Automatic download the list of your followers
-    followers_order=FollowersOrder.ASC  # Sort the followers list by follow date. ASC or DESC
-)
-```
-You can also use all the default values except for your username obv. Short version:
-```python
-from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Settings import FollowersOrder
-twitch_miner = TwitchChannelPointsMiner("your-twitch-username")
-twitch_miner.mine(["streamer1", "streamer2"])                                                       # Array of streamers OR
-twitch_miner.mine(followers=True, followers_order=FollowersOrder.ASC)                               # Automatic use the followers list OR
-twitch_miner.mine(["streamer1", "streamer2"], followers=True, followers_order=FollowersOrder.DESC)  # Mixed
+
+MINER_CONFIG = {
+    "username": "your-twitch-username",
+    # Omit "password" to enter it interactively when authentication is needed.
+    "enable_analytics": False,
+}
+
+STREAMERS = ["streamer1", "streamer2"]
+
+MINE_CONFIG = {
+    "followers": False,
+    "followers_order": FollowersOrder.ASC,
+    "blacklist": [],
+    "categories": [],
+}
+
+# Set to a dictionary to start the analytics server, or leave as None.
+ANALYTICS_CONFIG = None
 ```
-If you follow so many streamers on Twitch, but you don't want to mine points for all of them, you can blacklist the users with the `blacklist` keyword. [#94](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/94)
+
+The file is normal Python, so import any enums or settings classes used by its
+values. See [config.example.py](config.example.py) for the complete annotated
+configuration, including logger integrations, per-streamer settings, predictions,
+categories, and analytics.
+
+### Configuration sections
+
+| Name | Passed to | Purpose |
+|---|---|---|
+| `MINER_CONFIG` | `TwitchChannelPointsMiner(...)` | Account, priority, default streamer behavior, logging, notifications, and global runtime options. |
+| `STREAMERS` | First argument of `mine(...)` | Ordered streamer logins or `Streamer` objects with per-channel overrides. Use `[]` when relying only on followers or categories. |
+| `MINE_CONFIG` | Keyword arguments of `mine(...)` | Followers, blacklist, category discovery, Drops diagnostics, and other mining-session options. Do not include `streamers` here. |
+| `ANALYTICS_CONFIG` | `analytics(...)` | Analytics server options. Set to `None` to leave the server disabled. |
+
+#### MINER_CONFIG
+
+`MINER_CONFIG` contains account-wide and constructor settings. At minimum, set
+`username`. This is also where you configure the optional password, mining
+priority, analytics storage, SSL behavior, logging and notification integrations,
+and the default `StreamerSettings` inherited by channels without overrides.
+
+See [Settings](#settings) for the available priority, logger, streamer, and bet
+objects. Keep credentials and integration tokens only in your private
+`config/config.py`.
+
+#### STREAMERS
+
+`STREAMERS` is the ordered list of fixed channels. Each entry can be a lowercase
+login string or a `Streamer(...)` object when that channel needs custom
+`StreamerSettings`. Use an empty list when mining exclusively from followed
+channels or category discovery.
+
+Streamer settings follow this precedence: settings on an individual `Streamer`,
+then the default `streamer_settings` in `MINER_CONFIG`, then project defaults.
+Plain strings in `STREAMERS` use the configured defaults.
+
+Common streamer-list patterns:
+
 ```python
-from TwitchChannelPointsMiner import TwitchChannelPointsMiner
-twitch_miner = TwitchChannelPointsMiner("your-twitch-username")
-twitch_miner.mine(followers=True, blacklist=["user1", "user2"])  # Blacklist example
+# Fixed list
+STREAMERS = ["streamer1", "streamer2"]
+MINE_CONFIG = {"followers": False, "categories": []}
+
+# All followed channels
+STREAMERS = []
+MINE_CONFIG = {"followers": True, "followers_order": FollowersOrder.ASC}
+
+# Fixed list plus followers, excluding selected users
+STREAMERS = ["streamer1"]
+MINE_CONFIG = {
+    "followers": True,
+    "followers_order": FollowersOrder.DESC,
+    "blacklist": ["user1", "user2"],
+}
 ```
 
-### Category-based Drops
+#### MINE_CONFIG
 
-Use `categories` when you want the miner to find eligible live channels for a
-game instead of maintaining a fixed list of streamer usernames. Twitch category
-slugs are the preferred input, followed by full category URLs. Displayed category
-names are also accepted:
+`MINE_CONFIG` contains the keyword arguments for the mining session. Use it to
+combine followed channels with `STREAMERS`, apply a blacklist, configure follower
+ordering, discover channels by category, and control category/Drop diagnostics.
+The streamer list itself belongs in `STREAMERS`, not in this dictionary.
+
+#### Category-based Drops
+
+Use `categories` to mine Drops for games without maintaining a fixed list of
+streamer usernames. The miner finds configured games with active, incomplete
+Drop campaigns, discovers eligible live channels, and adds those channels to the
+normal mining session. Categories can be used by themselves or together with
+`STREAMERS` and `MINE_CONFIG["followers"] = True`.
+
+Import the category enums (and `ChatPresence` if you want a category-specific
+chat policy) before using the examples below:
 
 ```python
-twitch_miner.mine(
-    categories=[
-        "pokemon-go",
-        "https://www.twitch.tv/directory/category/pokemon-go?filter=drops",
-        "Pokémon GO",
-    ],
-    category_limit=5,
-    category_log_level=logging.INFO,
-    category_refresh_interval_hours=6,
+import logging
+
+from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.Settings import (
+    CategoryCampaignOrder,
+    CategorySort,
 )
+
+MINE_CONFIG = {
+    "categories": [
+        "pokemon-go",
+        "warframe",
+    ],
+    "category_limit": 5,
+    "category_sort": CategorySort.VIEWERS_DESC,
+    "category_campaign_order": CategoryCampaignOrder.EXPIRATION,
+    "category_chat": ChatPresence.NEVER,
+    "category_log_level": logging.INFO,
+    "category_refresh_interval_hours": 6,
+}
 ```
 
-Category matching is accent-insensitive, so `Pokémon GO`, `Pokemon GO`, and
-`pokemon-go` resolve to the same Twitch category. This is useful when the Twitch
-display name contains accented characters but a configuration or copied URL uses
-plain ASCII. For the most reliable matching, use the Twitch category slug when
-available; otherwise, paste the full Twitch category URL.
+##### How category discovery works
 
-If Twitch's campaign sources do not list any campaign for a configured game, the
-miner uses that game's `twitchdrops.app/game/<category>` page as a third-priority
-fallback. Restricted campaign channel lists are checked in full for live users
-about every five minutes while the campaign is active. A twitchdrops.app game URL
-can also be used directly as the category value, which is useful when its slug
-differs from Twitch's slug. Setting `category_refresh_interval_hours=0` still
-disables all periodic category checks.
+At startup, the miner:
 
-Eligible logins shared by multiple active campaigns are checked first. The miner
-selects up to 20 live channels per campaign and queries the remaining channel list
-in standby batches only when a campaign has not reached that target.
+1. Reads the configured category values and checks current Drop campaigns.
+2. Keeps categories that have an active campaign with an incomplete, eligible
+   time-based Drop.
+3. Resolves each category to its Twitch game and searches for live channels.
+4. Applies the Drops tag, campaign-channel, limit, and sorting rules described
+   below.
+5. Loads the discovered users as category streamers and subscribes to the same
+   relevant Twitch events used for explicitly configured streamers.
 
-To force a particular live streamer for a category, separate the category and
-streamer with a pipe:
+If no configured category has an active incomplete campaign, category discovery
+is skipped. Explicit `streamers` and downloaded followers are unaffected.
+
+Discovered category channels use the miner's default `StreamerSettings`, except
+that `category_chat` can override their chat presence. The blacklist also applies
+to discovered channels. If a username is both explicitly configured and found by
+category discovery, it remains explicitly configured and keeps its explicit
+settings.
+
+##### Category configuration reference
+
+| Option | Default | Description |
+|---|---:|---|
+| `categories` | `[]` | Category names, slugs, URLs, or category/streamer selectors to discover. |
+| `category_drops_enabled` | `True` | Require the live channel to have a `DropsEnabled` tag. This also affects campaign eligibility checks. |
+| `category_limit` | `30` | Maximum channels returned by a normal category search. Values below 1 behave as 1. Restricted campaign discovery may select up to 20 live channels per campaign instead. |
+| `category_sort` | `CategorySort.VIEWERS_DESC` | Determines how normal category search results are selected and ordered. Enum values and equivalent strings are accepted. |
+| `category_campaign_order` | `CategoryCampaignOrder.ORDER` | Preserves configured category order or prioritizes the nearest viable campaign deadline. |
+| `category_chat` | `None` | Chat policy for category-discovered streamers. `None` inherits the default streamer setting. |
+| `category_log_level` | `logging.INFO` | Severity used for category discovery and refresh messages. |
+| `category_refresh_interval_hours` | `6` | Hours between campaign/channel refreshes. Positive values have a 30-minute minimum; `0` disables refresh. |
+| `track_category_streamer_points` | `False` | Include point earn/spend events from category-only streamers in balance tracking and analytics. Explicit streamers are always tracked. |
+| `drop_item_art` | `False` | Store and display Drop item artwork URLs in Drops analytics. |
+| `print_open_drop_campaigns_on_load` | `False` | Log all open Drop campaigns during startup. Useful for checking category names and campaign dates. |
+| `scrape_drop_progress_on_load` | `False` | Read inventory Drop progress immediately at startup. |
+| `log_drop_checks` | `False` | Enable verbose Drop GraphQL/inventory diagnostics. Leave disabled unless troubleshooting. |
+
+##### Category input formats
+
+The preferred input is the lowercase slug from a Twitch directory URL:
+
+```python
+categories=[
+    "pokemon-go",  # Preferred Twitch slug
+    "Pokémon GO",  # Twitch display name
+    "https://www.twitch.tv/directory/category/pokemon-go?filter=drops",
+    "https://twitchdrops.app/game/pokemon-go",
+]
+```
+
+Category matching is case- and accent-insensitive, so `Pokémon GO`, `Pokemon GO`,
+and `pokemon-go` resolve to the same category. A Twitch URL is useful when the
+display name is ambiguous. A twitchdrops.app game URL is useful when its slug
+differs from Twitch's slug.
+
+To require one particular live streamer, append its login after a pipe (`|`):
 
 ```python
 categories=[
     "Call of Duty: Warzone|streamer-name",
-    "[Pokémon GO]|[another-streamer]",
+    "[Pokémon GO]|[@another-streamer]",
 ]
 ```
 
-The pipe avoids conflicts with punctuation in category names such as
-`Call of Duty: Warzone`.
+The optional brackets and leading `@` are removed. The pipe is the separator so
+punctuation in names such as `Call of Duty: Warzone` remains safe. The forced
+streamer is accepted only when they are live in the requested category and, when
+`category_drops_enabled=True`, have the `DropsEnabled` tag. A forced selector is
+not supported on a URL; use the category name or slug form.
 
-The miner periodically checks configured categories for new campaigns and live
+##### Channel selection and sorting
+
+`category_sort` accepts a `CategorySort` member or its string value:
+
+| Value | Selection behavior |
+|---|---|
+| `ORDER` | Keep Twitch's API order. |
+| `VIEWERS_DESC` | Highest viewer count first. This is the default. |
+| `VIEWERS_ASC` | Lowest viewer count first. |
+| `STARTED_AT_DESC` | Most recently started streams first. |
+| `STARTED_AT_ASC` | Longest-running streams first. |
+| `RANDOM` | Shuffle the eligible candidates. |
+
+For `ORDER` and `VIEWERS_DESC`, the miner requests enough eligible results to
+fill `category_limit`. Other sorts inspect a wider candidate window—up to three
+times the limit, capped at 300—before selecting the final results. An invalid
+sort value falls back to `VIEWERS_DESC`.
+
+Twitch restricts effective watching capacity; adding many discovered channels
+does not mean all of them accrue progress simultaneously. Use a modest
+`category_limit`, campaign ordering, and the project's normal priority settings
+to keep the active set useful. See [Limits](#limits).
+
+##### Campaign filtering and ordering
+
+With `category_drops_enabled=True`, the miner requires a Drops-enabled live
+channel and filters categories using eligible Drop campaign information. Set it
+to `False` only when you intentionally want live channels from a category even
+without the Drops tag.
+
+`CategoryCampaignOrder.ORDER` preserves the order in `categories`.
+`CategoryCampaignOrder.EXPIRATION` prioritizes categories whose viable campaigns
+expire soonest, helping time-sensitive Drops get selected first.
+
+If Twitch's campaign sources do not list any campaign for a configured game, the
+miner uses that game's `twitchdrops.app/game/<category>` page as a third-priority
+fallback. Restricted campaign channel lists are checked in full for live users
+while the campaign is active. Shared logins eligible for multiple active
+campaigns are checked first. The miner selects up to 20 live channels per
+restricted campaign and checks remaining channel lists in standby batches only
+when a campaign has not reached that target.
+
+##### Refresh behavior
+
+The miner periodically rechecks configured categories for new campaigns and live
 replacement streamers. `category_refresh_interval_hours` defaults to 6 hours,
-has a minimum of 30 minutes, and adds a random delay between 20-seconds to 5-minutes. Set it to `0` to
-disable periodic category refresh (not recommended).
+has a minimum of 30 minutes for any positive value, and adds a random delay of
+20 seconds to 5 minutes. During active restricted-campaign discovery, the miner
+may temporarily refresh as often as every five minutes to work through standby
+channel batches. Set the value to `0` to disable all periodic category checks.
 
-Set `category_log_level` to the severity you want for category discovery and
-refresh messages. This lets those messages pass an `INFO` console threshold
-without enabling global `DEBUG` logging. For example,
-`category_log_level=logging.DEBUG` shows category debug records in Docker logs
-while unrelated debug records remain filtered out.
+Refreshes add newly discovered streamers but do not remove channels that were
+loaded earlier. Restart the miner to fully discard stale or removed category
+streamers. In Docker/config mode, changing `MINE_CONFIG["categories"]` triggers
+discovery after the configuration watcher detects the edit; other category
+options require a restart. See [Configuration reload limitations](#configuration-reload-limitations).
 
-### By cloning the repository
-1. Clone this repository `git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2`
-2. Install all the requirements `pip install -r requirements.txt`. Python 3.11 through 3.13 is supported. You could also try to create a _virtualenv_ and then install all the requirements
-```sh
-pip install virtualenv
-virtualenv -p python3 venv
-source venv/bin/activate
-pip install -r requirements.txt
+##### Category logging and analytics
+
+`category_log_level` controls category discovery and refresh records separately
+from unrelated logs. For example, `logging.DEBUG` lets category diagnostics pass
+an `INFO` console threshold without turning on global debug output. Use
+`log_drop_checks=True` only for deeper Drop API/inventory debugging because it
+can produce substantially more output.
+
+By default, point balance events from category-only streamers are ignored to
+avoid noisy or misleading analytics across transient channels. Set
+`track_category_streamer_points=True` to include them. A streamer that is also in
+the explicit `streamers` list is always tracked. `drop_item_art=True` enriches the
+Drops analytics table with item artwork, while `scrape_drop_progress_on_load=True`
+populates current inventory progress at startup.
+
+##### Category examples
+
+Prioritize the closest-expiring configured Drop campaigns, preferring
+lower-viewer channels and never joining their chats:
+
+```python
+MINE_CONFIG = {
+    "categories": ["warframe", "diablo-iv", "the-elder-scrolls-online"],
+    "category_limit": 3,
+    "category_sort": CategorySort.VIEWERS_ASC,
+    "category_campaign_order": CategoryCampaignOrder.EXPIRATION,
+    "category_chat": ChatPresence.NEVER,
+    "category_drops_enabled": True,
+}
 ```
 
-Start mining! `python run.py` 🥳
+Mix permanent streamers, followers, and category discovery:
+
+```python
+STREAMERS = ["favorite-streamer"]
+MINE_CONFIG = {
+    "followers": True,
+    "blacklist": ["blocked-streamer"],
+    "categories": ["arc-raiders", "warframe|preferred-streamer"],
+    "category_limit": 5,
+    "track_category_streamer_points": True,
+}
+```
+
+##### Category troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| No category streamers are loaded | Confirm the game has an active, incomplete campaign and try its Twitch directory URL. Enable `print_open_drop_campaigns_on_load=True` to inspect detected campaigns. |
+| A live channel is skipped | With `category_drops_enabled=True`, it must have the `DropsEnabled` tag. Restricted campaigns may also require the channel to be on the campaign's allowlist. |
+| A forced streamer is skipped | Confirm the login is live, streaming the requested game, and has the Drops tag when required. |
+| The chosen channels are unexpected | Check `category_sort`, `category_limit`, category order, and `CategoryCampaignOrder`. Restricted campaign allowlists take precedence over a normal category search. |
+| A removed category still affects selection | Refresh only adds streamers; restart the miner to remove already-loaded category channels. |
+| Category messages are missing | Set `category_log_level=logging.INFO` or `logging.DEBUG` and ensure the logger/console threshold permits that level. |
+| Analytics omit channel point changes | Set `track_category_streamer_points=True`; it defaults to `False` for category-only channels. |
+
+#### ANALYTICS_CONFIG
+
+Set `ANALYTICS_CONFIG` to `None` when the web server is not needed. Otherwise,
+provide the keyword arguments for `analytics(...)`, such as `host`, `port`,
+`refresh`, `days_ago`, `password`, and `log_poll_interval`. Analytics storage
+also requires `MINER_CONFIG["enable_analytics"] = True`. See [Analytics](#analytics)
+for configuration and security guidance.
+
+### Local installation
+
+Clone the repository, create an isolated environment, install dependencies, and
+copy the configuration template. Python 3.11 through 3.13 is supported.
+
+```sh
+git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2
+cd Twitch-Channel-Points-Miner-v2
+python3 -m venv venv
+source venv/bin/activate  # Windows PowerShell: .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+mkdir -p config
+cp config.example.py config/config.py
+```
+
+Edit `config/config.py`, then continue to [Starting the miner](#starting-the-miner).
+
+### Starting the miner
+
+When running a clone, point the stable runner at the local configuration
+directory:
+
+```sh
+python -m TwitchChannelPointsMiner.runner --config-dir ./config
+```
+
+Docker images already use this runner and default to `/usr/src/app/config`, so no
+command override is needed. On first authentication the process may require an
+interactive terminal. Cookies, logs, and analytics data are stored separately
+from the configuration and should be persisted as described in [Docker](#docker).
+
+The runner checks `config/config.py` every five seconds. Set
+`TCPM_CONFIG_RELOAD_SECONDS` to change the interval; the minimum is one second.
+
+#### Configuration reload limitations
+
+- New entries in `STREAMERS` are applied without a restart. Removing a streamer
+  does not remove its loaded state, chat connection, or PubSub subscriptions;
+  restart the miner to remove it completely.
+- Changes to `MINE_CONFIG["categories"]` trigger discovery after the watcher
+  detects the edit. Previously discovered channels remain loaded until restart.
+- Changes to existing streamer settings, `MINER_CONFIG`, `ANALYTICS_CONFIG`, and
+  non-category `MINE_CONFIG` options require a restart.
+- Invalid configuration is logged and ignored. The watcher retries after the
+  file changes again.
 
 ### Docker
 
 #### Docker Hub
 Official Docker images are on https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2 for `linux/amd64`, `linux/arm64` and `linux/arm/v7`.
 
-The miner now loads user configuration from a persistent directory:
+The image reads `/usr/src/app/config/config.py`. Create a host `config` directory,
+copy [config.example.py](config.example.py) to `config/config.py`, customize it,
+and mount the directory. The container entrypoint starts the stable runner.
 
-- `config/config.py`: user-owned configuration
+Persist these directories on the host:
 
-When upgrading an existing container, keep the existing `run.py` mount and add
-the config directory mount. On first start the miner converts `run.py` into
-`config/config.py` without modifying `run.py`. After verifying the converted
-configuration, the old `run.py` mount can be removed.
-
-If the config directory is not mounted, the miner prints a migration notice,
-sends it to every configured alert service, and continues to run the existing
-`run.py` unchanged.
-
-These folders are mounted :
-
-- analytics : to save the analytics data
-- cookies : to provide login information
-- logs : to keep logs outside of container
+- `analytics`: analytics history and Drop data
+- `cookies`: saved Twitch authentication
+- `logs`: miner log files
+- `config`: the user-owned configuration
 
 **Example using docker-compose:**
 
@@ -453,8 +537,6 @@ services:
       - ./cookies:/usr/src/app/cookies
       - ./logs:/usr/src/app/logs
       - ./config:/usr/src/app/config
-      # Keep this during the first upgraded start; remove after conversion:
-      - ./run.py:/usr/src/app/run.py:ro
     ports:
       - "5000:5000"
 ```
@@ -466,52 +548,46 @@ docker run \
     -v $(pwd)/cookies:/usr/src/app/cookies \
     -v $(pwd)/logs:/usr/src/app/logs \
     -v $(pwd)/config:/usr/src/app/config \
-    -v $(pwd)/run.py:/usr/src/app/run.py:ro \
     -p 5000:5000 \
     rdavidoff/twitch-channel-points-miner-v2
 ```
 
-`$(pwd)` Could not work on Windows (cmd), please use the absolute path instead, like: `/path/of/your/cookies:/usr/src/app/cookies`.
+`$(pwd)` does not work in Windows Command Prompt. Use absolute host paths there,
+such as `/path/to/cookies:/usr/src/app/cookies`.
 
-On Windows, use absolute host paths for both mounts. For example, mount
-`C:\Absolute\Path\config` at `/usr/src/app/config` and the legacy `run.py` at
-`/usr/src/app/run.py` during conversion.
+On Windows, use absolute host paths. For example, mount
+`C:\Absolute\Path\config` at `/usr/src/app/config`.
 
-New installations can copy `config.example.py` to `config/config.py`, edit it,
-and mount only the config directory. Existing installations may keep `run.py`
-read-only because conversion never changes it. To disable automatic conversion,
-set `TCPM_DISABLE_AUTO_CONVERSION=1`. To use another container path, set
-`TCPM_CONFIG_DIR` and mount that directory.
+For a non-default container path, set `TCPM_CONFIG_DIR` and mount the host
+directory at the same location. Users upgrading from the legacy runner should
+follow [Migrating from run.py](#migrating-from-runpy) once; new installations do
+not need a legacy file.
 
-The miner polls `config/config.py` every five seconds, so a saved change may
-take up to five seconds to be detected. Set `TCPM_CONFIG_RELOAD_SECONDS` to
-change the polling interval (minimum one second).
+Directories that are not mounted are created inside the container and their data
+is lost when the container is removed. On first authentication, run the container
+interactively with `-it` so you can complete the Twitch login.
 
-#### Configuration reload limitations
-
-- New entries in `STREAMERS` are applied without a restart. Removing a streamer
-  from `STREAMERS` does not remove its already-loaded state, chat connection, or
-  PubSub subscriptions; restart the miner to remove it completely.
-- Changes to `MINE_CONFIG["categories"]` trigger category discovery immediately
-  after the configuration is detected. Streamers already discovered from a
-  removed category remain loaded until the miner restarts. Because the runtime
-  still considers them category streamers, watch selection may remain limited
-  to one channel until restart.
-- Changes to existing streamer settings, constructor options, analytics
-  settings, and non-category mining options require a restart.
-- Invalid configuration is logged and ignored. The watcher retries after the
-  file changes again.
-
-If you don't mount the volume for the analytics (or cookies or logs) folder, the folder will be automatically created on the Docker container, and you will lose all the data when it is stopped.
-
-If you don't have a cookie or it's your first time running the script, you will need to login to Twitch and start the container with `-it` args. For multiple accounts, mount a separate config directory and bind a separate analytics port for each container, for example:
+For multiple accounts, give each container separate config, cookie, log, and
+analytics directories, and use a different host port for each analytics server:
 
 ```sh
-docker run --name user1 -v $(pwd)/user1:/usr/src/app/config -p 5001:5000 rdavidoff/twitch-channel-points-miner-v2
+docker run --name user1 -it \
+    -v $(pwd)/user1/config:/usr/src/app/config \
+    -v $(pwd)/user1/cookies:/usr/src/app/cookies \
+    -v $(pwd)/user1/logs:/usr/src/app/logs \
+    -v $(pwd)/user1/analytics:/usr/src/app/analytics \
+    -p 5001:5000 \
+    rdavidoff/twitch-channel-points-miner-v2
 ```
 
 ```sh
-docker run --name user2 -v $(pwd)/user2:/usr/src/app/config -p 5002:5000 rdavidoff/twitch-channel-points-miner-v2
+docker run --name user2 -it \
+    -v $(pwd)/user2/config:/usr/src/app/config \
+    -v $(pwd)/user2/cookies:/usr/src/app/cookies \
+    -v $(pwd)/user2/logs:/usr/src/app/logs \
+    -v $(pwd)/user2/analytics:/usr/src/app/analytics \
+    -p 5002:5000 \
+    rdavidoff/twitch-channel-points-miner-v2
 ```
 
 #### Portainer
@@ -530,9 +606,14 @@ _**Twitch has a limit - you can't watch more than two channels at one time. We t
 Make sure to write the streamers array in order of priority from left to right. If you use `followers=True` you can choose to download the followers sorted by follow date (ASC or DESC).
 
 ## Settings
-Most of the settings are self-explained and are commented on in the example.
-You can watch only two streamers per time. With `priority` settings, you can select which streamers watch by use priority. You can use an array of priority or single item. I suggest using at least one priority from `ORDER`, `POINTS_ASCENDING`, `POINTS_DESCENDING` because, for example, If you set only `STREAK` after catch all watch streak, the script will stop to watch streamers.
-Available values are the following:
+Most settings are documented inline in [config.example.py](config.example.py).
+The `priority` option controls which eligible streamers receive the available
+watch slots. It accepts one `Priority` value or an ordered list. Include at least
+one fallback such as `ORDER`, `POINTS_ASCENDING`, or `POINTS_DESCENDING`; using
+only `STREAK`, for example, leaves no selection rule after available streaks have
+been handled.
+
+Available values:
  - `STREAK` - Catch the watch streak from all streamers
  - `DROPS` - Claim all drops from streamers with drops tags enabled
  - `SUBSCRIBED` - Prioritize streamers you're subscribed to (higher subscription tiers are mined first)
@@ -540,27 +621,35 @@ Available values are the following:
  - `POINTS_ASCENDING` - On top the streamers with the lowest points
  - `POINTS_DESCENDING` - On top the streamers with the highest points
 
-You can combine all priority but keep in mind that use `ORDER` and `POINTS_ASCENDING` in the same settings doesn't make sense.
+Priorities can be combined in order. Avoid contradictory fallback rules such as
+`ORDER` and `POINTS_ASCENDING` in the same list.
 
 ### LoggerSettings
-| Key             	| Type            	| Default                        	                                  | Description                                                                          	                                                                                                  |
-|-----------------	|-----------------	|-------------------------------------------------------------------- |------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `save`          	| bool            	| True                           	                                  | If you want to save logs in file (suggested)                                         	                                                                                                  |
-| `less`          	| bool            	| False                          	                                  | Reduce the logging format and message verbosity [#10](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/10)                                                               |
-| `console_level` 	| level 	        | logging.INFO                   	                                  | Level of logs in terminal - Use logging.DEBUG for more helpful messages.             	                                                                                                  |
-| `console_username`| bool 	            | False                   	                                          | Adds a username to every log line in the console if True. [#602](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/602)|
-| `time_zone`| str 	            | None                   	                                          | Set a specific time zone for console and file loggers. Use tz database names. Example: "America/Denver" https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues/205|
-| `file_level`    	| level 	        | logging.DEBUG                  	                                  | Level of logs in file save - If you think the log file it's too big, use logging.INFO 	                                                                                                  |
-| `emoji`         	| bool            	| For Windows is False else True 	                                  | On Windows, we have a problem printing emoji. Set to false if you have a problem      	                                                                                                  |
-| `colored`         | bool            	| True 	                                                              | If you want to print colored text [#45](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/45) [#82](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/82) |
-| `auto_clear`      | bool            	| True 	                                                              | Create a file rotation handler with interval = 1D and backupCount = 7 [#215](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/215)                                       |
-| `color_palette`   | ColorPalette      | All messages are Fore.RESET except WIN and LOSE bet (GREEN and RED) | Create your custom color palette. Read more above.      	                                                                                                                              |
-| `telegram`        | Telegram          | None                                                                | (Optional) Receive Telegram updates for multiple events list [#233](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/233)                                                           |
-| `discord`         | Discord          | None                                                                 | (Optional) Receive Discord updates for multiple events list [#320](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/320)                                                           |
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `save` | bool | `True` | Save logs to rotating files. |
+| `less` | bool | `False` | Use compact log formatting and shorter messages. |
+| `console_level` | logging level | `logging.INFO` | Minimum level written to the console. |
+| `console_username` | bool | `False` | Include the account username in console and notification messages. |
+| `time_zone` | str or None | `None` | Log time zone, such as `America/Denver`. |
+| `file_level` | logging level | `logging.DEBUG` | Minimum level written to log files. |
+| `emoji` | bool | Platform-dependent | Enable emoji; defaults to disabled on Windows and enabled elsewhere. |
+| `colored` | bool | `False` | Enable colored console output. |
+| `auto_clear` | bool | `True` | Rotate logs daily and retain seven backups. |
+| `color_palette` | ColorPalette | Default palette | Customize colors by event. |
+| `telegram` | Telegram or None | `None` | Send selected events through Telegram. |
+| `discord` | Discord or None | `None` | Send selected events through Discord. |
+| `webhook` | Webhook or None | `None` | Send selected events to a generic HTTP endpoint. |
+| `matrix` | Matrix or None | `None` | Send selected events to a Matrix room. |
+| `pushover` | Pushover or None | `None` | Send selected events through Pushover. |
+| `gotify` | Gotify or None | `None` | Send selected events to a Gotify server. |
 
 #### Color Palette
-Now you can customize the color of the terminal message. We have created a default ColorPalette that provide all the message with `DEFAULT (RESET)` color and the `BET_WIN` and `BET_LOSE` message `GREEN` and `RED` respectively. You can change the colors of all `Events` enum class. The colors allowed are all the Fore color from Colorama: `BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.`
-The script was developed to handle all the human error, lower-case upper case and more, but I want to suggest using the following code-style
+`ColorPalette` customizes console colors by event name. Unspecified events use
+`Fore.RESET`, while prediction wins and losses default to green and red. Values
+may be Colorama constants or case-insensitive color names: `BLACK`, `RED`,
+`GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`, `WHITE`, or `RESET`.
 ```python
 from colorama import Fore
 ColorPalette(
@@ -580,22 +669,22 @@ ColorPalette(
 ```
 
 #### Telegram
-If you want to receive logs update on Telegram, initiate a new Telegram class, else omit this parameter or set as None.
+To receive selected log events through Telegram, configure a `Telegram`
+instance; otherwise omit the option or set it to `None`.
 1. Create a bot with [@BotFather](https://t.me/botfather)
-2. Get you `chat_id` with [@getmyid_bot](https://t.me/getmyid_bot)
+2. Get your `chat_id` with [@getmyid_bot](https://t.me/getmyid_bot)
 
-| Key                	 | Type            	| Default 	| Description                                                        |
-|----------------------- |-----------------	|---------	|------------------------------------------------------------------- |
-| `chat_id`         	 | int        	    |           | Chat ID to send messages @getmyid_bot                              |
-| `token`       	 | string           |        	| Telegram API token @BotFather                                      |
-| `events`   	         | list             |       	| Only these events will be sent to the chat. Array of Event. or str |
-| `disable_notification` | bool             | false   	| Revoke the notification (sound/vibration)                          |
-
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `chat_id` | int | Required | Numeric Telegram chat ID. |
+| `token` | str | Required | Bot token issued by BotFather. |
+| `events` | list | Required | Events to send. |
+| `disable_notification` | bool | `False` | Send without sound or vibration when enabled. |
 
 ```python
 Telegram(
-    chat_id=123456789,
-    token="123456789:shfuihreuifheuifhiu34578347",
+    chat_id=123456789,  # Replace with your numeric chat ID.
+    token="YOUR_BOT_TOKEN",
     events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
                     Events.BET_LOSE, Events.CHAT_MENTION],
     disable_notification=True,
@@ -603,7 +692,8 @@ Telegram(
 ```
 
 #### Discord
-If you want to receive log updates on Discord initialize a new Discord class, else leave omit this parameter or set it as None [YT Video](https://www.youtube.com/watch?v=fKksxz2Gdnc)
+To receive selected log events through Discord, configure a `Discord` instance;
+otherwise omit the option or set it to `None`.
 1. Go to the Server you want to receive updates
 2. Click "Edit Channel"
 3. Click "Integrations"
@@ -613,27 +703,27 @@ If you want to receive log updates on Discord initialize a new Discord class, el
 7. Click on "Copy Webhook URL"
 
 
-| Key                	 | Type            	| Default 	| Description                                                        |
-|----------------------- |---------------------	|--------------	|------------------------------------------------------------------- |
-| `webhook_api`          | string        	|           	| Discord webhook URL                                                |
-| `events`   	         | list             	|       	| Only these events will be sent to the chat. Array of Event. or str |
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `webhook_api` | str | Required | Discord webhook URL. |
+| `events` | list | Required | Events to send. |
 
 ```python
 Discord(
-   webhook_api="https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J",
+   webhook_api="https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
    events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
                     Events.BET_LOSE, Events.CHAT_MENTION],
 )
 ```
 
 #### Generic Webhook
-You can use generic webhook
+Use `Webhook` to send selected events to an HTTP endpoint.
 
-| Key                	 | Type            	| Default 	| Description                                                        |
-|----------------------- |------------------|-----------|------------------------------------------------------------------- |
-| `endpoint`             | string        	|           | webhook url                                                        |
-| `method`               | string        	|           | `POST` or `GET`                                                    |
-| `events`   	         | list             |       	| Only these events will be sent to the endpoint. Array of Event. or str |
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `endpoint` | str | Required | Destination URL. |
+| `method` | str | Required | `POST` or `GET`. |
+| `events` | list | Required | Events to send. |
 
 ```python
 Webhook(
@@ -651,6 +741,7 @@ Webhook(
  - `GAIN_FOR_RAID`
  - `GAIN_FOR_CLAIM`
  - `GAIN_FOR_WATCH`
+ - `GAIN_FOR_WATCH_STREAK`
  - `BET_WIN`
  - `BET_LOSE`
  - `BET_REFUND`
@@ -664,42 +755,47 @@ Webhook(
  - `DROP_CLAIM`
  - `DROP_STATUS`
  - `CHAT_MENTION`
+ - `CONFIGURATION`
 
 ### StreamerSettings
-| Key                	| Type        	| Default                        	| Description                                                                                                                                          	                                                                            |
-|--------------------	|-------------	|--------------------------------	|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `make_predictions` 	| bool        	| True                           	| Choose if you want to make predictions / bet or not                                                                                                  	                                                                            |
-| `follow_raid`      	| bool        	| True                           	| Choose if you want to follow raid +250 points                                                                                                        	                                                                            |
-| `claim_drops`      	| bool        	| True                           	| If this value is True, the script will increase the watch-time for the current game. With this, you can claim the drops from Twitch Inventory [#21](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/21)         |
-| `claim_moments`      	| bool        	| True                           	| If set to True, [moments](https://help.twitch.tv/s/article/moments) will be claimed when available         |
-| `watch_streak`     	| bool        	| True                           	| Choose if you want to change a priority for these streamers and try to catch the Watch Streak event [#11](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/11)                                                   |
-| `community_goals`    | bool          | False                             | If True, contributes the max channel points per stream to the streamers' community challenge goals |
-| `bet`              	| BetSettings 	|  	                                | Rules to follow for the bet                                                                                                                                                                                                       |
-| `chat` 	            | ChatPresence  | ONLINE    	                    | Join IRC-Chat to appear online in chat and attempt to get StreamElements channel points and increase view-time  [#47](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/47)                                       |
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `make_predictions` | bool | `True` | Participate in channel-point predictions. |
+| `follow_raid` | bool | `True` | Follow eligible raids. |
+| `claim_drops` | bool | `True` | Accumulate Drop watch progress and claim available Drops. |
+| `claim_moments` | bool | `True` | Claim available [Moments](https://help.twitch.tv/s/article/moments). |
+| `watch_streak` | bool | `True` | Prioritize available watch-streak rewards. |
+| `community_goals` | bool | `False` | Contribute the maximum allowed points to community goals. |
+| `bet` | BetSettings | Default settings | Configure prediction strategy, limits, filters, and timing. |
+| `chat` | ChatPresence | `ONLINE` | Control when the miner joins IRC chat. |
 
 Allowed values for `chat` are:
 - `ALWAYS` Join in IRC chat and never leave
 - `NEVER` Never join IRC chat
-- `ONLINE` Partecipate to IRC chat if the streamer is online (leave if offline)
-- `OFFLINE` Partecipate to IRC chat if the streamer is offline (leave if online)
+- `ONLINE` Participate in IRC chat while the streamer is online (leave when offline)
+- `OFFLINE` Participate in IRC chat while the streamer is offline (leave when online)
 
 ### BetSettings
-| Key                	| Type            	| Default 	| Description                                                                                                    	                                                                          |
-|--------------------	|-----------------	|---------	|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `strategy`         	| Strategy        	| SMART   	| Choose your strategy! See below for more info                                                                  	                                                                          |
-| `percentage`       	| int             	| 5       	| Place the x% of your channel points                                                                            	                                                                          |
-| `percentage_gap`   	| int             	| 20      	| Gap difference between outcomesA and outcomesB (for SMART stragegy)                                            	                                                                          |
-| `max_points`       	| int             	| 50000   	| If the x percentage of your channel points is GT bet_max_points set this value                                 	                                                                          |
-| `stealth_mode`     	| bool            	| False   	| If the calculated amount of channel points is GT the highest bet, place the highest value minus 1-2 points [#33](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/33)      |
-| `delay_mode` 	        | DelayMode         	| FROM_END	| Define how is calculating the waiting time before placing a bet |
-| `delay` 	        | float             	| 6     	| Value to be used to calculate bet delay depending on `delay_mode` value |
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `strategy` | Strategy | `SMART` | Prediction outcome-selection strategy. |
+| `percentage` | int | `5` | Percentage of the current balance to place. |
+| `percentage_gap` | int | `20` | Percentage-point gap used by the SMART strategy. |
+| `max_points` | int | `50000` | Maximum calculated prediction amount. |
+| `minimum_points` | int | `0` | Balance that must be exceeded before placing a prediction. |
+| `stealth_mode` | bool | `False` | Keep a large prediction just below the current highest prediction. |
+| `filter_condition` | FilterCondition or None | `None` | Optional condition that must pass before placing a prediction. |
+| `delay_mode` | DelayMode | `FROM_END` | How prediction timing is calculated. |
+| `delay` | float | `6` | Timing value interpreted according to `delay_mode`. |
 
 #### Bet strategy
 
 - **MOST_VOTED**: Select the option most voted based on users count
 - **HIGH_ODDS**: Select the option with the highest odds
 - **PERCENTAGE**: Select the option with the highest percentage based on odds (It's the same that show Twitch) - Should be the same as select LOWEST_ODDS
-- **SMART_MONEY**: Select the option with the highest points placed. [#331](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/331)
+- **SMART_MONEY**: Select the option with the highest points placed.
 - **SMART**: If the majority in percent chose an option, then follow the other users, otherwise select the option with the highest odds
 - **NUMBER_1**: Always select the 1st option, BLUE side if there are only two options
 - **NUMBER_2**: Always select the 2nd option, PINK side if there are only two options
@@ -712,20 +808,22 @@ Allowed values for `chat` are:
 
 ![Screenshot](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/prediction.png)
 
-Here a concrete example:
+Here is a concrete example:
 
-- **MOST_VOTED**: 21 Users have select **'over 7.5'**, instead of 9 'under 7.5'
+- **MOST_VOTED**: 21 users selected **“over 7.5”**, compared with 9 for “under 7.5.”
 - **HIGH_ODDS**: The highest odd is 2.27 on **'over 7.5'** vs 1.79 on 'under 7.5'
 - **PERCENTAGE**: The highest percentage is 56% for **'under 7.5'**
 - **SMART**: Calculate the percentage based on the users. The percentages are: 'over 7.5': 70% and 'under 7.5': 30%. If the difference between the two percentages is higher than `percentage_gap` select the highest percentage, else the highest odds.
 
-In this case if percentage_gap = 20 ; 70-30 = 40 > percentage_gap, so the bot will select 'over 7.5'
-### FilterCondition
-| Key         	| Type        	| Default 	| Description                                                                      	|
-|-------------	|-------------	|---------	|----------------------------------------------------------------------------------	|
-| `by`       	| OutcomeKeys 	| None    	| Key to apply the filter                                                          	|
-| `where`      	| Condition   	| None    	| Condition that should match for place bet                                        	|
-| `value`     	| number      	| None    	| Value to compare                                                                 	|
+With `percentage_gap=20`, the 40-point difference exceeds the threshold, so the
+miner selects “over 7.5.”
+#### FilterCondition
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `by` | OutcomeKeys | `None` | Prediction value to evaluate. |
+| `where` | Condition | `None` | Comparison operator. |
+| `value` | number | `None` | Comparison target. |
 
 Allowed values for `by` are:
 - `PERCENTAGE_USERS` (no sum) [Would never want a sum as it'd always be 100%]
@@ -739,18 +837,30 @@ Allowed values for `by` are:
 
 Allowed values for `where` are: `GT, LT, GTE, LTE`
 
-#### Example
-- If you want to place the bet ONLY if the total of users participants in the bet is greater than 200
-`FilterCondition(by=OutcomeKeys.TOTAL_USERS, where=Condition.GT, value=200)`
-- If you want to place the bet ONLY if the winning odd of your decision is greater than or equal to 1.3
-`FilterCondition(by=OutcomeKeys.ODDS, where=Condition.GTE, value=1.3)`
-- If you want to place the bet ONLY if the highest bet is lower than 2000
-`FilterCondition(by=OutcomeKeys.TOP_POINTS, where=Condition.LT, value=2000)`
+##### Example
 
-### DelayMode
+Require more than 200 total participants:
+
+```python
+FilterCondition(by=OutcomeKeys.TOTAL_USERS, where=Condition.GT, value=200)
+```
+
+Require the selected outcome's odds to be at least 1.3:
+
+```python
+FilterCondition(by=OutcomeKeys.ODDS, where=Condition.GTE, value=1.3)
+```
+
+Require the largest prediction to be below 2,000 points:
+
+```python
+FilterCondition(by=OutcomeKeys.TOP_POINTS, where=Condition.LT, value=2000)
+```
+
+#### DelayMode
 
 - **FROM_START**: Will wait `delay` seconds from when the bet was opened
-- **FROM_END**: Will until there is `delay` seconds left to place the bet
+- **FROM_END**: Wait until `delay` seconds remain in the prediction window
 - **PERCENTAGE**: Will place the bet when `delay` percent of the set timer is elapsed
 
 Here's a concrete example. Let's suppose we have a bet that is opened with a timer of 10 minutes:
@@ -760,22 +870,40 @@ Here's a concrete example. Let's suppose we have a bet that is opened with a tim
 - **PERCENTAGE** with `delay=0.2`: The bet will be placed when the timer went down by 20% (so 2mins after the bet is opened)
 
 ## Analytics
-We have recently introduced a little frontend where you can show with a chart you points trend. The script will spawn a Flask web-server on your machine where you can select binding address and port.
-The chart provides some annotation to handle the prediction and watch strike events. Usually annotation are used to notice big increase / decrease of points. If you want to can disable annotations.
-On each (x, y) points Its present a tooltip that show points, date time and reason of points gained / lost. This web page was just a funny idea, and it is not intended to use for a professional usage.
-If you want you can toggle the dark theme with the dedicated checkbox.
+
+The optional analytics server provides a browser-based view of channel-point
+history, Drops, and miner logs. The points chart includes tooltips with the
+balance, timestamp, and gain or spend reason. Annotations highlight predictions,
+watch streaks, and other significant changes, and can be disabled in the page.
+The interface also includes light and dark themes.
 
 | Light theme | Dark theme |
 | ----------- | ---------- |
 | ![Light theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-light.png) | ![Dark theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-dark.png) |
 
-For use this feature just call the `analytics()` method before start mining. Read more at: [#96](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/96)
-The chart will be autofreshed each `refresh` minutes. The log viewer polls every `log_poll_interval` seconds (default `5`; accepted range `1` to `180`). To connect from another machine, bind to `0.0.0.0` and provide `password="a-strong-password"`; remote binds without a password are rejected. Sign in with your Twitch username and that password. Because the built-in server uses plain HTTP, expose it only on a trusted network or behind an HTTPS reverse proxy. With the `days_ago` arg you can select how many days you want to show by default in your analytics graph.
+Enable storage with `MINER_CONFIG["enable_analytics"] = True` and configure the
+server through `ANALYTICS_CONFIG`. The chart refreshes every `refresh` minutes.
+The log viewer polls every `log_poll_interval` seconds (default `5`; accepted
+range `1` to `180`), and `days_ago` controls the chart's initial time range.
+
+For access from another machine, bind to `0.0.0.0` and provide a strong
+`password`; remote binds without a password are rejected. Sign in with the
+configured Twitch username and analytics password. The built-in server uses
+plain HTTP, so expose it only on a trusted network or behind an HTTPS reverse
+proxy. Background and design context are available in [issue #96](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/96).
 ```python
-from TwitchChannelPointsMiner import TwitchChannelPointsMiner
-twitch_miner = TwitchChannelPointsMiner("your-twitch-username")
-twitch_miner.analytics(host="127.0.0.1", port=5000, refresh=5, days_ago=7, log_poll_interval=5)   # Analytics web-server
-twitch_miner.mine(followers=True, blacklist=["user1", "user2"])
+MINER_CONFIG = {
+    "username": "your-twitch-username",
+    "enable_analytics": True,
+}
+
+ANALYTICS_CONFIG = {
+    "host": "127.0.0.1",
+    "port": 5000,
+    "refresh": 5,
+    "days_ago": 7,
+    "log_poll_interval": 5,
+}
 ```
 
 ### Analytics security and HTTPS reverse proxy
@@ -801,27 +929,166 @@ server {
 }
 ```
 
-Run `twitch_miner.analytics(host="127.0.0.1", password="a-strong-password")` behind that proxy. Restrict the proxy further with a firewall, VPN, or IP allowlist where possible. nginx and certificate provisioning must be configured for your operating system and domain; the example only shows the relevant proxy boundary.
+Set `ANALYTICS_CONFIG={"host": "127.0.0.1", "password": "a-strong-password"}`
+behind that proxy. Restrict the proxy further with a firewall, VPN, or IP
+allowlist where possible. nginx and certificate provisioning must be configured
+for your operating system and domain; the example only shows the relevant proxy
+boundary.
 
-### `enable_analytics` option in `twitch_minerfile` toggles Analytics needed for the `analytics()` method
+### Enabling analytics storage
 
-Disabling Analytics significantly reduces memory consumption and saves some disk space by not creating and writing `/analytics/*.json`.
+Disabling analytics reduces memory and disk use because the miner does not create
+or update analytics JSON files.
 
-Set this option to `True` if you need Analytics. Otherwise set this option to `False` (default value).
+Set `MINER_CONFIG["enable_analytics"]` to `True` when using the analytics server.
+Otherwise leave it `False` (the default).
 
-## Migrating from an old repository (the original one):
-If you already have a `twitch-cookies.pkl` and you don't want to log in again, please create a `cookies/` folder in the current directory and then copy the `.pkl` file with a new name `your-twitch-username.pkl`. The miner safely migrates valid legacy cookie files to its JSON format and restricts them to the owner on first load.
+## Logs
+
+Logging is controlled by `LoggerSettings` in `MINER_CONFIG`. The default full
+format includes timestamps, levels, function names, streamer state, point gains,
+Drop activity, and prediction decisions. Set `less=True` for shorter console
+messages while retaining the important event details.
+
+### Full format
+
+```text
+14/07/26 12:00:00 - INFO - [run]: 💣 Start session: 'session-id'
+14/07/26 12:00:02 - INFO - [set_online]: 🥳 Streamer(username=streamer-name, channel_id=0000000, channel_points=12000) is Online!
+14/07/26 12:05:00 - INFO - [on_message]: 🚀 +10 → Streamer(username=streamer-name, channel_id=0000000, channel_points=12010) - Reason: WATCH.
+14/07/26 12:06:00 - INFO - [claim_bonus]: 🎁 Claiming the bonus for Streamer(username=streamer-name, channel_id=0000000, channel_points=12010)!
 ```
-.
-+-- run.py
-+-- cookies
-|   +-- your-twitch-username.pkl
+
+### Compact format
+
+```text
+14/07 12:00:00 - 💣 Start session: 'session-id'
+14/07 12:00:02 - 🥳 streamer-name (12k points) is Online!
+14/07 12:05:00 - 🚀 +10 → streamer-name (12k points) - Reason: WATCH.
+14/07 12:06:00 - 🎁 Claiming the bonus for streamer-name (12k points)!
 ```
+
+### Graceful-shutdown report
+
+During a controlled shutdown—such as `Ctrl+C` or Docker's normal stop signal—the
+miner summarizes session duration, the log path, prediction results, and points
+gained or spent per streamer and event type. A hard kill, host crash, or power
+loss cannot produce this report.
+
+```text
+14/07/26 18:00:00 - 🛑 Ending session: 'session-id'
+14/07/26 18:00:00 - 📄 Logs file: /path/to/logs/username.timestamp.log
+14/07/26 18:00:00 - ⌛ Duration 6:00:00
+14/07/26 18:00:00 - 🤖 streamer-name (15k points), Total points gained: 3k
+14/07/26 18:00:00 - 💰 CLAIM(4 times, 200 gained), WATCH(24 times, 240 gained)
+```
+
+## Migrating from run.py
+
+Existing Docker users can let the image convert a conventional legacy runner on
+first startup. The conversion preserves imports and expressions while splitting
+the old calls into the four current configuration values.
+
+### Automatic Docker migration
+
+1. Back up the existing `run.py` and container configuration.
+2. Create an empty, persistent host directory named `config`.
+3. During the first upgraded start, mount both the directory and the old runner:
+
+   ```yaml
+   volumes:
+     - ./config:/usr/src/app/config
+     - ./run.py:/usr/src/app/run.py:ro
+   ```
+
+4. Recreate the container. When `/usr/src/app/config/config.py` is absent, the
+   entrypoint converts `/usr/src/app/run.py`, validates the result, and starts
+   with the new configuration.
+5. Check the startup output, inspect `config/config.py`, and confirm the account,
+   streamers, mining options, notifications, and analytics server behave as
+   expected.
+6. Remove the `run.py` mount and recreate the container again. Keep only the
+   persistent config directory for future upgrades.
+
+The converter never modifies the source runner and refuses to overwrite an
+existing `config/config.py`. It creates the new file with owner-only permissions
+and writes `config/.converted-from-run-py`, containing the source path and SHA-256
+hash, as a migration record.
+
+### What converts automatically
+
+The legacy file must contain exactly one `TwitchChannelPointsMiner(...)` call,
+exactly one `.mine(...)` call, and no more than one `.analytics(...)` call. The
+converter maps them as follows:
+
+| Legacy expression | New configuration value |
+|---|---|
+| Arguments to `TwitchChannelPointsMiner(...)` | `MINER_CONFIG` |
+| First positional argument to `.mine(...)` | `STREAMERS` |
+| Keyword arguments to `.mine(...)` | `MINE_CONFIG` |
+| Arguments to `.analytics(...)` | `ANALYTICS_CONFIG`, or `None` when absent |
+
+Imports needed by enums and settings objects are retained. Expanded `**kwargs`,
+extra positional arguments, multiple miner/mine calls, or syntax errors cannot
+be converted safely.
+
+If conversion fails, any incomplete output is removed, a migration warning is
+printed, and the original runner executes unchanged. Correct the legacy file and
+remove any partial config before retrying, or create `config/config.py` manually
+from [config.example.py](config.example.py). Set
+`TCPM_DISABLE_AUTO_CONVERSION=1` only when you intentionally need to postpone
+conversion; the container will continue using the mounted legacy runner.
+
+To convert without starting the miner, run the image's runner with
+`--convert-only` while mounting both paths. This writes the converted config but
+does not launch mining. Conversion still refuses to replace an existing config.
+
+```sh
+docker run --rm \
+    -v $(pwd)/config:/usr/src/app/config \
+    -v $(pwd)/run.py:/usr/src/app/run.py:ro \
+    rdavidoff/twitch-channel-points-miner-v2 --convert-only
+```
+
+## Legacy cookie migration (optional)
+
+This section applies only if you are upgrading from an older version or the
+original miner and already have a working `twitch-cookies.pkl`. New users can
+skip it—the miner creates the account cookie file after normal authentication.
+
+The current account file is `cookies/<twitch-username>.pkl`, where the filename
+must match `MINER_CONFIG["username"]`. Despite the historical `.pkl` extension,
+new files contain validated JSON rather than Python pickle data.
+
+To reuse an old cookie:
+
+1. Stop the miner.
+2. Back up the old cookie file. Treat it like a password: it contains an
+   authentication token and must not be committed, shared, or included in logs.
+3. Create the persistent `cookies` directory if it does not exist.
+4. Copy and rename the old file to match the configured Twitch login:
+
+   ```sh
+   mkdir -p cookies
+   cp /path/to/twitch-cookies.pkl cookies/your-twitch-username.pkl
+   ```
+
+5. Start the miner normally. If the file contains the supported legacy
+   data-only cookie list, the miner loads it with a restricted parser, validates
+   its structure, rewrites it as JSON, and limits its permissions to the owner.
+
+For Docker, the host directory must be mounted at `/usr/src/app/cookies` as shown
+in [Docker](#docker). The same per-account filename rule applies inside the
+mounted directory. Use a separate cookie and config directory for each account.
+
+The legacy cookie may no longer be accepted by Twitch. If the miner reports an
+invalid or unsafe file, remove it and authenticate again. If Twitch rejects a
+previously valid saved token, the miner clears the cached login and restarts so
+that reauthentication can occur; follow the instructions printed in the logs.
 
 ## Windows
-Other users have find multiple problems on Windows. Suggestions are:
- - Stop using Windows :stuck_out_tongue_closed_eyes:
- - Suppress the emoji in logs with `logger_settings=LoggerSettings(emoji=False)`
+Windows users who encounter terminal rendering problems can disable emoji with
+`LoggerSettings(emoji=False)` inside `MINER_CONFIG["logger_settings"]`.
 
 Other useful info can be found here:
 - https://github.com/gottagofaster236/Twitch-Channel-Points-Miner/issues/31
@@ -855,23 +1122,23 @@ pkg install python-pandas
 
 `cd Twitch-Channel-Points-Miner-v2`
 
-**6. Configure your miner on your preferences by typing**
+**6. Create and edit the configuration**
 
-`nano example.py`
+```sh
+mkdir -p config
+cp config.example.py config/config.py
+nano config/config.py
+```
 
-**7. Rename file name (optional)**
-
-`mv example.py run.py`
-
-**8. Install packages**
+**7. Install packages**
 ```
 pip install -r requirements.txt
 pip install Twitch-Channel-Points-Miner-v2
 ```
 
-**9. Run the miner!**
+**8. Run the miner!**
 
-`python run.py`
+`python -m TwitchChannelPointsMiner.runner --config-dir ./config`
 
 Read more at [#92](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/92) [#76](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/76)
 
