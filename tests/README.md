@@ -81,6 +81,6 @@ cannot reasonably support the case.
 ## Continuous integration
 
 [The Tests workflow](../.github/workflows/tests.yml) runs the complete suite on
-Python 3.11, 3.12, and 3.13 for pushes and pull requests. A change should pass
-locally before it is submitted, but the workflow remains the final check across
-all supported Python versions.
+Python 3.11, 3.12, 3.13, and 3.14 for pushes and pull requests. A change should
+pass locally before it is submitted, but the workflow remains the final check
+across all supported Python versions.

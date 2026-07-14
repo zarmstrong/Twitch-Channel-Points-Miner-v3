@@ -45,6 +45,7 @@ setuptools.setup(
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Operating System :: OS Independent",
         "Topic :: Utilities",
         "Topic :: Software Development :: Libraries :: Python Modules",
@@ -53,5 +54,5 @@ setuptools.setup(
         "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
         "Natural Language :: English",
     ],
-    python_requires=">=3.11,<3.14",
+    python_requires=">=3.11,<3.15",
 )

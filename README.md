@@ -461,7 +461,7 @@ for configuration and security guidance.
 ### Local installation
 
 Clone the repository, create an isolated environment, install dependencies, and
-copy the configuration template. Python 3.11 through 3.13 is supported.
+copy the configuration template. Python 3.11 through 3.14 is supported.
 
 ```sh
 git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2
