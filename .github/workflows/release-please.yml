@@ -1,0 +1,79 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release_please:
+    name: Create release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+
+  detect_code_changes:
+    name: Detect released code changes
+    needs: release_please
+    if: needs.release_please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      code_changed: ${{ steps.changes.outputs.code_changed }}
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release_please.outputs.tag_name }}
+          fetch-depth: 0
+
+      - name: Compare with previous release
+        id: changes
+        env:
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+        shell: bash
+        run: |
+          previous_tag=$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null || true)
+          code_changed=false
+
+          if [[ -z "${previous_tag}" ]]; then
+            code_changed=true
+          else
+            while IFS= read -r file; do
+              case "${file}" in
+                TwitchChannelPointsMiner/__init__.py)
+                  # Release Please updates only the package version here.
+                  ;;
+                TwitchChannelPointsMiner/*.py|Dockerfile|requirements.txt|assets/*|config.example.py|example.py|twitchdrops_app_scraper.py)
+                  code_changed=true
+                  break
+                  ;;
+              esac
+            done < <(git diff --name-only "${previous_tag}" "${RELEASE_TAG}")
+          fi
+
+          echo "code_changed=${code_changed}" >> "${GITHUB_OUTPUT}"
+
+  publish_docker:
+    name: Publish Docker image
+    needs:
+      - release_please
+      - detect_code_changes
+    if: needs.detect_code_changes.outputs.code_changed == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/deploy-docker.yml
+    with:
+      ref: ${{ needs.release_please.outputs.tag_name }}
+    secrets: inherit

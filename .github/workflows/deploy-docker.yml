@@ -1,11 +1,12 @@
-name: deploy-docker
+name: Publish Docker image
 
 on:
-  push:
-    # branches: [master]
-    tags:
-      - '*'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git tag or commit to publish
+        required: true
+        type: string
 
 env:
   DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'rdavidoff' }}
@@ -17,6 +18,8 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -36,7 +39,7 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
           tags: |
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags') }}
+            type=semver,pattern={{version}},value=${{ inputs.ref }}
             type=raw,value=latest
 
       - name: Build and push AMD64, ARM64, ARMv7

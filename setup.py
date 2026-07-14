@@ -29,7 +29,7 @@ setuptools.setup(
     install_requires=[
         "requests==2.32.5",
         "websocket-client==1.7.0",
-        "python-dateutil==2.8.2",
+        "python-dateutil==2.9.0.post0",
         "emoji==2.10.1",
         "millify==0.1.1",
         "colorama==0.4.6",

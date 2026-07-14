@@ -998,7 +998,7 @@ the old calls into the four current configuration values.
    ```yaml
    volumes:
      - ./config:/usr/src/app/config
-     - ./run.py:/usr/src/app/run.py:ro
+     - ./run.py:/usr/src/app/run.py
    ```
 
 4. Recreate the container. When `/usr/src/app/config/config.py` is absent, the
@@ -1010,10 +1010,11 @@ the old calls into the four current configuration values.
 6. Remove the `run.py` mount and recreate the container again. Keep only the
    persistent config directory for future upgrades.
 
-The converter never modifies the source runner and refuses to overwrite an
-existing `config/config.py`. It creates the new file with owner-only permissions
-and writes `config/.converted-from-run-py`, containing the source path and SHA-256
-hash, as a migration record.
+After a successful conversion, the converter renames the legacy runner to
+`run.py.bak` so it cannot be mistaken for the active configuration. It refuses
+to overwrite either an existing `config/config.py` or `run.py.bak`. The new
+configuration has owner-only permissions, and `config/.converted-from-run-py`
+records the source path and SHA-256 hash.
 
 ### What converts automatically
 
@@ -1046,7 +1047,7 @@ does not launch mining. Conversion still refuses to replace an existing config.
 ```sh
 docker run --rm \
     -v $(pwd)/config:/usr/src/app/config \
-    -v $(pwd)/run.py:/usr/src/app/run.py:ro \
+    -v $(pwd)/run.py:/usr/src/app/run.py \
     rdavidoff/twitch-channel-points-miner-v2 --convert-only
 ```
 

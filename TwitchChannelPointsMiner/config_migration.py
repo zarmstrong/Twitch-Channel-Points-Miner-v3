@@ -113,8 +113,11 @@ def convert_runner_source(source, source_name="run.py"):
 def convert_runner(runner_path, config_path):
     runner = Path(runner_path)
     config = Path(config_path)
+    backup = runner.with_name(runner.name + ".bak")
     if config.exists():
         raise ConfigMigrationError(f"Refusing to overwrite existing {config}")
+    if backup.exists():
+        raise ConfigMigrationError(f"Refusing to overwrite existing {backup}")
     converted = convert_runner_source(
         runner.read_text(encoding="utf-8"), source_name=runner.name
     )
@@ -133,8 +136,15 @@ def convert_runner(runner_path, config_path):
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
-    digest = hashlib.sha256(runner.read_bytes()).hexdigest()
-    config.with_name(".converted-from-run-py").write_text(
-        f"source={runner.resolve()}\nsha256={digest}\n", encoding="utf-8"
-    )
+    marker = config.with_name(".converted-from-run-py")
+    try:
+        digest = hashlib.sha256(runner.read_bytes()).hexdigest()
+        marker.write_text(
+            f"source={runner.resolve()}\nsha256={digest}\n", encoding="utf-8"
+        )
+        runner.rename(backup)
+    except Exception:
+        marker.unlink(missing_ok=True)
+        config.unlink(missing_ok=True)
+        raise
     return config
