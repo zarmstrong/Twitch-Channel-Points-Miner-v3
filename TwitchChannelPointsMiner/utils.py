@@ -171,6 +171,19 @@ def init2dict(content):
     return dict(re.findall(r"""__([a-z]+)__ = "([^"]+)""", content))
 
 
+def is_newer_version(candidate, current):
+    """Return whether a SemVer candidate is newer than the current version."""
+    version_pattern = r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$"
+    candidate_match = re.match(version_pattern, candidate)
+    current_match = re.match(version_pattern, current)
+    if candidate_match is None or current_match is None:
+        return False
+
+    candidate_parts = tuple(int(part) for part in candidate_match.groups())
+    current_parts = tuple(int(part) for part in current_match.groups())
+    return candidate_parts > current_parts
+
+
 def check_versions():
     try:
         current_version = init2dict(read("__init__.py"))

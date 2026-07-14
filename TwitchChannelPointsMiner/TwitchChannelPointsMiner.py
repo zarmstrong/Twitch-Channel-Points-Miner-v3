@@ -35,6 +35,7 @@ from TwitchChannelPointsMiner.utils import (
     check_versions,
     get_user_agent,
     internet_connection_available,
+    is_newer_version,
     set_default_settings,
 )
 
@@ -199,7 +200,7 @@ class TwitchChannelPointsMiner:
             logger.error(
                 "Unable to detect if you have the latest version of this script"
             )
-        elif current_version != github_version:
+        elif is_newer_version(github_version, current_version):
             logger.info(f"You are running version {current_version} of this script")
             logger.info(f"The latest version on GitHub is {github_version}")
 
