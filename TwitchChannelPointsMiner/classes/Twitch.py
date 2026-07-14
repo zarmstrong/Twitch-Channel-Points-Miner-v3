@@ -31,7 +31,12 @@ from TwitchChannelPointsMiner.classes.Exceptions import (
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
 )
-from TwitchChannelPointsMiner.classes.Settings import Events, Priority, Settings
+from TwitchChannelPointsMiner.classes.Settings import (
+    Events,
+    FollowersOrder,
+    Priority,
+    Settings,
+)
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
     CLIENT_ID,
@@ -679,6 +684,29 @@ class Twitch(object):
             raise StreamerDoesNotExistException
         else:
             return json_response["data"]["user"]["id"]
+
+    def get_followers(
+        self, limit: int = 100, order: FollowersOrder = FollowersOrder.ASC
+    ):
+        json_data = copy.deepcopy(GQLOperations.ChannelFollows)
+        json_data["variables"] = {"limit": limit, "order": str(order)}
+        has_next = True
+        last_cursor = ""
+        follows = []
+        while has_next is True:
+            json_data["variables"]["cursor"] = last_cursor
+            json_response = self.post_gql_request(json_data)
+            try:
+                follows_response = json_response["data"]["user"]["follows"]
+                last_cursor = None
+                for follow in follows_response["edges"]:
+                    follows.append(follow["node"]["login"].lower())
+                    last_cursor = follow["cursor"]
+
+                has_next = follows_response["pageInfo"]["hasNextPage"]
+            except KeyError:
+                return []
+        return follows
 
     def __normalize_category(self, category: str) -> str:
         if category is None:
