@@ -1922,6 +1922,7 @@ class Twitch(object):
 
     def send_minute_watched_events(self, streamers, priority, chunk_size=3):
         while self.running:
+            iteration_started_at = time.time()
             try:
                 streamers_index = [
                     i
@@ -2271,6 +2272,14 @@ class Twitch(object):
                     self.__chuncked_sleep(20, chunk_size=chunk_size)
             except Exception:
                 logger.error("Exception raised in send minute watched", exc_info=True)
+            finally:
+                # Early failures use ``continue`` and skip the per-stream sleep.
+                # Keep the watcher from hammering Twitch when an upstream request
+                # or persisted query fails.
+                self.__chuncked_sleep(
+                    20 - (time.time() - iteration_started_at),
+                    chunk_size=chunk_size,
+                )
 
     # === CHANNEL POINTS / PREDICTION === #
     # Load the amount of current points for a channel, check if a bonus is available
