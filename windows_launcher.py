@@ -53,6 +53,7 @@ def main():
             str(config_dir),
             "--legacy-runner",
             str(application_dir / "run.py"),
+            *sys.argv[1:],
         ]
     )
 

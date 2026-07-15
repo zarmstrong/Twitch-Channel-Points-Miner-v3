@@ -27,3 +27,31 @@ def test_application_directory_uses_source_directory(monkeypatch):
     assert windows_launcher.application_directory() == Path(
         windows_launcher.__file__
     ).resolve().parent
+
+
+def test_main_forwards_command_line_arguments(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text("", encoding="utf-8")
+    runner_calls = []
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        windows_launcher, "runner_main", lambda argv: runner_calls.append(argv) or 0
+    )
+    monkeypatch.setattr(
+        windows_launcher.sys,
+        "argv",
+        ["TwitchChannelPointsMiner.exe", "--convert-only"],
+    )
+
+    assert windows_launcher.main() == 0
+    assert runner_calls == [
+        [
+            "--config-dir",
+            str(config_dir),
+            "--legacy-runner",
+            str(tmp_path / "run.py"),
+            "--convert-only",
+        ]
+    ]
