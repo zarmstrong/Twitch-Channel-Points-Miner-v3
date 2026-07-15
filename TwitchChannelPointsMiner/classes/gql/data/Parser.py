@@ -884,7 +884,7 @@ class Parser:
             with JsonParentContext("user"):
                 return Drops.DropCampaignDetailsResponse(
                     campaign=parse_expected_value(
-                        user, "campaign", drop_campaign_details_parser
+                        user, "dropCampaign", drop_campaign_details_parser
                     ),
                 )
 

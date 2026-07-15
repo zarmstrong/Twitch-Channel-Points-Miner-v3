@@ -14,4 +14,4 @@ class PlaybackAccessTokenResponse:
         self.authorization = authorization
 
     def __repr__(self):
-        return f"StreamPlaybackAccessToken({self.__dict__})"
+        return f"PlaybackAccessTokenResponse({self.__dict__})"

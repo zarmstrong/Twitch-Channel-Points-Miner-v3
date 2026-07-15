@@ -15,8 +15,13 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
 )
 from TwitchChannelPointsMiner.classes.gql.Integration import GQL
 from TwitchChannelPointsMiner.classes.gql.data.Parser import (
+    Parser,
     expect_int,
     expect_number,
+)
+from TwitchChannelPointsMiner.classes.gql.data.response.PlaybackAccessToken import (
+    Authorization,
+    PlaybackAccessTokenResponse,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.utils import AttemptStrategy
@@ -64,6 +69,39 @@ def test_expect_number_rejects_non_numeric_json_values(value):
 def test_expect_number_accepts_json_ints_and_floats():
     assert expect_number(2) == 2.0
     assert expect_number(1.5) == 1.5
+
+
+def test_playback_access_token_repr_uses_class_name():
+    response = PlaybackAccessTokenResponse("value", "signature", Authorization(False, None))
+
+    assert repr(response).startswith("PlaybackAccessTokenResponse(")
+
+
+def test_drop_campaign_details_parser_reads_drop_campaign_field():
+    payload = {
+        "data": {
+            "user": {
+                "dropCampaign": {
+                    "id": "campaign-1",
+                    "name": "Campaign",
+                    "status": "ACTIVE",
+                    "game": {
+                        "id": "game-1",
+                        "slug": "game",
+                        "displayName": "Game",
+                    },
+                    "allow": {"channels": None},
+                    "startAt": "2020-01-01T00:00:00Z",
+                    "endAt": "2099-01-01T00:00:00Z",
+                    "timeBasedDrops": [],
+                }
+            }
+        }
+    }
+
+    response = Parser().parse_drop_campaign_details_response(payload)
+
+    assert response.campaign.id == "campaign-1"
 
 
 def test_get_id_from_login_parses_typed_response_and_session_headers():
