@@ -105,7 +105,7 @@ class AttemptStrategy:
         """
         Calls `attempt` up to `self.attempts` times until either a successful attempt is made or the maximum number of
         attempts have been made.
-        :param attempt: The functon to attempt.
+        :param attempt: The function to attempt.
         :param validate: Function to check if the result is valid. Should throw an Exception if not.
         :param retryable: Function that returns True if a given Error can be retried.
         :param exception_context: Function that returns a context string (or None) for a given Exception.

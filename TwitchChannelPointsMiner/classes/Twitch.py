@@ -704,11 +704,7 @@ class Twitch(object):
         )
 
     def get_channel_id(self, streamer_username):
-        try:
-            response = self.gql.get_id_from_login(streamer_username)
-        except RetryError as error:
-            logger.error(f"Error getting channel id for {streamer_username}: {error}")
-            raise StreamerDoesNotExistException
+        response = self.gql.get_id_from_login(streamer_username)
         if response.id == "":
             raise StreamerDoesNotExistException
         return response.id

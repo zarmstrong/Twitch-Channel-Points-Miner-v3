@@ -16,7 +16,7 @@ class GQLResponseErrors(GQLError):
 
     def __init__(self, operation_name: str, errors: list[Error]):
         self.operation_name = operation_name
-        """The name of the SQL operation."""
+        """The name of the GQL operation."""
         self.errors = errors
         """The list of errors in the response."""
 
@@ -62,7 +62,7 @@ class RetryError(GQLError):
 
     def __init__(self, operation_name: str, errors: list):
         self.operation_name = operation_name
-        """The name of the SQL operation."""
+        """The name of the GQL operation."""
         self.errors = errors
         """The list of errors that occurred."""
 

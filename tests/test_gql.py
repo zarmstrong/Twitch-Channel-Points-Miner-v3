@@ -5,7 +5,10 @@ import pytest
 import requests
 
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
-from TwitchChannelPointsMiner.classes.Exceptions import StreamerIsOfflineException
+from TwitchChannelPointsMiner.classes.Exceptions import (
+    StreamerDoesNotExistException,
+    StreamerIsOfflineException,
+)
 from TwitchChannelPointsMiner.classes.gql.Errors import (
     InvalidJsonShapeException,
     RetryError,
@@ -395,6 +398,31 @@ def twitch_with_gql(gql):
     twitch = Twitch.__new__(Twitch)
     twitch.gql = gql
     return twitch
+
+
+def test_get_channel_id_only_classifies_empty_id_as_missing_streamer():
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            get_id_from_login=lambda username: SimpleNamespace(id="")
+        )
+    )
+
+    with pytest.raises(StreamerDoesNotExistException):
+        twitch.get_channel_id("does-not-exist")
+
+
+def test_get_channel_id_preserves_transient_gql_failure():
+    retry_error = RetryError("GetIDFromLogin", [])
+
+    def fail(username):
+        raise retry_error
+
+    twitch = twitch_with_gql(SimpleNamespace(get_id_from_login=fail))
+
+    with pytest.raises(RetryError) as error:
+        twitch.get_channel_id("example")
+
+    assert error.value is retry_error
 
 
 def test_login_refreshes_shared_gql_client_version(monkeypatch, tmp_path):
