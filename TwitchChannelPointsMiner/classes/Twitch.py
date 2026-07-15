@@ -89,6 +89,7 @@ class Twitch(object):
         "twitchdrops_app_campaigns",
         "category_campaign_eligibility",
         "completed_drop_campaigns",
+        "available_badge_names",
         "restart_requested",
         "gql",
     ]
@@ -138,6 +139,7 @@ class Twitch(object):
         self.twitchdrops_app_campaigns = {}
         self.category_campaign_eligibility = {}
         self.completed_drop_campaigns = set()
+        self.available_badge_names = None
         self.restart_requested = Event()
 
     def __request_authentication_restart(self):
@@ -1181,6 +1183,7 @@ class Twitch(object):
             for name, image_url in awarded_benefit_fingerprints
             if name and image_url == ""
         }
+        owned_reward_names = awarded_names | self.__get_available_badge_names()
         checked_twitchdrops_app = False
 
         for category in categories:
@@ -1215,7 +1218,7 @@ class Twitch(object):
                     for drop in campaign.get("drops", [])
                     if str(drop.get("name") or "").strip()
                 }
-                missing_drop_names = sorted(drop_names - awarded_names)
+                missing_drop_names = sorted(drop_names - owned_reward_names)
                 campaign_evaluations.append(
                     {
                         "campaign": campaign.get("name"),
@@ -1224,7 +1227,7 @@ class Twitch(object):
                         "fully_collected": bool(drop_names) and not missing_drop_names,
                     }
                 )
-                if drop_names and drop_names.issubset(awarded_names):
+                if drop_names and drop_names.issubset(owned_reward_names):
                     completed_campaigns.append(
                         {
                             "campaign": campaign.get("name"),
@@ -1274,6 +1277,53 @@ class Twitch(object):
                 )
 
         return deadlines
+
+    def __get_available_badge_names(self):
+        """Return every global badge the authenticated user may select."""
+        if self.available_badge_names is not None:
+            return self.available_badge_names
+
+        self.available_badge_names = set()
+        request = {
+            "operationName": "AvailableBadges",
+            "query": (
+                "query AvailableBadges { currentUser { availableBadges { "
+                "id setID version title description imageURL } } }"
+            ),
+            "variables": {},
+        }
+        try:
+            response = self.gql.post_gql_request_raw("AvailableBadges", request)
+            current_user = (response.get("data") or {}).get("currentUser") or {}
+            badges = current_user.get("availableBadges")
+            if not isinstance(badges, list):
+                self.__log_drop_check(
+                    "full Twitch badge inventory was unavailable",
+                    level=logging.DEBUG,
+                )
+                return self.available_badge_names
+
+            for badge in badges:
+                if not isinstance(badge, dict):
+                    continue
+                title = str(badge.get("title") or "").strip().lower()
+                if title:
+                    self.available_badge_names.add(title)
+
+            self.__log_drop_check(
+                "loaded " f"{len(self.available_badge_names)} earned Twitch badge names"
+            )
+            self.__log_drop_check_json(
+                "earned Twitch badge names",
+                sorted(self.available_badge_names),
+                level=self.category_log_level,
+                category_log=True,
+            )
+        except (RetryError, KeyError, TypeError, ValueError) as error:
+            self.__log_drop_check(
+                f"unable to load full Twitch badge inventory: {error}"
+            )
+        return self.available_badge_names
 
     def filter_categories_with_active_drops(
         self, categories: List[str], order="ORDER", drops_enabled: bool = True
