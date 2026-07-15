@@ -588,7 +588,10 @@ class Twitch(object):
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
 
     def get_broadcast_id(self, streamer):
-        return self.get_stream_info(streamer)["stream"]["id"]
+        stream_info = self.get_stream_info(streamer)
+        if stream_info is None:
+            return None
+        return stream_info["stream"]["id"]
 
     def get_stream_info(self, streamer):
         try:
@@ -597,7 +600,7 @@ class Twitch(object):
             )
         except RetryError as error:
             logger.error(f"Error getting stream info for {streamer.username}: {error}")
-            raise
+            return None
         if response.user is None or response.user.stream is None:
             raise StreamerIsOfflineException
         game = response.user.broadcast_settings.game

@@ -553,6 +553,19 @@ def test_get_stream_info_treats_null_user_as_offline():
         twitch.get_stream_info(SimpleNamespace(username="deleted-channel"))
 
 
+def test_get_stream_info_returns_none_on_retry_failure():
+    retry_error = RetryError("VideoPlayerStreamInfoOverlayChannel", [])
+
+    def fail(username):
+        raise retry_error
+
+    twitch = twitch_with_gql(
+        SimpleNamespace(video_player_stream_info_overlay_channel=fail)
+    )
+
+    assert twitch.get_stream_info(SimpleNamespace(username="example")) is None
+
+
 def test_stream_info_parser_accepts_null_user():
     payload = {
         "data": {"user": None},
@@ -746,6 +759,13 @@ def test_get_broadcast_id_uses_typed_stream_info(monkeypatch):
     )
 
     assert twitch.get_broadcast_id(SimpleNamespace(username="example")) == "broadcast-1"
+
+
+def test_get_broadcast_id_returns_none_when_stream_info_is_unavailable(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    monkeypatch.setattr(Twitch, "get_stream_info", lambda self, streamer: None)
+
+    assert twitch.get_broadcast_id(SimpleNamespace(username="example")) is None
 
 
 def test_inventory_typed_response_retains_richer_raw_payload():
