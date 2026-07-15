@@ -985,6 +985,44 @@ def test_category_filter_bypasses_campaign_lookup_when_drops_are_disabled():
     ) == ["Just Chatting"]
 
 
+def test_category_filter_does_not_fallback_for_completed_twitch_category(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"completedRewardCampaigns": [{"id": "campaign-1"}]},
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        lambda self, inventory, requested: ({}, {"two-point-museum"}),
+    )
+    fallback_calls = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs, awarded: fallback_calls.append(
+            known_slugs
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__replace_category_campaign_eligibility",
+        lambda self, slug, eligibility: None,
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.filter_categories_with_active_drops(["two-point-museum"]) == []
+    assert fallback_calls == [{"two-point-museum"}]
+
+
 def test_category_eligibility_replacement_preserves_other_games():
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {
