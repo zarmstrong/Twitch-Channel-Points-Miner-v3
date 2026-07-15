@@ -985,7 +985,7 @@ def test_category_filter_bypasses_campaign_lookup_when_drops_are_disabled():
     ) == ["Just Chatting"]
 
 
-def test_category_filter_does_not_fallback_for_completed_twitch_category(monkeypatch):
+def test_category_filter_passes_completed_twitch_category_to_fallback(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}
     monkeypatch.setattr(

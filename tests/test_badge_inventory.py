@@ -2,6 +2,7 @@ import logging
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from twitchdrops_app_scraper import TwitchDropsAppScraper
 
 
@@ -35,6 +36,50 @@ def test_available_badges_returns_full_earned_badge_titles():
     )
     twitch = bare_twitch(gql)
 
+    assert twitch._Twitch__get_available_badge_names() == {"two point pickle"}
+
+
+def test_available_badges_retries_after_unavailable_response():
+    responses = iter(
+        [
+            {"data": {"currentUser": {"availableBadges": None}}},
+            {
+                "data": {
+                    "currentUser": {
+                        "availableBadges": [{"title": "Two Point Pickle"}]
+                    }
+                }
+            },
+        ]
+    )
+    twitch = bare_twitch(
+        SimpleNamespace(post_gql_request_raw=lambda operation, request: next(responses))
+    )
+
+    assert twitch._Twitch__get_available_badge_names() == set()
+    assert twitch.available_badge_names is None
+    assert twitch._Twitch__get_available_badge_names() == {"two point pickle"}
+
+
+def test_available_badges_retries_after_request_error():
+    calls = []
+
+    def post_gql_request_raw(operation, request):
+        calls.append(operation)
+        if len(calls) == 1:
+            raise RetryError("AvailableBadges", [])
+        return {
+            "data": {
+                "currentUser": {
+                    "availableBadges": [{"title": "Two Point Pickle"}]
+                }
+            }
+        }
+
+    twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
+
+    assert twitch._Twitch__get_available_badge_names() == set()
+    assert twitch.available_badge_names is None
     assert twitch._Twitch__get_available_badge_names() == {"two point pickle"}
 
 

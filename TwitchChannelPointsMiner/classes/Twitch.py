@@ -1283,7 +1283,7 @@ class Twitch(object):
         if self.available_badge_names is not None:
             return self.available_badge_names
 
-        self.available_badge_names = set()
+        available_badge_names = set()
         request = {
             "operationName": "AvailableBadges",
             "query": (
@@ -1301,14 +1301,16 @@ class Twitch(object):
                     "full Twitch badge inventory was unavailable",
                     level=logging.DEBUG,
                 )
-                return self.available_badge_names
+                return available_badge_names
 
             for badge in badges:
                 if not isinstance(badge, dict):
                     continue
                 title = str(badge.get("title") or "").strip().lower()
                 if title:
-                    self.available_badge_names.add(title)
+                    available_badge_names.add(title)
+
+            self.available_badge_names = available_badge_names
 
             self.__log_drop_check(
                 "loaded " f"{len(self.available_badge_names)} earned Twitch badge names"
@@ -1323,6 +1325,7 @@ class Twitch(object):
             self.__log_drop_check(
                 f"unable to load full Twitch badge inventory: {error}"
             )
+            return available_badge_names
         return self.available_badge_names
 
     def filter_categories_with_active_drops(
