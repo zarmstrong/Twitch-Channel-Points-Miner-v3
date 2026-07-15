@@ -674,7 +674,9 @@ class Parser:
         """
         _, _, data = self.parse_base_response(response, True)
         with JsonParentContext("data"):
-            user = parse_expected_value(data, "user", expect_dict)
+            user = parse_expected_value(data, "user", optional_parser(expect_dict))
+            if user is None:
+                return GetIdFromLoginResponse(_id="")
             return GetIdFromLoginResponse(
                 _id=parse_expected_value(user, "id", expect_str)
             )

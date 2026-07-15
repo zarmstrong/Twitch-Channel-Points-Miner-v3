@@ -82,6 +82,49 @@ def test_get_id_from_login_parses_typed_response_and_session_headers():
     assert calls[0][2]["Client-Version"] == "test-version"
 
 
+def test_get_id_from_login_returns_empty_id_for_unknown_login():
+    payload = {
+        "data": {"user": None},
+        "extensions": {"operationName": "GetIDFromLogin"},
+    }
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    assert gql.get_id_from_login("does-not-exist").id == ""
+
+
+def test_multiplier_shape_error_includes_full_json_path():
+    payload = {
+        "data": {
+            "community": {
+                "channel": {
+                    "self": {
+                        "communityPoints": {
+                            "balance": 10,
+                            "activeMultipliers": [{"factor": "1.5"}],
+                            "availableClaim": None,
+                        }
+                    },
+                    "communityPointsSettings": {"goals": []},
+                }
+            }
+        },
+        "extensions": {"operationName": "ChannelPointsContext"},
+    }
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    with pytest.raises(RetryError) as error:
+        gql.get_channel_points_context("example")
+
+    assert (
+        'JSON at ["data", "community", "channel", "self", '
+        '"communityPoints", "activeMultipliers", 0, "factor"]' in str(error.value)
+    )
+
+
 def test_retries_transport_errors_then_returns_typed_response():
     attempts = 0
 

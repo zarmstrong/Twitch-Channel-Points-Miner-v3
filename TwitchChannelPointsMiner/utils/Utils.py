@@ -170,7 +170,8 @@ def create_chunks(lst, n):
 
 def read(fname):
     package_root = path.dirname(path.dirname(__file__))
-    return open(path.join(package_root, fname), encoding="utf-8").read()
+    with open(path.join(package_root, fname), encoding="utf-8") as file:
+        return file.read()
 
 
 def init2dict(content):

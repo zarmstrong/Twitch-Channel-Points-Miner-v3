@@ -59,3 +59,22 @@ def test_package_utils_read_version_from_package_root():
     version_data = utils.init2dict(utils.read("__init__.py"))
 
     assert version_data["version"] == "2.0.5"
+
+
+def test_read_closes_file_handle(monkeypatch):
+    closed = []
+
+    class FakeFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            closed.append(True)
+
+        def read(self):
+            return "contents"
+
+    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: FakeFile())
+
+    assert utils.read("anything") == "contents"
+    assert closed == [True]

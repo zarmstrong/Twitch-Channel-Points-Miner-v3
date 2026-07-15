@@ -1,6 +1,6 @@
 import abc
 
-from TwitchChannelPointsMiner.classes.gql import Error
+from TwitchChannelPointsMiner.classes.gql.data.response.Error import Error
 
 
 class GQLError(abc.ABC, Exception):
