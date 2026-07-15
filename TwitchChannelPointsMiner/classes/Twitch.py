@@ -122,6 +122,7 @@ class Twitch(object):
             session_id=self.client_session,
         )
         self.gql = (gql_factory or GQLFactory()).create(gql_client_session)
+        self.gql.on_unauthorized = self.__request_authentication_restart
         self.twilight_build_id_pattern = re.compile(
             r'window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
         )
@@ -138,10 +139,6 @@ class Twitch(object):
         self.category_campaign_eligibility = {}
         self.completed_drop_campaigns = set()
         self.restart_requested = Event()
-
-    @staticmethod
-    def __is_unauthorized_response(response):
-        return isinstance(response, dict) and response.get("status") == 401
 
     def __request_authentication_restart(self):
         if self.restart_requested.is_set():
@@ -521,6 +518,11 @@ class Twitch(object):
         else:
             self.twitch_login.load_cookies(self.cookies_file)
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
+        # Keep the shared typed-GQL session in sync with Twitch's current web
+        # client version. The legacy transport refreshed this before every
+        # request; once per authenticated startup avoids stale headers without
+        # adding a network request to every operation.
+        self.update_client_version()
 
     # === STREAMER / STREAM / INFO === #
     def update_stream(self, streamer):
@@ -1248,6 +1250,8 @@ class Twitch(object):
     ) -> List[str]:
         if not categories:
             return []
+        if drops_enabled is False:
+            return categories
 
         inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
@@ -2202,6 +2206,12 @@ class Twitch(object):
                 "the current point state"
             )
             return
+        if community_points.balance is None:
+            logger.debug(
+                f"Channel points response for {streamer.username} has no balance; "
+                "keeping the current point state"
+            )
+            return
         streamer.channel_points = community_points.balance
         streamer.activeMultipliers = [
             {"factor": multiplier.factor}
@@ -2640,6 +2650,8 @@ class Twitch(object):
 
         campaigns_by_id = {}
         for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
             campaign_id = campaign.get("id")
             if campaign_id:
                 campaigns_by_id[campaign_id] = campaign
@@ -2777,18 +2789,16 @@ class Twitch(object):
         campaign_channel_login_by_id: Optional[Dict[str, str]] = None,
     ):
         def extract_drop_campaign(response_item):
-            drop_campaign = (
-                response_item.get("data", {}).get("user", {}).get("dropCampaign")
-            )
-            if drop_campaign is None:
-                drop_campaign = (
-                    response_item.get("data", {})
-                    .get("currentUser", {})
-                    .get("dropCampaign")
-                )
-            if drop_campaign is None:
-                drop_campaign = response_item.get("data", {}).get("dropCampaign")
-            return drop_campaign
+            if not isinstance(response_item, dict):
+                return None
+            data = response_item.get("data")
+            if not isinstance(data, dict):
+                return None
+            for parent_name in ("user", "currentUser"):
+                parent = data.get(parent_name)
+                if isinstance(parent, dict) and parent.get("dropCampaign") is not None:
+                    return parent["dropCampaign"]
+            return data.get("dropCampaign")
 
         result = []
         misses = 0
@@ -2873,16 +2883,20 @@ class Twitch(object):
         # We need the inventory only for get the real updated value/progress
         # Get data from inventory and sync current status with streamers.campaigns
         inventory = self.__get_inventory()
-        if inventory not in [None, {}] and inventory["dropCampaignsInProgress"] not in [
-            None,
-            {},
-        ]:
+        campaigns_in_progress = (
+            inventory.get("dropCampaignsInProgress")
+            if isinstance(inventory, dict)
+            else None
+        )
+        if campaigns_in_progress not in [None, {}]:
             campaigns_by_id = {campaign.id: campaign for campaign in campaigns}
             for campaign in campaigns:
                 campaign.clear_drops()  # Remove all the claimed drops
 
             # Iterate all campaigns currently in progress from our inventory.
-            for progress in inventory["dropCampaignsInProgress"]:
+            for progress in campaigns_in_progress:
+                if not isinstance(progress, dict):
+                    continue
                 campaign_ref = campaigns_by_id.get(progress.get("id"))
 
                 if campaign_ref is not None:

@@ -1,12 +1,15 @@
 import inspect
+from types import SimpleNamespace
 
 import pytest
+import requests
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
     _normalize_streams_watched,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.classes.Settings import Priority
 
 
 def test_streams_watched_defaults_to_two():
@@ -35,3 +38,70 @@ def test_minute_watcher_accepts_streams_watched_argument():
     ]
 
     assert parameter.default == 2
+
+
+def _watch_streamer(username, from_category=False):
+    stream = SimpleNamespace(
+        update_elapsed=lambda: 0,
+        spade_url=f"https://spade.test/{username}",
+        encode_payload=lambda: "payload",
+        campaigns=[],
+    )
+    return SimpleNamespace(
+        username=username,
+        is_online=True,
+        online_at=0,
+        from_category=from_category,
+        channel_points=0,
+        stream=stream,
+        settings=SimpleNamespace(claim_drops=False),
+        drops_condition=lambda: False,
+    )
+
+
+def _run_one_watch_iteration(monkeypatch, streamers, streams_watched):
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.user_agent = "test-agent"
+    posted = []
+
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda url, **kwargs: posted.append(url) or SimpleNamespace(status_code=500),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    twitch.send_minute_watched_events(
+        streamers,
+        [Priority.ORDER],
+        streams_watched=streams_watched,
+    )
+    return posted
+
+
+def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("one"), _watch_streamer("two")],
+        streams_watched=2,
+    )
+
+    assert posted == ["https://spade.test/one", "https://spade.test/two"]
+
+
+def test_minute_watcher_limits_category_discovery_to_one_stream(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("category", from_category=True),
+            _watch_streamer("explicit"),
+        ],
+        streams_watched=2,
+    )
+
+    assert posted == ["https://spade.test/category"]

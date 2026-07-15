@@ -70,7 +70,8 @@ def is_recoverable_error(e: Exception) -> bool:
     :return: True if the exception is recoverable, False otherwise.
     """
     if isinstance(e, requests.exceptions.RequestException):
-        return True
+        response = getattr(e, "response", None)
+        return response is None or response.status_code not in (401, 403)
     if isinstance(e, GQLError):
         return e.recoverable()
     return False
@@ -115,6 +116,7 @@ class GQL:
         attempt_strategy: AttemptStrategy | None = None,
         parser: Parser | None = None,
         post_request: PostRequest | None = None,
+        on_unauthorized: Callable[[], None] | None = None,
     ):
         self.client_session = client_session
         """The client session for making requests."""
@@ -130,6 +132,8 @@ class GQL:
             self.__default_post_request if post_request is None else post_request
         )
         """Function for posting GQL requests."""
+        self.on_unauthorized = on_unauthorized
+        """Callback invoked when Twitch rejects the current authorization token."""
 
     @staticmethod
     def __default_post_request(url: str, json: dict | list, headers: dict[str, str]):
@@ -154,8 +158,16 @@ class GQL:
         logger.debug(
             f"Data: {request_json}, Status code: {response.status_code}, Content: {response.text}"
         )
+        if response.status_code == 401 and self.on_unauthorized is not None:
+            self.on_unauthorized()
         response.raise_for_status()
         response_json = response.json()
+        if (
+            isinstance(response_json, dict)
+            and response_json.get("status") == 401
+            and self.on_unauthorized is not None
+        ):
+            self.on_unauthorized()
         if isinstance(request_json, list):
             # A batched request should result in a batched response
             if isinstance(response_json, list):

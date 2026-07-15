@@ -16,7 +16,7 @@ class Properties:
     def __init__(
         self,
         available_claim: Claim | None,
-        balance: int,
+        balance: int | None,
         active_multipliers: list[Multiplier],
     ):
         self.available_claim = available_claim

@@ -120,7 +120,20 @@ def expect_int(value: Any) -> int:
     Parser that checks that the value is an int then returns it.
     :raises InvalidJsonShapeException: if the value is not an int.
     """
-    return expect_is_type(value, int)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidJsonShapeException(
+            [], f"int expected, got {describe_value(value)}"
+        )
+    return value
+
+
+def expect_number(value: Any) -> float:
+    """Parse a JSON number while rejecting booleans and numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidJsonShapeException(
+            [], f"number expected, got {describe_value(value)}"
+        )
+    return float(value)
 
 
 def expect_bool(value: Any) -> bool:
@@ -398,20 +411,21 @@ def claim_parser(value: Any) -> ChannelPointsContext.Properties.Claim:
 def multiplier_parser(value: Any) -> ChannelPointsContext.Properties.Multiplier:
     expect_dict(value)
     return ChannelPointsContext.Properties.Multiplier(
-        factor=parse_expected_value(value, "factor", float),
+        factor=parse_expected_value(value, "factor", expect_number),
     )
 
 
 def community_points_parser(value: Any) -> ChannelPointsContext.Properties:
     expect_dict(value)
     return ChannelPointsContext.Properties(
-        available_claim=parse_expected_value(
+        available_claim=parse_value(
             value, "availableClaim", optional_parser(claim_parser)
         ),
-        balance=parse_expected_value(value, "balance", expect_int),
-        active_multipliers=parse_expected_value(
-            value, "activeMultipliers", list_parser(multiplier_parser)
-        ),
+        balance=parse_value(value, "balance", expect_int),
+        active_multipliers=parse_value(
+            value, "activeMultipliers", list_parser(multiplier_parser), []
+        )
+        or [],
     )
 
 
@@ -454,10 +468,8 @@ def channel_parser(value: Any) -> ChannelPointsContext.Channel:
     expect_dict(value)
     return ChannelPointsContext.Channel(
         _id=parse_value(value, "id", expect_str),
-        edge=parse_expected_value(
-            value, "self", optional_parser(channel_self_edge_parser)
-        ),
-        community_points_settings=parse_expected_value(
+        edge=parse_value(value, "self", optional_parser(channel_self_edge_parser)),
+        community_points_settings=parse_value(
             value,
             "communityPointsSettings",
             optional_parser(community_points_settings_parser),

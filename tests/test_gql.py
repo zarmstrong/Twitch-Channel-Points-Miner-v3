@@ -1,12 +1,20 @@
 from types import SimpleNamespace
+from threading import Event
 
 import pytest
 import requests
 
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerIsOfflineException
-from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.gql.Errors import (
+    InvalidJsonShapeException,
+    RetryError,
+)
 from TwitchChannelPointsMiner.classes.gql.Integration import GQL
+from TwitchChannelPointsMiner.classes.gql.data.Parser import (
+    expect_int,
+    expect_number,
+)
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.utils import AttemptStrategy
 
@@ -19,7 +27,9 @@ class FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(str(self.status_code))
+            error = requests.HTTPError(str(self.status_code))
+            error.response = self
+            raise error
 
     def json(self):
         return self.payload
@@ -34,6 +44,23 @@ def client_session():
         device_id="test-device",
         session_id="test-session",
     )
+
+
+@pytest.mark.parametrize("value", [True, False, 1.0, "1"])
+def test_expect_int_rejects_non_integer_json_values(value):
+    with pytest.raises(InvalidJsonShapeException):
+        expect_int(value)
+
+
+@pytest.mark.parametrize("value", [True, False, "1.5", None])
+def test_expect_number_rejects_non_numeric_json_values(value):
+    with pytest.raises(InvalidJsonShapeException):
+        expect_number(value)
+
+
+def test_expect_number_accepts_json_ints_and_floats():
+    assert expect_number(2) == 2.0
+    assert expect_number(1.5) == 1.5
 
 
 def test_get_id_from_login_parses_typed_response_and_session_headers():
@@ -193,6 +220,54 @@ def test_exhausted_transport_retries_raise_retry_error():
     assert len(error.value.errors) == 2
 
 
+def test_unauthorized_response_invokes_recovery_callback():
+    recovered = []
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=3, attempt_interval_seconds=0),
+        post_request=lambda *args, **kwargs: FakeResponse({}, status_code=401),
+        on_unauthorized=lambda: recovered.append(True),
+    )
+
+    with pytest.raises(RetryError):
+        gql.get_id_from_login("example")
+
+    assert recovered == [True]
+
+
+def test_unauthorized_json_body_invokes_recovery_callback():
+    recovered = []
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=3, attempt_interval_seconds=0),
+        post_request=lambda *args, **kwargs: FakeResponse(
+            {"status": 401, "message": "Unauthorized"}
+        ),
+        on_unauthorized=lambda: recovered.append(True),
+    )
+
+    with pytest.raises(RetryError):
+        gql.get_id_from_login("example")
+
+    assert recovered == [True]
+
+
+def test_authentication_recovery_clears_cookie_and_requests_restart(tmp_path):
+    cookie = tmp_path / "cookies.json"
+    cookie.write_text("cached", encoding="utf-8")
+    twitch = Twitch.__new__(Twitch)
+    twitch.cookies_file = str(cookie)
+    twitch.twitch_login = SimpleNamespace(username="example")
+    twitch.restart_requested = Event()
+    twitch.running = True
+
+    twitch._Twitch__request_authentication_restart()
+
+    assert cookie.exists() is False
+    assert twitch.restart_requested.is_set() is True
+    assert twitch.running is False
+
+
 def test_raw_batch_transport_preserves_variable_response_shapes():
     payload = [
         {"data": {"user": {"dropCampaign": {"id": "campaign-1"}}}},
@@ -277,6 +352,22 @@ def twitch_with_gql(gql):
     twitch = Twitch.__new__(Twitch)
     twitch.gql = gql
     return twitch
+
+
+def test_login_refreshes_shared_gql_client_version(monkeypatch, tmp_path):
+    twitch = Twitch.__new__(Twitch)
+    twitch.cookies_file = str(tmp_path / "missing-cookies.json")
+    twitch.twitch_login = SimpleNamespace(login_flow=lambda: False)
+    refreshed = []
+    monkeypatch.setattr(
+        Twitch,
+        "update_client_version",
+        lambda self: refreshed.append(True) or "current-version",
+    )
+
+    twitch.login()
+
+    assert refreshed == [True]
 
 
 def test_load_channel_points_context_adapts_typed_response(monkeypatch):
@@ -505,6 +596,35 @@ def test_load_channel_points_keeps_state_when_points_are_unavailable():
     assert streamer.activeMultipliers == [{"factor": 2}]
 
 
+def test_partial_channel_points_without_balance_preserves_state():
+    payload = {
+        "data": {
+            "community": {
+                "channel": {
+                    "self": {"communityPoints": {}},
+                }
+            }
+        },
+        "extensions": {"operationName": "ChannelPointsContext"},
+    }
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+    twitch = twitch_with_gql(gql)
+    streamer = SimpleNamespace(
+        username="example",
+        channel_points=55,
+        activeMultipliers=[{"factor": 2}],
+        community_goals={},
+        settings=SimpleNamespace(community_goals=True),
+    )
+
+    twitch.load_channel_points_context(streamer)
+
+    assert streamer.channel_points == 55
+    assert streamer.activeMultipliers == [{"factor": 2}]
+
+
 def test_claim_drop_uses_typed_claim_status(monkeypatch):
     drop = SimpleNamespace(
         drop_instance_id="instance-1",
@@ -669,6 +789,115 @@ def test_dashboard_typed_response_retains_full_raw_payload():
 
     assert response.campaigns is None
     assert response.raw_response == payload
+
+
+def test_dashboard_extraction_ignores_non_campaign_values():
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            get_viewer_drops_dashboard=lambda: SimpleNamespace(
+                raw_response={
+                    "data": {
+                        "currentUser": {
+                            "dropCampaigns": [None, "invalid", {"id": "campaign-1"}]
+                        }
+                    }
+                }
+            )
+        )
+    )
+
+    assert twitch._Twitch__get_drops_dashboard() == [{"id": "campaign-1"}]
+
+
+def test_campaign_details_retries_viewer_context_after_null_user():
+    calls = []
+
+    def post_batch(operation_name, requests):
+        calls.append(requests)
+        if len(calls) == 1:
+            return [{"data": {"user": None}}]
+        return [
+            {"data": {"user": {"dropCampaign": {"id": "campaign-1", "name": "Drop"}}}}
+        ]
+
+    twitch = twitch_with_gql(SimpleNamespace(post_gql_request_batch_raw=post_batch))
+    twitch.twitch_login = SimpleNamespace(
+        get_user_id=lambda: "viewer-id", username="viewer"
+    )
+    twitch.log_drop_checks = False
+
+    campaigns = twitch._Twitch__get_campaigns_details(
+        [{"id": "campaign-1"}],
+        campaign_channel_login_by_id={"campaign-1": "restricted-channel"},
+    )
+
+    assert campaigns == [{"id": "campaign-1", "name": "Drop"}]
+    assert calls[0][0]["variables"]["channelLogin"] == "restricted-channel"
+    assert calls[1][0]["variables"]["channelLogin"] == "viewer-id"
+
+
+def test_campaign_sync_accepts_partial_inventory_without_progress(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.log_drop_checks = False
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"gameEventDrops": []},
+    )
+
+    twitch._Twitch__sync_campaigns([])
+
+
+def test_category_filter_bypasses_campaign_lookup_when_drops_are_disabled():
+    twitch = twitch_with_gql(SimpleNamespace())
+
+    assert twitch.filter_categories_with_active_drops(
+        ["Just Chatting"], drops_enabled=False
+    ) == ["Just Chatting"]
+
+
+def test_category_eligibility_replacement_preserves_other_games():
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("old-game", "stale"): (1, 1),
+        ("other-game", "keep"): (1, 2),
+    }
+
+    twitch._Twitch__replace_category_campaign_eligibility("old-game", {"fresh": (2, 2)})
+
+    assert twitch.category_campaign_eligibility == {
+        ("old-game", "fresh"): (2, 2),
+        ("other-game", "keep"): (1, 2),
+    }
+
+
+def test_campaign_inventory_merge_keeps_new_drop_and_existing_progress():
+    twitch = twitch_with_gql(SimpleNamespace())
+    fresh = {
+        "id": "campaign-1",
+        "timeBasedDrops": [
+            {"id": "old-drop", "self": None},
+            {"id": "new-drop", "self": None},
+        ],
+    }
+    inventory = {
+        "id": "campaign-1",
+        "timeBasedDrops": [
+            {
+                "id": "old-drop",
+                "self": {"currentMinutesWatched": 30, "isClaimed": True},
+            }
+        ],
+    }
+
+    merged = twitch._Twitch__merge_campaign_inventory_progress(fresh, inventory)
+
+    assert [drop["id"] for drop in merged["timeBasedDrops"]] == [
+        "old-drop",
+        "new-drop",
+    ]
+    assert merged["timeBasedDrops"][0]["self"]["currentMinutesWatched"] == 30
+    assert fresh["timeBasedDrops"][0]["self"] is None
 
 
 def test_mod_view_channel_parses_moderator_status():

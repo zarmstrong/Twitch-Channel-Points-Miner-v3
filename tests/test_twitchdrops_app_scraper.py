@@ -24,9 +24,7 @@ def test_single_campaign_accepts_watch_drop_without_campaign_label():
     </div>
     """
 
-    report = parse_game_page(
-        source, "https://twitchdrops.app/game/halo-infinite"
-    )
+    report = parse_game_page(source, "https://twitchdrops.app/game/halo-infinite")
 
     assert report["campaign_count"] == 1
     assert report["campaigns"][0]["name"] == "Community GameNight-JUL14"
@@ -59,3 +57,25 @@ def test_multiple_campaigns_do_not_guess_unlabeled_drop_ownership():
 
     assert report["campaign_count"] == 0
     assert report["non_watch_campaign_count"] == 2
+
+
+def test_subscriber_only_campaign_is_not_treated_as_watch_drop():
+    source = """
+    <main><h1>Example Game</h1></main>
+    <div class="drop-card">
+      <div class="drop-name">Subscriber Reward</div>
+      <div class="drop-time">Subscribe to a participating channel</div>
+      <div class="drop-campaign">Subscriber Campaign</div>
+    </div>
+    <h2>Active Campaigns</h2>
+    <div class="campaign-banner">
+      <span class="cb-name">Subscriber Campaign</span>
+      <span class="cb-timer" data-end-ts="1784087999999"></span>
+    </div>
+    <h2>Past Drops</h2>
+    """
+
+    report = parse_game_page(source, "https://twitchdrops.app/game/example")
+
+    assert report["campaign_count"] == 0
+    assert report["non_watch_campaign_count"] == 1
