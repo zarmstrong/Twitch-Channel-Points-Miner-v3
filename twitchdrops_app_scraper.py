@@ -156,6 +156,13 @@ def parse_game_page(source, url):
     drops = [drop for drop in drops if drop["name"]]
     campaign_blocks = list(div_blocks(active_source, "campaign-banner"))
     all_campaigns = [parse_campaign(block, game_name) for block in campaign_blocks]
+    unassigned_watch_drops = [
+        drop for drop in drops if not drop["campaign"] and is_watch_drop(drop)
+    ]
+    if len(all_campaigns) == 1 and unassigned_watch_drops:
+        campaign_name = all_campaigns[0]["name"]
+        for drop in unassigned_watch_drops:
+            drop["campaign"] = campaign_name
     watch_campaign_names = {
         drop["campaign"].casefold()
         for drop in drops
