@@ -28,7 +28,7 @@ class User:
 
 
 class VideoPlayerStreamInfoOverlayChannelResponse:
-    def __init__(self, user: User):
+    def __init__(self, user: User | None):
         self.user = user
 
     def __repr__(self):

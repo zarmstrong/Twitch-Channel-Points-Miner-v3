@@ -1,5 +1,5 @@
 class Authorization:
-    def __init__(self, is_forbidden: bool, forbidden_reason_code: str):
+    def __init__(self, is_forbidden: bool, forbidden_reason_code: str | None):
         self.is_forbidden = is_forbidden
         self.forbidden_reason_code = forbidden_reason_code
 

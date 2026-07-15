@@ -60,7 +60,7 @@ class CommunityPointsSettings:
 
 class Channel:
     class ChannelSelfEdge:
-        def __init__(self, community_points: Properties):
+        def __init__(self, community_points: Properties | None):
             self.community_points = community_points
 
         def __repr__(self):
@@ -68,9 +68,9 @@ class Channel:
 
     def __init__(
         self,
-        _id: str,
-        edge: ChannelSelfEdge,
-        community_points_settings: CommunityPointsSettings,
+        _id: str | None,
+        edge: ChannelSelfEdge | None,
+        community_points_settings: CommunityPointsSettings | None,
     ):
         self.id = _id
         self.edge = edge
@@ -81,7 +81,9 @@ class Channel:
 
 
 class CommunityUser:
-    def __init__(self, _id: str | None, display_name: str | None, channel: Channel):
+    def __init__(
+        self, _id: str | None, display_name: str | None, channel: Channel | None
+    ):
         self.id = _id
         self.display_name = display_name
         self.channel = channel

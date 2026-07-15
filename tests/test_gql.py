@@ -4,6 +4,7 @@ import pytest
 import requests
 
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
+from TwitchChannelPointsMiner.classes.Exceptions import StreamerIsOfflineException
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.gql.Integration import GQL
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
@@ -79,6 +80,103 @@ def test_retries_transport_errors_then_returns_typed_response():
     assert attempts == 2
 
 
+def test_retries_live_service_error_then_returns_typed_response():
+    attempts = 0
+
+    def post(url, json, headers):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return FakeResponse(
+                {
+                    "data": {},
+                    "errors": [
+                        {
+                            "message": "service error",
+                            "path": ["users", 0, "id"],
+                        }
+                    ],
+                    "extensions": {"operationName": "GetIDFromLogin"},
+                }
+            )
+        return FakeResponse(
+            {
+                "data": {"user": {"id": "123"}},
+                "extensions": {"operationName": "GetIDFromLogin"},
+            }
+        )
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=2, attempt_interval_seconds=0),
+        post_request=post,
+    )
+
+    assert gql.get_id_from_login("example").id == "123"
+    assert attempts == 2
+
+
+def test_retries_service_error_when_graphql_data_is_null():
+    attempts = 0
+
+    def post(url, json, headers):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return FakeResponse(
+                {
+                    "data": None,
+                    "errors": [{"message": "service unavailable"}],
+                    "extensions": {"operationName": "GetIDFromLogin"},
+                }
+            )
+        return FakeResponse(
+            {
+                "data": {"user": {"id": "123"}},
+                "extensions": {"operationName": "GetIDFromLogin"},
+            }
+        )
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=2, attempt_interval_seconds=0),
+        post_request=post,
+    )
+
+    assert gql.get_id_from_login("example").id == "123"
+    assert attempts == 2
+
+
+def test_retries_service_error_without_response_extensions():
+    attempts = 0
+
+    def post(url, json, headers):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return FakeResponse(
+                {
+                    "data": None,
+                    "errors": [{"message": "service timeout"}],
+                }
+            )
+        return FakeResponse(
+            {
+                "data": {"user": {"id": "123"}},
+                "extensions": {"operationName": "GetIDFromLogin"},
+            }
+        )
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=2, attempt_interval_seconds=0),
+        post_request=post,
+    )
+
+    assert gql.get_id_from_login("example").id == "123"
+    assert attempts == 2
+
+
 def test_exhausted_transport_retries_raise_retry_error():
     def post(url, json, headers):
         raise requests.ConnectionError("offline")
@@ -93,6 +191,86 @@ def test_exhausted_transport_retries_raise_retry_error():
         gql.get_id_from_login("example")
 
     assert len(error.value.errors) == 2
+
+
+def test_raw_batch_transport_preserves_variable_response_shapes():
+    payload = [
+        {"data": {"user": {"dropCampaign": {"id": "campaign-1"}}}},
+        {"data": {"currentUser": {"dropCampaign": None}}, "errors": []},
+    ]
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    response = gql.post_gql_request_batch_raw(
+        "DropCampaignDetails", [{"operationName": "one"}, {"operationName": "two"}]
+    )
+
+    assert response == payload
+
+
+def test_raw_batch_transport_rejects_response_count_mismatch():
+    gql = GQL(
+        client_session(),
+        post_request=lambda *args, **kwargs: FakeResponse([{"data": {}}]),
+    )
+
+    with pytest.raises(RetryError) as error:
+        gql.post_gql_request_batch_raw(
+            "DropCampaignDetails",
+            [{"operationName": "one"}, {"operationName": "two"}],
+        )
+
+    assert "Expected 2 batched responses, got 1" in str(error.value)
+
+
+def test_empty_batch_returns_without_making_http_request():
+    gql = GQL(
+        client_session(),
+        post_request=lambda *args, **kwargs: pytest.fail("unexpected HTTP request"),
+    )
+
+    assert gql.post_gql_request_batch_raw("EmptyBatch", []) == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"attempts": 0}, "attempts must be a positive integer"),
+        ({"attempts": True}, "attempts must be a positive integer"),
+        (
+            {"attempt_interval_seconds": -1},
+            "attempt_interval_seconds must be a non-negative number",
+        ),
+    ],
+)
+def test_attempt_strategy_rejects_invalid_configuration(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        AttemptStrategy(**kwargs)
+
+
+def test_channel_follows_stops_when_next_page_has_no_new_cursor(caplog):
+    gql = GQL(client_session())
+    calls = 0
+    page = SimpleNamespace(
+        follows=SimpleNamespace(
+            edges=[
+                SimpleNamespace(cursor="edge-cursor", node=SimpleNamespace(login="one"))
+            ],
+            page_info=SimpleNamespace(has_next_page=True, end_cursor=None),
+        )
+    )
+
+    def post(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return page
+
+    gql.post_gql_request_single = post
+
+    assert gql.channel_follows() == ["one"]
+    assert calls == 1
+    assert "without a new end cursor" in caplog.text
 
 
 def twitch_with_gql(gql):
@@ -200,6 +378,55 @@ def test_get_stream_info_adapts_typed_game_and_tags_for_stream_entity():
     ]
 
 
+def test_get_stream_info_treats_null_user_as_offline():
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            video_player_stream_info_overlay_channel=lambda username: SimpleNamespace(
+                user=None
+            )
+        )
+    )
+
+    with pytest.raises(StreamerIsOfflineException):
+        twitch.get_stream_info(SimpleNamespace(username="deleted-channel"))
+
+
+def test_stream_info_parser_accepts_null_user():
+    payload = {
+        "data": {"user": None},
+        "extensions": {"operationName": "VideoPlayerStreamInfoOverlayChannel"},
+    }
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    assert gql.video_player_stream_info_overlay_channel("deleted-channel").user is None
+
+
+def test_playback_authorization_accepts_null_forbidden_reason():
+    payload = {
+        "data": {
+            "streamPlaybackAccessToken": {
+                "value": "token-value",
+                "signature": "token-signature",
+                "authorization": {
+                    "isForbidden": False,
+                    "forbiddenReasonCode": None,
+                },
+            }
+        },
+        "extensions": {"operationName": "PlaybackAccessToken"},
+    }
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    response = gql.get_playback_access_token("example")
+
+    assert response.authorization.is_forbidden is False
+    assert response.authorization.forbidden_reason_code is None
+
+
 def test_channel_points_context_accepts_current_query_shape_without_user_ids():
     payload = {
         "data": {
@@ -218,7 +445,9 @@ def test_channel_points_context_accepts_current_query_shape_without_user_ids():
         },
         "extensions": {"operationName": "ChannelPointsContext"},
     }
-    gql = GQL(client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload))
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
 
     response = gql.get_channel_points_context("example")
 
@@ -226,6 +455,54 @@ def test_channel_points_context_accepts_current_query_shape_without_user_ids():
     assert response.community.display_name is None
     assert response.community.channel.id is None
     assert response.community.channel.edge.community_points.balance == 100
+
+
+def test_channel_points_context_accepts_unavailable_community_points():
+    payload = {
+        "data": {
+            "community": {
+                "channel": {
+                    "self": {"communityPoints": None},
+                    "communityPointsSettings": None,
+                }
+            }
+        },
+        "extensions": {"operationName": "ChannelPointsContext"},
+    }
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    response = gql.get_channel_points_context("example")
+
+    assert response.community.channel.edge.community_points is None
+    assert response.community.channel.community_points_settings is None
+
+
+def test_load_channel_points_keeps_state_when_points_are_unavailable():
+    gql = SimpleNamespace(
+        get_channel_points_context=lambda username: SimpleNamespace(
+            community=SimpleNamespace(
+                channel=SimpleNamespace(
+                    edge=SimpleNamespace(community_points=None),
+                    community_points_settings=None,
+                )
+            )
+        )
+    )
+    twitch = twitch_with_gql(gql)
+    streamer = SimpleNamespace(
+        username="example",
+        channel_points=55,
+        activeMultipliers=[{"factor": 2}],
+        community_goals={"existing": object()},
+        settings=SimpleNamespace(community_goals=True),
+    )
+
+    twitch.load_channel_points_context(streamer)
+
+    assert streamer.channel_points == 55
+    assert streamer.activeMultipliers == [{"factor": 2}]
 
 
 def test_claim_drop_uses_typed_claim_status(monkeypatch):
@@ -290,7 +567,9 @@ def test_inventory_typed_response_retains_richer_raw_payload():
         "data": {"currentUser": {"inventory": inventory}},
         "extensions": {"operationName": "Inventory"},
     }
-    gql = GQL(client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload))
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
 
     response = gql.get_inventory()
 
@@ -323,20 +602,21 @@ def test_inventory_typed_parsing_does_not_replace_raw_campaign_dicts():
         ],
     }
     payload = {
-        "data": {
-            "currentUser": {
-                "inventory": {"dropCampaignsInProgress": [campaign]}
-            }
-        },
+        "data": {"currentUser": {"inventory": {"dropCampaignsInProgress": [campaign]}}},
         "extensions": {"operationName": "Inventory"},
     }
-    gql = GQL(client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload))
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
 
     response = gql.get_inventory()
 
     assert response.campaigns[0].id == "campaign-1"
     assert isinstance(response.inventory["dropCampaignsInProgress"][0], dict)
-    assert response.inventory["dropCampaignsInProgress"][0]["game"]["displayName"] == "Game"
+    assert (
+        response.inventory["dropCampaignsInProgress"][0]["game"]["displayName"]
+        == "Game"
+    )
     assert isinstance(
         payload["data"]["currentUser"]["inventory"]["dropCampaignsInProgress"][0],
         dict,
@@ -359,7 +639,9 @@ def test_inventory_uses_partial_data_when_optional_field_returns_gql_error():
         ],
         "extensions": {"operationName": "Inventory"},
     }
-    gql = GQL(client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload))
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
 
     response = gql.get_inventory()
 
@@ -379,7 +661,9 @@ def test_dashboard_typed_response_retains_full_raw_payload():
         },
         "extensions": {"operationName": "ViewerDropsDashboard"},
     }
-    gql = GQL(client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload))
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
 
     response = gql.get_viewer_drops_dashboard()
 
@@ -392,6 +676,8 @@ def test_mod_view_channel_parses_moderator_status():
         "data": {"user": {"self": {"isModerator": True}}},
         "extensions": {"operationName": "ModViewChannelQuery"},
     }
-    gql = GQL(client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload))
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
 
     assert gql.mod_view_channel("example").is_moderator is True

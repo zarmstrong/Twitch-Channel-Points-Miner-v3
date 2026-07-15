@@ -245,10 +245,17 @@ def error_parser(value: Any) -> Error:
     recoverable = message in [
         "service timeout",
         "service unavailable",
+        "service error",
         "context deadline exceeded",
     ]
+
+    def parse_path_item(item):
+        if isinstance(item, (str, int)):
+            return item
+        raise InvalidJsonShapeException([], "path item must be a string or integer")
+
     return Error(
-        recoverable, message, parse_value(value, "path", list_parser(expect_str))
+        recoverable, message, parse_value(value, "path", list_parser(parse_path_item))
     )
 
 
@@ -376,7 +383,7 @@ def authorization_parser(value: Any) -> PlaybackAccessToken.Authorization:
     return PlaybackAccessToken.Authorization(
         is_forbidden=parse_expected_value(value, "isForbidden", expect_bool),
         forbidden_reason_code=parse_expected_value(
-            value, "forbiddenReasonCode", expect_str
+            value, "forbiddenReasonCode", optional_parser(expect_str)
         ),
     )
 
@@ -414,7 +421,7 @@ def channel_self_edge_parser(
     expect_dict(value)
     return ChannelPointsContext.Channel.ChannelSelfEdge(
         community_points=parse_expected_value(
-            value, "communityPoints", community_points_parser
+            value, "communityPoints", optional_parser(community_points_parser)
         ),
     )
 
@@ -447,9 +454,13 @@ def channel_parser(value: Any) -> ChannelPointsContext.Channel:
     expect_dict(value)
     return ChannelPointsContext.Channel(
         _id=parse_value(value, "id", expect_str),
-        edge=parse_expected_value(value, "self", channel_self_edge_parser),
+        edge=parse_expected_value(
+            value, "self", optional_parser(channel_self_edge_parser)
+        ),
         community_points_settings=parse_expected_value(
-            value, "communityPointsSettings", community_points_settings_parser
+            value,
+            "communityPointsSettings",
+            optional_parser(community_points_settings_parser),
         ),
     )
 
@@ -459,7 +470,7 @@ def community_parser(value: Any) -> ChannelPointsContext.CommunityUser:
     return ChannelPointsContext.CommunityUser(
         _id=parse_value(value, "id", expect_str),
         display_name=parse_value(value, "displayName", expect_str),
-        channel=parse_expected_value(value, "channel", channel_parser),
+        channel=parse_expected_value(value, "channel", optional_parser(channel_parser)),
     )
 
 
@@ -619,14 +630,14 @@ class Parser:
         if response_dict == {}:
             raise InvalidJsonShapeException([], "response was empty")
         errors = parse_value(response_dict, "errors", list_parser(error_parser), [])
-        data = parse_value(response_dict, "data", expect_dict)
-        extensions = parse_expected_value(response_dict, "extensions", expect_dict)
+        extensions = parse_value(response_dict, "extensions", expect_dict, {}) or {}
         with JsonParentContext("extensions"):
-            operation_name = parse_expected_value(
-                extensions, "operationName", expect_str
+            operation_name = parse_value(
+                extensions, "operationName", expect_str, "unknown"
             )
         if expect_no_errors and errors is not None and len(errors) > 0:
             raise GQLResponseErrors(operation_name, errors)
+        data = parse_value(response_dict, "data", expect_dict)
         return errors or [], operation_name, data or {}
 
     def parse_video_player_stream_info_overlay_channel_data(self, response: Any):
@@ -639,7 +650,7 @@ class Parser:
         _, _, data = self.parse_base_response(response, True)
         with JsonParentContext("data"):
             return VideoPlayerStreamInfoOverlayChannelResponse(
-                user=parse_expected_value(data, "user", user_parser),
+                user=parse_expected_value(data, "user", optional_parser(user_parser)),
             )
 
     def parse_get_id_from_login_response(self, response: Any):

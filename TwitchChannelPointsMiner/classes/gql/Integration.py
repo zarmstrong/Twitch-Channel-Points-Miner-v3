@@ -89,16 +89,10 @@ def error_context(e: Exception) -> str | None:
         return None
 
 
-def parse_list(parse: Callable[[Any], T], value: Any) -> list[T]:
-    """
-    Utility for parsing a list
-    :param parse: Parser for the list item type.
-    :param value: The value to parse.
-    :return:
-    """
-    if isinstance(value, list):
-        return [parse(item) for item in value]
-    raise InvalidJsonShapeException([], "list expected")
+def parse_raw_response(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    raise InvalidJsonShapeException([], "dict expected")
 
 
 class PostRequest(Protocol):
@@ -132,8 +126,15 @@ class GQL:
         """Strategy for handling failed requests."""
         self.parser = Parser() if parser is None else parser
         """The parser for parsing GQL responses."""
-        self.post_request = requests.post if post_request is None else post_request
+        self.post_request = (
+            self.__default_post_request if post_request is None else post_request
+        )
         """Function for posting GQL requests."""
+
+    @staticmethod
+    def __default_post_request(url: str, json: dict | list, headers: dict[str, str]):
+        """Post through requests with the timeout used by the legacy GQL client."""
+        return requests.post(url, json=json, headers=headers, timeout=(5, 30))
 
     def __post_gql_request(
         self, request_json: dict | list, parse: Callable[[Any], T]
@@ -158,6 +159,13 @@ class GQL:
         if isinstance(request_json, list):
             # A batched request should result in a batched response
             if isinstance(response_json, list):
+                if len(response_json) != len(request_json):
+                    raise InvalidJsonShapeException(
+                        [],
+                        "Expected "
+                        f"{len(request_json)} batched responses, got "
+                        f"{len(response_json)}",
+                    )
                 return list(map(parse, response_json))
             else:
                 raise InvalidJsonShapeException(
@@ -212,15 +220,29 @@ class GQL:
         :return: The parsed response, either a single object or a list if the request was a list.
         :raises RetryError: If one or more errors occurred while attempting the request.
         """
+        if not request_json:
+            return []
         result = self.attempt_strategy.make_attempts(
-            lambda: self.__post_gql_request(
-                request_json, lambda value: parse_list(parse, value)
-            ),
+            lambda: self.__post_gql_request(request_json, parse),
             validate_response,
             is_recoverable_error,
             error_context,
         )
         return self.__handle_result(result, operation_name)
+
+    def post_gql_request_raw(self, operation_name: str, request_json: dict) -> dict:
+        """Post a variable-schema operation while retaining its raw response."""
+        return self.post_gql_request_single(
+            operation_name, request_json, parse_raw_response
+        )
+
+    def post_gql_request_batch_raw(
+        self, operation_name: str, request_json: list[dict]
+    ) -> list[dict]:
+        """Post variable-schema operations as a batch and retain raw responses."""
+        return self.post_gql_request_batch(
+            operation_name, request_json, parse_raw_response
+        )
 
     def video_player_stream_info_overlay_channel(
         self, streamer_username: str
@@ -289,8 +311,16 @@ class GQL:
                 for edge in parsed_response.follows.edges:
                     follow = edge.node
                     follows.append(follow.login)
-                    last_cursor = edge.cursor
                 has_next = parsed_response.follows.page_info.has_next_page
+                if has_next:
+                    next_cursor = parsed_response.follows.page_info.end_cursor
+                    if next_cursor in (None, "", last_cursor):
+                        logger.warning(
+                            "ChannelFollows indicated another page without a new "
+                            "end cursor; returning the followers loaded so far."
+                        )
+                        break
+                    last_cursor = next_cursor
             else:
                 logger.warning("Unable to get follower list.")
                 return []

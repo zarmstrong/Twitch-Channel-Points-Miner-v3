@@ -81,7 +81,15 @@ class ErrorResult:
 class AttemptStrategy:
     """Handles making an attempt at something multiple times by catching Exceptions and validating the Result."""
 
-    def __init__(self, attempts: int = 3, attempt_interval_seconds: int = 1):
+    def __init__(self, attempts: int = 3, attempt_interval_seconds: int | float = 1):
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("attempts must be a positive integer")
+        if (
+            isinstance(attempt_interval_seconds, bool)
+            or not isinstance(attempt_interval_seconds, (int, float))
+            or attempt_interval_seconds < 0
+        ):
+            raise ValueError("attempt_interval_seconds must be a non-negative number")
         self.attempts = attempts
         """The number of attempts that should be made."""
         self.attempt_interval_seconds = attempt_interval_seconds

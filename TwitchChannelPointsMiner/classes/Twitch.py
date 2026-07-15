@@ -596,7 +596,7 @@ class Twitch(object):
         except RetryError as error:
             logger.error(f"Error getting stream info for {streamer.username}: {error}")
             raise
-        if response.user.stream is None:
+        if response.user is None or response.user.stream is None:
             raise StreamerIsOfflineException
         game = response.user.broadcast_settings.game
         return {
@@ -1845,32 +1845,6 @@ class Twitch(object):
             )
             self.__chuncked_sleep(random_sleep * 60, chunk_size=chunk_size)
 
-    def post_gql_request(self, json_data):
-        try:
-            response = requests.post(
-                GQLOperations.url,
-                json=json_data,
-                headers={
-                    "Authorization": f"OAuth {self.twitch_login.get_auth_token()}",
-                    "Client-Id": CLIENT_ID,
-                    # "Client-Integrity": self.post_integrity(),
-                    "Client-Session-Id": self.client_session,
-                    "Client-Version": self.update_client_version(),
-                    "User-Agent": self.user_agent,
-                    "X-Device-Id": self.device_id,
-                },
-                timeout=(5, 30),
-            )
-            logger.debug(
-                f"Data: {json_data}, Status code: {response.status_code}, Content: {response.text}"
-            )
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(
-                f"Error with GQLOperations ({json_data['operationName']}): {e}"
-            )
-            return {}
-
     # Request for Integrity Token
     # Twitch needs Authorization, Client-Id, X-Device-Id to generate JWT which is used for authorize gql requests
     # Regenerate Integrity Token 5 minutes before expire
@@ -2217,7 +2191,17 @@ class Twitch(object):
         if response.community is None:
             raise StreamerDoesNotExistException
         channel = response.community.channel
-        community_points = channel.edge.community_points
+        community_points = (
+            channel.edge.community_points
+            if channel is not None and channel.edge is not None
+            else None
+        )
+        if community_points is None:
+            logger.debug(
+                f"Channel points are unavailable for {streamer.username}; keeping "
+                "the current point state"
+            )
+            return
         streamer.channel_points = community_points.balance
         streamer.activeMultipliers = [
             {"factor": multiplier.factor}
@@ -2225,7 +2209,11 @@ class Twitch(object):
         ]
 
         if streamer.settings.community_goals is True:
-            goals = channel.community_points_settings.goals
+            goals = (
+                channel.community_points_settings.goals
+                if channel.community_points_settings is not None
+                else []
+            )
             streamer.community_goals = {
                 goal.id: CommunityGoal.from_gql(goal) for goal in goals
             }
@@ -2489,7 +2477,13 @@ class Twitch(object):
                     ),
                 }
 
-                response = self.post_gql_request(payload)
+                try:
+                    response = self.gql.post_gql_request_raw(
+                        payload["operationName"], payload
+                    )
+                except RetryError as error:
+                    variant_errors.append(str(error))
+                    break
                 if not isinstance(response, dict):
                     break
 
@@ -2819,9 +2813,12 @@ class Twitch(object):
                     "channelLogin": str(channel_login),
                 }
 
-            response = self.post_gql_request(json_data)
-            if not isinstance(response, list):
-                logger.debug("Unexpected campaigns response format, skipping chunk")
+            try:
+                response = self.gql.post_gql_request_batch_raw(
+                    GQLOperations.DropCampaignDetails["operationName"], json_data
+                )
+            except RetryError as error:
+                logger.debug(f"Unable to load campaign details: {error}")
                 misses += len(chunk)
                 continue
             retry_campaigns = []
@@ -2844,8 +2841,13 @@ class Twitch(object):
                         "channelLogin": viewer_context,
                     }
 
-                retry_response = self.post_gql_request(retry_data)
-                if not isinstance(retry_response, list):
+                try:
+                    retry_response = self.gql.post_gql_request_batch_raw(
+                        GQLOperations.DropCampaignDetails["operationName"],
+                        retry_data,
+                    )
+                except RetryError as error:
+                    logger.debug(f"Unable to retry campaign details: {error}")
                     misses += len(retry_campaigns)
                     continue
                 for index in range(len(retry_campaigns)):
