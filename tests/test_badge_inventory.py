@@ -83,6 +83,36 @@ def test_available_badges_retries_after_request_error():
     assert twitch._Twitch__get_available_badge_names() == {"two point pickle"}
 
 
+def test_available_badges_refreshes_successful_cache():
+    responses = iter(
+        [
+            {
+                "data": {
+                    "currentUser": {"availableBadges": [{"title": "Old Badge"}]}
+                }
+            },
+            {
+                "data": {
+                    "currentUser": {"availableBadges": [{"title": "New Badge"}]}
+                }
+            },
+        ]
+    )
+    calls = []
+
+    def post_gql_request_raw(operation, request):
+        calls.append(operation)
+        return next(responses)
+
+    twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
+
+    assert twitch._Twitch__get_available_badge_names() == {"old badge"}
+    assert twitch._Twitch__get_available_badge_names() == {"old badge"}
+    assert calls == ["AvailableBadges"]
+    assert twitch._Twitch__get_available_badge_names(refresh=True) == {"new badge"}
+    assert calls == ["AvailableBadges", "AvailableBadges"]
+
+
 def test_earned_badge_completes_fallback_campaign(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
@@ -94,6 +124,7 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
         }
     )
     twitch = bare_twitch(gql)
+    twitch.available_badge_names = {"stale badge"}
     monkeypatch.setattr(
         TwitchDropsAppScraper,
         "scrape",

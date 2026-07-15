@@ -1183,7 +1183,9 @@ class Twitch(object):
             for name, image_url in awarded_benefit_fingerprints
             if name and image_url == ""
         }
-        owned_reward_names = awarded_names | self.__get_available_badge_names()
+        owned_reward_names = awarded_names | self.__get_available_badge_names(
+            refresh=True
+        )
         checked_twitchdrops_app = False
 
         for category in categories:
@@ -1278,8 +1280,10 @@ class Twitch(object):
 
         return deadlines
 
-    def __get_available_badge_names(self):
+    def __get_available_badge_names(self, refresh=False):
         """Return every global badge the authenticated user may select."""
+        if refresh:
+            self.available_badge_names = None
         if self.available_badge_names is not None:
             return self.available_badge_names
 

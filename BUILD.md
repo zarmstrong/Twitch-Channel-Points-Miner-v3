@@ -10,13 +10,13 @@ repository root.
 
 - Windows with Python 3.11 or newer
 - The project dependencies
-- [PyInstaller](https://pyinstaller.org/)
+- [PyInstaller 6.21.0](https://pyinstaller.org/)
 
 Install the build dependencies:
 
 ```powershell
 py -m pip install -r requirements.txt
-py -m pip install pyinstaller
+py -m pip install pyinstaller==6.21.0
 ```
 
 Build the executable:
