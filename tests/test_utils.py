@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from TwitchChannelPointsMiner import utils
+from TwitchChannelPointsMiner import __version__, utils
 
 
 @pytest.mark.parametrize(
@@ -58,7 +58,7 @@ def test_remove_emoji_leaves_plain_text():
 def test_package_utils_read_version_from_package_root():
     version_data = utils.init2dict(utils.read("__init__.py"))
 
-    assert version_data["version"] == "2.0.5"
+    assert version_data["version"] == __version__
 
 
 def test_read_closes_file_handle(monkeypatch):
