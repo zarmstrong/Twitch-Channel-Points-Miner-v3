@@ -53,3 +53,9 @@ def test_copy_values_if_none_preserves_explicit_values():
 
 def test_remove_emoji_leaves_plain_text():
     assert utils.remove_emoji("Live now! " + chr(0x1F389)) == "Live now! "
+
+
+def test_package_utils_read_version_from_package_root():
+    version_data = utils.init2dict(utils.read("__init__.py"))
+
+    assert version_data["version"] == "2.0.5"
