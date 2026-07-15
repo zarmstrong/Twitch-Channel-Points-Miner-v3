@@ -89,6 +89,7 @@ class Twitch(object):
         "twitchdrops_app_campaigns",
         "category_campaign_eligibility",
         "completed_drop_campaigns",
+        "available_badge_names",
         "restart_requested",
         "gql",
     ]
@@ -138,6 +139,7 @@ class Twitch(object):
         self.twitchdrops_app_campaigns = {}
         self.category_campaign_eligibility = {}
         self.completed_drop_campaigns = set()
+        self.available_badge_names = None
         self.restart_requested = Event()
 
     def __request_authentication_restart(self):
@@ -827,6 +829,20 @@ class Twitch(object):
 
         return completed_ids
 
+    def __completed_campaign_ids_from_inventory(self, inventory: dict) -> set:
+        completed_ids = set()
+
+        for campaign in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = campaign.get("id")
+            if campaign_id in [None, ""] and isinstance(campaign.get("campaign"), dict):
+                campaign_id = campaign["campaign"].get("id")
+            if campaign_id not in [None, ""]:
+                completed_ids.add(str(campaign_id))
+
+        return completed_ids
+
     def __merge_campaign_inventory_progress(
         self, campaign: dict, inventory_campaign: dict
     ) -> dict:
@@ -1073,6 +1089,8 @@ class Twitch(object):
             if campaign_id not in campaigns_by_id:
                 campaigns_by_id[campaign_id] = campaign
         completed_drop_ids = self.__completed_drop_ids_from_inventory(inventory)
+        completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
+        self.completed_drop_campaigns.update(completed_campaign_ids)
         awarded_benefit_ids, awarded_benefit_fingerprints = self.__awarded_benefits(
             inventory
         )
@@ -1080,6 +1098,21 @@ class Twitch(object):
 
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
+                continue
+            if campaign_id in completed_campaign_ids:
+                campaign_evaluations.append(
+                    {
+                        "campaign": campaign.get("name"),
+                        "campaign_id": campaign_id,
+                        "game": (campaign.get("game") or {}).get("displayName"),
+                        "active_incomplete": False,
+                        "skip_reason": "completed_campaign",
+                    }
+                )
+                game = campaign.get("game") or {}
+                game_name = (game.get("displayName") or game.get("name") or "").strip()
+                if game_name:
+                    twitch_category_slugs.add(self.__slugify(game_name))
                 continue
             inventory_campaign = inventory_campaigns.get(campaign_id)
             if inventory_campaign is not None:
@@ -1150,6 +1183,9 @@ class Twitch(object):
             for name, image_url in awarded_benefit_fingerprints
             if name and image_url == ""
         }
+        owned_reward_names = awarded_names | self.__get_available_badge_names(
+            refresh=True
+        )
         checked_twitchdrops_app = False
 
         for category in categories:
@@ -1184,7 +1220,7 @@ class Twitch(object):
                     for drop in campaign.get("drops", [])
                     if str(drop.get("name") or "").strip()
                 }
-                missing_drop_names = sorted(drop_names - awarded_names)
+                missing_drop_names = sorted(drop_names - owned_reward_names)
                 campaign_evaluations.append(
                     {
                         "campaign": campaign.get("name"),
@@ -1193,7 +1229,7 @@ class Twitch(object):
                         "fully_collected": bool(drop_names) and not missing_drop_names,
                     }
                 )
-                if drop_names and drop_names.issubset(awarded_names):
+                if drop_names and drop_names.issubset(owned_reward_names):
                     completed_campaigns.append(
                         {
                             "campaign": campaign.get("name"),
@@ -1244,6 +1280,58 @@ class Twitch(object):
 
         return deadlines
 
+    def __get_available_badge_names(self, refresh=False):
+        """Return every global badge the authenticated user may select."""
+        if refresh:
+            self.available_badge_names = None
+        if self.available_badge_names is not None:
+            return self.available_badge_names
+
+        available_badge_names = set()
+        request = {
+            "operationName": "AvailableBadges",
+            "query": (
+                "query AvailableBadges { currentUser { availableBadges { "
+                "id setID version title description imageURL } } }"
+            ),
+            "variables": {},
+        }
+        try:
+            response = self.gql.post_gql_request_raw("AvailableBadges", request)
+            current_user = (response.get("data") or {}).get("currentUser") or {}
+            badges = current_user.get("availableBadges")
+            if not isinstance(badges, list):
+                self.__log_drop_check(
+                    "full Twitch badge inventory was unavailable",
+                    level=logging.DEBUG,
+                )
+                return available_badge_names
+
+            for badge in badges:
+                if not isinstance(badge, dict):
+                    continue
+                title = str(badge.get("title") or "").strip().lower()
+                if title:
+                    available_badge_names.add(title)
+
+            self.available_badge_names = available_badge_names
+
+            self.__log_drop_check(
+                "loaded " f"{len(self.available_badge_names)} earned Twitch badge names"
+            )
+            self.__log_drop_check_json(
+                "earned Twitch badge names",
+                sorted(self.available_badge_names),
+                level=self.category_log_level,
+                category_log=True,
+            )
+        except (RetryError, KeyError, TypeError, ValueError) as error:
+            self.__log_drop_check(
+                f"unable to load full Twitch badge inventory: {error}"
+            )
+            return available_badge_names
+        return self.available_badge_names
+
     def filter_categories_with_active_drops(
         self, categories: List[str], order="ORDER", drops_enabled: bool = True
     ) -> List[str]:
@@ -1270,7 +1358,7 @@ class Twitch(object):
                 )
         (
             active_category_deadlines,
-            _twitch_category_slugs,
+            twitch_category_slugs,
         ) = self.__active_drop_category_slugs_from_campaigns(
             inventory,
             requested_category_slugs,
@@ -1279,7 +1367,7 @@ class Twitch(object):
         active_category_deadlines.update(
             self.__twitchdrops_app_fallback(
                 categories,
-                set(active_category_deadlines),
+                twitch_category_slugs,
                 awarded_benefit_fingerprints,
             )
         )
@@ -2601,6 +2689,9 @@ class Twitch(object):
                     )
                 if cache_key:
                     self.awarded_game_event_drops[str(cache_key)] = awarded_drop
+            self.completed_drop_campaigns.update(
+                self.__completed_campaign_ids_from_inventory(inventory)
+            )
             if self.log_drop_checks is True:
                 campaigns_in_progress = (
                     inventory.get("dropCampaignsInProgress", []) or []

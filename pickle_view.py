@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """Safely display a JSON cookie file created by the miner."""
 

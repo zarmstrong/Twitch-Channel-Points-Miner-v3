@@ -55,7 +55,7 @@ jobs:
                 TwitchChannelPointsMiner/__init__.py)
                   # Release Please updates only the package version here.
                   ;;
-                TwitchChannelPointsMiner/*.py|Dockerfile|requirements.txt|assets/*|config.example.py|example.py|twitchdrops_app_scraper.py)
+                TwitchChannelPointsMiner/*.py|Dockerfile|requirements.txt|assets/*|config.example.py|example.py|twitchdrops_app_scraper.py|windows_launcher.py|build_windows.bat|TwitchChannelPointsMiner.spec)
                   code_changed=true
                   break
                   ;;
@@ -77,3 +77,49 @@ jobs:
     with:
       ref: ${{ needs.release_please.outputs.tag_name }}
     secrets: inherit
+
+  publish_windows_exe:
+    name: Publish Windows executable
+    needs:
+      - release_please
+      - detect_code_changes
+    if: needs.detect_code_changes.outputs.code_changed == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release_please.outputs.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install validators==0.22.0 pyinstaller==6.21.0
+
+      - name: Build Windows executable
+        shell: cmd
+        run: build_windows.bat
+
+      - name: Package executable zip
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+        run: |
+          $zipName = "TwitchChannelPointsMiner-$env:RELEASE_TAG.zip"
+          Compress-Archive -Path "dist/TwitchChannelPointsMiner.exe" -DestinationPath "dist/$zipName" -Force
+
+      - name: Upload executable to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release_please.outputs.tag_name }}
+          files: dist/TwitchChannelPointsMiner-${{ needs.release_please.outputs.tag_name }}.zip
+          fail_on_unmatched_files: true

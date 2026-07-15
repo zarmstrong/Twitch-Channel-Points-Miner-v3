@@ -94,3 +94,18 @@ def test_bulk_inventory_claim_marks_completed_campaign(monkeypatch):
     twitch.claim_all_drops_from_inventory()
 
     assert twitch.completed_drop_campaigns == {"campaign-1"}
+
+
+def test_completed_reward_campaign_ids_suppress_stale_campaigns(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    inventory = {
+        "completedRewardCampaigns": [
+            {"id": "campaign-1"},
+            {"campaign": {"id": "campaign-2"}},
+        ]
+    }
+
+    completed = twitch._Twitch__completed_campaign_ids_from_inventory(inventory)
+    twitch.completed_drop_campaigns.update(completed)
+
+    assert twitch.completed_drop_campaigns == {"campaign-1", "campaign-2"}

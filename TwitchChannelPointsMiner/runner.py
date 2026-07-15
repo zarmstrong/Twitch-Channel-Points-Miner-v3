@@ -169,7 +169,14 @@ def run_config(config, path):
     if miner.twitch.restart_requested.is_set():
         # Flush the forced authentication alert before replacing the process.
         miner.queue_listener.stop()
-        os.execv(sys.executable, [sys.executable, "-u", *sys.argv])
+        restart_process()
+
+
+def restart_process():
+    """Replace the current process, preserving frozen executable arguments."""
+    if getattr(sys, "frozen", False):
+        return os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+    return os.execv(sys.executable, [sys.executable, "-u", *sys.argv])
 
 
 def _run_legacy(runner, reason):
