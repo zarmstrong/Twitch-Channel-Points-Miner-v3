@@ -85,6 +85,8 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
     - [What converts automatically](#what-converts-automatically)
 8. 🍪 [Legacy cookie migration (optional)](#legacy-cookie-migration-optional)
 9. 🪟 [Windows](#windows)
+    - [Download a release executable](#download-a-release-executable)
+    - [First launch and upgrades](#first-launch-and-upgrades)
 10. 📱 [Termux](#termux)
 11. ⚠️ [Disclaimer](#disclaimer)
 
@@ -372,6 +374,12 @@ channel and filters categories using eligible Drop campaign information. Set it
 to `False` only when you intentionally want live channels from a category even
 without the Drops tag.
 
+Campaigns that Twitch reports as completed are excluded from active category
+discovery. For badge rewards, the miner also checks the authenticated account's
+full available badge inventory. This prevents an already-earned badge campaign
+from keeping a category active when the normal Drops inventory omits that
+reward.
+
 `CategoryCampaignOrder.ORDER` preserves the order in `categories`.
 `CategoryCampaignOrder.EXPIRATION` prioritizes categories whose viable campaigns
 expire soonest, helping time-sensitive Drops get selected first.
@@ -513,6 +521,9 @@ The runner checks `config/config.py` every five seconds. Set
 
 #### Docker Hub
 Official Docker images are on https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2 for `linux/amd64`, `linux/arm64` and `linux/arm/v7`.
+
+Maintainers building or publishing images from source should follow the
+[Docker image build guide](BUILD.md#docker-images).
 
 The image reads `/usr/src/app/config/config.py`. Create a host `config` directory,
 copy [config.example.py](config.example.py) to `config/config.py`, customize it,
@@ -1114,27 +1125,29 @@ that reauthentication can occur; follow the instructions printed in the logs.
 Windows users who encounter terminal rendering problems can disable emoji with
 `LoggerSettings(emoji=False)` inside `MINER_CONFIG["logger_settings"]`.
 
-### Build a standalone executable
+### Download a release executable
 
-Build the executable on Windows with Python 3.11 or newer. From the repository
-directory, install the normal dependencies and PyInstaller, then run the build
-script:
+Releases that include code changes provide a versioned
+`TwitchChannelPointsMiner-<version>.zip` on the project's
+[Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases).
+Extract the archive into a writable directory and run
+`TwitchChannelPointsMiner.exe`. Keep the executable in that directory so its
+configuration and runtime data remain together.
 
-```powershell
-py -m pip install -r requirements.txt
-py -m pip install pyinstaller
-.\build_windows.bat
-```
+To build the executable from source, follow the
+[Windows build guide](BUILD.md#windows-executable).
 
-The result is `dist\TwitchChannelPointsMiner.exe`. Copy that file to a writable
-directory before running it. On first launch it creates
-`config\config.py` beside the executable and exits. Edit that external file as
-described in [How to use](#how-to-use), then launch the executable again.
+### First launch and upgrades
+
+On first launch, the executable creates `config\config.py` beside itself and
+exits. Edit that external file as described in [How to use](#how-to-use), then
+launch the executable again.
 
 The executable keeps editable configuration, credentials, cookies, logs, and
 analytics data outside the binary. Keep that directory private, especially the
-`config` and `cookies` folders. Rebuilding or replacing the executable does not
-overwrite the existing configuration.
+`config` and `cookies` folders. To upgrade, stop the miner and replace only the
+executable with the newer version. Rebuilding or replacing it does not overwrite
+the existing configuration or account data.
 
 Other useful info can be found here:
 - https://github.com/gottagofaster236/Twitch-Channel-Points-Miner/issues/31
