@@ -1114,6 +1114,28 @@ that reauthentication can occur; follow the instructions printed in the logs.
 Windows users who encounter terminal rendering problems can disable emoji with
 `LoggerSettings(emoji=False)` inside `MINER_CONFIG["logger_settings"]`.
 
+### Build a standalone executable
+
+Build the executable on Windows with Python 3.11 or newer. From the repository
+directory, install the normal dependencies and PyInstaller, then run the build
+script:
+
+```powershell
+py -m pip install -r requirements.txt
+py -m pip install pyinstaller
+.\build_windows.bat
+```
+
+The result is `dist\TwitchChannelPointsMiner.exe`. Copy that file to a writable
+directory before running it. On first launch it creates
+`config\config.py` beside the executable and exits. Edit that external file as
+described in [How to use](#how-to-use), then launch the executable again.
+
+The executable keeps editable configuration, credentials, cookies, logs, and
+analytics data outside the binary. Keep that directory private, especially the
+`config` and `cookies` folders. Rebuilding or replacing the executable does not
+overwrite the existing configuration.
+
 Other useful info can be found here:
 - https://github.com/gottagofaster236/Twitch-Channel-Points-Miner/issues/31
 - https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/55
