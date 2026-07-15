@@ -21,6 +21,8 @@ jobs:
       - name: Run Release Please
         id: release
         uses: googleapis/release-please-action@v5
+        with:
+          target-branch: ${{ github.ref_name}}
 
   detect_code_changes:
     name: Detect released code changes
