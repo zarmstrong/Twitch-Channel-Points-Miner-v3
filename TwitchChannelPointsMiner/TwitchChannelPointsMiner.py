@@ -19,6 +19,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     StreamerSettings,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
+from TwitchChannelPointsMiner.classes.gql.Integration import GQLFactory
 from TwitchChannelPointsMiner.classes.Settings import (
     CategoryCampaignOrder,
     Events,
@@ -30,6 +31,7 @@ from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
 from TwitchChannelPointsMiner.utils import (
+    AttemptStrategy,
     _millify,
     at_least_one_value_in_settings_is,
     check_versions,
@@ -104,6 +106,7 @@ class TwitchChannelPointsMiner:
         # Default values for all streamers
         streamer_settings: StreamerSettings = StreamerSettings(),
         streams_watched: int = 2,
+        gql: AttemptStrategy | GQLFactory | None = None,
     ):
 
         # Fixes TypeError: 'NoneType' object is not subscriptable
@@ -167,7 +170,17 @@ class TwitchChannelPointsMiner:
 
         # user_agent = get_user_agent("FIREFOX")
         user_agent = get_user_agent("CHROME")
-        self.twitch = Twitch(self.username, user_agent, password)
+        if gql is None:
+            gql_factory = GQLFactory()
+        elif isinstance(gql, AttemptStrategy):
+            gql_factory = GQLFactory(attempt_strategy=gql)
+        elif isinstance(gql, GQLFactory):
+            gql_factory = gql
+        else:
+            raise ValueError("gql must be None, AttemptStrategy, or GQLFactory")
+        self.twitch = Twitch(
+            self.username, user_agent, password, gql_factory=gql_factory
+        )
 
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]

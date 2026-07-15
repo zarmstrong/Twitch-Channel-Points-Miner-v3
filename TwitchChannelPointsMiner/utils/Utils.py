@@ -7,11 +7,16 @@ from os import path
 from random import randrange
 
 import requests
-from millify import millify
+from millify import millify as package_millify
 
 from TwitchChannelPointsMiner.constants import USER_AGENTS, GITHUB_url
 
 
+def millify(input, precision=2):
+    return package_millify(input, precision)
+
+
+# Backward-compatible alias for callers not yet migrated to the public name.
 def _millify(input, precision=2):
     return millify(input, precision)
 
@@ -164,7 +169,9 @@ def create_chunks(lst, n):
 
 
 def read(fname):
-    return open(path.join(path.dirname(__file__), fname), encoding="utf-8").read()
+    package_root = path.dirname(path.dirname(__file__))
+    with open(path.join(package_root, fname), encoding="utf-8") as file:
+        return file.read()
 
 
 def init2dict(content):

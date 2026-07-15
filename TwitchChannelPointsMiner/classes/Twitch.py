@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import requests
 from colorama import Fore
 
+from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
@@ -30,6 +31,8 @@ from TwitchChannelPointsMiner.classes.Exceptions import (
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
 )
+from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.gql.Integration import GQLFactory
 from TwitchChannelPointsMiner.classes.Settings import (
     Events,
     FollowersOrder,
@@ -87,9 +90,10 @@ class Twitch(object):
         "category_campaign_eligibility",
         "completed_drop_campaigns",
         "restart_requested",
+        "gql",
     ]
 
-    def __init__(self, username, user_agent, password=None):
+    def __init__(self, username, user_agent, password=None, gql_factory=None):
         if (
             not isinstance(username, str)
             or re.fullmatch(r"[A-Za-z0-9_]{1,25}", username) is None
@@ -110,6 +114,15 @@ class Twitch(object):
         # self.integrity_expire = 0
         self.client_session = token_hex(16)
         self.client_version = CLIENT_VERSION
+        gql_client_session = ClientSession(
+            login=self.twitch_login,
+            user_agent=self.user_agent,
+            version=self.client_version,
+            device_id=self.device_id,
+            session_id=self.client_session,
+        )
+        self.gql = (gql_factory or GQLFactory()).create(gql_client_session)
+        self.gql.on_unauthorized = self.__request_authentication_restart
         self.twilight_build_id_pattern = re.compile(
             r'window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
         )
@@ -126,10 +139,6 @@ class Twitch(object):
         self.category_campaign_eligibility = {}
         self.completed_drop_campaigns = set()
         self.restart_requested = Event()
-
-    @staticmethod
-    def __is_unauthorized_response(response):
-        return isinstance(response, dict) and response.get("status") == 401
 
     def __request_authentication_restart(self):
         if self.restart_requested.is_set():
@@ -509,6 +518,11 @@ class Twitch(object):
         else:
             self.twitch_login.load_cookies(self.cookies_file)
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
+        # Keep the shared typed-GQL session in sync with Twitch's current web
+        # client version. The legacy transport refreshed this before every
+        # request; once per authenticated startup avoids stale headers without
+        # adding a network request to every operation.
+        self.update_client_version()
 
     # === STREAMER / STREAM / INFO === #
     def update_stream(self, streamer):
@@ -574,25 +588,44 @@ class Twitch(object):
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
 
     def get_broadcast_id(self, streamer):
-        json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
-        json_data["variables"] = {"id": streamer.channel_id}
-        response = self.post_gql_request(json_data)
-        if response != {}:
-            stream = response["data"]["user"]["stream"]
-            if stream is not None:
-                return stream["id"]
-            else:
-                raise StreamerIsOfflineException
+        stream_info = self.get_stream_info(streamer)
+        if stream_info is None:
+            return None
+        return stream_info["stream"]["id"]
 
     def get_stream_info(self, streamer):
-        json_data = copy.deepcopy(GQLOperations.VideoPlayerStreamInfoOverlayChannel)
-        json_data["variables"] = {"channel": streamer.username}
-        response = self.post_gql_request(json_data)
-        if response != {}:
-            if response["data"]["user"]["stream"] is None:
-                raise StreamerIsOfflineException
-            else:
-                return response["data"]["user"]
+        try:
+            response = self.gql.video_player_stream_info_overlay_channel(
+                streamer.username
+            )
+        except RetryError as error:
+            logger.error(f"Error getting stream info for {streamer.username}: {error}")
+            return None
+        if response.user is None or response.user.stream is None:
+            raise StreamerIsOfflineException
+        game = response.user.broadcast_settings.game
+        return {
+            "stream": {
+                "id": response.user.stream.id,
+                "tags": [
+                    {"id": tag.id, "localizedName": tag.localized_name}
+                    for tag in response.user.stream.tags
+                ],
+                "viewersCount": response.user.stream.viewers_count,
+            },
+            "broadcastSettings": {
+                "title": response.user.broadcast_settings.title,
+                "game": (
+                    {}
+                    if game is None
+                    else {
+                        "id": game.id,
+                        "displayName": game.display_name,
+                        "name": game.name,
+                    }
+                ),
+            },
+        }
 
     def check_streamer_online(self, streamer):
         if time.time() < streamer.offline_at + 60:
@@ -674,40 +707,21 @@ class Twitch(object):
         )
 
     def get_channel_id(self, streamer_username):
-        json_data = copy.deepcopy(GQLOperations.GetIDFromLogin)
-        json_data["variables"]["login"] = streamer_username
-        json_response = self.post_gql_request(json_data)
-        if (
-            "data" not in json_response
-            or "user" not in json_response["data"]
-            or json_response["data"]["user"] is None
-        ):
+        response = self.gql.get_id_from_login(streamer_username)
+        if response.id == "":
             raise StreamerDoesNotExistException
-        else:
-            return json_response["data"]["user"]["id"]
+        return response.id
 
     def get_followers(
         self, limit: int = 100, order: FollowersOrder = FollowersOrder.ASC
     ):
-        json_data = copy.deepcopy(GQLOperations.ChannelFollows)
-        json_data["variables"] = {"limit": limit, "order": str(order)}
-        has_next = True
-        last_cursor = ""
-        follows = []
-        while has_next is True:
-            json_data["variables"]["cursor"] = last_cursor
-            json_response = self.post_gql_request(json_data)
-            try:
-                follows_response = json_response["data"]["user"]["follows"]
-                last_cursor = None
-                for follow in follows_response["edges"]:
-                    follows.append(follow["node"]["login"].lower())
-                    last_cursor = follow["cursor"]
-
-                has_next = follows_response["pageInfo"]["hasNextPage"]
-            except KeyError:
-                return []
-        return follows
+        try:
+            return [login.lower() for login in self.gql.channel_follows(limit, order)]
+        except RetryError as error:
+            logger.error(
+                f"Error getting followed channels. Limit: {limit}, order: {order}: {error}"
+            )
+            return []
 
     def __normalize_category(self, category: str) -> str:
         if category is None:
@@ -1077,7 +1091,27 @@ class Twitch(object):
             game_slug = self.__slugify(game_name) if game_name else ""
             if game_slug:
                 twitch_category_slugs.add(game_slug)
+            matches_configured_category = game_slug in requested_category_slugs
+            evaluation = {
+                "campaign": campaign.get("name"),
+                "campaign_id": campaign_id,
+                "game": game_name,
+                "game_slug": game_slug,
+                "matches_configured_category": matches_configured_category,
+                "drops": [
+                    drop.get("name")
+                    for drop in campaign.get("timeBasedDrops", []) or []
+                    if isinstance(drop, dict)
+                ],
+            }
             if game_slug not in requested_category_slugs:
+                evaluation["active_incomplete"] = None
+                evaluation["skip_reason"] = (
+                    "missing_game_metadata"
+                    if game_slug == ""
+                    else "category_not_configured"
+                )
+                campaign_evaluations.append(evaluation)
                 continue
 
             deadline = self.__active_incomplete_drop_deadline(
@@ -1086,19 +1120,8 @@ class Twitch(object):
                 awarded_benefit_ids,
                 awarded_benefit_fingerprints,
             )
-            campaign_evaluations.append(
-                {
-                    "campaign": campaign.get("name"),
-                    "campaign_id": campaign_id,
-                    "game": game_name,
-                    "drops": [
-                        drop.get("name")
-                        for drop in campaign.get("timeBasedDrops", []) or []
-                        if isinstance(drop, dict)
-                    ],
-                    "active_incomplete": deadline is not None,
-                }
-            )
+            evaluation["active_incomplete"] = deadline is not None
+            campaign_evaluations.append(evaluation)
             if deadline is None:
                 continue
 
@@ -1226,6 +1249,8 @@ class Twitch(object):
     ) -> List[str]:
         if not categories:
             return []
+        if drops_enabled is False:
+            return categories
 
         inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
@@ -1787,22 +1812,21 @@ class Twitch(object):
     def update_raid(self, streamer, raid):
         if streamer.raid != raid:
             streamer.raid = raid
-            json_data = copy.deepcopy(GQLOperations.JoinRaid)
-            json_data["variables"] = {"input": {"raidID": raid.raid_id}}
-            self.post_gql_request(json_data)
-
-            logger.info(
-                f"Joining raid from {streamer} to {raid.target_login}!",
-                extra={"emoji": ":performing_arts:", "event": Events.JOIN_RAID},
-            )
+            try:
+                self.gql.join_raid(raid.raid_id)
+                logger.info(
+                    f"Joining raid from {streamer} to {raid.target_login}!",
+                    extra={"emoji": ":performing_arts:", "event": Events.JOIN_RAID},
+                )
+            except RetryError as error:
+                logger.error(f"Error joining raid from {streamer} to {raid}: {error}")
 
     def viewer_is_mod(self, streamer):
-        json_data = copy.deepcopy(GQLOperations.ModViewChannelQuery)
-        json_data["variables"] = {"channelLogin": streamer.username}
-        response = self.post_gql_request(json_data)
         try:
-            streamer.viewer_is_mod = response["data"]["user"]["self"]["isModerator"]
-        except (ValueError, KeyError):
+            response = self.gql.mod_view_channel(streamer.username)
+            streamer.viewer_is_mod = response.is_moderator is True
+        except RetryError as error:
+            logger.error(f"Unable to load moderator status for {streamer}: {error}")
             streamer.viewer_is_mod = False
 
     # === 'GLOBALS' METHODS === #
@@ -1823,32 +1847,6 @@ class Twitch(object):
                 f"No internet connection available! Retry after {random_sleep}m"
             )
             self.__chuncked_sleep(random_sleep * 60, chunk_size=chunk_size)
-
-    def post_gql_request(self, json_data):
-        try:
-            response = requests.post(
-                GQLOperations.url,
-                json=json_data,
-                headers={
-                    "Authorization": f"OAuth {self.twitch_login.get_auth_token()}",
-                    "Client-Id": CLIENT_ID,
-                    # "Client-Integrity": self.post_integrity(),
-                    "Client-Session-Id": self.client_session,
-                    "Client-Version": self.update_client_version(),
-                    "User-Agent": self.user_agent,
-                    "X-Device-Id": self.device_id,
-                },
-                timeout=(5, 30),
-            )
-            logger.debug(
-                f"Data: {json_data}, Status code: {response.status_code}, Content: {response.text}"
-            )
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(
-                f"Error with GQLOperations ({json_data['operationName']}): {e}"
-            )
-            return {}
 
     # Request for Integrity Token
     # Twitch needs Authorization, Client-Id, X-Device-Id to generate JWT which is used for authorize gql requests
@@ -1919,6 +1917,7 @@ class Twitch(object):
                 logger.debug("Error with update_client_version: no match")
                 return self.client_version
             self.client_version = matcher.group(1)
+            self.gql.client_session.version = self.client_version
             logger.debug(f"Client version: {self.client_version}")
             return self.client_version
         except requests.exceptions.RequestException as e:
@@ -2185,62 +2184,52 @@ class Twitch(object):
     # === CHANNEL POINTS / PREDICTION === #
     # Load the amount of current points for a channel, check if a bonus is available
     def load_channel_points_context(self, streamer):
-        json_data = copy.deepcopy(GQLOperations.ChannelPointsContext)
-        json_data["variables"] = {"channelLogin": streamer.username}
-
-        response = self.post_gql_request(json_data)
-        if not isinstance(response, dict) or response == {}:
-            return
-
-        data = response.get("data")
-        if not isinstance(data, dict) or "community" not in data:
-            logger.debug(
-                f"Channel points response for {streamer.username} did not contain "
-                "community data; keeping the current point state"
+        try:
+            response = self.gql.get_channel_points_context(streamer.username)
+        except RetryError as error:
+            logger.error(
+                f"Error loading channel points for {streamer.username}: {error}"
             )
             return
-
-        community = data["community"]
-        if community is None:
+        if response.community is None:
             raise StreamerDoesNotExistException
-
-        channel = community.get("channel") if isinstance(community, dict) else None
-        viewer = channel.get("self") if isinstance(channel, dict) else None
+        channel = response.community.channel
         community_points = (
-            viewer.get("communityPoints") if isinstance(viewer, dict) else None
+            channel.edge.community_points
+            if channel is not None and channel.edge is not None
+            else None
         )
-        if not isinstance(community_points, dict):
+        if community_points is None:
             logger.debug(
                 f"Channel points are unavailable for {streamer.username}; keeping "
                 "the current point state"
             )
             return
-
-        balance = community_points.get("balance")
-        if balance is None:
+        if community_points.balance is None:
             logger.debug(
                 f"Channel points response for {streamer.username} has no balance; "
                 "keeping the current point state"
             )
             return
-
-        streamer.channel_points = balance
-        streamer.activeMultipliers = community_points.get("activeMultipliers")
+        streamer.channel_points = community_points.balance
+        streamer.activeMultipliers = [
+            {"factor": multiplier.factor}
+            for multiplier in community_points.active_multipliers
+        ]
 
         if streamer.settings.community_goals is True:
-            points_settings = channel.get("communityPointsSettings") or {}
             goals = (
-                points_settings.get("goals", [])
-                if isinstance(points_settings, dict)
+                channel.community_points_settings.goals
+                if channel.community_points_settings is not None
                 else []
             )
             streamer.community_goals = {
-                goal["id"]: CommunityGoal.from_gql(goal) for goal in goals
+                goal.id: CommunityGoal.from_gql(goal) for goal in goals
             }
 
-        available_claim = community_points.get("availableClaim")
-        if isinstance(available_claim, dict) and available_claim.get("id") is not None:
-            self.claim_bonus(streamer, available_claim["id"])
+        available_claim = community_points.available_claim
+        if available_claim is not None:
+            self.claim_bonus(streamer, available_claim.id)
 
         if streamer.settings.community_goals is True:
             self.contribute_to_community_goals(streamer)
@@ -2284,30 +2273,27 @@ class Twitch(object):
                         },
                     )
 
-                    json_data = copy.deepcopy(GQLOperations.MakePrediction)
-                    json_data["variables"] = {
-                        "input": {
-                            "eventID": event.event_id,
-                            "outcomeID": decision["id"],
-                            "points": decision["amount"],
-                            "transactionID": token_hex(16),
-                        }
-                    }
-                    response = self.post_gql_request(json_data)
-                    if (
-                        "data" in response
-                        and "makePrediction" in response["data"]
-                        and "error" in response["data"]["makePrediction"]
-                        and response["data"]["makePrediction"]["error"] is not None
-                    ):
-                        error_code = response["data"]["makePrediction"]["error"]["code"]
+                    try:
+                        response = self.gql.make_prediction(
+                            event.event_id, decision["id"], decision["amount"]
+                        )
+                    except RetryError as error:
                         logger.error(
-                            f"Failed to place bet, error: {error_code}",
+                            f"Failed to place bet: {error}",
                             extra={
                                 "emoji": ":four_leaf_clover:",
                                 "event": Events.BET_FAILED,
                             },
                         )
+                    else:
+                        if response.error is not None:
+                            logger.error(
+                                f"Failed to place bet, error: {response.error.code}",
+                                extra={
+                                    "emoji": ":four_leaf_clover:",
+                                    "event": Events.BET_FAILED,
+                                },
+                            )
                 else:
                     logger.info(
                         f"Bet won't be placed as the amount {_millify(decision['amount'])} is less than the minimum required 10",
@@ -2332,11 +2318,10 @@ class Twitch(object):
                 extra={"emoji": ":gift:", "event": Events.BONUS_CLAIM},
             )
 
-        json_data = copy.deepcopy(GQLOperations.ClaimCommunityPoints)
-        json_data["variables"] = {
-            "input": {"channelID": streamer.channel_id, "claimID": claim_id}
-        }
-        self.post_gql_request(json_data)
+        try:
+            self.gql.claim_community_points(streamer.channel_id, claim_id)
+        except RetryError as error:
+            logger.error(f"Error claiming bonus for {streamer}: {error}")
 
     # === MOMENTS === #
     def claim_moment(self, streamer, moment_id):
@@ -2346,9 +2331,10 @@ class Twitch(object):
                 extra={"emoji": ":video_camera:", "event": Events.MOMENT_CLAIM},
             )
 
-        json_data = copy.deepcopy(GQLOperations.CommunityMomentCallout_Claim)
-        json_data["variables"] = {"input": {"momentID": moment_id}}
-        self.post_gql_request(json_data)
+        try:
+            self.gql.claim_moment(moment_id)
+        except RetryError as error:
+            logger.error(f"Error claiming moment for {streamer}: {error}")
 
     # === CAMPAIGNS / DROPS / INVENTORY === #
     def log_open_drop_campaigns(self):
@@ -2500,7 +2486,13 @@ class Twitch(object):
                     ),
                 }
 
-                response = self.post_gql_request(payload)
+                try:
+                    response = self.gql.post_gql_request_raw(
+                        payload["operationName"], payload
+                    )
+                except RetryError as error:
+                    variant_errors.append(str(error))
+                    break
                 if not isinstance(response, dict):
                     break
 
@@ -2578,11 +2570,24 @@ class Twitch(object):
         return campaigns, debug
 
     def __get_inventory(self):
-        response = self.post_gql_request(GQLOperations.Inventory)
         try:
-            inventory = (
-                response["data"]["currentUser"]["inventory"] if response != {} else {}
-            )
+            inventory_response = self.gql.get_inventory()
+            inventory = inventory_response.inventory
+            if inventory_response.errors:
+                error_paths = {
+                    tuple(error.path or []) for error in inventory_response.errors
+                }
+                only_optional_errors = error_paths.issubset(
+                    {("currentUser", "inventory", "gameEventDrops")}
+                )
+                message = (
+                    "Twitch returned partial drops inventory data; continuing with "
+                    f"the available fields. Errors: {inventory_response.errors}"
+                )
+                if only_optional_errors:
+                    self.__log_drop_check(message, level=logging.DEBUG)
+                else:
+                    logger.warning(message, extra={"emoji": ":warning:"})
             for awarded_drop in inventory.get("gameEventDrops", []) or []:
                 if not isinstance(awarded_drop, dict):
                     continue
@@ -2613,12 +2618,19 @@ class Twitch(object):
                     level=logging.DEBUG,
                 )
             return inventory
+        except RetryError as error:
+            logger.error(f"Unable to load drops inventory: {error}")
+            return {}
         except (ValueError, KeyError, TypeError):
             self.__log_drop_check("failed to parse inventory response")
             return {}
 
     def __get_drops_dashboard(self, status=None, return_raw: bool = False):
-        response = self.post_gql_request(GQLOperations.ViewerDropsDashboard)
+        try:
+            response = self.gql.get_viewer_drops_dashboard().raw_response
+        except RetryError as error:
+            logger.error(f"Unable to load drops dashboard: {error}")
+            response = {}
         data = response.get("data", {}) if isinstance(response, dict) else {}
         current_user = data.get("currentUser", {})
         campaigns = []
@@ -2637,6 +2649,8 @@ class Twitch(object):
 
         campaigns_by_id = {}
         for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
             campaign_id = campaign.get("id")
             if campaign_id:
                 campaigns_by_id[campaign_id] = campaign
@@ -2774,18 +2788,16 @@ class Twitch(object):
         campaign_channel_login_by_id: Optional[Dict[str, str]] = None,
     ):
         def extract_drop_campaign(response_item):
-            drop_campaign = (
-                response_item.get("data", {}).get("user", {}).get("dropCampaign")
-            )
-            if drop_campaign is None:
-                drop_campaign = (
-                    response_item.get("data", {})
-                    .get("currentUser", {})
-                    .get("dropCampaign")
-                )
-            if drop_campaign is None:
-                drop_campaign = response_item.get("data", {}).get("dropCampaign")
-            return drop_campaign
+            if not isinstance(response_item, dict):
+                return None
+            data = response_item.get("data")
+            if not isinstance(data, dict):
+                return None
+            for parent_name in ("user", "currentUser"):
+                parent = data.get(parent_name)
+                if isinstance(parent, dict) and parent.get("dropCampaign") is not None:
+                    return parent["dropCampaign"]
+            return data.get("dropCampaign")
 
         result = []
         misses = 0
@@ -2810,9 +2822,12 @@ class Twitch(object):
                     "channelLogin": str(channel_login),
                 }
 
-            response = self.post_gql_request(json_data)
-            if not isinstance(response, list):
-                logger.debug("Unexpected campaigns response format, skipping chunk")
+            try:
+                response = self.gql.post_gql_request_batch_raw(
+                    GQLOperations.DropCampaignDetails["operationName"], json_data
+                )
+            except RetryError as error:
+                logger.debug(f"Unable to load campaign details: {error}")
                 misses += len(chunk)
                 continue
             retry_campaigns = []
@@ -2835,8 +2850,13 @@ class Twitch(object):
                         "channelLogin": viewer_context,
                     }
 
-                retry_response = self.post_gql_request(retry_data)
-                if not isinstance(retry_response, list):
+                try:
+                    retry_response = self.gql.post_gql_request_batch_raw(
+                        GQLOperations.DropCampaignDetails["operationName"],
+                        retry_data,
+                    )
+                except RetryError as error:
+                    logger.debug(f"Unable to retry campaign details: {error}")
                     misses += len(retry_campaigns)
                     continue
                 for index in range(len(retry_campaigns)):
@@ -2862,16 +2882,20 @@ class Twitch(object):
         # We need the inventory only for get the real updated value/progress
         # Get data from inventory and sync current status with streamers.campaigns
         inventory = self.__get_inventory()
-        if inventory not in [None, {}] and inventory["dropCampaignsInProgress"] not in [
-            None,
-            {},
-        ]:
+        campaigns_in_progress = (
+            inventory.get("dropCampaignsInProgress")
+            if isinstance(inventory, dict)
+            else None
+        )
+        if campaigns_in_progress not in [None, {}]:
             campaigns_by_id = {campaign.id: campaign for campaign in campaigns}
             for campaign in campaigns:
                 campaign.clear_drops()  # Remove all the claimed drops
 
             # Iterate all campaigns currently in progress from our inventory.
-            for progress in inventory["dropCampaignsInProgress"]:
+            for progress in campaigns_in_progress:
+                if not isinstance(progress, dict):
+                    continue
                 campaign_ref = campaigns_by_id.get(progress.get("id"))
 
                 if campaign_ref is not None:
@@ -3180,22 +3204,18 @@ class Twitch(object):
             f"Claim {drop}", extra={"emoji": ":package:", "event": Events.DROP_CLAIM}
         )
 
-        json_data = copy.deepcopy(GQLOperations.DropsPage_ClaimDropRewards)
-        json_data["variables"] = {"input": {"dropInstanceID": drop.drop_instance_id}}
-        response = self.post_gql_request(json_data)
         try:
-            # response["data"]["claimDropRewards"] can be null and respose["data"]["errors"] != []
-            # or response["data"]["claimDropRewards"]["status"] === DROP_INSTANCE_ALREADY_CLAIMED
-            if ("claimDropRewards" in response["data"]) and (
-                response["data"]["claimDropRewards"] is None
-            ):
+            response = self.gql.claim_drop_rewards(drop.drop_instance_id)
+        except RetryError as error:
+            logger.error(f"Unable to claim {drop}: {error}")
+            return False
+        try:
+            if response.errors:
                 return False
-            elif ("errors" in response["data"]) and (response["data"]["errors"] != []):
-                return False
-            elif ("claimDropRewards" in response["data"]) and (
-                response["data"]["claimDropRewards"]["status"]
-                in ["ELIGIBLE_FOR_ALL", "DROP_INSTANCE_ALREADY_CLAIMED"]
-            ):
+            if response.status in [
+                "ELIGIBLE_FOR_ALL",
+                "DROP_INSTANCE_ALREADY_CLAIMED",
+            ]:
                 if campaign is not None:
                     remaining_drops = [
                         campaign_drop
@@ -3222,9 +3242,8 @@ class Twitch(object):
                         item_art_url_override=variant.get("item_art_url"),
                     )
                 return True
-            else:
-                return False
-        except (ValueError, KeyError):
+            return False
+        except (AttributeError, TypeError):
             return False
 
     def claim_all_drops_from_inventory(self):
@@ -3394,29 +3413,31 @@ class Twitch(object):
             goal.status == "STARTED" and goal.is_in_stock
             for goal in streamer.community_goals.values()
         ):
-            json_data = copy.deepcopy(GQLOperations.UserPointsContribution)
-            json_data["variables"] = {"channelLogin": streamer.username}
-            response = self.post_gql_request(json_data)
-            user_goal_contributions = response["data"]["user"]["channel"]["self"][
-                "communityPoints"
-            ]["goalContributions"]
+            try:
+                response = self.gql.get_user_points_contribution(streamer.username)
+            except RetryError as error:
+                logger.error(
+                    f"Unable to load community-goal contributions for {streamer}: {error}"
+                )
+                return
+            user_goal_contributions = response.goal_contributions
 
             logger.debug(
                 f"Found {len(user_goal_contributions)} community goals for the current stream"
             )
 
             for goal_contribution in user_goal_contributions:
-                goal_id = goal_contribution["goal"]["id"]
-                goal = streamer.community_goals[goal_id]
+                goal_id = goal_contribution.id
+                goal = streamer.community_goals.get(goal_id)
                 if goal is None:
                     # TODO should this trigger a new load context request
                     logger.error(
                         f"Unable to find context data for community goal {goal_id}"
                     )
                 else:
-                    user_stream_contribution = goal_contribution[
-                        "userPointsContributedThisStream"
-                    ]
+                    user_stream_contribution = (
+                        goal_contribution.user_points_contributed_this_stream
+                    )
                     user_left_to_contribute = (
                         goal.per_stream_user_maximum_contribution
                         - user_stream_contribution
@@ -3436,22 +3457,18 @@ class Twitch(object):
                         )
 
     def contribute_to_community_goal(self, streamer, goal_id, title, amount):
-        json_data = copy.deepcopy(GQLOperations.ContributeCommunityPointsCommunityGoal)
-        json_data["variables"] = {
-            "input": {
-                "amount": amount,
-                "channelID": streamer.channel_id,
-                "goalID": goal_id,
-                "transactionID": token_hex(16),
-            }
-        }
-
-        response = self.post_gql_request(json_data)
-
-        error = response["data"]["contributeCommunityPointsCommunityGoal"]["error"]
-        if error:
+        try:
+            response = self.gql.contribute_to_community_goal(
+                streamer.channel_id, goal_id, amount
+            )
+        except RetryError as error:
             logger.error(
                 f"Unable to contribute channel points to community goal '{title}', reason '{error}'"
+            )
+            return
+        if response.error:
+            logger.error(
+                f"Unable to contribute channel points to community goal '{title}', reason '{response.error}'"
             )
         else:
             logger.info(

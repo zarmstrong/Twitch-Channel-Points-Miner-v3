@@ -33,12 +33,10 @@ def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     twitch.log_drop_checks = False
     twitch.category_campaign_eligibility = {}
     twitch.twitchdrops_app_campaigns = {}
-    monkeypatch.setattr(
-        Twitch,
-        "post_gql_request",
-        lambda self, request: {
-            "data": {"claimDropRewards": {"status": claim_status}}
-        },
+    twitch.gql = SimpleNamespace(
+        claim_drop_rewards=lambda drop_instance_id: SimpleNamespace(
+            status=claim_status, errors=[]
+        )
     )
     monkeypatch.setattr(
         Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []

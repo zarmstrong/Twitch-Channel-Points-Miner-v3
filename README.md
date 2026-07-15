@@ -537,6 +537,7 @@ services:
     tty: true
     environment:
       - TERM=xterm-256color
+      - TZ=America/Denver
     volumes:
       - ./analytics:/usr/src/app/analytics
       - ./cookies:/usr/src/app/cookies
@@ -549,6 +550,7 @@ services:
 **Example with docker run:**
 ```sh
 docker run \
+    -e TZ=America/Denver \
     -v $(pwd)/analytics:/usr/src/app/analytics \
     -v $(pwd)/cookies:/usr/src/app/cookies \
     -v $(pwd)/logs:/usr/src/app/logs \
@@ -556,6 +558,11 @@ docker run \
     -p 5000:5000 \
     rdavidoff/twitch-channel-points-miner-v2
 ```
+
+Set `TZ` to your [IANA time zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones),
+for example `America/New_York`, `Europe/London`, or `Asia/Tokyo`. This controls
+the local time used in container logs and timestamps. If `TZ` is omitted, the
+container uses UTC.
 
 `$(pwd)` does not work in Windows Command Prompt. Use absolute host paths there,
 such as `/path/to/cookies:/usr/src/app/cookies`.
