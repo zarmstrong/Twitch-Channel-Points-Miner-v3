@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.1.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/Twitch-Channel-Points-Miner-v2-3.0.0...Twitch-Channel-Points-Miner-v2-3.1.0) (2026-07-16)
+
+
+### Features
+
+* discover and schedule upcoming Twitch drops ([f0f0a4d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f0f0a4dd6afd5d989f949403d55d75d94a1a472a))
+
+
+### Bug Fixes
+
+* allow Release Please to calculate future versions ([a9b2489](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a9b24896903ef4bed2319f43da397f57d471442e))
+* discover channel-advertised drop campaigns ([77e6382](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/77e63820ae91dd1b773bb6c17d8eacdefb60f0ee))
+* skip category discovery when drops inventory is unavailable ([54410df](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/54410dfb28c1cbbd252534fdba2b37c6759c46a7))
+
 ## [3.0.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/Twitch-Channel-Points-Miner-v2-3.0.0...Twitch-Channel-Points-Miner-v2-3.0.0) (2026-07-16)
 
 
