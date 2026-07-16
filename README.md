@@ -758,6 +758,10 @@ Use `Webhook` to send selected events to an HTTP endpoint.
 | `endpoint` | str | Required | Destination URL. |
 | `method` | str | Required | `POST` or `GET`. |
 | `events` | list | Required | Events to send. |
+| `timeout` | float | `10` | Request timeout in seconds. |
+
+`GET` requests send `event_name` and `message` as query parameters. `POST`
+requests send them as form fields in the request body.
 
 ```python
 Webhook(
@@ -765,6 +769,7 @@ Webhook(
    method="GET",
    events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
                     Events.BET_LOSE, Events.CHAT_MENTION],
+   timeout=5,
 )
 ```
 
