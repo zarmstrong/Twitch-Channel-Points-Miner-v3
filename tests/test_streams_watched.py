@@ -94,7 +94,7 @@ def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
     assert posted == ["https://spade.test/one", "https://spade.test/two"]
 
 
-def test_minute_watcher_limits_category_discovery_to_one_stream(monkeypatch):
+def test_minute_watcher_uses_second_slot_for_explicit_stream(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
         [
@@ -106,7 +106,10 @@ def test_minute_watcher_limits_category_discovery_to_one_stream(monkeypatch):
         streams_watched=2,
     )
 
-    assert posted == ["https://spade.test/category"]
+    assert posted == [
+        "https://spade.test/category",
+        "https://spade.test/explicit",
+    ]
 
 
 def test_minute_watcher_stops_completed_category_stream(monkeypatch):
@@ -117,3 +120,20 @@ def test_minute_watcher_stops_completed_category_stream(monkeypatch):
     )
 
     assert posted == []
+
+
+def test_minute_watcher_backfills_slot_after_extra_category_stream(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("category-one", True, True),
+            _watch_streamer("category-two", True, True),
+            _watch_streamer("explicit"),
+        ],
+        streams_watched=2,
+    )
+
+    assert posted == [
+        "https://spade.test/category-one",
+        "https://spade.test/explicit",
+    ]

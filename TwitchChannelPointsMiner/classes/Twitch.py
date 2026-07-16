@@ -2173,14 +2173,10 @@ class Twitch(object):
                 Twitch has a limit - you can't watch more than 2 channels at one time.
                 Take the configured number of streamers from the final list in priority order.
                 """
-                has_category_streamers = any(
-                    getattr(streamer, "from_category", False) is True
-                    for streamer in streamers
-                )
-
-                # Drops progress is counted on one stream at a time. When category
-                # discovery is enabled, keep watch selection to a single stream.
-                max_watch_amount = 1 if has_category_streamers else streams_watched
+                # Twitch counts watch time on up to two streams, but Drops progress
+                # applies to only one. The category safety net below reserves at
+                # most one selection for a discovered Drops stream.
+                max_watch_amount = streams_watched
                 streamers_watching = set()
 
                 def remaining_watch_amount():
@@ -2276,6 +2272,17 @@ class Twitch(object):
                         if category_picks >= 1:
                             continue
                         category_picks += 1
+                    filtered_streamers_watching.append(index)
+
+                # If multiple discovered streams occupied the initial selection,
+                # use any freed slot for an explicitly configured points stream.
+                for index in streamers_index:
+                    if len(filtered_streamers_watching) >= max_watch_amount:
+                        break
+                    if index in filtered_streamers_watching:
+                        continue
+                    if getattr(streamers[index], "from_category", False) is True:
+                        continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
 
