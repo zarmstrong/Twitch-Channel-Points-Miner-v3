@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/Twitch-Channel-Points-Miner-v2-3.0.0...Twitch-Channel-Points-Miner-v2-3.0.0) (2026-07-16)
+
+
+### Bug Fixes
+
+* discover channel-advertised drop campaigns ([77e6382](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/77e63820ae91dd1b773bb6c17d8eacdefb60f0ee))
+
 ## [3.0.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/Twitch-Channel-Points-Miner-v2-2.0.5...Twitch-Channel-Points-Miner-v2-3.0.0) (2026-07-15)
 
 
