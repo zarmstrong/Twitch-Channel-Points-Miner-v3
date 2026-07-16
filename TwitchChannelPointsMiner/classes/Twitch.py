@@ -2154,6 +2154,10 @@ class Twitch(object):
                     for i in range(0, len(streamers))
                     if streamers[i].is_online is True
                     and (
+                        getattr(streamers[i], "from_category", False) is not True
+                        or self.__drops_condition(streamers[i]) is True
+                    )
+                    and (
                         streamers[i].online_at == 0
                         or (time.time() - streamers[i].online_at) > 30
                     )

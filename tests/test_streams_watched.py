@@ -40,7 +40,7 @@ def test_minute_watcher_accepts_streams_watched_argument():
     assert parameter.default == 2
 
 
-def _watch_streamer(username, from_category=False):
+def _watch_streamer(username, from_category=False, drops_eligible=False):
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
         spade_url=f"https://spade.test/{username}",
@@ -55,7 +55,7 @@ def _watch_streamer(username, from_category=False):
         channel_points=0,
         stream=stream,
         settings=SimpleNamespace(claim_drops=False),
-        drops_condition=lambda: False,
+        drops_condition=lambda: drops_eligible,
     )
 
 
@@ -98,10 +98,22 @@ def test_minute_watcher_limits_category_discovery_to_one_stream(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
         [
-            _watch_streamer("category", from_category=True),
+            _watch_streamer(
+                "category", from_category=True, drops_eligible=True
+            ),
             _watch_streamer("explicit"),
         ],
         streams_watched=2,
     )
 
     assert posted == ["https://spade.test/category"]
+
+
+def test_minute_watcher_stops_completed_category_stream(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("completed-category", from_category=True)],
+        streams_watched=1,
+    )
+
+    assert posted == []
