@@ -147,3 +147,66 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_campaigns == {}
+
+
+def test_game_prefixed_badge_name_matches_campaign_benefit():
+    matcher = Twitch._Twitch__reward_name_is_owned
+
+    assert matcher(
+        "Android Triangle",
+        {"detroit android triangle"},
+        "Detroit: Become Human",
+    )
+
+
+def test_unrelated_prefixed_badge_name_does_not_match_campaign_benefit():
+    matcher = Twitch._Twitch__reward_name_is_owned
+
+    assert not matcher(
+        "Android Triangle",
+        {"unrelated android triangle"},
+        "Detroit: Become Human",
+    )
+
+
+def test_channel_campaign_discovery_accepts_uninitialized_campaign_cache(monkeypatch):
+    twitch = bare_twitch(
+        SimpleNamespace(
+            get_id_from_login=lambda login: SimpleNamespace(id="channel-1"),
+            post_gql_request_raw=lambda operation, request: {
+                "data": {
+                    "channel": {
+                        "viewerDropCampaigns": [
+                            {
+                                "id": "campaign-1",
+                                "name": "Detroit Badge Drop",
+                                "game": {"name": "Detroit: Become Human"},
+                                "timeBasedDrops": [],
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+    )
+    twitch.discovered_open_drop_campaigns = None
+    twitch.category_campaign_eligibility = {}
+    monkeypatch.setattr(
+        Twitch,
+        "get_live_streamers_for_category",
+        lambda self, category, drops_enabled, limit: ["streamer"],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_available_badge_names",
+        lambda self, refresh: set(),
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    twitch._Twitch__channel_advertised_campaign_fallback(
+        ["detroit-become-human"], set()
+    )
+
+    assert [
+        campaign["id"] for campaign in twitch.discovered_open_drop_campaigns
+    ] == ["campaign-1"]

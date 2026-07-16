@@ -160,6 +160,16 @@ class GQLOperations:
             }
         },
     }
+    DropsHighlightService_AvailableDrops = {
+        "operationName": "DropsHighlightService_AvailableDrops",
+        "variables": {"channelID": None},
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "9a62a09bce5b53e26e64a671e530bc599cb6aab1e5ba3cbd5d85966d3940716f",
+            }
+        },
+    }
     DropCampaignDetails = {
         "operationName": "DropCampaignDetails",
         "extensions": {

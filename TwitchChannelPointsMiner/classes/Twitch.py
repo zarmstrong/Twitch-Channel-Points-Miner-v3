@@ -1220,7 +1220,15 @@ class Twitch(object):
                     for drop in campaign.get("drops", [])
                     if str(drop.get("name") or "").strip()
                 }
-                missing_drop_names = sorted(drop_names - owned_reward_names)
+                missing_drop_names = sorted(
+                    drop_name
+                    for drop_name in drop_names
+                    if not self.__reward_name_is_owned(
+                        drop_name,
+                        owned_reward_names,
+                        report.get("game") or category_name,
+                    )
+                )
                 campaign_evaluations.append(
                     {
                         "campaign": campaign.get("name"),
@@ -1229,7 +1237,7 @@ class Twitch(object):
                         "fully_collected": bool(drop_names) and not missing_drop_names,
                     }
                 )
-                if drop_names and drop_names.issubset(owned_reward_names):
+                if drop_names and not missing_drop_names:
                     completed_campaigns.append(
                         {
                             "campaign": campaign.get("name"),
@@ -1278,6 +1286,114 @@ class Twitch(object):
                     extra={"emoji": ":globe_with_meridians:"},
                 )
 
+        return deadlines
+
+    @staticmethod
+    def __reward_name_is_owned(reward_name, owned_reward_names, game_name=""):
+        reward_words = re.findall(r"[a-z0-9]+", str(reward_name or "").lower())
+        game_words = set(re.findall(r"[a-z0-9]+", str(game_name or "").lower()))
+        if not reward_words:
+            return False
+        for owned_name in owned_reward_names:
+            owned_words = re.findall(r"[a-z0-9]+", str(owned_name or "").lower())
+            if owned_words == reward_words:
+                return True
+            prefix_length = len(owned_words) - len(reward_words)
+            if (
+                prefix_length > 0
+                and owned_words[prefix_length:] == reward_words
+                and set(owned_words[:prefix_length]).issubset(game_words)
+            ):
+                return True
+        return False
+
+    def __channel_advertised_campaign_fallback(self, categories, known_slugs):
+        deadlines = {}
+        pending_categories = []
+        for category in categories:
+            category_name, _ = self.__split_category_streamer_selector(category)
+            normalized = self.__normalize_category(category_name)
+            slug = self.__slugify(normalized.replace("-", " "))
+            if slug and slug not in known_slugs:
+                pending_categories.append(category)
+        if not pending_categories:
+            return deadlines
+
+        owned_badges = self.__get_available_badge_names(refresh=True)
+        now = datetime.utcnow()
+        for category in pending_categories:
+            category_name, _ = self.__split_category_streamer_selector(category)
+            normalized = self.__normalize_category(category_name)
+            slug = self.__slugify(normalized.replace("-", " "))
+            if not slug or slug in known_slugs:
+                continue
+            streamers = self.get_live_streamers_for_category(
+                category, drops_enabled=True, limit=3
+            )
+            campaigns = {}
+            for login in streamers:
+                try:
+                    channel_id = self.gql.get_id_from_login(login).id
+                    request = copy.deepcopy(
+                        GQLOperations.DropsHighlightService_AvailableDrops
+                    )
+                    request["variables"] = {"channelID": channel_id}
+                    response = self.gql.post_gql_request_raw(
+                        request["operationName"], request
+                    )
+                except (RetryError, AttributeError, KeyError, TypeError):
+                    continue
+                channel = (response.get("data") or {}).get("channel") or {}
+                for campaign in channel.get("viewerDropCampaigns", []) or []:
+                    campaign_game = (
+                        campaign.get("game") if isinstance(campaign, dict) else None
+                    )
+                    campaign_game_slug = self.__slugify(
+                        (campaign_game or {}).get("displayName")
+                        or (campaign_game or {}).get("name")
+                        or ""
+                    )
+                    if (
+                        isinstance(campaign, dict)
+                        and campaign.get("id")
+                        and campaign_game_slug == slug
+                    ):
+                        campaigns[str(campaign["id"])] = campaign
+            if not campaigns:
+                continue
+            discovered_by_id = {
+                str(campaign.get("id")): campaign
+                for campaign in (self.discovered_open_drop_campaigns or [])
+                if isinstance(campaign, dict) and campaign.get("id")
+            }
+            discovered_by_id.update(campaigns)
+            self.discovered_open_drop_campaigns = list(discovered_by_id.values())
+            known_slugs.add(slug)
+            for campaign in campaigns.values():
+                for drop in campaign.get("timeBasedDrops", []) or []:
+                    required = drop.get("requiredMinutesWatched") or 0
+                    end_at = self.__parse_twitch_datetime(drop.get("endAt"))
+                    if required <= 0 or end_at is None or end_at <= now:
+                        continue
+                    benefits = [
+                        edge.get("benefit")
+                        for edge in drop.get("benefitEdges", []) or []
+                        if isinstance(edge, dict)
+                        and isinstance(edge.get("benefit"), dict)
+                    ]
+                    if benefits and all(
+                        self.__reward_name_is_owned(
+                            benefit.get("name"), owned_badges, category_name
+                        )
+                        for benefit in benefits
+                    ):
+                        continue
+                    if slug not in deadlines or end_at < deadlines[slug]:
+                        deadlines[slug] = end_at
+            self.__log_category(
+                f"Found {len(campaigns)} native channel-advertised campaigns for '{category_name}'",
+                extra={"emoji": ":satellite:"},
+            )
         return deadlines
 
     def __get_available_badge_names(self, refresh=False):
@@ -1362,6 +1478,11 @@ class Twitch(object):
         ) = self.__active_drop_category_slugs_from_campaigns(
             inventory,
             requested_category_slugs,
+        )
+        active_category_deadlines.update(
+            self.__channel_advertised_campaign_fallback(
+                categories, twitch_category_slugs
+            )
         )
         _, awarded_benefit_fingerprints = self.__awarded_benefits(inventory)
         active_category_deadlines.update(
