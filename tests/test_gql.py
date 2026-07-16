@@ -985,6 +985,20 @@ def test_category_filter_bypasses_campaign_lookup_when_drops_are_disabled():
     ) == ["Just Chatting"]
 
 
+@pytest.mark.parametrize("inventory", [None, {}])
+def test_category_filter_skips_discovery_when_inventory_is_unavailable(
+    monkeypatch, inventory
+):
+    twitch = twitch_with_gql(SimpleNamespace())
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: inventory,
+    )
+
+    assert twitch.filter_categories_with_active_drops(["Rust", "Diablo IV"]) == []
+
+
 def test_category_filter_passes_completed_twitch_category_to_fallback(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}

@@ -1473,10 +1473,10 @@ class Twitch(object):
         inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
             logger.warning(
-                "Unable to load drops inventory; using configured categories without campaign filter",
+                "Unable to load drops inventory; skipping category stream discovery",
                 extra={"emoji": ":warning:"},
             )
-            return categories
+            return []
 
         requested_category_slugs = set()
         for category in categories:
