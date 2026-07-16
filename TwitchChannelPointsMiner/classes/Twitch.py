@@ -87,6 +87,7 @@ class Twitch(object):
         "discovered_open_drop_campaigns",
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
+        "twitchdrops_app_upcoming_starts",
         "category_campaign_eligibility",
         "completed_drop_campaigns",
         "available_badge_names",
@@ -137,6 +138,7 @@ class Twitch(object):
         self.discovered_open_drop_campaigns = None
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
+        self.twitchdrops_app_upcoming_starts = {}
         self.category_campaign_eligibility = {}
         self.completed_drop_campaigns = set()
         self.available_badge_names = None
@@ -1172,10 +1174,11 @@ class Twitch(object):
         return active_deadlines, twitch_category_slugs
 
     def __twitchdrops_app_fallback(
-        self, categories, active_twitch_category_slugs, awarded_benefit_fingerprints
+        self, categories, known_category_slugs, awarded_benefit_fingerprints
     ):
         deadlines = {}
         self.twitchdrops_app_campaigns = {}
+        self.twitchdrops_app_upcoming_starts = {}
         scraper = TwitchDropsAppScraper(timeout=20)
         now = datetime.utcnow()
         awarded_names = {
@@ -1186,21 +1189,86 @@ class Twitch(object):
         owned_reward_names = awarded_names | self.__get_available_badge_names(
             refresh=True
         )
-        checked_twitchdrops_app = False
+        try:
+            indexed_games = scraper.scrape_front_page()
+        except requests.RequestException as error:
+            self.__log_drop_check(
+                f"twitchdrops.app front-page check failed: {error}",
+                level=logging.DEBUG,
+            )
+            return deadlines
+
+        upcoming_game_count = sum(
+            1 for game in indexed_games if game.get("upcoming") is True
+        )
+        logger.debug(
+            "Scraped twitchdrops.app front page: "
+            f"{len(indexed_games) - upcoming_game_count} active games, "
+            f"{upcoming_game_count} upcoming games",
+            extra={"emoji": ":globe_with_meridians:", "category_log": True},
+        )
+
+        indexed_by_slug = {}
+        for game in indexed_games:
+            aliases = {
+                self.__slugify(game.get("slug") or ""),
+                self.__slugify(game.get("game") or ""),
+            }
+            for alias in aliases - {""}:
+                indexed_by_slug[alias] = game
+
+        configured_matches = []
+        for category in categories:
+            category_name, _ = self.__split_category_streamer_selector(category)
+            normalized = self.__normalize_category(category_name)
+            requested_slug = self.__slugify(normalized.replace("-", " "))
+            indexed_game = indexed_by_slug.get(requested_slug)
+            if indexed_game is None:
+                continue
+            status = "upcoming" if indexed_game.get("upcoming") is True else "active"
+            configured_matches.append(
+                f"{category_name} ({status}, "
+                f"{indexed_game.get('starts_at') or 'unknown start'} -> "
+                f"{indexed_game.get('ends_at') or 'unknown end'})"
+            )
+        logger.debug(
+            "twitchdrops.app front-page matches for configured games: "
+            + (", ".join(configured_matches) if configured_matches else "none"),
+            extra={"emoji": ":mag:", "category_log": True},
+        )
+        checked_game_pages = False
 
         for category in categories:
             category_name, _ = self.__split_category_streamer_selector(category)
             normalized = self.__normalize_category(category_name)
             requested_slug = self.__slugify(normalized.replace("-", " "))
-            if not requested_slug or requested_slug in active_twitch_category_slugs:
+            indexed_game = indexed_by_slug.get(requested_slug)
+            if not requested_slug or indexed_game is None:
                 continue
+            # A front-page match is authoritative enough to avoid the much
+            # slower live-channel campaign probe, even when Twitch already
+            # found the same game or the indexed campaign has not started yet.
+            known_category_slugs.add(requested_slug)
 
-            if checked_twitchdrops_app:
+            indexed_start = self.__parse_twitch_datetime(indexed_game.get("starts_at"))
+            if (
+                indexed_game.get("upcoming") is True
+                and indexed_start
+                and indexed_start > now
+            ):
+                self.twitchdrops_app_upcoming_starts[requested_slug] = indexed_start
+                logger.info(
+                    f"Upcoming twitchdrops.app campaign for '{category_name}' starts at "
+                    f"{indexed_start.isoformat()} UTC",
+                    extra={"emoji": ":alarm_clock:", "category_log": True},
+                )
+
+            if checked_game_pages:
                 time.sleep(random.uniform(*TWITCHDROPS_APP_CHECK_DELAY_SECONDS))
-            checked_twitchdrops_app = True
+            checked_game_pages = True
 
             try:
-                report = scraper.scrape(normalized)
+                report = scraper.scrape(indexed_game["url"])
             except (ValueError, requests.RequestException) as error:
                 self.__log_drop_check(
                     f"twitchdrops.app fallback failed for '{category_name}': {error}",
@@ -1211,7 +1279,32 @@ class Twitch(object):
             campaigns = []
             completed_campaigns = []
             campaign_evaluations = []
-            for campaign in report.get("campaigns", []):
+            upcoming_campaigns = report.get("upcoming_campaigns", [])
+            upcoming_starts = [
+                self.__parse_twitch_datetime(campaign.get("starts_at"))
+                for campaign in upcoming_campaigns
+            ]
+            upcoming_starts = [
+                start for start in upcoming_starts if start and start > now
+            ]
+            if upcoming_starts:
+                self.twitchdrops_app_upcoming_starts[requested_slug] = min(
+                    upcoming_starts
+                )
+            reported_campaigns = list(report.get("campaigns", []))
+            # The site can retain its "upcoming" label briefly after the start.
+            # Promote those records locally so the scheduled refresh can begin
+            # mining without waiting for the page cache to turn over.
+            reported_campaigns.extend(
+                campaign
+                for campaign in upcoming_campaigns
+                if (
+                    self.__parse_twitch_datetime(campaign.get("starts_at"))
+                    or datetime.max
+                )
+                <= now
+            )
+            for campaign in reported_campaigns:
                 ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
                 if ends_at is None or ends_at <= now:
                     continue
@@ -1288,6 +1381,16 @@ class Twitch(object):
 
         return deadlines
 
+    def next_upcoming_drop_start(self) -> Optional[datetime]:
+        """Return the next known configured-category campaign start in UTC."""
+        now = datetime.utcnow()
+        future_starts = [
+            starts_at
+            for starts_at in self.twitchdrops_app_upcoming_starts.values()
+            if starts_at > now
+        ]
+        return min(future_starts) if future_starts else None
+
     @staticmethod
     def __reward_name_is_owned(reward_name, owned_reward_names, game_name=""):
         reward_words = re.findall(r"[a-z0-9]+", str(reward_name or "").lower())
@@ -1306,95 +1409,6 @@ class Twitch(object):
             ):
                 return True
         return False
-
-    def __channel_advertised_campaign_fallback(self, categories, known_slugs):
-        deadlines = {}
-        pending_categories = []
-        for category in categories:
-            category_name, _ = self.__split_category_streamer_selector(category)
-            normalized = self.__normalize_category(category_name)
-            slug = self.__slugify(normalized.replace("-", " "))
-            if slug and slug not in known_slugs:
-                pending_categories.append(category)
-        if not pending_categories:
-            return deadlines
-
-        owned_badges = self.__get_available_badge_names(refresh=True)
-        now = datetime.utcnow()
-        for category in pending_categories:
-            category_name, _ = self.__split_category_streamer_selector(category)
-            normalized = self.__normalize_category(category_name)
-            slug = self.__slugify(normalized.replace("-", " "))
-            if not slug or slug in known_slugs:
-                continue
-            streamers = self.get_live_streamers_for_category(
-                category, drops_enabled=True, limit=3
-            )
-            campaigns = {}
-            for login in streamers:
-                try:
-                    channel_id = self.gql.get_id_from_login(login).id
-                    request = copy.deepcopy(
-                        GQLOperations.DropsHighlightService_AvailableDrops
-                    )
-                    request["variables"] = {"channelID": channel_id}
-                    response = self.gql.post_gql_request_raw(
-                        request["operationName"], request
-                    )
-                except (RetryError, AttributeError, KeyError, TypeError):
-                    continue
-                channel = (response.get("data") or {}).get("channel") or {}
-                for campaign in channel.get("viewerDropCampaigns", []) or []:
-                    campaign_game = (
-                        campaign.get("game") if isinstance(campaign, dict) else None
-                    )
-                    campaign_game_slug = self.__slugify(
-                        (campaign_game or {}).get("displayName")
-                        or (campaign_game or {}).get("name")
-                        or ""
-                    )
-                    if (
-                        isinstance(campaign, dict)
-                        and campaign.get("id")
-                        and campaign_game_slug == slug
-                    ):
-                        campaigns[str(campaign["id"])] = campaign
-            if not campaigns:
-                continue
-            discovered_by_id = {
-                str(campaign.get("id")): campaign
-                for campaign in (self.discovered_open_drop_campaigns or [])
-                if isinstance(campaign, dict) and campaign.get("id")
-            }
-            discovered_by_id.update(campaigns)
-            self.discovered_open_drop_campaigns = list(discovered_by_id.values())
-            known_slugs.add(slug)
-            for campaign in campaigns.values():
-                for drop in campaign.get("timeBasedDrops", []) or []:
-                    required = drop.get("requiredMinutesWatched") or 0
-                    end_at = self.__parse_twitch_datetime(drop.get("endAt"))
-                    if required <= 0 or end_at is None or end_at <= now:
-                        continue
-                    benefits = [
-                        edge.get("benefit")
-                        for edge in drop.get("benefitEdges", []) or []
-                        if isinstance(edge, dict)
-                        and isinstance(edge.get("benefit"), dict)
-                    ]
-                    if benefits and all(
-                        self.__reward_name_is_owned(
-                            benefit.get("name"), owned_badges, category_name
-                        )
-                        for benefit in benefits
-                    ):
-                        continue
-                    if slug not in deadlines or end_at < deadlines[slug]:
-                        deadlines[slug] = end_at
-            self.__log_category(
-                f"Found {len(campaigns)} native channel-advertised campaigns for '{category_name}'",
-                extra={"emoji": ":satellite:"},
-            )
-        return deadlines
 
     def __get_available_badge_names(self, refresh=False):
         """Return every global badge the authenticated user may select."""
@@ -1478,11 +1492,6 @@ class Twitch(object):
         ) = self.__active_drop_category_slugs_from_campaigns(
             inventory,
             requested_category_slugs,
-        )
-        active_category_deadlines.update(
-            self.__channel_advertised_campaign_fallback(
-                categories, twitch_category_slugs
-            )
         )
         _, awarded_benefit_fingerprints = self.__awarded_benefits(inventory)
         active_category_deadlines.update(

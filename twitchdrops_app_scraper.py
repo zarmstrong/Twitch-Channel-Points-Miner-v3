@@ -15,6 +15,7 @@ import requests
 
 
 BASE_URL = "https://twitchdrops.app/game/"
+HOME_URL = "https://twitchdrops.app/"
 TWITCH_LOGIN_PATTERN = re.compile(
     r'href=["\']https?://(?:www\.)?twitch\.tv/([^?"\'/#]+)[^"\']*["\']',
     re.IGNORECASE,
@@ -97,7 +98,7 @@ def is_watch_drop(drop):
     return (drop.get("requirement") or "").casefold().startswith("watch ")
 
 
-def parse_campaign(block, game_name):
+def parse_campaign(block, game_name, starts_at=None):
     name = first_match(
         r'class=["\'][^"\']*\bcb-name\b[^"\']*["\'][^>]*>(.*?)</span>', block
     )
@@ -121,6 +122,7 @@ def parse_campaign(block, game_name):
         "dates": first_match(
             r'class=["\'][^"\']*\bcb-dates\b[^"\']*["\'][^>]*>(.*?)</span>', block
         ),
+        "starts_at": starts_at,
         "ends_at": (
             datetime.fromtimestamp(end_timestamp / 1000, timezone.utc).isoformat()
             if end_timestamp
@@ -148,14 +150,34 @@ def parse_game_page(source, url):
             "Past Campaigns",
         ],
     )
-    active_heading = re.search(
-        r"<h2[^>]*>\s*Active Campaigns\s*</h2>", source, re.IGNORECASE
+    upcoming_source = section(
+        source,
+        "Upcoming Campaigns",
+        ["Past Drops", "Past Campaigns", "Frequently Asked Questions"],
     )
-    viewer_source = source[: active_heading.start()] if active_heading else source
+    content_boundary = re.search(
+        r"<h2[^>]*>\s*(?:Active Campaigns|How to get these drops|"
+        r"Upcoming Campaigns|Past Drops|Past Campaigns)\s*</h2>",
+        source,
+        re.IGNORECASE,
+    )
+    viewer_source = source[: content_boundary.start()] if content_boundary else source
     drops = [parse_drop(block) for block in div_blocks(viewer_source, "drop-card")]
     drops = [drop for drop in drops if drop["name"]]
     campaign_blocks = list(div_blocks(active_source, "campaign-banner"))
     all_campaigns = [parse_campaign(block, game_name) for block in campaign_blocks]
+    page_path = urlparse(url).path.rstrip("/")
+    page_timing = re.search(
+        rf'<a\b[^>]*href=["\']{re.escape(page_path)}["\'][^>]*'
+        r'data-end=["\']([^"\']+)["\'][^>]*data-start=["\']([^"\']+)["\']',
+        source,
+        re.IGNORECASE,
+    )
+    page_start = page_timing.group(2) if page_timing else None
+    upcoming_campaigns = [
+        parse_campaign(block, game_name, starts_at=page_start)
+        for block in div_blocks(upcoming_source, "campaign-banner")
+    ]
     unassigned_watch_drops = [
         drop for drop in drops if not drop["campaign"] and is_watch_drop(drop)
     ]
@@ -181,6 +203,10 @@ def parse_game_page(source, url):
             if (drop["campaign"] or "").casefold() == campaign_name
             and is_watch_drop(drop)
         ]
+    if len(upcoming_campaigns) == 1:
+        upcoming_campaigns[0]["drops"] = [
+            drop for drop in drops if is_watch_drop(drop)
+        ]
     non_watch_campaigns = [
         campaign for campaign in all_campaigns if campaign not in campaigns
     ]
@@ -191,9 +217,46 @@ def parse_game_page(source, url):
         "non_watch_campaign_count": len(non_watch_campaigns),
         "drop_count": len(drops),
         "campaigns": campaigns,
+        "upcoming_campaigns": upcoming_campaigns,
         "non_watch_campaigns": non_watch_campaigns,
         "drops": drops,
     }
+
+
+def parse_front_page(source):
+    """Return active and upcoming games advertised by the site index."""
+    games = []
+    seen = set()
+    for block in re.findall(
+        r'<a\b[^>]*class=["\'][^"\']*\bgame-card\b[^"\']*["\'][^>]*>',
+        source,
+        re.IGNORECASE,
+    ):
+        if "game-card--expired" in block:
+            continue
+
+        def attribute(name):
+            match = re.search(
+                rf'\b{re.escape(name)}=["\']([^"\']*)["\']', block, re.IGNORECASE
+            )
+            return html.unescape(match.group(1)) if match else None
+
+        slug = attribute("data-slug")
+        href = attribute("href")
+        if not slug or not href or slug in seen:
+            continue
+        seen.add(slug)
+        games.append(
+            {
+                "slug": slug,
+                "game": attribute("data-game"),
+                "url": f"https://twitchdrops.app{href}",
+                "starts_at": attribute("data-start"),
+                "ends_at": attribute("data-end"),
+                "upcoming": " upcoming" in block,
+            }
+        )
+    return games
 
 
 class TwitchDropsAppScraper(object):
@@ -212,6 +275,15 @@ class TwitchDropsAppScraper(object):
         )
         response.raise_for_status()
         return parse_game_page(response.text, url)
+
+    def scrape_front_page(self):
+        response = self.session.get(
+            HOME_URL,
+            timeout=self.timeout,
+            headers={"Accept": "text/html", "User-Agent": "TwitchDropsAppScraper/1.0"},
+        )
+        response.raise_for_status()
+        return parse_front_page(response.text)
 
 
 def parse_args():

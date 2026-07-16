@@ -11,6 +11,7 @@ def bare_twitch(gql):
     twitch.gql = gql
     twitch.available_badge_names = None
     twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_upcoming_starts = {}
     twitch.log_drop_checks = False
     twitch.category_log_level = logging.DEBUG
     return twitch
@@ -127,6 +128,17 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     twitch.available_badge_names = {"stale badge"}
     monkeypatch.setattr(
         TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "two-point-museum",
+                "game": "Two Point Museum",
+                "url": "https://twitchdrops.app/game/two-point-museum",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
         "scrape",
         lambda self, category: {
             "game": "Two Point Museum",
@@ -149,6 +161,46 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     assert twitch.twitchdrops_app_campaigns == {}
 
 
+def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_games(
+    monkeypatch,
+):
+    twitch = bare_twitch(
+        SimpleNamespace(
+            post_gql_request_raw=lambda operation, request: {
+                "data": {"currentUser": {"availableBadges": []}}
+            }
+        )
+    )
+    detail_requests = []
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "path-of-exile",
+                "game": "Path of Exile",
+                "url": "https://twitchdrops.app/game/path-of-exile",
+            }
+        ],
+    )
+
+    def scrape_detail(self, category):
+        detail_requests.append(category)
+        return {"game": "Path of Exile", "campaigns": []}
+
+    monkeypatch.setattr(TwitchDropsAppScraper, "scrape", scrape_detail)
+
+    known_slugs = {"path-of-exile"}
+    twitch._Twitch__twitchdrops_app_fallback(
+        ["path-of-exile", "not-on-front-page"],
+        known_slugs,
+        set(),
+    )
+
+    assert detail_requests == ["https://twitchdrops.app/game/path-of-exile"]
+    assert known_slugs == {"path-of-exile"}
+
+
 def test_game_prefixed_badge_name_matches_campaign_benefit():
     matcher = Twitch._Twitch__reward_name_is_owned
 
@@ -167,46 +219,3 @@ def test_unrelated_prefixed_badge_name_does_not_match_campaign_benefit():
         {"unrelated android triangle"},
         "Detroit: Become Human",
     )
-
-
-def test_channel_campaign_discovery_accepts_uninitialized_campaign_cache(monkeypatch):
-    twitch = bare_twitch(
-        SimpleNamespace(
-            get_id_from_login=lambda login: SimpleNamespace(id="channel-1"),
-            post_gql_request_raw=lambda operation, request: {
-                "data": {
-                    "channel": {
-                        "viewerDropCampaigns": [
-                            {
-                                "id": "campaign-1",
-                                "name": "Detroit Badge Drop",
-                                "game": {"name": "Detroit: Become Human"},
-                                "timeBasedDrops": [],
-                            }
-                        ]
-                    }
-                }
-            },
-        )
-    )
-    twitch.discovered_open_drop_campaigns = None
-    twitch.category_campaign_eligibility = {}
-    monkeypatch.setattr(
-        Twitch,
-        "get_live_streamers_for_category",
-        lambda self, category, drops_enabled, limit: ["streamer"],
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_available_badge_names",
-        lambda self, refresh: set(),
-    )
-    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
-
-    twitch._Twitch__channel_advertised_campaign_fallback(
-        ["detroit-become-human"], set()
-    )
-
-    assert [
-        campaign["id"] for campaign in twitch.discovered_open_drop_campaigns
-    ] == ["campaign-1"]

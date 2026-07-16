@@ -571,6 +571,14 @@ class TwitchChannelPointsMiner:
                 if effective_category_refresh_seconds > 0
                 else None
             )
+            upcoming_drop_start = self.twitch.next_upcoming_drop_start()
+            if upcoming_drop_start is not None and next_category_refresh_at is not None:
+                next_category_refresh_at = min(
+                    next_category_refresh_at,
+                    time.time()
+                    + max((upcoming_drop_start - datetime.utcnow()).total_seconds(), 0)
+                    + 5,
+                )
             while self.running and self.twitch.running:
                 if self.twitch.restart_requested.wait(random.uniform(20, 60)):
                     break
@@ -621,6 +629,19 @@ class TwitchChannelPointsMiner:
                         + effective_category_refresh_seconds
                         + random.randint(20, 5 * 60)
                     )
+                    upcoming_drop_start = self.twitch.next_upcoming_drop_start()
+                    if upcoming_drop_start is not None:
+                        next_category_refresh_at = min(
+                            next_category_refresh_at,
+                            time.time()
+                            + max(
+                                (
+                                    upcoming_drop_start - datetime.utcnow()
+                                ).total_seconds(),
+                                0,
+                            )
+                            + 5,
+                        )
 
     def __refresh_category_streamers(
         self,
