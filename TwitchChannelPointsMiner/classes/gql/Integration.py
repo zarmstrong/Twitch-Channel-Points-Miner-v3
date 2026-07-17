@@ -521,6 +521,19 @@ class GQL:
                     result.append(item)
         return result
 
+    def get_drop_campaign_data(self, campaign_ids: list[str]) -> list[dict]:
+        """Return complete campaign data from Twitch's campaign-details query.
+
+        Unlike the typed campaign response, this preserves every field Twitch
+        returned. In particular, badge rewards can be identified with
+        ``benefitEdges[].benefit.distributionType == "BADGE"``.
+        """
+        return [
+            response.raw_campaign
+            for response in self.get_drop_campaign_details(campaign_ids)
+            if response.raw_campaign
+        ]
+
     def claim_drop_rewards(self, drop_instance_id: str) -> DropsPageClaimDropsResponse:
         """
         Claims the rewards for the drop with the given id.

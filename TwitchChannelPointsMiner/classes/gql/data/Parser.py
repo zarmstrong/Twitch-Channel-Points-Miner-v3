@@ -886,6 +886,7 @@ class Parser:
                     campaign=parse_expected_value(
                         user, "dropCampaign", drop_campaign_details_parser
                     ),
+                    raw_campaign=copy.deepcopy(user.get("dropCampaign")),
                 )
 
     def parse_drop_page_claim_drop_rewards(self, response: Any):

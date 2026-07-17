@@ -6,10 +6,12 @@ import requests
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
+    _normalize_badge_drop_streamer_limit,
+    _normalize_streamer_source_priority,
     _normalize_streams_watched,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
-from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.Settings import Priority, StreamerSource
 
 
 def test_streams_watched_defaults_to_two():
@@ -40,7 +42,12 @@ def test_minute_watcher_accepts_streams_watched_argument():
     assert parameter.default == 2
 
 
-def _watch_streamer(username, from_category=False, drops_eligible=False):
+def _watch_streamer(
+    username,
+    from_category=False,
+    drops_eligible=False,
+    from_badge_campaign=False,
+):
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
         spade_url=f"https://spade.test/{username}",
@@ -52,6 +59,7 @@ def _watch_streamer(username, from_category=False, drops_eligible=False):
         is_online=True,
         online_at=0,
         from_category=from_category,
+        from_badge_campaign=from_badge_campaign,
         channel_points=0,
         stream=stream,
         settings=SimpleNamespace(claim_drops=False),
@@ -59,7 +67,12 @@ def _watch_streamer(username, from_category=False, drops_eligible=False):
     )
 
 
-def _run_one_watch_iteration(monkeypatch, streamers, streams_watched):
+def _run_one_watch_iteration(
+    monkeypatch,
+    streamers,
+    streams_watched,
+    source_priority=None,
+):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
     twitch.user_agent = "test-agent"
@@ -80,6 +93,7 @@ def _run_one_watch_iteration(monkeypatch, streamers, streams_watched):
         streamers,
         [Priority.ORDER],
         streams_watched=streams_watched,
+        source_priority=source_priority,
     )
     return posted
 
@@ -107,8 +121,8 @@ def test_minute_watcher_uses_second_slot_for_explicit_stream(monkeypatch):
     )
 
     assert posted == [
-        "https://spade.test/category",
         "https://spade.test/explicit",
+        "https://spade.test/category",
     ]
 
 
@@ -134,6 +148,47 @@ def test_minute_watcher_backfills_slot_after_extra_category_stream(monkeypatch):
     )
 
     assert posted == [
-        "https://spade.test/category-one",
         "https://spade.test/explicit",
+        "https://spade.test/category-one",
     ]
+
+
+def test_badge_source_can_be_given_first_priority(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("explicit"),
+            _watch_streamer("category", True, True),
+            _watch_streamer("badge", True, True, True),
+        ],
+        streams_watched=1,
+        source_priority=[
+            StreamerSource.BADGES,
+            StreamerSource.STREAMERS,
+            StreamerSource.CATEGORIES,
+        ],
+    )
+
+    assert posted == ["https://spade.test/badge"]
+
+
+def test_source_priority_appends_omitted_sources():
+    assert _normalize_streamer_source_priority([StreamerSource.BADGES]) == [
+        StreamerSource.BADGES,
+        StreamerSource.STREAMERS,
+        StreamerSource.CATEGORIES,
+    ]
+
+
+@pytest.mark.parametrize("value", [0, 3, True, "1", None])
+def test_badge_drop_streamer_limit_rejects_values_other_than_one_or_two(
+    caplog, value
+):
+    assert _normalize_badge_drop_streamer_limit(value) == 1
+    assert "badge_drop_streamer_limit must be either 1 or 2" in caplog.text
+
+
+@pytest.mark.parametrize("value", [1, 2])
+def test_badge_drop_streamer_limit_accepts_one_or_two(caplog, value):
+    assert _normalize_badge_drop_streamer_limit(value) == value
+    assert caplog.text == ""

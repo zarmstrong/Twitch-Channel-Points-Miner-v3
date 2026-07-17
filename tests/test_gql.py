@@ -826,6 +826,55 @@ def test_inventory_typed_response_retains_richer_raw_payload():
     assert response.inventory == inventory
 
 
+def test_drop_campaign_data_retains_badge_distribution_type():
+    campaign = {
+        "id": "campaign-1",
+        "name": "Badge Campaign",
+        "status": "ACTIVE",
+        "game": {"id": "game-1", "slug": "game", "displayName": "Game"},
+        "allow": {"channels": None},
+        "startAt": "2026-01-01T00:00:00Z",
+        "endAt": "2026-02-01T00:00:00Z",
+        "timeBasedDrops": [
+            {
+                "id": "drop-1",
+                "name": "Badge Drop",
+                "startAt": "2026-01-01T00:00:00Z",
+                "endAt": "2026-02-01T00:00:00Z",
+                "requiredMinutesWatched": 15,
+                "requiredSubs": 0,
+                "benefitEdges": [
+                    {
+                        "benefit": {
+                            "id": "benefit-1",
+                            "name": "Chat Badge",
+                            "distributionType": "BADGE",
+                            "imageAssetURL": "https://example/badge.png",
+                        },
+                        "entitlementLimit": 1,
+                    }
+                ],
+            }
+        ],
+    }
+    payload = [
+        {
+            "data": {"user": {"dropCampaign": campaign}},
+            "extensions": {"operationName": "DropCampaignDetails"},
+        }
+    ]
+    gql = GQL(
+        client_session(), post_request=lambda *args, **kwargs: FakeResponse(payload)
+    )
+
+    result = gql.get_drop_campaign_data(["campaign-1"])
+
+    benefit = result[0]["timeBasedDrops"][0]["benefitEdges"][0]["benefit"]
+    assert benefit["distributionType"] == "BADGE"
+    assert benefit["id"] == "benefit-1"
+    assert result[0] is not campaign
+
+
 def test_inventory_typed_parsing_does_not_replace_raw_campaign_dicts():
     campaign = {
         "id": "campaign-1",

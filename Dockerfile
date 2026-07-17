@@ -31,8 +31,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --fix-missing --no-ins
   && rm -rf /usr/share/doc/*
 
 ADD ./TwitchChannelPointsMiner ./TwitchChannelPointsMiner
-ADD ./twitchdrops_app_scraper.py ./twitchdrops_app_scraper.py
 ADD ./assets ./assets
-ADD ./example.py ./example.py
 ADD ./config.example.py ./config.example.py
 ENTRYPOINT [ "python", "-u", "-m", "TwitchChannelPointsMiner.runner" ]

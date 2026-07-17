@@ -195,6 +195,21 @@ one concurrent viewing session: reports in issue #787 indicate that continuously
 mining two channels alongside normal Twitch viewing may contribute to Turbo users
 being served ads. Invalid values are logged and replaced with `2`.
 
+`streamer_source_priority` controls which source gets the available viewing
+slots first. Its default is configured/followed streamers, ordinary category
+discovery, then automatic badge campaigns:
+
+```python
+streamer_source_priority=[
+    StreamerSource.STREAMERS,
+    StreamerSource.CATEGORIES,
+    StreamerSource.BADGES,
+]
+```
+
+Move `StreamerSource.BADGES` to the front to prioritize earning badge Drops.
+The existing `priority` rules are applied within each source group.
+
 See [Settings](#settings) for the available priority, logger, streamer, and bet
 objects. Keep credentials and integration tokens only in your private
 `config/config.py`.
@@ -305,6 +320,10 @@ settings.
 | `category_chat` | `None` | Chat policy for category-discovered streamers. `None` inherits the default streamer setting. |
 | `category_log_level` | `logging.INFO` | Severity used for category discovery and refresh messages. |
 | `category_refresh_interval_hours` | `6` | Hours between campaign/channel refreshes. Positive values have a 30-minute minimum; `0` disables refresh. |
+| `drop_badge_catalog` | `True` | On startup, classify twitchdrops.app rewards against Twitch's authoritative global badge catalog and persist the result in the config directory. |
+| `drop_badge_refresh_interval_hours` | `1` | Hours between checks for new campaigns. Positive values have a one-hour minimum; `0` keeps the startup check but disables periodic checks. |
+| `auto_mine_badge_drops` | `False` | Automatically add live channels for active, unearned watch-time badge campaigns. |
+| `badge_drop_streamer_limit` | `1` | Live candidates added for each eligible all-channel badge campaign. Accepts `1` or `2`; restricted campaigns use their listed channels. |
 | `track_category_streamer_points` | `False` | Include point earn/spend events from category-only streamers in balance tracking and analytics. Explicit streamers are always tracked. |
 | `drop_item_art` | `False` | Store and display Drop item artwork URLs in Drops analytics. |
 | `print_open_drop_campaigns_on_load` | `False` | Log all open Drop campaigns during startup. Useful for checking category names and campaign dates. |
@@ -406,6 +425,24 @@ loaded earlier. Restart the miner to fully discard stale or removed category
 streamers. In Docker/config mode, changing `MINE_CONFIG["categories"]` triggers
 discovery after the configuration watcher detects the edit; other category
 options require a restart. See [Configuration reload limitations](#configuration-reload-limitations).
+
+The Drop badge catalog runs independently of category discovery. Its startup
+check begins in a background thread after normal miner setup completes, and it
+checks hourly thereafter by default. INFO logs show the number of changed game
+pages and progress every ten pages during a large baseline. The front-page game
+signature is compared with the saved state, so only new or changed campaign
+pages are downloaded and processed. Full Twitch badge records, game snapshots,
+classifications, and historical campaign records are stored in
+`drop_badge_catalog.json` beside `config.py`. Rewards confirmed by Twitch are
+marked `BADGE`; unmatched rewards remain `UNKNOWN` rather than being assumed not
+to be badges.
+
+Set `auto_mine_badge_drops=True` to use that catalog to add eligible live
+channels automatically. The feature only considers active watch-time campaigns,
+skips badges already available to the authenticated account, honors `blacklist`,
+and uses `category_chat` and `category_sort`. Subscription-only rewards are not
+added because watching cannot earn them. Automatically selected streamers always
+have `claim_drops=True`. This feature is disabled by default.
 
 ##### Category logging and analytics
 

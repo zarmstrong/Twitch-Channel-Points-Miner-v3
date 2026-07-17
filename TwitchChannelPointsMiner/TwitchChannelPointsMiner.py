@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
+from TwitchChannelPointsMiner.classes.DropBadgeCatalog import DropBadgeCatalog
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
@@ -26,6 +27,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     FollowersOrder,
     Priority,
     Settings,
+    StreamerSource,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
@@ -67,6 +69,38 @@ def _normalize_streams_watched(streams_watched):
     return 2
 
 
+def _normalize_streamer_source_priority(source_priority):
+    defaults = [
+        StreamerSource.STREAMERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+    ]
+    if not isinstance(source_priority, (list, tuple)):
+        logger.error(
+            "streamer_source_priority must be a list of StreamerSource values; "
+            "using the default order"
+        )
+        return defaults
+
+    normalized = []
+    for source in source_priority:
+        if isinstance(source, StreamerSource) and source not in normalized:
+            normalized.append(source)
+    for source in defaults:
+        if source not in normalized:
+            normalized.append(source)
+    return normalized
+
+
+def _normalize_badge_drop_streamer_limit(limit):
+    if type(limit) is int and limit in (1, 2):
+        return limit
+    logger.error(
+        "badge_drop_streamer_limit must be either 1 or 2; using the default value 1"
+    )
+    return 1
+
+
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
@@ -76,6 +110,7 @@ class TwitchChannelPointsMiner:
         "disable_ssl_cert_verification",
         "disable_at_in_nickname",
         "streams_watched",
+        "streamer_source_priority",
         "priority",
         "streamers",
         "events_predictions",
@@ -89,6 +124,14 @@ class TwitchChannelPointsMiner:
         "logs_file",
         "queue_listener",
         "config_reload_lock",
+        "drop_badge_catalog",
+        "drop_badge_catalog_thread",
+        "drop_badge_catalog_stop_event",
+        "auto_mine_badge_drops",
+        "badge_drop_streamer_limit",
+        "badge_drop_category_chat",
+        "badge_drop_category_sort",
+        "badge_drop_blacklist",
     ]
 
     def __init__(
@@ -107,6 +150,11 @@ class TwitchChannelPointsMiner:
         streamer_settings: StreamerSettings = StreamerSettings(),
         streams_watched: int = 2,
         gql: AttemptStrategy | GQLFactory | None = None,
+        streamer_source_priority: list = [
+            StreamerSource.STREAMERS,
+            StreamerSource.CATEGORIES,
+            StreamerSource.BADGES,
+        ],
     ):
 
         # Fixes TypeError: 'NoneType' object is not subscriptable
@@ -129,6 +177,9 @@ class TwitchChannelPointsMiner:
         Settings.disable_at_in_nickname = disable_at_in_nickname
 
         self.streams_watched = _normalize_streams_watched(streams_watched)
+        self.streamer_source_priority = _normalize_streamer_source_priority(
+            streamer_source_priority
+        )
 
         import socket
 
@@ -196,6 +247,21 @@ class TwitchChannelPointsMiner:
         self.start_datetime = None
         self.original_streamers = []
         self.config_reload_lock = threading.Lock()
+        self.drop_badge_catalog = None
+        self.drop_badge_catalog_thread = None
+        self.drop_badge_catalog_stop_event = threading.Event()
+        self.auto_mine_badge_drops = False
+        self.badge_drop_streamer_limit = 1
+        self.badge_drop_category_chat = None
+        self.badge_drop_category_sort = "VIEWERS_DESC"
+        self.badge_drop_blacklist = set()
+
+        if not hasattr(Settings, "config_path"):
+            Settings.config_path = os.path.abspath(
+                os.environ.get(
+                    "TCPM_CONFIG_DIR", os.path.join(Path().absolute(), "config")
+                )
+            )
 
         self.logs_file, self.queue_listener = configure_loggers(
             self.username, logger_settings
@@ -278,6 +344,10 @@ class TwitchChannelPointsMiner:
         log_drop_checks: bool = False,
         track_category_streamer_points: bool = False,
         category_refresh_interval_hours: float = 6,
+        drop_badge_catalog: bool = True,
+        drop_badge_refresh_interval_hours: float = 1,
+        auto_mine_badge_drops: bool = False,
+        badge_drop_streamer_limit: int = 1,
     ):
         self.run(
             streamers=streamers,
@@ -297,6 +367,10 @@ class TwitchChannelPointsMiner:
             log_drop_checks=log_drop_checks,
             track_category_streamer_points=track_category_streamer_points,
             category_refresh_interval_hours=category_refresh_interval_hours,
+            drop_badge_catalog=drop_badge_catalog,
+            drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
+            auto_mine_badge_drops=auto_mine_badge_drops,
+            badge_drop_streamer_limit=badge_drop_streamer_limit,
         )
 
     def run(
@@ -318,6 +392,10 @@ class TwitchChannelPointsMiner:
         log_drop_checks: bool = False,
         track_category_streamer_points: bool = False,
         category_refresh_interval_hours: float = 6,
+        drop_badge_catalog: bool = True,
+        drop_badge_refresh_interval_hours: float = 1,
+        auto_mine_badge_drops: bool = False,
+        badge_drop_streamer_limit: int = 1,
     ):
         if self.running:
             logger.error("You can't start multiple sessions of this instance!")
@@ -334,6 +412,32 @@ class TwitchChannelPointsMiner:
             self.twitch.log_drop_checks = log_drop_checks
             self.twitch.category_log_level = category_log_level
             Settings.track_category_streamer_points = track_category_streamer_points
+            self.auto_mine_badge_drops = auto_mine_badge_drops is True
+            self.badge_drop_streamer_limit = _normalize_badge_drop_streamer_limit(
+                badge_drop_streamer_limit
+            )
+            self.badge_drop_category_chat = category_chat
+            self.badge_drop_category_sort = category_sort
+            self.badge_drop_blacklist = {
+                str(username).lower().strip() for username in blacklist
+            }
+
+            drop_badge_refresh_seconds = 0
+            if drop_badge_catalog is True:
+                self.drop_badge_catalog = DropBadgeCatalog(
+                    self.twitch.twitch_login, Settings.config_path
+                )
+                drop_badge_refresh_seconds = (
+                    max(float(drop_badge_refresh_interval_hours), 1) * 60 * 60
+                    if drop_badge_refresh_interval_hours > 0
+                    else 0
+                )
+                self.drop_badge_catalog_thread = threading.Thread(
+                    target=self.__drop_badge_catalog_loop,
+                    args=(drop_badge_refresh_seconds,),
+                    name="Drop badge catalog",
+                    daemon=True,
+                )
 
             if print_open_drop_campaigns_on_load is True:
                 self.twitch.log_open_drop_campaigns()
@@ -493,7 +597,10 @@ class TwitchChannelPointsMiner:
             self.minute_watcher_thread = threading.Thread(
                 target=self.twitch.send_minute_watched_events,
                 args=(self.streamers, self.priority),
-                kwargs={"streams_watched": self.streams_watched},
+                kwargs={
+                    "streams_watched": self.streams_watched,
+                    "source_priority": self.streamer_source_priority,
+                },
             )
             self.minute_watcher_thread.name = "Minute watcher"
             self.minute_watcher_thread.start()
@@ -551,6 +658,9 @@ class TwitchChannelPointsMiner:
                     self.ws_pool.submit(
                         PubsubTopic("community-points-channel-v1", streamer=streamer)
                     )
+
+            if self.drop_badge_catalog_thread is not None:
+                self.drop_badge_catalog_thread.start()
 
             refresh_context = time.time()
             category_refresh_interval_seconds = (
@@ -642,6 +752,210 @@ class TwitchChannelPointsMiner:
                             )
                             + 5,
                         )
+
+    def __drop_badge_catalog_loop(self, refresh_seconds):
+        logger.info(
+            "Starting Drop badge catalog check in the background: "
+            f"{self.drop_badge_catalog.path}",
+            extra={"emoji": ":card_index_dividers:", "category_log": True},
+        )
+        self.__sync_drop_badge_catalog(initial=True)
+        if self.auto_mine_badge_drops:
+            self.__auto_mine_badge_campaigns()
+        if refresh_seconds <= 0:
+            return
+        while self.running and self.twitch.running:
+            if self.drop_badge_catalog_stop_event.wait(refresh_seconds):
+                return
+            if self.running and self.twitch.running:
+                self.__sync_drop_badge_catalog()
+                if self.auto_mine_badge_drops:
+                    self.__auto_mine_badge_campaigns()
+
+    def __sync_drop_badge_catalog(self, initial=False):
+        if self.drop_badge_catalog is None:
+            return
+        try:
+            result = self.drop_badge_catalog.sync()
+        except Exception as error:
+            logger.warning(
+                f"Unable to refresh Drop badge catalog: {error}",
+                extra={"emoji": ":warning:", "category_log": True},
+            )
+            return
+
+        new_campaigns = result["new_campaigns"]
+        new_badges = sum(
+            drop.get("badge_classification", {}).get("status") == "BADGE"
+            for record in new_campaigns
+            for drop in record.get("campaign", {}).get("drops", []) or []
+        )
+        if initial:
+            logger.info(
+                "Drop badge catalog loaded: "
+                f"{result['stored_campaigns']} campaigns, "
+                f"{new_badges} confirmed badges in the startup baseline",
+                extra={"emoji": ":card_index_dividers:", "category_log": True},
+            )
+        elif new_campaigns:
+            logger.info(
+                f"Drop badge catalog found {len(new_campaigns)} new campaigns "
+                f"with {new_badges} confirmed badges",
+                extra={"emoji": ":gift:", "category_log": True},
+            )
+        else:
+            logger.info(
+                "Drop badge catalog hourly check found no new campaigns",
+                extra={"emoji": ":white_check_mark:", "category_log": True},
+            )
+
+    def __auto_mine_badge_campaigns(self):
+        if self.drop_badge_catalog is None or self.ws_pool is None:
+            return
+
+        try:
+            owned_badges = self.twitch.get_earned_badge_names(refresh=True)
+            if owned_badges is None:
+                logger.warning(
+                    "Skipping automatic badge Drop discovery because Twitch did "
+                    "not return the account's earned badge inventory",
+                    extra={"emoji": ":warning:", "category_log": True},
+                )
+                return
+            campaigns = self.drop_badge_catalog.eligible_badge_campaigns(owned_badges)
+        except Exception as error:
+            logger.warning(
+                f"Unable to determine eligible badge Drop campaigns: {error}",
+                extra={"emoji": ":warning:", "category_log": True},
+            )
+            return
+
+        selectors = []
+        for record in campaigns:
+            game_slug = str(record.get("game_slug") or "").strip()
+            campaign = record.get("campaign") or {}
+            if not game_slug:
+                continue
+            channels = [
+                str(channel).lower().strip()
+                for channel in campaign.get("channels", []) or []
+                if str(channel).strip()
+            ]
+            if campaign.get("all_channels") is True:
+                selectors.append((game_slug, False))
+            else:
+                selectors.extend(
+                    (f"{game_slug}|{channel}", True) for channel in channels
+                )
+
+        discovered_usernames = []
+        for selector, restricted in dict.fromkeys(selectors):
+            try:
+                discovered_usernames.extend(
+                    self.twitch.get_live_streamers_for_category(
+                        selector,
+                        drops_enabled=True,
+                        limit=(1 if restricted else self.badge_drop_streamer_limit),
+                        sort_by=self.badge_drop_category_sort,
+                        respect_campaign_restrictions=False,
+                    )
+                )
+            except Exception as error:
+                logger.warning(
+                    f"Unable to find a live channel for badge Drop campaign selector "
+                    f"'{selector}': {error}",
+                    extra={"emoji": ":warning:", "category_log": True},
+                )
+
+        added = 0
+        with self.config_reload_lock:
+            existing_usernames = {streamer.username for streamer in self.streamers}
+            for username in dict.fromkeys(discovered_usernames):
+                username = str(username).lower().strip()
+                if (
+                    not username
+                    or username in existing_usernames
+                    or username in self.badge_drop_blacklist
+                ):
+                    continue
+
+                try:
+                    streamer = Streamer(
+                        username,
+                        settings=StreamerSettings(
+                            claim_drops=True,
+                            chat=self.badge_drop_category_chat,
+                        ),
+                        from_category=True,
+                        from_badge_campaign=True,
+                    )
+                    streamer.channel_id = self.twitch.get_channel_id(username)
+                    streamer.settings = set_default_settings(
+                        streamer.settings, Settings.streamer_settings
+                    )
+                    streamer.settings.bet = set_default_settings(
+                        streamer.settings.bet, Settings.streamer_settings.bet
+                    )
+                    if streamer.settings.chat != ChatPresence.NEVER:
+                        streamer.irc_chat = ThreadChat(
+                            self.username,
+                            self.twitch.twitch_login.get_auth_token(),
+                            streamer.username,
+                        )
+
+                    self.twitch.load_channel_points_context(streamer)
+                    self.twitch.check_streamer_online(streamer)
+                    self.streamers.append(streamer)
+                    existing_usernames.add(username)
+                    added += 1
+
+                    self.ws_pool.submit(
+                        PubsubTopic("video-playback-by-id", streamer=streamer)
+                    )
+                    if streamer.settings.follow_raid is True:
+                        self.ws_pool.submit(PubsubTopic("raid", streamer=streamer))
+                    if streamer.settings.make_predictions is True:
+                        self.ws_pool.submit(
+                            PubsubTopic("predictions-channel-v1", streamer=streamer)
+                        )
+                    if streamer.settings.claim_moments is True:
+                        self.ws_pool.submit(
+                            PubsubTopic(
+                                "community-moments-channel-v1", streamer=streamer
+                            )
+                        )
+                    if streamer.settings.community_goals is True:
+                        self.ws_pool.submit(
+                            PubsubTopic(
+                                "community-points-channel-v1", streamer=streamer
+                            )
+                        )
+                except StreamerDoesNotExistException:
+                    logger.info(
+                        f"Streamer {username} does not exist",
+                        extra={"emoji": ":cry:"},
+                    )
+                except Exception as error:
+                    logger.warning(
+                        f"Unable to add badge Drop streamer {username}: {error}",
+                        extra={"emoji": ":warning:", "category_log": True},
+                    )
+
+            if added > 0 and self.sync_campaigns_thread is None:
+                self.sync_campaigns_thread = threading.Thread(
+                    target=self.twitch.sync_campaigns,
+                    args=(self.streamers,),
+                    name="Sync campaigns/inventory",
+                )
+                self.sync_campaigns_thread.start()
+
+        badge_count = sum(len(record.get("eligible_drops", [])) for record in campaigns)
+        logger.info(
+            "Automatic badge Drop check complete: "
+            f"{len(campaigns)} eligible campaigns, {badge_count} unearned badges, "
+            f"{added} new live streamers",
+            extra={"emoji": ":gift:", "category_log": True},
+        )
 
     def __refresh_category_streamers(
         self,
@@ -856,6 +1170,7 @@ class TwitchChannelPointsMiner:
                     streamer.irc_chat.join()
 
         self.running = self.twitch.running = False
+        self.drop_badge_catalog_stop_event.set()
         if self.ws_pool is not None:
             self.ws_pool.end()
 
@@ -864,6 +1179,9 @@ class TwitchChannelPointsMiner:
 
         if self.sync_campaigns_thread is not None:
             self.sync_campaigns_thread.join()
+
+        if self.drop_badge_catalog_thread is not None:
+            self.drop_badge_catalog_thread.join(timeout=30)
 
         # Check if all the mutex are unlocked.
         # Prevent breaks of .json file

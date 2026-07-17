@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Automatically converted from example.py; review before editing.
+# Copy this template to config/config.py and review each setting before use.
 
 import logging
 from colorama import Fore
@@ -17,6 +17,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     FollowersOrder,
     CategorySort,
     CategoryCampaignOrder,
+    StreamerSource,
 )
 from TwitchChannelPointsMiner.classes.entities.Bet import Strategy, BetSettings, Condition, OutcomeKeys, FilterCondition, DelayMode
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
@@ -34,6 +35,11 @@ MINER_CONFIG = {
     'disable_ssl_cert_verification': False,
     'disable_at_in_nickname': False,
     'streams_watched': 2,                       # Watch 1 stream to reduce concurrent sessions (which may help Twitch Turbo users avoid ads), or 2 for the default maximum
+    'streamer_source_priority': [
+        StreamerSource.STREAMERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+    ],
     'logger_settings': LoggerSettings(
         save=True,                              # If you want to save logs in a file (suggested)
         console_level=logging.INFO,             # Level of logs - use logging.DEBUG for more info
@@ -157,6 +163,10 @@ MINE_CONFIG = {
     'scrape_drop_progress_on_load': True,
     'log_drop_checks': True,
     'category_refresh_interval_hours': 3,
+    'drop_badge_catalog': True,
+    'drop_badge_refresh_interval_hours': 1,
+    'auto_mine_badge_drops': False,
+    'badge_drop_streamer_limit': 1,
 }
 
 ANALYTICS_CONFIG = None

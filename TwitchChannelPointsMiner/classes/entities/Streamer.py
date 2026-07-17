@@ -76,6 +76,7 @@ class Streamer(object):
     __slots__ = [
         "username",
         "from_category",
+        "from_badge_campaign",
         "explicitly_configured",
         "channel_id",
         "settings",
@@ -98,10 +99,16 @@ class Streamer(object):
     ]
 
     def __init__(
-        self, username, settings=None, from_category=False, explicitly_configured=False
+        self,
+        username,
+        settings=None,
+        from_category=False,
+        explicitly_configured=False,
+        from_badge_campaign=False,
     ):
         self.username: str = username.lower().strip()
         self.from_category = from_category
+        self.from_badge_campaign = from_badge_campaign
         self.explicitly_configured = explicitly_configured
         self.channel_id: str = ""
         self.settings = settings

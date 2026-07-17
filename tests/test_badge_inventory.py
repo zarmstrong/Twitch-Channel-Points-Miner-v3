@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
-from twitchdrops_app_scraper import TwitchDropsAppScraper
+from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 
 
 def bare_twitch(gql):

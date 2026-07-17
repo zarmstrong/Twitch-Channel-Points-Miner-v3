@@ -13,6 +13,12 @@ class Priority(Enum):
     POINTS_DESCENDING = auto()
 
 
+class StreamerSource(Enum):
+    STREAMERS = auto()
+    CATEGORIES = auto()
+    BADGES = auto()
+
+
 class FollowersOrder(Enum):
     ASC = auto()
     DESC = auto()

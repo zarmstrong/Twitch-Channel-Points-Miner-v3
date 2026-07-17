@@ -152,8 +152,10 @@ def _watch_config(path, miner, initial_config, interval):
 
 def run_config(config, path):
     from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+    from TwitchChannelPointsMiner.classes.Settings import Settings
 
     config.MINE_CONFIG.setdefault("categories", [])
+    Settings.config_path = str(path.parent.resolve())
     miner = TwitchChannelPointsMiner(**config.MINER_CONFIG)
     if config.ANALYTICS_CONFIG is not None:
         miner.analytics(**config.ANALYTICS_CONFIG)

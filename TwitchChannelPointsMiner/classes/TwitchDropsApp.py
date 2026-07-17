@@ -1,18 +1,12 @@
-#!/usr/bin/env python3
-"""Scrape active Twitch Drops campaigns from a twitchdrops.app game page."""
+"""Parse and fetch Twitch Drops campaign data from twitchdrops.app."""
 
-import argparse
 import hashlib
 import html
-import json
 import re
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
-
 
 BASE_URL = "https://twitchdrops.app/game/"
 HOME_URL = "https://twitchdrops.app/"
@@ -133,6 +127,7 @@ def parse_campaign(block, game_name, starts_at=None):
         "description": first_match(
             r'class=["\'][^"\']*\bcb-desc\b[^"\']*["\'][^>]*>(.*?)</div>', block
         ),
+        "drops": [],
     }
 
 
@@ -190,23 +185,22 @@ def parse_game_page(source, url):
         for drop in drops
         if drop["campaign"] and is_watch_drop(drop)
     }
+    for campaign in all_campaigns:
+        campaign_name = (campaign["name"] or "").casefold()
+        campaign["drops"] = [
+            drop
+            for drop in drops
+            if (drop["campaign"] or "").casefold() == campaign_name
+        ]
     campaigns = [
         campaign
         for campaign in all_campaigns
         if (campaign["name"] or "").casefold() in watch_campaign_names
     ]
     for campaign in campaigns:
-        campaign_name = (campaign["name"] or "").casefold()
-        campaign["drops"] = [
-            drop
-            for drop in drops
-            if (drop["campaign"] or "").casefold() == campaign_name
-            and is_watch_drop(drop)
-        ]
+        campaign["drops"] = [drop for drop in campaign["drops"] if is_watch_drop(drop)]
     if len(upcoming_campaigns) == 1:
-        upcoming_campaigns[0]["drops"] = [
-            drop for drop in drops if is_watch_drop(drop)
-        ]
+        upcoming_campaigns[0]["drops"] = [drop for drop in drops if is_watch_drop(drop)]
     non_watch_campaigns = [
         campaign for campaign in all_campaigns if campaign not in campaigns
     ]
@@ -254,6 +248,11 @@ def parse_front_page(source):
                 "starts_at": attribute("data-start"),
                 "ends_at": attribute("data-end"),
                 "upcoming": " upcoming" in block,
+                "drop_count": (
+                    int(attribute("data-drops"))
+                    if str(attribute("data-drops") or "").isdigit()
+                    else None
+                ),
             }
         )
     return games
@@ -284,52 +283,3 @@ class TwitchDropsAppScraper(object):
         )
         response.raise_for_status()
         return parse_front_page(response.text)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "category", help="category slug, name, or twitchdrops.app game URL"
-    )
-    parser.add_argument("--output", type=Path, help="JSON report path")
-    parser.add_argument(
-        "--input", type=Path, help="parse a saved HTML page instead of fetching"
-    )
-    parser.add_argument(
-        "--timeout", type=float, default=20, help="request timeout in seconds"
-    )
-    args = parser.parse_args()
-    if args.timeout <= 0:
-        parser.error("--timeout must be greater than zero")
-    return args
-
-
-def main():
-    args = parse_args()
-    try:
-        url = game_url(args.category)
-        if args.input:
-            report = parse_game_page(args.input.read_text(encoding="utf-8"), url)
-        else:
-            report = TwitchDropsAppScraper(timeout=args.timeout).scrape(args.category)
-    except (OSError, ValueError, requests.RequestException) as error:
-        print(f"Scrape failed: {error}", file=sys.stderr)
-        return 2
-    report["generated_at"] = datetime.now(timezone.utc).isoformat()
-    output = args.output
-    if output is None:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output = Path("logs") / f"twitchdrops-app-report-{timestamp}.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    print(
-        f"Scraped {report['campaign_count']} active campaigns and {report['drop_count']} drops"
-    )
-    print(f"Saved report to {output.resolve()}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -57,7 +57,6 @@ The current suite covers these areas:
 | `test_campaign.py` | Campaign filtering, Drop synchronization and claiming, and community goals |
 | `test_entities.py` | Streams, Drops, PubSub messages, topics, timestamps, and payload encoding |
 | `test_config_migration.py` | Legacy runner conversion, invalid inputs, output permissions, and migration markers |
-| `test_runner_migration.py` | Runner schemas, portable defaults, keyword insertion, and automatic migration |
 | `test_streamer.py` | Streamer settings, state transitions, histories, multipliers, Drops, and prediction timing |
 
 `conftest.py` contains fixtures shared across the suite, including the minimal

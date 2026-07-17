@@ -1,4 +1,7 @@
-from twitchdrops_app_scraper import parse_front_page, parse_game_page
+from TwitchChannelPointsMiner.classes.TwitchDropsApp import (
+    parse_front_page,
+    parse_game_page,
+)
 
 
 def test_single_campaign_accepts_watch_drop_without_campaign_label():
@@ -79,6 +82,9 @@ def test_subscriber_only_campaign_is_not_treated_as_watch_drop():
 
     assert report["campaign_count"] == 0
     assert report["non_watch_campaign_count"] == 1
+    assert report["non_watch_campaigns"][0]["drops"][0]["name"] == (
+        "Subscriber Reward"
+    )
 
 
 def test_upcoming_campaign_includes_page_start_and_watch_drop():

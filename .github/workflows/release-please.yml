@@ -57,7 +57,7 @@ jobs:
                 TwitchChannelPointsMiner/__init__.py)
                   # Release Please updates only the package version here.
                   ;;
-                TwitchChannelPointsMiner/*.py|Dockerfile|requirements.txt|assets/*|config.example.py|example.py|twitchdrops_app_scraper.py|windows_launcher.py|build_windows.bat|TwitchChannelPointsMiner.spec)
+                TwitchChannelPointsMiner/*.py|Dockerfile|requirements.txt|assets/*|config.example.py|windows_launcher.py|build_windows.bat|TwitchChannelPointsMiner.spec)
                   code_changed=true
                   break
                   ;;

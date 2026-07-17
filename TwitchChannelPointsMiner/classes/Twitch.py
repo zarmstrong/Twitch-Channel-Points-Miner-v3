@@ -38,7 +38,9 @@ from TwitchChannelPointsMiner.classes.Settings import (
     FollowersOrder,
     Priority,
     Settings,
+    StreamerSource,
 )
+from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
     CLIENT_ID,
@@ -51,7 +53,6 @@ from TwitchChannelPointsMiner.utils import (
     create_chunks,
     internet_connection_available,
 )
-from twitchdrops_app_scraper import TwitchDropsAppScraper
 
 # import json
 
@@ -1463,6 +1464,11 @@ class Twitch(object):
             return available_badge_names
         return self.available_badge_names
 
+    def get_earned_badge_names(self, refresh=False):
+        """Return Twitch badge titles currently available to this account."""
+        badge_names = self.__get_available_badge_names(refresh=refresh)
+        return badge_names if self.available_badge_names is not None else None
+
     def filter_categories_with_active_drops(
         self, categories: List[str], order="ORDER", drops_enabled: bool = True
     ) -> List[str]:
@@ -1716,6 +1722,7 @@ class Twitch(object):
         drops_enabled: bool = True,
         limit: int = 30,
         sort_by: Any = "VIEWERS_DESC",
+        respect_campaign_restrictions: bool = True,
     ) -> List[str]:
         if not category:
             return []
@@ -1765,7 +1772,11 @@ class Twitch(object):
         fallback_campaigns = self.twitchdrops_app_campaigns.get(
             self.__slugify(normalized_category.replace("-", " ")), []
         )
-        if forced_streamer_username is None and fallback_campaigns:
+        if (
+            respect_campaign_restrictions is True
+            and forced_streamer_username is None
+            and fallback_campaigns
+        ):
             if any(campaign.get("channels") for campaign in fallback_campaigns):
                 return self.__get_live_restricted_campaign_streamers(
                     fallback_campaigns,
@@ -2144,7 +2155,12 @@ class Twitch(object):
             return self.client_version
 
     def send_minute_watched_events(
-        self, streamers, priority, chunk_size=3, streams_watched=2
+        self,
+        streamers,
+        priority,
+        chunk_size=3,
+        streams_watched=2,
+        source_priority=None,
     ):
         while self.running:
             iteration_started_at = time.time()
@@ -2179,89 +2195,125 @@ class Twitch(object):
                 max_watch_amount = streams_watched
                 streamers_watching = set()
 
+                default_source_priority = [
+                    StreamerSource.STREAMERS,
+                    StreamerSource.CATEGORIES,
+                    StreamerSource.BADGES,
+                ]
+                normalized_source_priority = []
+                for source in source_priority or default_source_priority:
+                    if (
+                        isinstance(source, StreamerSource)
+                        and source not in normalized_source_priority
+                    ):
+                        normalized_source_priority.append(source)
+                for source in default_source_priority:
+                    if source not in normalized_source_priority:
+                        normalized_source_priority.append(source)
+                source_priority = normalized_source_priority
+
+                def streamer_source(index):
+                    if getattr(streamers[index], "from_badge_campaign", False) is True:
+                        return StreamerSource.BADGES
+                    if getattr(streamers[index], "from_category", False) is True:
+                        return StreamerSource.CATEGORIES
+                    return StreamerSource.STREAMERS
+
                 def remaining_watch_amount():
                     return max_watch_amount - len(streamers_watching)
 
-                for prior in priority:
+                for source in source_priority:
                     if remaining_watch_amount() <= 0:
                         break
+                    source_indexes = [
+                        index
+                        for index in streamers_index
+                        if streamer_source(index) == source
+                    ]
 
-                    if prior == Priority.ORDER:
-                        # Get the first 2 items, they are already in order
-                        streamers_watching.update(
-                            streamers_index[: remaining_watch_amount()]
-                        )
+                    for prior in priority:
+                        if remaining_watch_amount() <= 0:
+                            break
 
-                    elif prior in [
-                        Priority.POINTS_ASCENDING,
-                        Priority.POINTS_DESCENDING,
-                    ]:
-                        items = [
-                            {"points": streamers[index].channel_points, "index": index}
-                            for index in streamers_index
-                        ]
-                        items = sorted(
-                            items,
-                            key=lambda x: x["points"],
-                            reverse=(
-                                True if prior == Priority.POINTS_DESCENDING else False
-                            ),
-                        )
-                        streamers_watching.update(
-                            [item["index"] for item in items][
-                                : remaining_watch_amount()
+                        if prior == Priority.ORDER:
+                            streamers_watching.update(
+                                source_indexes[: remaining_watch_amount()]
+                            )
+
+                        elif prior in [
+                            Priority.POINTS_ASCENDING,
+                            Priority.POINTS_DESCENDING,
+                        ]:
+                            items = [
+                                {
+                                    "points": streamers[index].channel_points,
+                                    "index": index,
+                                }
+                                for index in source_indexes
                             ]
-                        )
+                            items = sorted(
+                                items,
+                                key=lambda x: x["points"],
+                                reverse=(prior == Priority.POINTS_DESCENDING),
+                            )
+                            streamers_watching.update(
+                                [item["index"] for item in items][
+                                    : remaining_watch_amount()
+                                ]
+                            )
 
-                    elif prior == Priority.STREAK:
-                        """
-                        Check if we need need to change priority based on watch streak
-                        Viewers receive points for returning for x consecutive streams.
-                        Each stream must be at least 10 minutes long and it must have been at least 30 minutes since the last stream ended.
-                        Watch at least 6m for get the +10
-                        """
-                        for index in streamers_index:
-                            if (
-                                streamers[index].settings.watch_streak is True
-                                and streamers[index].stream.watch_streak_missing is True
-                                and (
-                                    streamers[index].offline_at == 0
-                                    or (
-                                        (time.time() - streamers[index].offline_at)
-                                        // 60
+                        elif prior == Priority.STREAK:
+                            for index in source_indexes:
+                                if (
+                                    streamers[index].settings.watch_streak is True
+                                    and streamers[index].stream.watch_streak_missing
+                                    is True
+                                    and (
+                                        streamers[index].offline_at == 0
+                                        or (
+                                            (time.time() - streamers[index].offline_at)
+                                            // 60
+                                        )
+                                        > 30
                                     )
-                                    > 30
-                                )
-                                # fix #425
-                                and streamers[index].stream.minute_watched < 11
-                            ):
-                                streamers_watching.add(index)
-                                if remaining_watch_amount() <= 0:
-                                    break
+                                    and streamers[index].stream.minute_watched < 11
+                                ):
+                                    streamers_watching.add(index)
+                                    if remaining_watch_amount() <= 0:
+                                        break
 
-                    elif prior == Priority.DROPS:
-                        for index in streamers_index:
-                            if self.__drops_condition(streamers[index]) is True:
-                                streamers_watching.add(index)
-                                if remaining_watch_amount() <= 0:
-                                    break
+                        elif prior == Priority.DROPS:
+                            for index in source_indexes:
+                                if self.__drops_condition(streamers[index]) is True:
+                                    streamers_watching.add(index)
+                                    if remaining_watch_amount() <= 0:
+                                        break
 
-                    elif prior == Priority.SUBSCRIBED:
-                        streamers_with_multiplier = [
-                            index
-                            for index in streamers_index
-                            if streamers[index].viewer_has_points_multiplier()
-                        ]
-                        streamers_with_multiplier = sorted(
-                            streamers_with_multiplier,
-                            key=lambda x: streamers[x].total_points_multiplier(),
-                            reverse=True,
-                        )
-                        streamers_watching.update(
-                            streamers_with_multiplier[: remaining_watch_amount()]
-                        )
+                        elif prior == Priority.SUBSCRIBED:
+                            streamers_with_multiplier = [
+                                index
+                                for index in source_indexes
+                                if streamers[index].viewer_has_points_multiplier()
+                            ]
+                            streamers_with_multiplier = sorted(
+                                streamers_with_multiplier,
+                                key=lambda x: streamers[x].total_points_multiplier(),
+                                reverse=True,
+                            )
+                            streamers_watching.update(
+                                streamers_with_multiplier[: remaining_watch_amount()]
+                            )
 
-                streamers_watching = list(streamers_watching)[:max_watch_amount]
+                source_rank = {
+                    source: rank for rank, source in enumerate(source_priority)
+                }
+                streamers_watching = sorted(
+                    streamers_watching,
+                    key=lambda index: (
+                        source_rank[streamer_source(index)],
+                        streamers_index.index(index),
+                    ),
+                )[:max_watch_amount]
 
                 # Safety net: never watch more than one category-discovered streamer
                 # in the same loop iteration.

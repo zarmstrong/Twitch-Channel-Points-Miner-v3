@@ -159,8 +159,9 @@ class ViewerDropsDashboardResponse:
 
 
 class DropCampaignDetailsResponse:
-    def __init__(self, campaign: DropCampaignDetails):
+    def __init__(self, campaign: DropCampaignDetails, raw_campaign: dict | None = None):
         self.campaign = campaign
+        self.raw_campaign = raw_campaign or {}
 
     def __repr__(self):
         return f"DropCampaignDetailsResponse({self.__dict__})"

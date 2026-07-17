@@ -5,7 +5,7 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 ## Where to start
 
 - Main runtime entry point: [TwitchChannelPointsMiner/TwitchChannelPointsMiner.py](TwitchChannelPointsMiner/TwitchChannelPointsMiner.py)
-- Example configuration and usage: [example.py](example.py)
+- Example configuration and usage: [config.example.py](config.example.py)
 - Project overview and setup notes: [README.md](README.md)
 - Contribution and style expectations: [CONTRIBUTING.md](CONTRIBUTING.md)
 
