@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.1.0...3.1.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* use bare release tags on master ([#8](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/8)) ([415591c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/415591c37e1e87e15e63d3faeacb70b8ff5af163))
+
 ## [3.1.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/Twitch-Channel-Points-Miner-v2-3.0.0...Twitch-Channel-Points-Miner-v2-3.1.0) (2026-07-16)
 
 
