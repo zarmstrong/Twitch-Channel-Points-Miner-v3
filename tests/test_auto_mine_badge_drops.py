@@ -25,7 +25,7 @@ class FakeCatalog:
                 "game_slug": "restricted-game",
                 "campaign": {
                     "all_channels": False,
-                    "channels": ["AllowedChannel"],
+                    "channels": [" AllowedChannel ", "", None, 123],
                     "drops": [],
                 },
                 "eligible_drops": [{"name": "Restricted Badge"}],
@@ -114,7 +114,7 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
                 "restricted_campaigns": [
                     {
                         "all_channels": False,
-                        "channels": ["AllowedChannel"],
+                        "channels": ["allowedchannel"],
                         "drops": [],
                     }
                 ],

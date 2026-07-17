@@ -838,14 +838,16 @@ class TwitchChannelPointsMiner:
             if not game_slug:
                 continue
             channels = [
-                str(channel).lower().strip()
+                channel.lower().strip()
                 for channel in campaign.get("channels", []) or []
-                if str(channel).strip()
+                if isinstance(channel, str) and channel.strip()
             ]
             if campaign.get("all_channels") is True:
                 unrestricted_games.append(game_slug)
             elif channels:
-                restricted_campaigns_by_game.setdefault(game_slug, []).append(campaign)
+                restricted_campaigns_by_game.setdefault(game_slug, []).append(
+                    {**campaign, "channels": channels}
+                )
 
         discovered_usernames = []
         for game_slug in dict.fromkeys(unrestricted_games):
