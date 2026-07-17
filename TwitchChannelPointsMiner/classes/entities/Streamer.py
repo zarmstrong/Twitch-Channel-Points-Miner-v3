@@ -8,7 +8,11 @@ from threading import Lock
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
 from TwitchChannelPointsMiner.classes.entities.Stream import Stream
-from TwitchChannelPointsMiner.classes.Settings import Events, Settings
+from TwitchChannelPointsMiner.classes.Settings import (
+    ANALYTICS_FILE_MUTEX,
+    Events,
+    Settings,
+)
 from TwitchChannelPointsMiner.constants import URL
 from TwitchChannelPointsMiner.utils import _millify
 
@@ -71,6 +75,9 @@ class StreamerSettings(object):
 class Streamer(object):
     __slots__ = [
         "username",
+        "from_category",
+        "from_badge_campaign",
+        "explicitly_configured",
         "channel_id",
         "settings",
         "is_online",
@@ -88,10 +95,21 @@ class Streamer(object):
         "history",
         "streamer_url",
         "mutex",
+        "last_drop_watch_signature",
     ]
 
-    def __init__(self, username, settings=None):
+    def __init__(
+        self,
+        username,
+        settings=None,
+        from_category=False,
+        explicitly_configured=False,
+        from_badge_campaign=False,
+    ):
         self.username: str = username.lower().strip()
+        self.from_category = from_category
+        self.from_badge_campaign = from_badge_campaign
+        self.explicitly_configured = explicitly_configured
         self.channel_id: str = ""
         self.settings = settings
         self.is_online = False
@@ -109,6 +127,7 @@ class Streamer(object):
 
         self.raid = None
         self.history = {}
+        self.last_drop_watch_signature = None
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -139,7 +158,7 @@ class Streamer(object):
             },
         )
 
-    def set_online(self):
+    def set_online(self, drops_description=None):
         if self.is_online is False:
             self.online_at = time.time()
             self.is_online = True
@@ -147,8 +166,13 @@ class Streamer(object):
 
         self.toggle_chat()
 
+        online_message = (
+            f"{self} is Online for {drops_description}"
+            if drops_description
+            else f"{self} is Online!"
+        )
         logger.info(
-            f"{self} is Online!",
+            online_message,
             extra={
                 "emoji": ":partying_face:",
                 "event": Events.STREAMER_ONLINE,
@@ -172,16 +196,25 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
+            logger.info(
+                "[watch-streak] "
+                f"Twitch confirmed streak for streamer={self.username}; "
+                f"local watched={self.stream.minute_watched:.2f}m"
+            )
 
     def stream_up_elapsed(self):
         return self.stream_up == 0 or ((time.time() - self.stream_up) > 120)
 
     def drops_condition(self):
+        has_unclaimed_campaign_drops = any(
+            campaign.drops != [] for campaign in self.stream.campaigns
+        )
         return (
             self.settings.claim_drops is True
             and self.is_online is True
             # and self.stream.drops_tags is True
             and self.stream.campaigns_ids != []
+            and has_unclaimed_campaign_drops is True
         )
 
     def viewer_has_points_multiplier(self):
@@ -249,10 +282,14 @@ class Streamer(object):
         fname = os.path.join(Settings.analytics_path, f"{self.username}.json")
         temp_fname = fname + ".temp"  # Temporary file name
 
-        with self.mutex:
+        with ANALYTICS_FILE_MUTEX, self.mutex:
             # Create and write to the temporary file
-            with open(temp_fname, "w") as temp_file:
-                json_data = json.load(open(fname, "r")) if os.path.isfile(fname) else {}
+            with open(temp_fname, "w", encoding="utf-8") as temp_file:
+                if os.path.isfile(fname):
+                    with open(fname, "r", encoding="utf-8") as analytics_file:
+                        json_data = json.load(analytics_file)
+                else:
+                    json_data = {}
                 if key not in json_data:
                     json_data[key] = []
                 json_data[key].append(data)

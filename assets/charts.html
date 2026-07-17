@@ -18,7 +18,12 @@
         integrity="sha512-1ycn6IcaQQ40/MKBW2W4Rhis/DbILU74C1vSrLJxCq57o941Ym01SwNsOMqvEBFlcgUa6xLiPY/NS5R+E6ztJQ=="
         crossorigin="anonymous" referrerpolicy="no-referrer" />
 
-    <link href="{{url_for('static', filename='dark-theme.css')}}" rel="stylesheet" />
+    <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css')}}" rel="stylesheet" />
+    <script>
+        if (localStorage.getItem('dark-mode') === 'false') {
+            document.getElementById('dark-theme').disabled = true;
+        }
+    </script>
     <link href="{{url_for('static', filename='style.css')}}" rel="stylesheet" />
 
 </head>
@@ -34,44 +39,27 @@
             <div class="column is-4 has-text-left" style="margin-top: 35px;">
                 <table>
                     <tr>
-                        <td><a href="https://github.com/Tkd-Alex" target="_blank">Tkd-Alex</a></td>
                         <td><a href="https://github.com/rdavydov" target="_blank">rdavydov</a></td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/blob/master/LICENSE">
-                                <img alt="License"
-                                    src="https://img.shields.io/github/license/Tkd-Alex/Twitch-Channel-Points-Miner-v2" /></a>
-                        </td>
                         <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/blob/master/LICENSE">
                                 <img alt="License"
                                     src="https://img.shields.io/github/license/rdavydov/Twitch-Channel-Points-Miner-v2" /></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://www.python.org/downloads/release/python-360/">
+                        <td><a href="https://www.python.org/downloads/">
                                 <img alt="Python3"
-                                    src="https://img.shields.io/badge/built%20for-Python≥3.6-red.svg?style=flat"></a>
-                        </td>
-                        <td><a href="https://www.python.org/downloads/release/python-360/">
-                                <img alt="Python3"
-                                    src="https://img.shields.io/badge/built%20for-Python≥3.6-red.svg?style=flat"></a>
+                                    src="https://img.shields.io/badge/built%20for-Python%203.11--3.13-red.svg?style=flat"></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/pulls">
-                                <img alt="PRsWelcome"
-                                    src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat" /></a>
-                        </td>
                         <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/pulls">
                                 <img alt="PRsWelcome"
                                     src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat" /></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/stargazers">
-                                <img alt="GitHub Repo stars"
-                                    src="https://img.shields.io/github/stars/Tkd-Alex/Twitch-Channel-Points-Miner-v2" /></a>
-                        </td>
                         <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/stargazers">
                                 <img alt="GitHub Repo stars"
                                     src="https://img.shields.io/github/stars/rdavydov/Twitch-Channel-Points-Miner-v2" /></a>
@@ -79,21 +67,12 @@
                     </tr>
                     <tr>
                         <td><a
-                                href="https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues?q=is%3Aissue+is%3Aclosed">
-                                <img alt="GitHub closed issues"
-                                    src="https://img.shields.io/github/issues-closed/Tkd-Alex/Twitch-Channel-Points-Miner-v2"></a>
-                        </td>
-                        <td><a
                                 href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues?q=is%3Aissue+is%3Aclosed">
                                 <img alt="GitHub closed issues"
                                     src="https://img.shields.io/github/issues-closed/rdavydov/Twitch-Channel-Points-Miner-v2"></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2">
-                                <img alt="GitHub last commit"
-                                    src="https://img.shields.io/github/last-commit/Tkd-Alex/Twitch-Channel-Points-Miner-v2" /></a>
-                        </td>
                         <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2">
                                 <img alt="GitHub last commit"
                                     src="https://img.shields.io/github/last-commit/rdavydov/Twitch-Channel-Points-Miner-v2" /></a>
@@ -103,6 +82,35 @@
             </div>
         </div>
 
+        <div class="columns top-controls-row">
+            <div class="column is-narrow has-text-center">
+                <div id="dashboard-tabs" class="view-tabs">
+                    <button id="tab-points" class="button is-small is-link" type="button" onclick="switchDashboardTab('points')">Points</button>
+                    <button id="tab-drops" class="button is-small" type="button" onclick="switchDashboardTab('drops')">Drops</button>
+                </div>
+            </div>
+            <div class="column has-text-right top-controls" style="margin: auto">
+                <button id="auto-update-log">⏸️</button>
+                <label class="checkbox checkbox-label">
+                    Log
+                    <input type="checkbox" id="log">
+                </label>
+                <label class="checkbox checkbox-label">
+                    Annotations
+                    <input type="checkbox" checked="true" id="annotations">
+                </label>
+                <label class="checkbox checkbox-label">
+                    Dark mode
+                    <input type="checkbox" checked="true" id="dark-mode">
+                </label>
+                <label class="checkbox checkbox-label">
+                    Header
+                    <input type="checkbox" checked="true" id="toggle-header">
+                </label>
+            </div>
+        </div>
+
+        <div id="points-panel">
         <div class="columns">
             <div class="column is-narrow has-text-center">
                 <div class="dropdown">
@@ -144,24 +152,20 @@
             <div class="column is-2 has-text-left">
                 <input class="input" type="date" id="endDate">
             </div>
-            <div class="column has-text-right" style="margin: auto">
-                <button id="auto-update-log">⏸️</button>
-                <label class="checkbox checkbox-label">
-                    Log
-                    <input type="checkbox" id="log">
-                </label>
-                <label class="checkbox checkbox-label">
-                    Annotations
-                    <input type="checkbox" checked="true" id="annotations">
-                </label>
-                <label class="checkbox checkbox-label">
-                    Dark mode
-                    <input type="checkbox" checked="true" id="dark-mode">
-                </label>
-                <label class="checkbox checkbox-label">
-                    Header
-                    <input type="checkbox" checked="true" id="toggle-header">
-                </label>
+            <div class="column has-text-right">
+                <div class="streamer-delete-actions">
+                    <span id="streamer-selection-hint" class="streamer-selection-hint" style="display: none;">
+                        Shift-click to select a range
+                    </span>
+                    <button id="cancel-streamer-analytics-selection" class="button" type="button" style="display: none;">
+                        Cancel selection
+                    </button>
+                    <button id="delete-streamer-analytics" class="button is-danger" type="button"
+                        title="Select streamer analytics data to delete">
+                        <span class="icon is-small"><i class="fas fa-trash" aria-hidden="true"></i></span>
+                        <span class="delete-streamer-button-label">Delete analytics data</span>
+                    </button>
+                </div>
             </div>
         </div>
         <div class="columns">
@@ -174,6 +178,43 @@
                 <div class="box" id="chart" style="padding: 0.30rem;"></div>
             </div>
         </div>
+
+        </div>
+
+        <div id="drops-panel" style="display: none;">
+        <div class="columns">
+            <div class="column is-narrow">
+                <div class="tabs drops-tabs">
+                    <ul id="drops-categories-list"></ul>
+                </div>
+            </div>
+            <div class="column">
+                <div class="box" id="drops-box" style="padding: 0.75rem;">
+                    <h3 class="title is-5" style="margin-bottom: 0.50rem;">Drops By Category</h3>
+                    <div class="drops-toolbar">
+                        <p id="drops-category-title" class="drops-category-title"></p>
+                        <div class="select is-small drops-filter-select">
+                            <select id="drops-filter" onchange="changeDropsFilter(this.value)">
+                                <option value="active">Active drops</option>
+                                <option value="all">All drops</option>
+                                <option value="last_30">Last 30 days</option>
+                                <option value="last_60">Last 60 days</option>
+                                <option value="last_90">Last 90 days</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="drops-items" class="drops-items">
+                        <div class="drops-empty">No drop events yet.</div>
+                    </div>
+                    <div id="drops-pagination" class="drops-pagination" style="display: none;">
+                        <button id="drops-prev" class="button is-small" type="button" onclick="changeDropsPage(-1)">Prev</button>
+                        <span id="drops-page-info" class="drops-page-info"></span>
+                        <button id="drops-next" class="button is-small" type="button" onclick="changeDropsPage(1)">Next</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div>
         <div class="columns">
             <div class="column is-12">
                 <div class="box" id="log-box" style="padding: 0.30rem; display: none;">
@@ -181,16 +222,42 @@
                 </div>
             </div>
         </div>
+        <footer class="analytics-footer">
+            This project is based on code originally developed by
+            <a href="https://github.com/Tkd-Alex" target="_blank" rel="noopener noreferrer">Tkd-Alex</a>.
+        </footer>
+    </div>
+
+    <div id="analytics-delete-modal" class="analytics-modal" role="dialog" aria-modal="true"
+        aria-labelledby="analytics-delete-modal-title" aria-describedby="analytics-delete-modal-message" aria-hidden="true">
+        <div class="analytics-modal-card">
+            <div class="analytics-modal-icon" aria-hidden="true">
+                <i class="fas fa-trash-alt"></i>
+            </div>
+            <h2 id="analytics-delete-modal-title" class="analytics-modal-title">Delete analytics data?</h2>
+            <p id="analytics-delete-modal-message" class="analytics-modal-message"></p>
+            <div id="analytics-delete-modal-note" class="analytics-modal-note">
+                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                <span>This only removes analytics history. It does not remove the streamer from your miner configuration,
+                    and new activity may make them appear here again.</span>
+            </div>
+            <div class="analytics-modal-actions">
+                <button id="analytics-delete-modal-cancel" class="button" type="button">Cancel</button>
+                <button id="analytics-delete-modal-confirm" class="button is-danger" type="button">
+                    Delete analytics data
+                </button>
+            </div>
+        </div>
     </div>
 </body>
 
 <script type="text/javascript">
     // n.b. Seems that we are unable to call Flask variable in JS code imported from JS file.
-    // That's why "link[href='{{url_for('static', filename='dark-theme.css')}}']", {{ refresh }}, {{ daysAgo }} are here.
+    // That's why the Flask-provided dashboard settings are declared here.
 
     function toggleDarkMode() {
         var darkMode = $('#dark-mode').prop("checked")
-        $("link[href='{{url_for('static', filename='dark-theme.css')}}']").prop("disabled", !darkMode);
+        $('#dark-theme').prop("disabled", !darkMode);
         chart.updateOptions({
             colors: darkMode === true ? ["#f9826c"] : ['#008ffb'],
             chart: {
@@ -203,6 +270,8 @@
     }
     var refresh = parseInt("{{ refresh }}");
     var daysAgo = parseInt("{{ daysAgo }}");
+    var logPollInterval = parseInt("{{ logPollInterval }}");
+    var dateFormat = {{ dateFormat | tojson }};
 </script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js')}}"></script>
 

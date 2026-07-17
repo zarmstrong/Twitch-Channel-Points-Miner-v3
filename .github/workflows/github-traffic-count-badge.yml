@@ -5,13 +5,22 @@ on:
     - cron: "0 */24 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: github-traffic-badges
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-      
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: gh login
         run: echo "${{ secrets.SECRET_TOKEN }}" | gh auth login --with-token
 
@@ -24,25 +33,18 @@ jobs:
       - name: create gist and download previous count
         id: set_id
         run: |
-          if gh secret list | grep -q "TRAFFIC_ID"
+          if [ -n "${{ secrets.TRAFFIC_ID }}" ]
           then
               echo "TRAFFIC_ID found"
-              echo ::set-output name=GIST::${{ secrets.TRAFFIC_ID }}
+              echo "GIST=${{ secrets.TRAFFIC_ID }}" >> "$GITHUB_OUTPUT"
               curl https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.TRAFFIC_ID }}/raw/traffic.json > traffic_before.json
               if cat traffic_before.json | grep '404: Not Found'; then
-                echo "TRAFFIC_ID not valid anymore. Creating another gist..."
-                traffic_id=$(gh gist create traffic.json | awk -F / '{print $NF}')
-                echo $traffic_id | gh secret set TRAFFIC_ID
-                echo ::set-output name=GIST::$traffic_id
-                cp traffic.json traffic_before.json
-                git rm --ignore-unmatch TRAFFIC.md
+                echo "TRAFFIC_ID is no longer valid. Update the TRAFFIC_ID repository secret."
+                exit 1
               fi
           else
-              echo "TRAFFIC_ID not found. Creating a gist..."
-              traffic_id=$(gh gist create traffic.json | awk -F / '{print $NF}')
-              echo $traffic_id | gh secret set TRAFFIC_ID
-              echo ::set-output name=GIST::$traffic_id
-              cp traffic.json traffic_before.json
+              echo "TRAFFIC_ID is not configured. Create a gist and add its ID as the TRAFFIC_ID repository secret."
+              exit 1
           fi
       - name: update traffic.json
         run: |
@@ -71,13 +73,13 @@ jobs:
             ```html' >> TRAFFIC.md
             echo "<a href='$repo'><img alt='GitHub Traffic' src='$shields$url&logo=github'></a>" >> TRAFFIC.md
             echo '```' >> TRAFFIC.md
-            
+
             git add TRAFFIC.md
             git config --global user.name "GitHub Action"
             git config --global user.email "action@github.com"
             git commit -m "create traffic count badge"
           fi
       - name: Push
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"

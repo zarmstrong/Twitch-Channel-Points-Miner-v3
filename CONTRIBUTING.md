@@ -3,8 +3,12 @@
 ## Getting started
 
 Before you begin:
+
 - Have you read the [code of conduct](CODE_OF_CONDUCT.md)?
 - Check out the [existing issues](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues) & see if there is already an opened issue.
+- Use the [build guide](BUILD.md) when producing Windows or Docker artifacts.
+- Follow the [testing guide](tests/README.md) to set up the development environment,
+  run the suite, and add regression coverage.
 
 ### Ready to make a change? Fork the repo
 
@@ -80,6 +84,16 @@ Labels can help you find an issue you'd like to help with.
 
 ## Opening a pull request
 You can use the GitHub user interface :pencil2: for minor changes, like fixing a typo or updating a readme. You can also fork the repo and then clone it locally to view changes and run your tests on your machine.
+
+Before submitting code changes, run the checks described in the
+[testing guide](tests/README.md). Add or update tests whenever practical:
+bug fixes should include a regression test, and new behavior should include
+coverage for its expected result and important edge cases. If automated testing
+is not feasible, explain why and describe the manual verification performed in
+the pull request.
+
+Changes to Windows packaging or Docker images should also be verified with the
+relevant instructions in the [build guide](BUILD.md).
 
 ### Self review
 You should always review your own PR first.

@@ -1,4 +1,3 @@
-import platform
 import re
 import socket
 import time
@@ -8,11 +7,16 @@ from os import path
 from random import randrange
 
 import requests
-from millify import millify
+from millify import millify as package_millify
 
 from TwitchChannelPointsMiner.constants import USER_AGENTS, GITHUB_url
 
 
+def millify(input, precision=2):
+    return package_millify(input, precision)
+
+
+# Backward-compatible alias for callers not yet migrated to the public name.
 def _millify(input, precision=2):
     return millify(input, precision)
 
@@ -32,8 +36,7 @@ def float_round(number, ndigits=2):
 
 def server_time(message_data):
     return (
-        datetime.fromtimestamp(
-            message_data["server_time"], timezone.utc).isoformat()
+        datetime.fromtimestamp(message_data["server_time"], timezone.utc).isoformat()
         + "Z"
         if message_data is not None and "server_time" in message_data
         else datetime.fromtimestamp(time.time(), timezone.utc).isoformat() + "Z"
@@ -53,6 +56,7 @@ def create_nonce(length=30) -> str:
             char = chr(ord("A") + char_index - 26 - 10)
         nonce += char
     return nonce
+
 
 # for mobile-token
 
@@ -143,8 +147,8 @@ def set_default_settings(settings, defaults):
     )
 
 
-'''def char_decision_as_index(char):
-    return 0 if char == "A" else 1'''
+"""def char_decision_as_index(char):
+    return 0 if char == "A" else 1"""
 
 
 def internet_connection_available(host="8.8.8.8", port=53, timeout=3):
@@ -161,29 +165,30 @@ def percentage(a, b):
 
 
 def create_chunks(lst, n):
-    return [lst[i: (i + n)] for i in range(0, len(lst), n)]  # noqa: E203
-
-
-def download_file(name, fpath):
-    r = requests.get(
-        path.join(GITHUB_url, name),
-        headers={"User-Agent": get_user_agent("FIREFOX")},
-        stream=True,
-    )
-    if r.status_code == 200:
-        with open(fpath, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024):
-                if chunk:
-                    f.write(chunk)
-    return True
+    return [lst[i : (i + n)] for i in range(0, len(lst), n)]  # noqa: E203
 
 
 def read(fname):
-    return open(path.join(path.dirname(__file__), fname), encoding="utf-8").read()
+    package_root = path.dirname(path.dirname(__file__))
+    with open(path.join(package_root, fname), encoding="utf-8") as file:
+        return file.read()
 
 
 def init2dict(content):
     return dict(re.findall(r"""__([a-z]+)__ = "([^"]+)""", content))
+
+
+def is_newer_version(candidate, current):
+    """Return whether a SemVer candidate is newer than the current version."""
+    version_pattern = r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$"
+    candidate_match = re.match(version_pattern, candidate)
+    current_match = re.match(version_pattern, current)
+    if candidate_match is None or current_match is None:
+        return False
+
+    candidate_parts = tuple(int(part) for part in candidate_match.groups())
+    current_parts = tuple(int(part) for part in current_match.groups())
+    return candidate_parts > current_parts
 
 
 def check_versions():
@@ -201,7 +206,8 @@ def check_versions():
                     s.strip("/")
                     for s in [GITHUB_url, "TwitchChannelPointsMiner", "__init__.py"]
                 ]
-            )
+            ),
+            timeout=(5, 15),
         )
         github_version = init2dict(r.text)
         github_version = (

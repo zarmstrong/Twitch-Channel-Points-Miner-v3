@@ -1,4 +1,7 @@
 from enum import Enum, auto
+from threading import Lock
+
+ANALYTICS_FILE_MUTEX = Lock()
 
 
 class Priority(Enum):
@@ -10,6 +13,12 @@ class Priority(Enum):
     POINTS_DESCENDING = auto()
 
 
+class StreamerSource(Enum):
+    STREAMERS = auto()
+    CATEGORIES = auto()
+    BADGES = auto()
+
+
 class FollowersOrder(Enum):
     ASC = auto()
     DESC = auto()
@@ -18,10 +27,36 @@ class FollowersOrder(Enum):
         return self.name
 
 
+class CategorySort(str, Enum):
+    ORDER = "ORDER"
+    VIEWERS_DESC = "VIEWERS_DESC"
+    VIEWERS_ASC = "VIEWERS_ASC"
+    STARTED_AT_DESC = "STARTED_AT_DESC"
+    STARTED_AT_ASC = "STARTED_AT_ASC"
+    RANDOM = "RANDOM"
+
+    def __str__(self):
+        return self.value
+
+
+class CategoryCampaignOrder(str, Enum):
+    ORDER = "ORDER"
+    EXPIRATION = "EXPIRATION"
+
+    def __str__(self):
+        return self.value
+
+
 # Empty object shared between class
 class Settings(object):
-    __slots__ = ["logger", "streamer_settings",
-                 "enable_analytics", "disable_ssl_cert_verification", "disable_at_in_nickname"]
+    __slots__ = [
+        "logger",
+        "streamer_settings",
+        "enable_analytics",
+        "disable_ssl_cert_verification",
+        "disable_at_in_nickname",
+        "track_category_streamer_points",
+    ]
 
 
 class Events(Enum):
@@ -44,6 +79,7 @@ class Events(Enum):
     DROP_CLAIM = auto()
     DROP_STATUS = auto()
     CHAT_MENTION = auto()
+    CONFIGURATION = auto()
 
     def __str__(self):
         return self.name

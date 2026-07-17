@@ -2,22 +2,22 @@ import logging
 import os
 import platform
 import queue
-import pytz
 import sys
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener, TimedRotatingFileHandler
 from pathlib import Path
 
 import emoji
+import pytz
 from colorama import Fore, init
 
 from TwitchChannelPointsMiner.classes.Discord import Discord
-from TwitchChannelPointsMiner.classes.Webhook import Webhook
+from TwitchChannelPointsMiner.classes.Gotify import Gotify
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
+from TwitchChannelPointsMiner.classes.Pushover import Pushover
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.Telegram import Telegram
-from TwitchChannelPointsMiner.classes.Pushover import Pushover
-from TwitchChannelPointsMiner.classes.Gotify import Gotify
+from TwitchChannelPointsMiner.classes.Webhook import Webhook
 from TwitchChannelPointsMiner.utils import remove_emoji
 
 
@@ -70,6 +70,7 @@ class LoggerSettings:
         "console_level",
         "console_username",
         "time_zone",
+        "date_format",
         "file_level",
         "emoji",
         "colored",
@@ -81,7 +82,7 @@ class LoggerSettings:
         "matrix",
         "pushover",
         "gotify",
-        "username"
+        "username",
     ]
 
     def __init__(
@@ -91,6 +92,7 @@ class LoggerSettings:
         console_level: int = logging.INFO,
         console_username: bool = False,
         time_zone: str or None = None,
+        date_format: str = "dd/mm/yy",
         file_level: int = logging.DEBUG,
         emoji: bool = platform.system() != "Windows",
         colored: bool = False,
@@ -102,13 +104,25 @@ class LoggerSettings:
         matrix: Matrix or None = None,
         pushover: Pushover or None = None,
         gotify: Gotify or None = None,
-        username: str or None = None
+        username: str or None = None,
     ):
         self.save = save
         self.less = less
         self.console_level = console_level
         self.console_username = console_username
         self.time_zone = time_zone
+        if not isinstance(date_format, str):
+            raise TypeError("date_format must be a string")
+        date_parts = date_format.replace("-", "/").replace(".", "/").split("/")
+        if sorted(date_parts) != ["dd", "mm", "yy"] and sorted(date_parts) != [
+            "dd",
+            "mm",
+            "yyyy",
+        ]:
+            raise ValueError(
+                "date_format must contain dd, mm, and yy or yyyy, separated by /, -, or ."
+            )
+        self.date_format = date_format
         self.file_level = file_level
         self.emoji = emoji
         self.colored = colored
@@ -123,6 +137,19 @@ class LoggerSettings:
         self.username = username
 
 
+class CategoryConsoleFilter(logging.Filter):
+    """Allow category records to bypass the console's global level."""
+
+    def __init__(self, global_level):
+        super().__init__()
+        self.global_level = global_level
+
+    def filter(self, record):
+        return record.levelno >= self.global_level or getattr(
+            record, "category_log", False
+        )
+
+
 class FileFormatter(logging.Formatter):
     def __init__(self, *, fmt, settings: LoggerSettings, datefmt=None):
         self.settings = settings
@@ -132,8 +159,7 @@ class FileFormatter(logging.Formatter):
                 self.timezone = pytz.timezone(settings.time_zone)
                 logging.info(f"File logger time zone set to: {self.timezone}")
             except pytz.UnknownTimeZoneError:
-                logging.error(
-                    f"File logger: invalid time zone: {settings.time_zone}")
+                logging.error(f"File logger: invalid time zone: {settings.time_zone}")
         logging.Formatter.__init__(self, fmt=fmt, datefmt=datefmt)
 
     def formatTime(self, record, datefmt=None):
@@ -151,11 +177,11 @@ class GlobalFormatter(logging.Formatter):
         if settings.time_zone:
             try:
                 self.timezone = pytz.timezone(settings.time_zone)
-                logging.info(
-                    f"Console logger time zone set to: {self.timezone}")
+                logging.info(f"Console logger time zone set to: {self.timezone}")
             except pytz.UnknownTimeZoneError:
                 logging.error(
-                    f"Console logger: invalid time zone: {settings.time_zone}")
+                    f"Console logger: invalid time zone: {settings.time_zone}"
+                )
         logging.Formatter.__init__(self, fmt=fmt, datefmt=datefmt)
 
     def formatTime(self, record, datefmt=None):
@@ -167,8 +193,7 @@ class GlobalFormatter(logging.Formatter):
 
     def format(self, record):
         record.emoji_is_present = (
-            record.emoji_is_present if hasattr(
-                record, "emoji_is_present") else False
+            record.emoji_is_present if hasattr(record, "emoji_is_present") else False
         )
         if (
             hasattr(record, "emoji")
@@ -199,26 +224,22 @@ class GlobalFormatter(logging.Formatter):
             self.gotify(record)
 
             if self.settings.colored is True:
-                record.msg = (
-                    f"{self.settings.color_palette.get(record.event)}{record.msg}"
-                )
+                record.msg = f"{self.settings.color_palette.get(record.event)}{record.msg}{Fore.RESET}"
 
         return super().format(record)
 
     def telegram(self, record):
-        skip_telegram = False if hasattr(
-            record, "skip_telegram") is False else True
+        skip_telegram = False if hasattr(record, "skip_telegram") is False else True
 
         if (
             self.settings.telegram is not None
             and skip_telegram is False
             and self.settings.telegram.chat_id != 123456789
         ):
-            self.settings.telegram.send(record.msg, record.event)
+            self._send(self.settings.telegram, record)
 
     def discord(self, record):
-        skip_discord = False if hasattr(
-            record, "skip_discord") is False else True
+        skip_discord = False if hasattr(record, "skip_discord") is False else True
 
         if (
             self.settings.discord is not None
@@ -226,23 +247,20 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.discord.webhook_api
             != "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J"
         ):
-            self.settings.discord.send(record.msg, record.event)
+            self._send(self.settings.discord, record)
 
     def webhook(self, record):
-        skip_webhook = False if hasattr(
-            record, "skip_webhook") is False else True
+        skip_webhook = False if hasattr(record, "skip_webhook") is False else True
 
         if (
             self.settings.webhook is not None
             and skip_webhook is False
-            and self.settings.webhook.endpoint
-            != "https://example.com/webhook"
+            and self.settings.webhook.endpoint != "https://example.com/webhook"
         ):
-            self.settings.webhook.send(record.msg, record.event)
+            self._send(self.settings.webhook, record)
 
     def matrix(self, record):
-        skip_matrix = False if hasattr(
-            record, "skip_matrix") is False else True
+        skip_matrix = False if hasattr(record, "skip_matrix") is False else True
 
         if (
             self.settings.matrix is not None
@@ -250,11 +268,10 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.matrix.room_id != "..."
             and self.settings.matrix.access_token
         ):
-            self.settings.matrix.send(record.msg, record.event)
+            self._send(self.settings.matrix, record)
 
     def pushover(self, record):
-        skip_pushover = False if hasattr(
-            record, "skip_pushover") is False else True
+        skip_pushover = False if hasattr(record, "skip_pushover") is False else True
 
         if (
             self.settings.pushover is not None
@@ -262,11 +279,10 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.pushover.userkey != "YOUR-ACCOUNT-TOKEN"
             and self.settings.pushover.token != "YOUR-APPLICATION-TOKEN"
         ):
-            self.settings.pushover.send(record.msg, record.event)
+            self._send(self.settings.pushover, record)
 
     def gotify(self, record):
-        skip_gotify = False if hasattr(
-            record, "skip_gotify") is False else True
+        skip_gotify = False if hasattr(record, "skip_gotify") is False else True
 
         if (
             self.settings.gotify is not None
@@ -274,7 +290,21 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.gotify.endpoint
             != "https://example.com/message?token=TOKEN"
         ):
-            self.settings.gotify.send(record.msg, record.event)
+            self._send(self.settings.gotify, record)
+
+    @staticmethod
+    def _send(notifier, record):
+        """Send a record, optionally bypassing a notifier's event allowlist."""
+        event = str(record.event)
+        force_alert = getattr(record, "force_alert", False)
+        added = force_alert and event not in notifier.events
+        if added:
+            notifier.events.append(event)
+        try:
+            notifier.send(record.msg, record.event)
+        finally:
+            if added:
+                notifier.events.remove(event)
 
 
 def configure_loggers(username, settings):
@@ -295,8 +325,16 @@ def configure_loggers(username, settings):
 
     settings.username = console_username
 
+    log_date_format = (
+        settings.date_format.replace("yyyy", "%Y")
+        .replace("yy", "%y")
+        .replace("mm", "%m")
+        .replace("dd", "%d")
+    )
+
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(settings.console_level)
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.addFilter(CategoryConsoleFilter(settings.console_level))
     console_handler.setFormatter(
         GlobalFormatter(
             fmt=(
@@ -304,9 +342,7 @@ def configure_loggers(username, settings):
                 if settings.less is False
                 else "%(asctime)s - %(message)s"
             ),
-            datefmt=(
-                "%d/%m/%y %H:%M:%S" if settings.less is False else "%d/%m %H:%M:%S"
-            ),
+            datefmt=f"{log_date_format} %H:%M:%S",
             settings=settings,
         )
     )
@@ -329,7 +365,11 @@ def configure_loggers(username, settings):
             )
         else:
             # Getting time zone from the console_handler's formatter since they are the same
-            tz = "" if console_handler.formatter.timezone is False else console_handler.formatter.timezone
+            tz = (
+                ""
+                if console_handler.formatter.timezone is False
+                else console_handler.formatter.timezone
+            )
             logs_file = os.path.join(
                 logs_path,
                 f"{username}.{datetime.now(tz).strftime('%Y%m%d-%H%M%S')}.log",
@@ -339,8 +379,8 @@ def configure_loggers(username, settings):
         file_handler.setFormatter(
             FileFormatter(
                 fmt="%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s]: %(message)s",
-                datefmt="%d/%m/%y %H:%M:%S",
-                settings=settings
+                datefmt=f"{log_date_format} %H:%M:%S",
+                settings=settings,
             )
         )
         file_handler.setLevel(settings.file_level)

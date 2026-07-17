@@ -5,13 +5,22 @@ on:
     - cron: "0 */24 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: github-traffic-badges
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-      
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: gh login
         run: echo "${{ secrets.SECRET_TOKEN }}" | gh auth login --with-token
 
@@ -25,25 +34,18 @@ jobs:
       - name: create gist and download previous count
         id: set_id
         run: |
-          if gh secret list | grep -q "GIST_ID"
+          if [ -n "${{ secrets.GIST_ID }}" ]
           then
               echo "GIST_ID found"
-              echo ::set-output name=GIST::${{ secrets.GIST_ID }}
+              echo "GIST=${{ secrets.GIST_ID }}" >> "$GITHUB_OUTPUT"
               curl https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clone.json > clone_before.json
               if cat clone_before.json | grep '404: Not Found'; then
-                echo "GIST_ID not valid anymore. Creating another gist..."
-                gist_id=$(gh gist create clone.json | awk -F / '{print $NF}')
-                echo $gist_id | gh secret set GIST_ID
-                echo ::set-output name=GIST::$gist_id
-                cp clone.json clone_before.json
-                git rm --ignore-unmatch  CLONE.md
+                echo "GIST_ID is no longer valid. Update the GIST_ID repository secret."
+                exit 1
               fi
           else
-              echo "GIST_ID not found. Creating a gist..."
-              gist_id=$(gh gist create clone.json | awk -F / '{print $NF}')
-              echo $gist_id | gh secret set GIST_ID
-              echo ::set-output name=GIST::$gist_id
-              cp clone.json clone_before.json
+              echo "GIST_ID is not configured. Create a gist and add its ID as the GIST_ID repository secret."
+              exit 1
           fi
 
       - name: update clone.json
@@ -77,7 +79,7 @@ jobs:
             ```html' >> CLONE.md
             echo "<a href='$repo'><img alt='GitHub Clones' src='$shields$url&logo=github'></a>" >> CLONE.md
             echo '```' >> CLONE.md
-            
+
             git add CLONE.md
             git config --global user.name "GitHub Action"
             git config --global user.email "action@github.com"
@@ -85,6 +87,6 @@ jobs:
           fi
 
       - name: Push
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"

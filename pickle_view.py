@@ -1,13 +1,21 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-# Simple script to view contents of a cookie file stored in a pickle format
+"""Safely display a JSON cookie file created by the miner."""
 
-import pickle
+import json
 import sys
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     argv = sys.argv
     if len(argv) <= 1:
-        print("Specify a pickle file as a parameter, e.g. cookies/user.pkl")
+        print("Specify a cookie file, e.g. cookies/user.pkl")
     else:
-        print(pickle.load(open(argv[1], 'rb')))
+        try:
+            with open(argv[1], encoding="utf-8") as cookie_file:
+                cookies = json.load(cookie_file)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit(
+                "Unable to read this as a JSON cookie file. Start the miner once "
+                f"to safely migrate a legacy cookie file: {error}"
+            ) from error
+        print(json.dumps(cookies, indent=2))
