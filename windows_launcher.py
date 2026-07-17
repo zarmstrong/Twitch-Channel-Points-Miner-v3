@@ -32,6 +32,11 @@ def prepare_config(application_dir):
 
     config_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(bundled_file("config.example.py"), config_path)
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        # Windows and some shared filesystems do not support POSIX permissions.
+        pass
     return config_dir, True
 
 

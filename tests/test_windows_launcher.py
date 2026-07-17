@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 import windows_launcher
@@ -13,6 +15,8 @@ def test_prepare_config_copies_template_once(tmp_path, monkeypatch):
     config_path = config_dir / "config.py"
     assert created is True
     assert config_path.read_text(encoding="utf-8") == "MINER_CONFIG = {}\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
     config_path.write_text("user configuration\n", encoding="utf-8")
     _, created_again = windows_launcher.prepare_config(tmp_path / "application")
