@@ -14,7 +14,46 @@ def bare_twitch(gql):
     twitch.twitchdrops_app_upcoming_starts = {}
     twitch.log_drop_checks = False
     twitch.category_log_level = logging.DEBUG
+    twitch.category_campaign_eligibility = {}
     return twitch
+
+
+def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+    calls = []
+
+    def helix_get(self, endpoint, params):
+        calls.append(params["user_login"])
+        return {
+            "data": [
+                {
+                    "user_login": login,
+                    "game_id": "game-1",
+                    "viewer_count": 100 - index,
+                    "tags": ["DropsEnabled"],
+                }
+                for index, login in enumerate(params["user_login"][:50])
+            ]
+        }
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", helix_get)
+    campaigns = [
+        {
+            "channels": [f"streamer-{index}" for index in range(250)],
+        }
+    ]
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        campaigns,
+        "game-1",
+        "Special Events",
+        target_per_campaign=30,
+        max_total=30,
+    )
+
+    assert len(usernames) == 30
+    assert len(calls) == 1
+    assert len(calls[0]) == 100
 
 
 def test_available_badges_returns_full_earned_badge_titles():

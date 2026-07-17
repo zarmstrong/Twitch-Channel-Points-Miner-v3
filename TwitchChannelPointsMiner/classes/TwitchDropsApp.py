@@ -1,5 +1,6 @@
-"""Parse and fetch Twitch Drops campaign data from twitchdrops.app."""
+"""Parse legacy pages and fetch normalized Twitch Drops data from a gist."""
 
+import copy
 import hashlib
 import html
 import re
@@ -10,6 +11,10 @@ import requests
 
 BASE_URL = "https://twitchdrops.app/game/"
 HOME_URL = "https://twitchdrops.app/"
+DROPS_GIST_URL = (
+    "https://gist.githubusercontent.com/zarmstrong/"
+    "72433778ae596815f4c6ff5e1d278cd2/raw/twitch-drops.json"
+)
 TWITCH_LOGIN_PATTERN = re.compile(
     r'href=["\']https?://(?:www\.)?twitch\.tv/([^?"\'/#]+)[^"\']*["\']',
     re.IGNORECASE,
@@ -258,28 +263,49 @@ def parse_front_page(source):
     return games
 
 
-class TwitchDropsAppScraper(object):
-    __slots__ = ["session", "timeout"]
+class TwitchDropsGistScraper(object):
+    __slots__ = ["session", "timeout", "_payload"]
 
     def __init__(self, session=None, timeout=20):
         self.session = session or requests.Session()
         self.timeout = timeout
+        self._payload = None
+
+    def _fetch(self):
+        if self._payload is not None:
+            return self._payload
+        response = self.session.get(
+            DROPS_GIST_URL,
+            timeout=self.timeout,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "TwitchDropsMiner/1.0",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Twitch Drops gist did not contain a JSON object")
+        if not isinstance(payload.get("indexed_games"), list) or not isinstance(
+            payload.get("games"), list
+        ):
+            raise ValueError("Twitch Drops gist is missing indexed_games or games")
+        self._payload = payload
+        return payload
 
     def scrape(self, category):
         url = game_url(category)
-        response = self.session.get(
-            url,
-            timeout=self.timeout,
-            headers={"Accept": "text/html", "User-Agent": "TwitchDropsAppScraper/1.0"},
-        )
-        response.raise_for_status()
-        return parse_game_page(response.text, url)
+        slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+        for report in self._fetch()["games"]:
+            source = str(report.get("source") or "")
+            report_slug = urlparse(source).path.rstrip("/").rsplit("/", 1)[-1]
+            if report_slug == slug:
+                return copy.deepcopy(report)
+        raise ValueError(f"Twitch Drops gist does not contain game '{slug}'")
 
     def scrape_front_page(self):
-        response = self.session.get(
-            HOME_URL,
-            timeout=self.timeout,
-            headers={"Accept": "text/html", "User-Agent": "TwitchDropsAppScraper/1.0"},
-        )
-        response.raise_for_status()
-        return parse_front_page(response.text)
+        return copy.deepcopy(self._fetch()["indexed_games"])
+
+
+# Preserve the public import used by developer tools and downstream integrations.
+TwitchDropsAppScraper = TwitchDropsGistScraper

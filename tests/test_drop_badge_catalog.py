@@ -15,7 +15,7 @@ class FakeResponse:
 
     def json(self):
         return {
-            "data": [
+            "sets": [
                 {
                     "set_id": "example-badge",
                     "versions": [{"id": "1", "title": "Example Badge"}],
@@ -139,7 +139,6 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
         tmp_path,
         scraper=scraper,
         session=session,
-        request_delay=0,
     )
 
     first = catalog.sync()
@@ -148,6 +147,7 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
     third = catalog.sync()
 
     assert first["scraped_games"] == 1
+    assert first["confirmed_badge_rewards"] == 1
     assert len(first["new_campaigns"]) == 1
     assert first["new_campaigns"][0]["campaign"]["drops"][0][
         "badge_classification"
@@ -169,7 +169,6 @@ def test_eligible_badge_campaigns_only_returns_active_unearned_watch_badges(
         tmp_path,
         scraper=FakeScraper(),
         session=FakeSession(),
-        request_delay=0,
     )
     now = datetime.now(timezone.utc)
     badge_drop = {
