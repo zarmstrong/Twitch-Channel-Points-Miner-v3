@@ -36,7 +36,6 @@ setuptools.setup(
         "irc==20.4.0",
         "pandas==2.2.3",
         "pytz==2024.1",
-        "validators==0.22.0",
     ],
     long_description=read("README.md"),
     long_description_content_type="text/markdown",

@@ -284,8 +284,12 @@ class Streamer(object):
 
         with ANALYTICS_FILE_MUTEX, self.mutex:
             # Create and write to the temporary file
-            with open(temp_fname, "w") as temp_file:
-                json_data = json.load(open(fname, "r")) if os.path.isfile(fname) else {}
+            with open(temp_fname, "w", encoding="utf-8") as temp_file:
+                if os.path.isfile(fname):
+                    with open(fname, "r", encoding="utf-8") as analytics_file:
+                        json_data = json.load(analytics_file)
+                else:
+                    json_data = {}
                 if key not in json_data:
                     json_data[key] = []
                 json_data[key].append(data)

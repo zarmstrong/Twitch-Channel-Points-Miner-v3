@@ -34,7 +34,7 @@ class Matrix(object):
 
         if not self.access_token:
             logging.getLogger(__name__).info(
-                "Invalid Matrix password provided. Notifications will not be sent."
+                "Matrix authentication failed. Notifications will not be sent."
             )
 
     def send(self, message: str, event: Events) -> None:
