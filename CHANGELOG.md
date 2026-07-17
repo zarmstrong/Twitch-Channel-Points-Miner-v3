@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.2.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.1.1...3.2.0) (2026-07-17)
+
+
+### Features
+
+* load Twitch Drops from shared gists ([#10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/10)) ([5d06130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5d0613025858a88b544635fcbfbe2b59b9334587))
+
+
+### Documentation
+
+* improve platform setup and test workflow ([#11](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/11)) ([e57bff9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e57bff9f0e5acfd05f5fcce3ffd8109a3a69f468))
+
 ## [3.1.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.1.0...3.1.1) (2026-07-17)
 
 
