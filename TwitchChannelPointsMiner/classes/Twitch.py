@@ -1608,6 +1608,13 @@ class Twitch(object):
         eligibility = self.category_campaign_eligibility.get(
             (game_slug, streamer.username)
         )
+        if (
+            eligibility is None
+            and getattr(streamer, "from_badge_campaign", False) is True
+        ):
+            eligibility = self.category_campaign_eligibility.get(
+                ("special-events", streamer.username)
+            )
         if eligibility is not None:
             eligible_campaigns, _ = eligibility
             return eligible_campaigns > 0
@@ -1958,13 +1965,16 @@ class Twitch(object):
 
         live_streams = {}
         checked = 0
+        allow_cross_category = self.__slugify(game_name) == "special-events"
         for login_chunk in create_chunks(ranked_logins, 100):
             response = self.__helix_get(
                 "streams", {"user_login": login_chunk, "first": 100}
             )
             checked += len(login_chunk)
             for stream in response.get("data", []) or []:
-                if str(stream.get("game_id") or "") != str(game_id):
+                if not allow_cross_category and str(stream.get("game_id") or "") != str(
+                    game_id
+                ):
                     continue
                 if drops_enabled is True:
                     normalized_tags = [

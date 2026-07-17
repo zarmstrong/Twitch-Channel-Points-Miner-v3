@@ -56,6 +56,104 @@ def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
     assert len(calls[0]) == 100
 
 
+def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__helix_get",
+        lambda self, endpoint, params: {
+            "data": [
+                {
+                    "user_login": "ewc-channel",
+                    "game_id": "another-esports-game",
+                    "viewer_count": 100,
+                    "tags": ["DropsEnabled"],
+                }
+            ]
+        },
+    )
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["ewc-channel"]}],
+        "special-events-id",
+        "Special Events",
+        target_per_campaign=30,
+        max_total=30,
+    )
+
+    assert usernames == ["ewc-channel"]
+
+
+def test_normal_restricted_lookup_still_requires_matching_game(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__helix_get",
+        lambda self, endpoint, params: {
+            "data": [
+                {
+                    "user_login": "wrong-game-channel",
+                    "game_id": "different-game",
+                    "viewer_count": 100,
+                    "tags": ["DropsEnabled"],
+                }
+            ]
+        },
+    )
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["wrong-game-channel"]}],
+        "expected-game",
+        "Expected Game",
+        target_per_campaign=30,
+        max_total=30,
+    )
+
+    assert usernames == []
+
+
+def test_badge_streamer_uses_special_events_eligibility_across_categories():
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("special-events", "ewc-channel"): (1, 2)
+    }
+    streamer = SimpleNamespace(
+        username="ewc-channel",
+        from_category=True,
+        from_badge_campaign=True,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
+def test_normal_category_streamer_does_not_cross_special_events_categories():
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("special-events", "category-channel"): (1, 2)
+    }
+    streamer = SimpleNamespace(
+        username="category-channel",
+        from_category=True,
+        from_badge_campaign=False,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
 def test_available_badges_returns_full_earned_badge_titles():
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
