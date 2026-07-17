@@ -297,6 +297,8 @@ class TwitchDropsGistScraper(object):
         url = game_url(category)
         slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
         for report in self._fetch()["games"]:
+            if not isinstance(report, dict):
+                continue
             source = str(report.get("source") or "")
             report_slug = urlparse(source).path.rstrip("/").rsplit("/", 1)[-1]
             if report_slug == slug:

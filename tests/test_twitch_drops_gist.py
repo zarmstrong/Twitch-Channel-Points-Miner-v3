@@ -64,3 +64,17 @@ def test_gist_scraper_rejects_missing_game():
 
     with pytest.raises(ValueError, match="does not contain game 'missing'"):
         scraper.scrape("missing")
+
+
+def test_gist_scraper_skips_non_object_game_entries():
+    scraper = TwitchDropsGistScraper(
+        session=FakeSession(
+            {
+                "indexed_games": [],
+                "games": [None, "invalid", {"source": "game/example"}],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="does not contain game 'missing'"):
+        scraper.scrape("missing")

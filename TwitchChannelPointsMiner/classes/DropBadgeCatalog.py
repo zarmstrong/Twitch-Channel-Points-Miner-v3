@@ -210,7 +210,10 @@ class DropBadgeCatalog:
             timeout=(5, 30),
         )
         response.raise_for_status()
-        badge_sets = response.json().get("sets")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Twitch badge gist did not contain a JSON object")
+        badge_sets = payload.get("sets")
         if not isinstance(badge_sets, list):
             raise ValueError("Twitch badge gist did not contain sets")
         self.state["badge_catalog"] = {

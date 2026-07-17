@@ -2,6 +2,8 @@ import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
     DropBadgeCatalog,
     badge_match_reason,
@@ -10,11 +12,14 @@ from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
 
 
 class FakeResponse:
+    def __init__(self, payload=None):
+        self.payload = payload
+
     def raise_for_status(self):
         return None
 
     def json(self):
-        return {
+        return self.payload if self.payload is not None else {
             "sets": [
                 {
                     "set_id": "example-badge",
@@ -25,12 +30,13 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, payload=None):
         self.calls = 0
+        self.payload = payload
 
     def get(self, *args, **kwargs):
         self.calls += 1
-        return FakeResponse()
+        return FakeResponse(self.payload)
 
 
 class FakeScraper:
@@ -99,6 +105,18 @@ def test_flatten_badges_preserves_set_and_version_attributes():
             "description": "Example description",
         }
     ]
+
+
+def test_fetch_badges_rejects_non_object_json(tmp_path):
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession([]),
+    )
+
+    with pytest.raises(ValueError, match="did not contain a JSON object"):
+        catalog._fetch_badges()
 
 
 def test_badge_matching_accepts_safe_title_variants():
