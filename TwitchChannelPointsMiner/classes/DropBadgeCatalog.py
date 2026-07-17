@@ -3,19 +3,20 @@ import json
 import logging
 import os
 import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
-from TwitchChannelPointsMiner.constants import CLIENT_ID
 
 logger = logging.getLogger(__name__)
 
-CATALOG_VERSION = 1
-GLOBAL_BADGES_URL = "https://api.twitch.tv/helix/chat/badges/global"
+CATALOG_VERSION = 2
+BADGES_GIST_URL = (
+    "https://gist.githubusercontent.com/zarmstrong/"
+    "d4fc5f87e2a5258a28421f7fdb8037d6/raw/twitch-badges.json"
+)
 
 
 def _now():
@@ -138,7 +139,6 @@ class DropBadgeCatalog:
         "scraper",
         "session",
         "badge_refresh_hours",
-        "request_delay",
         "state",
     ]
 
@@ -147,7 +147,6 @@ class DropBadgeCatalog:
         login,
         config_path,
         badge_refresh_hours=24,
-        request_delay=0.25,
         scraper=None,
         session=None,
     ):
@@ -156,7 +155,6 @@ class DropBadgeCatalog:
         self.scraper = scraper or TwitchDropsAppScraper(timeout=30)
         self.session = session or requests.Session()
         self.badge_refresh_hours = badge_refresh_hours
-        self.request_delay = request_delay
         self.state = self._load()
 
     def _empty_state(self):
@@ -203,21 +201,24 @@ class DropBadgeCatalog:
         return age < self.badge_refresh_hours * 3600
 
     def _fetch_badges(self):
-        token = self.login.get_auth_token()
-        if not token:
-            raise ValueError("Twitch authentication token is unavailable")
         response = self.session.get(
-            GLOBAL_BADGES_URL,
-            headers={"Authorization": f"Bearer {token}", "Client-Id": CLIENT_ID},
+            BADGES_GIST_URL,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "TwitchDropsMiner/1.0",
+            },
             timeout=(5, 30),
         )
         response.raise_for_status()
-        badge_sets = response.json().get("data")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Twitch badge gist did not contain a JSON object")
+        badge_sets = payload.get("sets")
         if not isinstance(badge_sets, list):
-            raise ValueError("Twitch global badge response did not contain data")
+            raise ValueError("Twitch badge gist did not contain sets")
         self.state["badge_catalog"] = {
             "fetched_at": _iso_now(),
-            "source": GLOBAL_BADGES_URL,
+            "source": BADGES_GIST_URL,
             "sets": badge_sets,
         }
         self._save()
@@ -261,6 +262,25 @@ class DropBadgeCatalog:
             for drop in campaign.get("drops", []) or []:
                 drop["badge_classification"] = classify_reward(drop, game_name, badges)
 
+    def _confirmed_badge_reward_count(self):
+        count = 0
+        for record in self.state["campaigns"].values():
+            if not isinstance(record, dict):
+                continue
+            campaign = record.get("campaign")
+            if not isinstance(campaign, dict):
+                continue
+            for drop in campaign.get("drops", []) or []:
+                if not isinstance(drop, dict):
+                    continue
+                classification = drop.get("badge_classification")
+                if (
+                    isinstance(classification, dict)
+                    and classification.get("status") == "BADGE"
+                ):
+                    count += 1
+        return count
+
     def sync(self, force=False):
         badge_refreshed = False
         badge_sets = self.state["badge_catalog"].get("sets") or []
@@ -302,20 +322,11 @@ class DropBadgeCatalog:
         logger.info(
             "Drop badge catalog check: "
             f"{len(indexed_games)} indexed games, "
-            f"{len(changed_games)} new or changed game pages",
+            f"{len(changed_games)} new or changed gist games",
             extra={"emoji": ":mag:", "category_log": True},
         )
 
-        for index, (game, slug, signature) in enumerate(changed_games, start=1):
-            if index == 1 or index % 10 == 0 or index == len(changed_games):
-                logger.info(
-                    "Drop badge catalog progress: "
-                    f"{index}/{len(changed_games)} game pages",
-                    extra={"emoji": ":hourglass_flowing_sand:", "category_log": True},
-                )
-
-            if scraped_games and self.request_delay:
-                time.sleep(self.request_delay)
+        for game, slug, signature in changed_games:
             report = enrich_game_report(self.scraper.scrape(game["url"]), badges)
             scraped_games += 1
             seen_at = _iso_now()
@@ -344,10 +355,10 @@ class DropBadgeCatalog:
                 self.state["campaigns"][campaign_id] = record
                 if existing is None:
                     new_campaigns.append(record)
-            self._save()
 
         self.state["last_checked_at"] = _iso_now()
         self._save()
+        confirmed_badge_rewards = self._confirmed_badge_reward_count()
         return {
             "indexed_games": len(indexed_games),
             "scraped_games": scraped_games,
@@ -355,6 +366,7 @@ class DropBadgeCatalog:
             "new_campaigns": new_campaigns,
             "badge_sets": len(badge_sets),
             "badge_versions": len(badges),
+            "confirmed_badge_rewards": confirmed_badge_rewards,
             "path": str(self.path),
         }
 

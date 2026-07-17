@@ -323,7 +323,7 @@ settings.
 | `category_chat` | `None` | Chat policy for category-discovered streamers. `None` inherits the default streamer setting. |
 | `category_log_level` | `logging.INFO` | Severity used for category discovery and refresh messages. |
 | `category_refresh_interval_hours` | `6` | Hours between campaign/channel refreshes. Positive values have a 30-minute minimum; `0` disables refresh. |
-| `drop_badge_catalog` | `True` | On startup, classify twitchdrops.app rewards against Twitch's authoritative global badge catalog and persist the result in the config directory. |
+| `drop_badge_catalog` | `True` | On startup, classify rewards from the shared Drops gist against the shared Twitch badge catalog and persist the result in the config directory. |
 | `drop_badge_refresh_interval_hours` | `1` | Hours between checks for new campaigns. Positive values have a one-hour minimum; `0` keeps the startup check but disables periodic checks. |
 | `auto_mine_badge_drops` | `False` | Automatically add live channels for active, unearned watch-time badge campaigns. |
 | `badge_drop_streamer_limit` | `1` | Live candidates added for each eligible all-channel badge campaign. Accepts `1` or `2`; restricted campaigns use their listed channels. |
@@ -407,8 +407,8 @@ reward.
 expire soonest, helping time-sensitive Drops get selected first.
 
 If Twitch's campaign sources do not list any campaign for a configured game, the
-miner uses that game's `twitchdrops.app/game/<category>` page as a third-priority
-fallback. Restricted campaign channel lists are checked in full for live users
+miner uses the shared `twitch-drops.json` gist as a third-priority fallback.
+Restricted campaign channel lists are checked in full for live users
 while the campaign is active. Shared logins eligible for multiple active
 campaigns are checked first. The miner selects up to 20 live channels per
 restricted campaign and checks remaining channel lists in standby batches only
@@ -431,10 +431,10 @@ options require a restart. See [Configuration reload limitations](#configuration
 
 The Drop badge catalog runs independently of category discovery. Its startup
 check begins in a background thread after normal miner setup completes, and it
-checks hourly thereafter by default. INFO logs show the number of changed game
-pages and progress every ten pages during a large baseline. The front-page game
-signature is compared with the saved state, so only new or changed campaign
-pages are downloaded and processed. Full Twitch badge records, game snapshots,
+checks hourly thereafter by default. It reads normalized campaign and badge data
+from the `twitch-drops.json` and `twitch-badges.json` gists. The game signature
+is compared with the saved state, so only new or changed campaign data is
+processed. Full Twitch badge records, game snapshots,
 classifications, and historical campaign records are stored in
 `drop_badge_catalog.json` beside `config.py`. Rewards confirmed by Twitch are
 marked `BADGE`; unmatched rewards remain `UNKNOWN` rather than being assumed not

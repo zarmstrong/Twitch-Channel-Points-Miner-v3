@@ -14,7 +14,144 @@ def bare_twitch(gql):
     twitch.twitchdrops_app_upcoming_starts = {}
     twitch.log_drop_checks = False
     twitch.category_log_level = logging.DEBUG
+    twitch.category_campaign_eligibility = {}
     return twitch
+
+
+def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+    calls = []
+
+    def helix_get(self, endpoint, params):
+        calls.append(params["user_login"])
+        return {
+            "data": [
+                {
+                    "user_login": login,
+                    "game_id": "game-1",
+                    "viewer_count": 100 - index,
+                    "tags": ["DropsEnabled"],
+                }
+                for index, login in enumerate(params["user_login"][:50])
+            ]
+        }
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", helix_get)
+    campaigns = [
+        {
+            "channels": [f"streamer-{index}" for index in range(250)],
+        }
+    ]
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        campaigns,
+        "game-1",
+        "Special Events",
+        target_per_campaign=30,
+        max_total=30,
+    )
+
+    assert len(usernames) == 30
+    assert len(calls) == 1
+    assert len(calls[0]) == 100
+
+
+def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__helix_get",
+        lambda self, endpoint, params: {
+            "data": [
+                {
+                    "user_login": "ewc-channel",
+                    "game_id": "another-esports-game",
+                    "viewer_count": 100,
+                    "tags": ["DropsEnabled"],
+                }
+            ]
+        },
+    )
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["ewc-channel"]}],
+        "special-events-id",
+        "Special Events",
+        target_per_campaign=30,
+        max_total=30,
+    )
+
+    assert usernames == ["ewc-channel"]
+
+
+def test_normal_restricted_lookup_still_requires_matching_game(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__helix_get",
+        lambda self, endpoint, params: {
+            "data": [
+                {
+                    "user_login": "wrong-game-channel",
+                    "game_id": "different-game",
+                    "viewer_count": 100,
+                    "tags": ["DropsEnabled"],
+                }
+            ]
+        },
+    )
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["wrong-game-channel"]}],
+        "expected-game",
+        "Expected Game",
+        target_per_campaign=30,
+        max_total=30,
+    )
+
+    assert usernames == []
+
+
+def test_badge_streamer_uses_special_events_eligibility_across_categories():
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("special-events", "ewc-channel"): (1, 2)
+    }
+    streamer = SimpleNamespace(
+        username="ewc-channel",
+        from_category=True,
+        from_badge_campaign=True,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
+def test_normal_category_streamer_does_not_cross_special_events_categories():
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("special-events", "category-channel"): (1, 2)
+    }
+    streamer = SimpleNamespace(
+        username="category-channel",
+        from_category=True,
+        from_badge_campaign=False,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is False
 
 
 def test_available_badges_returns_full_earned_badge_titles():

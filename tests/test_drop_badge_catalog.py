@@ -2,6 +2,8 @@ import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
     DropBadgeCatalog,
     badge_match_reason,
@@ -10,12 +12,15 @@ from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
 
 
 class FakeResponse:
+    def __init__(self, payload=None):
+        self.payload = payload
+
     def raise_for_status(self):
         return None
 
     def json(self):
-        return {
-            "data": [
+        return self.payload if self.payload is not None else {
+            "sets": [
                 {
                     "set_id": "example-badge",
                     "versions": [{"id": "1", "title": "Example Badge"}],
@@ -25,12 +30,13 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, payload=None):
         self.calls = 0
+        self.payload = payload
 
     def get(self, *args, **kwargs):
         self.calls += 1
-        return FakeResponse()
+        return FakeResponse(self.payload)
 
 
 class FakeScraper:
@@ -101,6 +107,18 @@ def test_flatten_badges_preserves_set_and_version_attributes():
     ]
 
 
+def test_fetch_badges_rejects_non_object_json(tmp_path):
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession([]),
+    )
+
+    with pytest.raises(ValueError, match="did not contain a JSON object"):
+        catalog._fetch_badges()
+
+
 def test_badge_matching_accepts_safe_title_variants():
     assert (
         badge_match_reason("Blue LED", "Example Game", "Blue LED")
@@ -139,21 +157,29 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
         tmp_path,
         scraper=scraper,
         session=session,
-        request_delay=0,
     )
 
     first = catalog.sync()
+    catalog.state["campaigns"].update(
+        {
+            "invalid-record": None,
+            "invalid-campaign": {"campaign": None},
+            "invalid-drop": {"campaign": {"drops": [None, "invalid"]}},
+        }
+    )
     second = catalog.sync()
     scraper.games[0]["drop_count"] = 2
     third = catalog.sync()
 
     assert first["scraped_games"] == 1
+    assert first["confirmed_badge_rewards"] == 1
     assert len(first["new_campaigns"]) == 1
     assert first["new_campaigns"][0]["campaign"]["drops"][0][
         "badge_classification"
     ]["status"] == "BADGE"
     assert second["scraped_games"] == 0
     assert second["new_campaigns"] == []
+    assert second["confirmed_badge_rewards"] == 1
     assert third["scraped_games"] == 1
     assert len(third["new_campaigns"]) == 1
     assert scraper.scrape_calls == 2
@@ -169,7 +195,6 @@ def test_eligible_badge_campaigns_only_returns_active_unearned_watch_badges(
         tmp_path,
         scraper=FakeScraper(),
         session=FakeSession(),
-        request_delay=0,
     )
     now = datetime.now(timezone.utc)
     badge_drop = {

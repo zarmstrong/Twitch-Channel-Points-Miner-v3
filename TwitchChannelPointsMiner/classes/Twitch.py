@@ -63,7 +63,6 @@ from TwitchChannelPointsMiner.utils import (
 
 logger = logging.getLogger(__name__)
 JsonType = Dict[str, Any]
-TWITCHDROPS_APP_CHECK_DELAY_SECONDS = (0.5, 2.0)
 
 
 class Twitch(object):
@@ -1193,9 +1192,9 @@ class Twitch(object):
         )
         try:
             indexed_games = scraper.scrape_front_page()
-        except requests.RequestException as error:
+        except (ValueError, requests.RequestException) as error:
             self.__log_drop_check(
-                f"twitchdrops.app front-page check failed: {error}",
+                f"Twitch Drops gist check failed: {error}",
                 level=logging.DEBUG,
             )
             return deadlines
@@ -1204,7 +1203,7 @@ class Twitch(object):
             1 for game in indexed_games if game.get("upcoming") is True
         )
         logger.debug(
-            "Scraped twitchdrops.app front page: "
+            "Loaded Twitch Drops gist: "
             f"{len(indexed_games) - upcoming_game_count} active games, "
             f"{upcoming_game_count} upcoming games",
             extra={"emoji": ":globe_with_meridians:", "category_log": True},
@@ -1234,12 +1233,10 @@ class Twitch(object):
                 f"{indexed_game.get('ends_at') or 'unknown end'})"
             )
         logger.debug(
-            "twitchdrops.app front-page matches for configured games: "
+            "Twitch Drops gist matches for configured games: "
             + (", ".join(configured_matches) if configured_matches else "none"),
             extra={"emoji": ":mag:", "category_log": True},
         )
-        checked_game_pages = False
-
         for category in categories:
             category_name, _ = self.__split_category_streamer_selector(category)
             normalized = self.__normalize_category(category_name)
@@ -1260,20 +1257,16 @@ class Twitch(object):
             ):
                 self.twitchdrops_app_upcoming_starts[requested_slug] = indexed_start
                 logger.info(
-                    f"Upcoming twitchdrops.app campaign for '{category_name}' starts at "
+                    f"Upcoming Twitch Drops gist campaign for '{category_name}' starts at "
                     f"{indexed_start.isoformat()} UTC",
                     extra={"emoji": ":alarm_clock:", "category_log": True},
                 )
-
-            if checked_game_pages:
-                time.sleep(random.uniform(*TWITCHDROPS_APP_CHECK_DELAY_SECONDS))
-            checked_game_pages = True
 
             try:
                 report = scraper.scrape(indexed_game["url"])
             except (ValueError, requests.RequestException) as error:
                 self.__log_drop_check(
-                    f"twitchdrops.app fallback failed for '{category_name}': {error}",
+                    f"Twitch Drops gist fallback failed for '{category_name}': {error}",
                     level=logging.DEBUG,
                 )
                 continue
@@ -1346,7 +1339,7 @@ class Twitch(object):
                     deadlines[requested_slug] = ends_at
 
             self.__log_drop_check_json(
-                f"twitchdrops.app campaign evaluation for '{category_name}'",
+                f"Twitch Drops gist campaign evaluation for '{category_name}'",
                 campaign_evaluations,
                 level=self.category_log_level,
                 category_log=True,
@@ -1355,11 +1348,11 @@ class Twitch(object):
             if completed_campaigns:
                 self.__log_category(
                     f"Skipped {len(completed_campaigns)} fully collected "
-                    f"twitchdrops.app campaigns for '{category_name}'",
+                    f"Twitch Drops gist campaigns for '{category_name}'",
                     extra={"emoji": ":white_check_mark:"},
                 )
                 self.__log_drop_check_json(
-                    f"twitchdrops.app completed campaigns for '{category_name}'",
+                    f"Twitch Drops gist completed campaigns for '{category_name}'",
                     completed_campaigns,
                     level=self.category_log_level,
                     category_log=True,
@@ -1375,7 +1368,7 @@ class Twitch(object):
                     }
                 )
                 self.__log_category(
-                    "Using twitchdrops.app fallback for "
+                    "Using Twitch Drops gist fallback for "
                     f"'{report.get('game') or category_name}': "
                     f"{len(campaigns)} campaigns, {channel_count} restricted channels",
                     extra={"emoji": ":globe_with_meridians:"},
@@ -1615,12 +1608,19 @@ class Twitch(object):
         eligibility = self.category_campaign_eligibility.get(
             (game_slug, streamer.username)
         )
+        if (
+            eligibility is None
+            and getattr(streamer, "from_badge_campaign", False) is True
+        ):
+            eligibility = self.category_campaign_eligibility.get(
+                ("special-events", streamer.username)
+            )
         if eligibility is not None:
             eligible_campaigns, _ = eligibility
             return eligible_campaigns > 0
 
         # Category discovery has already removed fully collected campaigns.
-        # Use its remaining twitchdrops.app campaign data when Twitch's private
+        # Use its remaining gist campaign data when Twitch's private
         # campaign query fails to populate Stream.campaigns.
         for campaign in self.twitchdrops_app_campaigns.get(game_slug, []):
             channels = {
@@ -1723,6 +1723,7 @@ class Twitch(object):
         limit: int = 30,
         sort_by: Any = "VIEWERS_DESC",
         respect_campaign_restrictions: bool = True,
+        restricted_campaigns=None,
     ) -> List[str]:
         if not category:
             return []
@@ -1769,8 +1770,12 @@ class Twitch(object):
         if not game_id:
             return []
 
-        fallback_campaigns = self.twitchdrops_app_campaigns.get(
-            self.__slugify(normalized_category.replace("-", " ")), []
+        fallback_campaigns = (
+            restricted_campaigns
+            if restricted_campaigns is not None
+            else self.twitchdrops_app_campaigns.get(
+                self.__slugify(normalized_category.replace("-", " ")), []
+            )
         )
         if (
             respect_campaign_restrictions is True
@@ -1783,6 +1788,10 @@ class Twitch(object):
                     game_id,
                     game_name,
                     drops_enabled=drops_enabled,
+                    target_per_campaign=(
+                        limit if restricted_campaigns is not None else 20
+                    ),
+                    max_total=(limit if restricted_campaigns is not None else None),
                 )
 
         if forced_streamer_username is not None:
@@ -1928,7 +1937,13 @@ class Twitch(object):
         return usernames
 
     def __get_live_restricted_campaign_streamers(
-        self, campaigns, game_id, game_name, drops_enabled=True, target_per_campaign=20
+        self,
+        campaigns,
+        game_id,
+        game_name,
+        drops_enabled=True,
+        target_per_campaign=20,
+        max_total=None,
     ):
         campaign_login_lists = [
             list(dict.fromkeys(login.lower() for login in campaign.get("channels", [])))
@@ -1950,13 +1965,16 @@ class Twitch(object):
 
         live_streams = {}
         checked = 0
+        allow_cross_category = self.__slugify(game_name) == "special-events"
         for login_chunk in create_chunks(ranked_logins, 100):
             response = self.__helix_get(
                 "streams", {"user_login": login_chunk, "first": 100}
             )
             checked += len(login_chunk)
             for stream in response.get("data", []) or []:
-                if str(stream.get("game_id") or "") != str(game_id):
+                if not allow_cross_category and str(stream.get("game_id") or "") != str(
+                    game_id
+                ):
                     continue
                 if drops_enabled is True:
                     normalized_tags = [
@@ -1972,7 +1990,7 @@ class Twitch(object):
             if all(
                 len(logins.intersection(live_streams)) >= target_per_campaign
                 for logins in campaign_logins
-            ):
+            ) or (max_total is not None and len(live_streams) >= max_total):
                 break
 
         sorted_live_streams = sorted(
@@ -2003,6 +2021,8 @@ class Twitch(object):
                 if campaign_selected >= target_per_campaign:
                     break
         usernames.sort(key=lambda login: -eligible_campaign_counts.get(login, 0))
+        if max_total is not None:
+            usernames = usernames[:max_total]
         game_slug = self.__slugify(game_name)
         self.__replace_category_campaign_eligibility(
             game_slug,
@@ -2012,7 +2032,7 @@ class Twitch(object):
             },
         )
         self.__log_category(
-            f"Checked {checked}/{len(ranked_logins)} twitchdrops.app channels for "
+            f"Checked {checked}/{len(ranked_logins)} Twitch Drops gist channels for "
             f"'{game_name}'; selected {len(usernames)} live across "
             f"{len(campaigns)} campaigns",
             extra={"emoji": ":satellite_antenna:"},
@@ -2728,7 +2748,7 @@ class Twitch(object):
     def __get_campaigns_from_channel_id(self, channel_id: str) -> List[dict]:
         # Twitch removed the channel-specific viewerDropCampaigns field. Campaign
         # discovery now comes from the dashboard, raw query, Helix, and
-        # twitchdrops.app paths used by log_open_drop_campaigns().
+        # Gist fallback paths used by log_open_drop_campaigns().
         return []
 
     def __get_reward_campaigns_raw_query(self):

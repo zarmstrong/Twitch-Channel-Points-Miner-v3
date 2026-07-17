@@ -25,7 +25,7 @@ class FakeCatalog:
                 "game_slug": "restricted-game",
                 "campaign": {
                     "all_channels": False,
-                    "channels": ["AllowedChannel"],
+                    "channels": [" AllowedChannel ", "", None, 123],
                     "drops": [],
                 },
                 "eligible_drops": [{"name": "Restricted Badge"}],
@@ -46,7 +46,7 @@ class FakeTwitch:
 
     def get_live_streamers_for_category(self, selector, **kwargs):
         self.selectors.append((selector, kwargs))
-        if "allowedchannel" in selector:
+        if kwargs.get("restricted_campaigns"):
             return ["allowedchannel"]
         return ["allchannel", "blacklisted"]
 
@@ -106,12 +106,18 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
             },
         ),
         (
-            "restricted-game|allowedchannel",
+            "restricted-game",
             {
                 "drops_enabled": True,
-                "limit": 1,
+                "limit": 30,
                 "sort_by": "VIEWERS_DESC",
-                "respect_campaign_restrictions": False,
+                "restricted_campaigns": [
+                    {
+                        "all_channels": False,
+                        "channels": ["allowedchannel"],
+                        "drops": [],
+                    }
+                ],
             },
         ),
     ]

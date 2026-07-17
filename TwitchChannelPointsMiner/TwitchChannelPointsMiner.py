@@ -794,7 +794,7 @@ class TwitchChannelPointsMiner:
             logger.info(
                 "Drop badge catalog loaded: "
                 f"{result['stored_campaigns']} campaigns, "
-                f"{new_badges} confirmed badges in the startup baseline",
+                f"{result['confirmed_badge_rewards']} confirmed badge rewards",
                 extra={"emoji": ":card_index_dividers:", "category_log": True},
             )
         elif new_campaigns:
@@ -830,40 +830,59 @@ class TwitchChannelPointsMiner:
             )
             return
 
-        selectors = []
+        unrestricted_games = []
+        restricted_campaigns_by_game = {}
         for record in campaigns:
             game_slug = str(record.get("game_slug") or "").strip()
             campaign = record.get("campaign") or {}
             if not game_slug:
                 continue
             channels = [
-                str(channel).lower().strip()
+                channel.lower().strip()
                 for channel in campaign.get("channels", []) or []
-                if str(channel).strip()
+                if isinstance(channel, str) and channel.strip()
             ]
             if campaign.get("all_channels") is True:
-                selectors.append((game_slug, False))
-            else:
-                selectors.extend(
-                    (f"{game_slug}|{channel}", True) for channel in channels
+                unrestricted_games.append(game_slug)
+            elif channels:
+                restricted_campaigns_by_game.setdefault(game_slug, []).append(
+                    {**campaign, "channels": channels}
                 )
 
         discovered_usernames = []
-        for selector, restricted in dict.fromkeys(selectors):
+        for game_slug in dict.fromkeys(unrestricted_games):
             try:
                 discovered_usernames.extend(
                     self.twitch.get_live_streamers_for_category(
-                        selector,
+                        game_slug,
                         drops_enabled=True,
-                        limit=(1 if restricted else self.badge_drop_streamer_limit),
+                        limit=self.badge_drop_streamer_limit,
                         sort_by=self.badge_drop_category_sort,
                         respect_campaign_restrictions=False,
                     )
                 )
             except Exception as error:
                 logger.warning(
-                    f"Unable to find a live channel for badge Drop campaign selector "
-                    f"'{selector}': {error}",
+                    f"Unable to find a live channel for badge Drop campaign "
+                    f"'{game_slug}': {error}",
+                    extra={"emoji": ":warning:", "category_log": True},
+                )
+
+        for game_slug, restricted_campaigns in restricted_campaigns_by_game.items():
+            try:
+                discovered_usernames.extend(
+                    self.twitch.get_live_streamers_for_category(
+                        game_slug,
+                        drops_enabled=True,
+                        limit=30,
+                        sort_by=self.badge_drop_category_sort,
+                        restricted_campaigns=restricted_campaigns,
+                    )
+                )
+            except Exception as error:
+                logger.warning(
+                    f"Unable to find restricted live channels for badge Drop "
+                    f"campaign '{game_slug}': {error}",
                     extra={"emoji": ":warning:", "category_log": True},
                 )
 
