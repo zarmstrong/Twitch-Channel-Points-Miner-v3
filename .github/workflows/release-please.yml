@@ -112,16 +112,19 @@ jobs:
         run: build_windows.bat
 
       - name: Package executable zip
+        id: package
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
         run: |
-          $zipName = "TwitchChannelPointsMiner-$env:RELEASE_TAG.zip"
+          $version = $env:RELEASE_TAG -replace '^Twitch-Channel-Points-Miner-v2-', ''
+          $zipName = "TwitchChannelPointsMiner-$version.zip"
           Compress-Archive -Path "dist/TwitchChannelPointsMiner.exe" -DestinationPath "dist/$zipName" -Force
+          "zip_path=dist/$zipName" >> $env:GITHUB_OUTPUT
 
       - name: Upload executable to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release_please.outputs.tag_name }}
-          files: dist/TwitchChannelPointsMiner-${{ needs.release_please.outputs.tag_name }}.zip
+          files: ${{ steps.package.outputs.zip_path }}
           fail_on_unmatched_files: true
