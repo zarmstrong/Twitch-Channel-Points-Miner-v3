@@ -29,7 +29,7 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 ## Validation
 
 - Install dependencies with `pip install -r requirements.txt`.
-- There is no formal automated test suite in the repo; prefer focused smoke checks and format validation for the files you touch.
+- Run the automated test suite with `python -m pytest`; prefer focused tests for the files or behavior you change.
 - The project follows Black formatting; keep edits compatible with the existing style and line lengths.
 
 ## Implementation notes

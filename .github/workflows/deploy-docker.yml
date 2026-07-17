@@ -39,10 +39,10 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
           tags: |
-            type=semver,pattern={{version}},value=${{ inputs.ref }}
+            type=semver,pattern={{version}},value=${{ inputs.ref }},match=v2-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$
             type=raw,value=latest
 
-      - name: Build and push AMD64, ARM64, ARMv7
+      - name: Build and push AMD64 and ARM64
         id: docker_build
         uses: docker/build-push-action@v7
         with:
@@ -50,7 +50,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -62,5 +62,5 @@ jobs:
       #     password: ${{ secrets.DOCKER_TOKEN }}
       #     repository: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
 
-      - name: Image digest AMD64, ARM64, ARMv7
+      - name: Image digest AMD64 and ARM64
         run: echo ${{ steps.docker_build.outputs.digest }}

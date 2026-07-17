@@ -557,7 +557,7 @@ The runner checks `config/config.py` every five seconds. Set
 ### Docker
 
 #### Docker Hub
-Official Docker images are on https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2 for `linux/amd64`, `linux/arm64` and `linux/arm/v7`.
+Official Docker images are on https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2 for `linux/amd64` and `linux/arm64`.
 
 Maintainers building or publishing images from source should follow the
 [Docker image build guide](BUILD.md#docker-images).
