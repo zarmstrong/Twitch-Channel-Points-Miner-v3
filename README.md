@@ -85,8 +85,11 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
     - [What converts automatically](#what-converts-automatically)
 8. 🍪 [Legacy cookie migration (optional)](#legacy-cookie-migration-optional)
 9. 🪟 [Windows](#windows)
-    - [Download a release executable](#download-a-release-executable)
-    - [First launch and upgrades](#first-launch-and-upgrades)
+    - [Install the Windows executable](#install-the-windows-executable)
+    - [Set up your account](#set-up-your-account)
+    - [Start the miner](#start-the-miner)
+    - [Update the miner](#update-the-miner)
+    - [Windows troubleshooting](#windows-troubleshooting)
 10. 📱 [Termux](#termux)
 11. ⚠️ [Disclaimer](#disclaimer)
 
@@ -1164,40 +1167,97 @@ previously valid saved token, the miner clears the cached login and restarts so
 that reauthentication can occur; follow the instructions printed in the logs.
 
 ## Windows
-Windows users who encounter terminal rendering problems can disable emoji with
-`LoggerSettings(emoji=False)` inside `MINER_CONFIG["logger_settings"]`.
+The Windows executable does not require Python, Git, or Command Prompt. Keep its
+folder private because it will contain your Twitch login and saved session.
 
-### Download a release executable
+### Install the Windows executable
 
-Releases that include code changes provide a versioned
-`TwitchChannelPointsMiner-<version>.zip` on the project's
-[Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases).
-Extract the archive into a writable directory and run
-`TwitchChannelPointsMiner.exe`. Keep the executable in that directory so its
-configuration and runtime data remain together.
+1. Open the project's
+   [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases)
+   and select the newest release.
+2. Under **Assets**, download the file named
+   `TwitchChannelPointsMiner-<version>.zip`. Do not download **Source code**.
+3. Open your **Downloads** folder, right-click the downloaded ZIP file, and
+   select **Extract All...**.
+4. Choose a permanent location that you can easily find, such as
+   `Documents\TwitchChannelPointsMiner`, and select **Extract**. Do not run the
+   program from inside the ZIP file.
+5. Open the extracted folder and double-click `TwitchChannelPointsMiner.exe`.
+   The first run creates the configuration file and then closes. This is normal.
 
-To build the executable from source, follow the
+Only download the executable from the project's official Releases page. If
+Microsoft Defender SmartScreen appears, check that the publisher warning names
+`TwitchChannelPointsMiner.exe` and that you used the link above. Then select
+**More info** followed by **Run anyway**. If the file came from anywhere else,
+delete it instead.
+
+### Set up your account
+
+1. In the extracted folder, open the new `config` folder.
+2. Right-click `config.py`, select **Open with**, and choose **Notepad**. Keep the
+   `.py` filename; do not rename it to `.txt`.
+3. Find `your-twitch-username` and replace it with your Twitch login name.
+4. On the next line, either replace `write-your-secure-psw` with your Twitch
+   password or delete that entire password line to enter it in the miner window
+   only when authentication is needed.
+5. Find the `STREAMERS = [` section near the middle of the file. Replace the
+   example streamer names with the channels you want to watch. Use login names
+   from their Twitch URLs, without `https://twitch.tv/` or the `@` symbol.
+6. Review the other settings and comments in the file. In particular, remove or
+   disable example notification services that you do not use. The
+   [configuration guide](#configuration-file) explains every section and links
+   to the complete examples.
+7. In Notepad, select **File > Save**, then close Notepad.
+
+The generated file is the full configuration template. You can return to it
+later to enable followed channels, Drops categories, predictions,
+notifications, and other settings without starting over.
+
+### Start the miner
+
+Double-click `TwitchChannelPointsMiner.exe` again. Leave the black console window
+open while the miner is running and follow any Twitch sign-in instructions it
+shows. To stop the miner, click the console window and press `Ctrl+C`, or close
+the window.
+
+The miner saves its settings, login session, and logs in folders beside the
+executable. Do not move the executable by itself after setup; move the entire
+`TwitchChannelPointsMiner` folder if you want it in a different location.
+
+### Update the miner
+
+1. Stop the running miner.
+2. Download and extract the newest release as described above.
+3. Copy the new `TwitchChannelPointsMiner.exe` into your existing miner folder.
+4. When Windows asks, choose **Replace the file in the destination**.
+5. Start the miner normally. Your existing configuration and login data remain
+   in place.
+
+### Windows troubleshooting
+
+- **The window closes the first time:** This is expected. Open
+  `config\config.py`, finish [Set up your account](#set-up-your-account), and run
+  the executable again.
+- **Windows says it cannot find the configuration:** Right-click the downloaded
+  ZIP and use **Extract All...** before running the executable.
+- **Notepad saved `config.py.txt`:** In File Explorer, enable **View > Show >
+  File name extensions**, then rename the file to `config.py`.
+- **Emoji or symbols look broken:** In `config.py`, use
+  `LoggerSettings(emoji=False)` in `MINER_CONFIG["logger_settings"]`. See
+  [LoggerSettings](#loggersettings) for the complete example.
+- **The miner closes or reports an error after setup:** Open the `logs` folder
+  beside the executable and check the newest log file. Remove account names,
+  cookies, tokens, and passwords before sharing a log in a bug report.
+
+Developers who want to create the executable from source can use the
 [Windows build guide](BUILD.md#windows-executable).
 
-### First launch and upgrades
-
-On first launch, the executable creates `config\config.py` beside itself and
-exits. Edit that external file as described in [How to use](#how-to-use), then
-launch the executable again.
-
-The executable keeps editable configuration, credentials, cookies, logs, and
-analytics data outside the binary. Keep that directory private, especially the
-`config` and `cookies` folders. To upgrade, stop the miner and replace only the
-executable with the newer version. Rebuilding or replacing it does not overwrite
-the existing configuration or account data.
-
-Other useful info can be found here:
-- https://github.com/gottagofaster236/Twitch-Channel-Points-Miner/issues/31
-- https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/55
-
-You can also follow this [video tutorial](https://www.youtube.com/watch?v=0VkM7NOZkuA).
-
 ## Termux
+> [!WARNING]
+> These instructions are outdated and have not been tested with the v3 miner.
+> They may not work and could cause unexpected problems. Use them at your own
+> risk.
+
 **1. Upgrade packages**
 ```
 pkg upgrade
