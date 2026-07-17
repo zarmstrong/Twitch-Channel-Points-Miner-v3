@@ -41,6 +41,33 @@ def test_drop_parses_benefit_and_updates_progress():
     assert drop.is_claimable is True
 
 
+@pytest.mark.parametrize(
+    "benefit_edges",
+    [None, [], [{}], [{"benefit": None}], [{"benefit": {}}]],
+)
+def test_drop_accepts_missing_or_incomplete_benefits(benefit_edges):
+    data = drop_data()
+    data["benefitEdges"] = benefit_edges
+
+    drop = Drop(data)
+
+    expected_edges = [] if benefit_edges is None else benefit_edges
+    assert drop.benefit_edges == expected_edges
+    assert drop.benefit == ""
+    assert drop.item_art_url is None
+
+
+def test_drop_accepts_missing_benefit_edges():
+    data = drop_data()
+    del data["benefitEdges"]
+
+    drop = Drop(data)
+
+    assert drop.benefit_edges == []
+    assert drop.benefit == ""
+    assert drop.item_art_url is None
+
+
 def test_drop_becomes_unclaimable_after_claim():
     drop = Drop(drop_data())
     drop.update(

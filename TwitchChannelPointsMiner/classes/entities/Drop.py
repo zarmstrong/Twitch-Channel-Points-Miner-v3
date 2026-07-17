@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
@@ -37,10 +38,14 @@ class Drop(object):
         self.id = dict["id"]
         self.name = dict["name"]
         self.benefit_edges = dict.get("benefitEdges", []) or []
-        self.benefit = ", ".join(
-            list(set([bf["benefit"]["name"] for bf in dict["benefitEdges"]]))
-        )
-        self.item_art_url = self.__extract_item_art_url(dict.get("benefitEdges", []))
+        benefit_names = []
+        for edge in self.benefit_edges:
+            benefit = edge.get("benefit") if isinstance(edge, Mapping) else None
+            name = benefit.get("name") if isinstance(benefit, Mapping) else None
+            if name and name not in benefit_names:
+                benefit_names.append(name)
+        self.benefit = ", ".join(benefit_names)
+        self.item_art_url = self.__extract_item_art_url(self.benefit_edges)
         self.minutes_required = dict["requiredMinutesWatched"]
 
         self.has_preconditions_met = None  # [True, False], None we don't know
@@ -57,7 +62,9 @@ class Drop(object):
 
     def __extract_item_art_url(self, benefit_edges):
         for edge in benefit_edges:
-            benefit = edge.get("benefit", {}) if isinstance(edge, dict) else {}
+            benefit = edge.get("benefit") if isinstance(edge, Mapping) else None
+            if not isinstance(benefit, Mapping):
+                continue
             for key in [
                 "imageAssetURL",
                 "imageAssetUrl",
