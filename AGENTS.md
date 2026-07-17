@@ -19,12 +19,20 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 
 ## Releases and versioning
 
-- The current release baseline is `3.0.0`.
+- The current release baseline is `3.2.0`.
 - Releases are managed by Release Please through [release-please-config.json](release-please-config.json), [.release-please-manifest.json](.release-please-manifest.json), and [.github/workflows/release-please.yml](.github/workflows/release-please.yml).
 - [TwitchChannelPointsMiner/__init__.py](TwitchChannelPointsMiner/__init__.py) is the package version source consumed by `setup.py`; keep its `__version__` value synchronized with the Release Please manifest when manually changing the release baseline.
 - Preserve the `x-release-please-version` annotation on the `__version__` line so Release Please can update it.
 - Use Conventional Commit prefixes such as `feat:`, `fix:`, and `docs:` so Release Please can determine versions and generate changelog entries.
 - Preserve the repository's existing bare SemVer tags (for example, `3.0.0` rather than `v3.0.0`).
+
+### Release workflow
+
+- Let the open Release Please PR accumulate all ordinary PRs intended for the next release; merge the release PR only when that release is ready to publish.
+- Give each ordinary PR a Conventional Commit title and preserve that title when squash-merging so Release Please can produce a distinct changelog entry.
+- Prefer separate PRs or commits for independently notable features, fixes, performance changes, and documentation updates instead of hiding them in one broad squash commit.
+- Before merging the Release Please PR, review its generated changelog and release notes for user-facing completeness and expand the summary when a single entry contains several notable changes.
+- Do not enable auto-merge on the Release Please PR because merging it is the action that publishes the combined release.
 
 ## Validation
 
