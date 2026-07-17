@@ -5,6 +5,7 @@
     ".": {
       "release-type": "python",
       "package-name": "Twitch-Channel-Points-Miner-v2",
+      "include-component-in-tag": false,
       "include-v-in-tag": false,
       "extra-files": [
         {
