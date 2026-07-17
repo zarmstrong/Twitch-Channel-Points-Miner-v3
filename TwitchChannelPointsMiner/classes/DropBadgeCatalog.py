@@ -262,6 +262,25 @@ class DropBadgeCatalog:
             for drop in campaign.get("drops", []) or []:
                 drop["badge_classification"] = classify_reward(drop, game_name, badges)
 
+    def _confirmed_badge_reward_count(self):
+        count = 0
+        for record in self.state["campaigns"].values():
+            if not isinstance(record, dict):
+                continue
+            campaign = record.get("campaign")
+            if not isinstance(campaign, dict):
+                continue
+            for drop in campaign.get("drops", []) or []:
+                if not isinstance(drop, dict):
+                    continue
+                classification = drop.get("badge_classification")
+                if (
+                    isinstance(classification, dict)
+                    and classification.get("status") == "BADGE"
+                ):
+                    count += 1
+        return count
+
     def sync(self, force=False):
         badge_refreshed = False
         badge_sets = self.state["badge_catalog"].get("sets") or []
@@ -339,11 +358,7 @@ class DropBadgeCatalog:
 
         self.state["last_checked_at"] = _iso_now()
         self._save()
-        confirmed_badge_rewards = sum(
-            drop.get("badge_classification", {}).get("status") == "BADGE"
-            for record in self.state["campaigns"].values()
-            for drop in record.get("campaign", {}).get("drops", []) or []
-        )
+        confirmed_badge_rewards = self._confirmed_badge_reward_count()
         return {
             "indexed_games": len(indexed_games),
             "scraped_games": scraped_games,

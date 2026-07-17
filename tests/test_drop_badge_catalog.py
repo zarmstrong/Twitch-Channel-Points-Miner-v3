@@ -160,6 +160,13 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
     )
 
     first = catalog.sync()
+    catalog.state["campaigns"].update(
+        {
+            "invalid-record": None,
+            "invalid-campaign": {"campaign": None},
+            "invalid-drop": {"campaign": {"drops": [None, "invalid"]}},
+        }
+    )
     second = catalog.sync()
     scraper.games[0]["drop_count"] = 2
     third = catalog.sync()
@@ -172,6 +179,7 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
     ]["status"] == "BADGE"
     assert second["scraped_games"] == 0
     assert second["new_campaigns"] == []
+    assert second["confirmed_badge_rewards"] == 1
     assert third["scraped_games"] == 1
     assert len(third["new_campaigns"]) == 1
     assert scraper.scrape_calls == 2
