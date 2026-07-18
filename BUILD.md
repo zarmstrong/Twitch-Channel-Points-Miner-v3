@@ -47,7 +47,8 @@ Docker builds **images**. A container is created later when an image is run.
 
 - Docker Engine or Docker Desktop
 - A Docker Hub account
-- Access to the `zacharmstrong/twitch-channel-points-miner` Docker Hub repository
+- Access to the `zacharmstrong/twitch-channel-points-miner` and
+  `zacharmstrong/twitch-channel-points-miner-v2` Docker Hub repositories
 - A Docker Hub personal access token with read and write permission
 
 For a multi-platform build, Docker must also have the Buildx plugin. Docker
@@ -63,6 +64,7 @@ the version you are publishing:
 export DOCKERHUB_NAMESPACE="zacharmstrong"
 export DOCKERHUB_USERNAME="zacharmstrong"
 export IMAGE="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
+export LEGACY_IMAGE="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2"
 export VERSION="3.0.0"
 ```
 
@@ -87,21 +89,27 @@ same CPU architecture as the development machine:
 docker build --pull \
     --tag "${IMAGE}:${VERSION}" \
     --tag "${IMAGE}:latest" \
+    --tag "${LEGACY_IMAGE}:${VERSION}" \
+    --tag "${LEGACY_IMAGE}:latest" \
     .
 ```
 
-Confirm that both local tags exist:
+Confirm that all local tags exist:
 
 ```sh
 docker image inspect "${IMAGE}:${VERSION}"
 docker image inspect "${IMAGE}:latest"
+docker image inspect "${LEGACY_IMAGE}:${VERSION}"
+docker image inspect "${LEGACY_IMAGE}:latest"
 ```
 
-Push both tags:
+Push all tags:
 
 ```sh
 docker push "${IMAGE}:${VERSION}"
 docker push "${IMAGE}:latest"
+docker push "${LEGACY_IMAGE}:${VERSION}"
+docker push "${LEGACY_IMAGE}:latest"
 ```
 
 This method publishes only the development machine's architecture. Use the next
@@ -150,6 +158,8 @@ docker buildx build --pull \
     --platform linux/amd64,linux/arm64 \
     --tag "${IMAGE}:${VERSION}" \
     --tag "${IMAGE}:latest" \
+    --tag "${LEGACY_IMAGE}:${VERSION}" \
+    --tag "${LEGACY_IMAGE}:latest" \
     --push \
     .
 ```
@@ -184,6 +194,8 @@ Inspect the Docker Hub manifest and confirm that it lists AMD64 and ARM64:
 ```sh
 docker buildx imagetools inspect "${IMAGE}:${VERSION}"
 docker buildx imagetools inspect "${IMAGE}:latest"
+docker buildx imagetools inspect "${LEGACY_IMAGE}:${VERSION}"
+docker buildx imagetools inspect "${LEGACY_IMAGE}:latest"
 ```
 
 You can also pull the image normally to test the variant for the current
@@ -205,9 +217,8 @@ export VERSION="1.0.1"
 ```
 
 Only update `latest` when the new version should become the default Docker Hub
-release. To publish a version without changing `latest`, remove the
-`--tag "${IMAGE}:latest"` argument from the build command and do not push that
-tag.
+release. To publish a version without changing `latest`, remove both `latest`
+tag arguments from the build command and do not push those tags.
 
 ### Troubleshooting
 

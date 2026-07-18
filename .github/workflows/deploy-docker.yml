@@ -37,7 +37,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
+          images: |
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.ref }},match=v2-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$
             type=raw,value=latest
