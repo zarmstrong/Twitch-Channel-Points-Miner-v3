@@ -101,6 +101,11 @@ var lastStreamerCheckboxIndex = null;
 var pendingDeleteStreamers = [];
 var analyticsDeleteInProgress = false;
 
+function showAnalyticsLoadError(message, details) {
+    console.error(`[analytics] ${message}`, details || '');
+    $('#analytics-load-error').text(message).show();
+}
+
 function switchDashboardTab(tabName) {
     var isPoints = tabName !== 'drops';
     $('#points-panel').toggle(isPoints);
@@ -371,7 +376,6 @@ function getStreamerData(streamer) {
                 name: streamer.replace(".json", ""),
                 data: response["series"]
             }], true)
-            clearAnnotations();
             annotations = response["annotations"];
             updateAnnotations();
             streamerRefreshTimeout = setTimeout(function () {
@@ -394,6 +398,7 @@ function getAllStreamersData() {
 
 function getStreamers() {
     $.getJSON('streamers', function (response) {
+        console.debug('[analytics] Points response', response);
         streamersList = response;
         sortStreamers();
         var availableStreamers = new Set(streamersList.map(streamer => streamer.name));
@@ -416,6 +421,11 @@ function getStreamers() {
 
         // Ensure the selected streamer is still active and scrolled into view
         renderStreamers();
+    }).fail(function (xhr, status, error) {
+        showAnalyticsLoadError(
+            `Points failed to load (${xhr.status || status}): ${error || xhr.responseText || 'Unknown error'}`,
+            xhr.responseText
+        );
     });
 }
 
@@ -652,6 +662,7 @@ function clearAnnotations() {
 
 function getDropsByCategory() {
     $.getJSON('./drops_by_category', function (response) {
+        console.debug('[analytics] Drops response', response);
         renderDropsByCategory(response);
         if (dropsRefreshTimeout) {
             clearTimeout(dropsRefreshTimeout);
@@ -659,7 +670,11 @@ function getDropsByCategory() {
         dropsRefreshTimeout = setTimeout(function () {
             getDropsByCategory();
         }, refresh);
-    }).fail(function () {
+    }).fail(function (xhr, status, error) {
+        showAnalyticsLoadError(
+            `Drops failed to load (${xhr.status || status}): ${error || xhr.responseText || 'Unknown error'}`,
+            xhr.responseText
+        );
         renderDropsByCategory({ drops: [] });
         if (dropsRefreshTimeout) {
             clearTimeout(dropsRefreshTimeout);
@@ -1051,9 +1066,6 @@ function escapeHtml(text) {
 }
 
 // Toggle
-$('#annotations').click(() => {
-    updateAnnotations();
-});
 $('#dark-mode').click(() => {
     toggleDarkMode();
 });

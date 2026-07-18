@@ -170,25 +170,6 @@ The `--push` flag is required because a multi-platform result cannot be loaded
 as one image into the classic local Docker image store. Buildx publishes a
 manifest that points to the image for each supported architecture.
 
-#### ARMv7 limitation
-
-The project currently pins `pandas==2.2.3`. PyPI does not provide a compatible
-32-bit ARM wheel for this configuration, so pip attempts to compile pandas and
-its NumPy build dependency from source. Under QEMU this is extremely slow and
-can fail with errors such as:
-
-```text
-qemu-arm: QEMU internal SIGSEGV
-c++: internal compiler error: Segmentation fault signal terminated program cc1plus
-ERROR: Failed to build 'pandas' when installing build dependencies for pandas
-```
-
-For a reliable ARMv7 release, attach a native ARMv7 build node to the Buildx
-builder and build that platform there. Do not assume that an emulated ARMv7
-build is stuck merely because `Preparing metadata (pyproject.toml)` runs for a
-long time; pip may be compiling hundreds of NumPy source files without a wheel.
-The recommended local command above publishes AMD64 and ARM64 only.
-
 ### Verify the published images
 
 Inspect the Docker Hub manifest and confirm that it lists AMD64 and ARM64:

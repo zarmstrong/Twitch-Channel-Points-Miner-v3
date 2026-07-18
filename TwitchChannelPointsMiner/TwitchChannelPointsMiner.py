@@ -102,6 +102,31 @@ def _normalize_badge_drop_streamer_limit(limit):
     return 1
 
 
+def _drop_progress_report_entries(original, current):
+    entries = []
+    for tracking_key, payload in current.items():
+        previous = original.get(tracking_key, {})
+        current_minutes = payload.get("current_minutes_watched", 0) or 0
+        previous_minutes = previous.get("current_minutes_watched", 0) or 0
+        current_status = payload.get("status") or "in_progress"
+        previous_status = previous.get("status")
+        if current_minutes == previous_minutes and current_status == previous_status:
+            continue
+
+        entry = payload.copy()
+        entry["minutes_gained"] = max(current_minutes - previous_minutes, 0)
+        entries.append(entry)
+
+    return sorted(
+        entries,
+        key=lambda entry: (
+            str(entry.get("category") or ""),
+            str(entry.get("campaign") or ""),
+            str(entry.get("item_name") or ""),
+        ),
+    )
+
+
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
@@ -122,6 +147,7 @@ class TwitchChannelPointsMiner:
         "running",
         "start_datetime",
         "original_streamers",
+        "original_drop_progress",
         "logs_file",
         "queue_listener",
         "config_reload_lock",
@@ -249,6 +275,7 @@ class TwitchChannelPointsMiner:
         self.running = False
         self.start_datetime = None
         self.original_streamers = []
+        self.original_drop_progress = {}
         self.config_reload_lock = threading.Lock()
         self.drop_badge_catalog = None
         self.drop_badge_catalog_thread = None
@@ -450,6 +477,8 @@ class TwitchChannelPointsMiner:
 
             if self.claim_drops_startup is True:
                 self.twitch.claim_all_drops_from_inventory()
+
+            self.original_drop_progress = self.twitch.drop_report_snapshot()
 
             streamers_name: list = []
             streamers_dict: dict = {}
@@ -1292,4 +1321,30 @@ class TwitchChannelPointsMiner:
                 logger.info(
                     f"{streamer_gain}\n{streamer_history}",
                     extra={"emoji": ":moneybag:"},
+                )
+
+        drop_entries = _drop_progress_report_entries(
+            self.original_drop_progress,
+            self.twitch.drop_report_snapshot(),
+        )
+        if drop_entries:
+            print("")
+            reward_label = "reward" if len(drop_entries) == 1 else "rewards"
+            logger.info(
+                f"Drop progress gained this session "
+                f"({len(drop_entries)} {reward_label}):",
+                extra={"emoji": ":gift:"},
+            )
+            for entry in drop_entries:
+                category = entry.get("category") or "Unknown category"
+                campaign = entry.get("campaign") or "Unknown campaign"
+                item_name = entry.get("item_name") or "Unknown reward"
+                watched = entry.get("current_minutes_watched", 0) or 0
+                required = entry.get("minutes_required", 0) or 0
+                gained = entry.get("minutes_gained", 0) or 0
+                status = str(entry.get("status") or "in_progress").replace("_", " ")
+                logger.info(
+                    f"{category} - {campaign} - {item_name}: "
+                    f"{watched}/{required}m (+{gained}m), {status}",
+                    extra={"emoji": ":hourglass_flowing_sand:"},
                 )

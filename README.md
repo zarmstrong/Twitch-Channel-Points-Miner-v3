@@ -55,6 +55,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
         - [Configuration reload limitations](#configuration-reload-limitations)
     - [Docker](#docker)
         - [Docker Hub](#docker-hub)
+        - [Graceful Docker shutdowns](#graceful-docker-shutdowns)
         - [Portainer](#portainer)
     - [Replit](#replit)
     - [Limits](#limits)
@@ -566,7 +567,7 @@ The ARM64 image can run in compatible 64-bit Android Linux environments where
 the device reports `aarch64` or `arm64-v8a`. Android itself is not a supported
 Docker host, and users are responsible for providing a suitable container,
 chroot, or Linux compatibility layer. Older 32-bit ARMv7 devices are not
-supported; see the [ARMv7 build limitation](BUILD.md#armv7-limitation).
+supported.
 
 Maintainers building or publishing images from source should follow the
 [Docker image build guide](BUILD.md#docker-images).
@@ -590,6 +591,8 @@ version: "3.9"
 services:
   miner:
     image: zacharmstrong/twitch-channel-points-miner
+    restart: unless-stopped
+    stop_grace_period: 60s
     stdin_open: true
     tty: true
     environment:
@@ -607,6 +610,8 @@ services:
 **Example with docker run:**
 ```sh
 docker run \
+    --restart unless-stopped \
+    --stop-timeout 60 \
     -e TZ=America/Denver \
     -v $(pwd)/analytics:/usr/src/app/analytics \
     -v $(pwd)/cookies:/usr/src/app/cookies \
@@ -626,6 +631,33 @@ such as `/path/to/cookies:/usr/src/app/cookies`.
 
 On Windows, use absolute host paths. For example, mount
 `C:\Absolute\Path\config` at `/usr/src/app/config`.
+
+#### Graceful Docker shutdowns
+
+The miner handles Docker's normal `SIGTERM` stop signal and writes its
+graceful-shutdown report after stopping its worker threads. This applies to
+`docker stop`, `docker restart`, and normal Docker Compose stop, restart, down,
+and recreate operations.
+
+Docker's default stop grace period is commonly only 10 seconds. Shutdown can
+take longer while chat, WebSocket, campaign-sync, and badge-catalog workers
+finish. Configure at least 60 seconds so Docker does not send `SIGKILL` before
+the report is written:
+
+```yaml
+services:
+  miner:
+    stop_grace_period: 60s
+    restart: unless-stopped
+```
+
+For `docker run`, use the equivalent `--stop-timeout 60` and
+`--restart unless-stopped` options. The restart policy controls recovery after
+process or host restarts; it does not replace the stop grace period.
+
+An immediate `docker kill`, an out-of-memory kill, a host crash, or power loss
+cannot run shutdown code and therefore cannot produce an end report. Reports
+are stored in the mounted `logs` directory, so keep that directory persistent.
 
 For a non-default container path, set `TCPM_CONFIG_DIR` and mount the host
 directory at the same location. Users upgrading from the legacy runner should
@@ -1057,8 +1089,11 @@ messages while retaining the important event details.
 
 During a controlled shutdown—such as `Ctrl+C` or Docker's normal stop signal—the
 miner summarizes session duration, the log path, prediction results, and points
-gained or spent per streamer and event type. A hard kill, host crash, or power
-loss cannot produce this report.
+gained or spent per streamer and event type. It also reports Drop rewards whose
+progress changed during the session, including watched minutes, minutes gained,
+required minutes, and final status. Docker users should configure the
+[recommended stop grace period](#graceful-docker-shutdowns). A hard kill, host
+crash, or power loss cannot produce this report.
 
 ```text
 14/07/26 18:00:00 - 🛑 Ending session: 'session-id'
@@ -1066,6 +1101,8 @@ loss cannot produce this report.
 14/07/26 18:00:00 - ⌛ Duration 6:00:00
 14/07/26 18:00:00 - 🤖 streamer-name (15k points), Total points gained: 3k
 14/07/26 18:00:00 - 💰 CLAIM(4 times, 200 gained), WATCH(24 times, 240 gained)
+14/07/26 18:00:00 - 🎁 Drop progress gained this session (1 reward):
+14/07/26 18:00:00 - ⏳ Game - Campaign - Reward: 25/60m (+19m), in progress
 ```
 
 ## Migrating from run.py
@@ -1271,25 +1308,19 @@ pkg upgrade
 
 **2. Install packages to Termux**
 ```
-pkg install python git libcrypt ndk-sysroot clang zlib binutils tur-repo
+pkg install python git libcrypt ndk-sysroot clang zlib binutils
 LDFLAGS="-L${PREFIX}/lib/" CFLAGS="-I${PREFIX}/include/" pip install --upgrade wheel
 ```
-Note: `pkg install tur-repo` will basically enable the [user repository](https://github.com/termux-user-repository/tur) _(Very similar to Arch AUR)_ and `python-pandas` pre-compiled package comes exactly from this repository.
 
-**3. Install pandas**
-```
-pkg install python-pandas
-```
-
-**4. Clone this repository**
+**3. Clone this repository**
 
 `git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3`
 
-**5. Go to the miner's directory**
+**4. Go to the miner's directory**
 
 `cd Twitch-Channel-Points-Miner-v3`
 
-**6. Create and edit the configuration**
+**5. Create and edit the configuration**
 
 ```sh
 mkdir -p config
@@ -1297,21 +1328,17 @@ cp config.example.py config/config.py
 nano config/config.py
 ```
 
-**7. Install packages**
+**6. Install packages**
 ```
 pip install -r requirements.txt
 pip install Twitch-Channel-Points-Miner-v2
 ```
 
-**8. Run the miner!**
+**7. Run the miner!**
 
 `python -m TwitchChannelPointsMiner.runner --config-dir ./config`
 
 Read more at [#92](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/92) [#76](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/76)
-
-**Note**
-
-⚠️ Installation of `pandas` and its build dependencies can take a long time.
 
 ## Disclaimer
 This project comes with no guarantee or warranty. You are responsible for whatever happens from using this project. It is possible to get soft or hard banned by using this project if you are not careful. This is a personal project and is in no way affiliated with Twitch.

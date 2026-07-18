@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from threading import Thread
 
-import pandas as pd
 from flask import Flask, Response, cli, render_template, request
 from werkzeug.serving import WSGIRequestHandler
 
@@ -16,6 +15,18 @@ cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
 
 MAX_LOG_TAIL_BYTES = 1024 * 1024
+
+
+def bounded_log_start(file_size, last_received_index, tail_bytes=None):
+    """Return a safe absolute offset for an analytics log response.
+
+    Older cached dashboard clients may omit ``tailBytes`` and repeatedly ask for
+    the log from byte zero.  Never let one request read an unbounded log into
+    memory and monopolize the miner process.
+    """
+    position = last_received_index if last_received_index <= file_size else 0
+    response_limit = min(tail_bytes or MAX_LOG_TAIL_BYTES, MAX_LOG_TAIL_BYTES)
+    return max(position, file_size - response_limit)
 
 
 def get_assets_folder():
@@ -29,27 +40,15 @@ def get_assets_folder():
 def streamers_available():
     path = Settings.analytics_path
     excluded_files = {"drops_by_category.json"}
-    return [
+    available = [
         f
         for f in os.listdir(path)
         if os.path.isfile(os.path.join(path, f))
         and f.endswith(".json")
         and f not in excluded_files
     ]
-
-
-def aggregate(df, freq="30Min"):
-    df_base_events = df[(df.z == "Watch") | (df.z == "Claim")]
-    df_other_events = df[(df.z != "Watch") & (df.z != "Claim")]
-
-    be = df_base_events.groupby([pd.Grouper(freq=freq, key="datetime"), "z"]).max()
-    be = be.reset_index()
-
-    oe = df_other_events.groupby([pd.Grouper(freq=freq, key="datetime"), "z"]).max()
-    oe = oe.reset_index()
-
-    result = pd.concat([be, oe])
-    return result
+    logger.debug("Analytics points scan path='%s' files=%s", path, sorted(available))
+    return available
 
 
 def filter_datas(start_date, end_date, datas):
@@ -68,15 +67,14 @@ def filter_datas(start_date, end_date, datas):
     original_series = datas.get("series", [])
 
     if "series" in datas:
-        df = pd.DataFrame(datas["series"])
-        df["datetime"] = pd.to_datetime(df.x // 1000, unit="s")
-
-        df = df[(df.x >= start_date) & (df.x <= end_date)]
-
-        datas["series"] = (
-            df.drop(columns="datetime")
-            .sort_values(by=["x", "y"], ascending=True)
-            .to_dict("records")
+        datas["series"] = sorted(
+            (
+                entry
+                for entry in datas["series"]
+                if isinstance(entry, dict)
+                and start_date <= entry.get("x", -1) <= end_date
+            ),
+            key=lambda entry: (entry.get("x", 0), entry.get("y", 0)),
         )
     else:
         datas["series"] = []
@@ -90,22 +88,20 @@ def filter_datas(start_date, end_date, datas):
                 datas["annotations"] = []
             return datas
 
-        new_end_date = start_date
-        new_start_date = 0
-        df = pd.DataFrame(original_series)
-        df["datetime"] = pd.to_datetime(df.x // 1000, unit="s")
-
         # Attempt to get the last known balance from before the provided timeframe
-        df = df[(df.x >= new_start_date) & (df.x <= new_end_date)]
-        if df.empty:
+        earlier_entries = [
+            entry
+            for entry in original_series
+            if isinstance(entry, dict) and 0 <= entry.get("x", -1) <= start_date
+        ]
+        if earlier_entries == []:
             datas["series"] = []
             datas["annotations"] = []
             return datas
-        last_balance = (
-            df.drop(columns="datetime")
-            .sort_values(by=["x", "y"], ascending=True)
-            .to_dict("records")[-1]["y"]
-        )
+        last_balance = max(
+            earlier_entries,
+            key=lambda entry: (entry.get("x", 0), entry.get("y", 0)),
+        )["y"]
 
         datas["series"] = [
             {"x": start_date, "y": last_balance, "z": "No Stream"},
@@ -113,15 +109,14 @@ def filter_datas(start_date, end_date, datas):
         ]
 
     if datas.get("annotations"):
-        df = pd.DataFrame(datas["annotations"])
-        df["datetime"] = pd.to_datetime(df.x // 1000, unit="s")
-
-        df = df[(df.x >= start_date) & (df.x <= end_date)]
-
-        datas["annotations"] = (
-            df.drop(columns="datetime")
-            .sort_values(by="x", ascending=True)
-            .to_dict("records")
+        datas["annotations"] = sorted(
+            (
+                annotation
+                for annotation in datas["annotations"]
+                if isinstance(annotation, dict)
+                and start_date <= annotation.get("x", -1) <= end_date
+            ),
+            key=lambda annotation: annotation.get("x", 0),
         )
     else:
         datas["annotations"] = []
@@ -174,18 +169,28 @@ def read_json(streamer, return_response=True):
         return filtered_data
 
 
-def get_challenge_points(streamer):
-    datas = read_json(streamer, return_response=False)
-    if "series" in datas and datas["series"]:
-        return datas["series"][-1]["y"]
-    return 0  # Default value when 'series' key is not found or empty
+def get_streamer_summary(streamer):
+    """Read the latest points record without running the chart-data pipeline."""
+    filename = streamer if streamer.endswith(".json") else f"{streamer}.json"
+    file_path = os.path.join(Settings.analytics_path, filename)
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            series = json.load(file).get("series", []) or []
+    except (json.JSONDecodeError, OSError, AttributeError) as error:
+        logger.error("Unable to read analytics summary '%s': %s", file_path, error)
+        return {"points": 0, "last_activity": 0}
 
-
-def get_last_activity(streamer):
-    datas = read_json(streamer, return_response=False)
-    if "series" in datas and datas["series"]:
-        return datas["series"][-1]["x"]
-    return 0  # Default value when 'series' key is not found or empty
+    latest = max(
+        (entry for entry in series if isinstance(entry, dict)),
+        key=lambda entry: entry.get("x", 0),
+        default=None,
+    )
+    if latest is None:
+        return {"points": 0, "last_activity": 0}
+    return {
+        "points": latest.get("y", 0),
+        "last_activity": latest.get("x", 0),
+    }
 
 
 def json_all():
@@ -207,6 +212,7 @@ def json_all():
 def drops_by_category():
     drops_file = os.path.join(Settings.analytics_path, "drops_by_category.json")
     if os.path.isfile(drops_file) is False:
+        logger.warning("Analytics Drops file not found: '%s'", drops_file)
         return Response(
             json.dumps({"categories": {}, "drops": []}),
             status=200,
@@ -216,7 +222,8 @@ def drops_by_category():
     try:
         with open(drops_file, "r", encoding="utf-8") as file:
             data = json.load(file)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as error:
+        logger.error("Unable to read analytics Drops file '%s': %s", drops_file, error)
         return Response(
             json.dumps({"categories": {}, "drops": []}),
             status=200,
@@ -231,6 +238,13 @@ def drops_by_category():
             grouped[category] = []
         grouped[category].append(drop)
 
+    logger.debug(
+        "Analytics Drops response path='%s' drops=%d categories=%d",
+        drops_file,
+        len(drops),
+        len(grouped),
+    )
+
     return Response(
         json.dumps({"categories": grouped, "drops": drops}),
         status=200,
@@ -239,30 +253,33 @@ def drops_by_category():
 
 
 def index(refresh=5, days_ago=7, log_poll_interval=5):
+    assets_folder = get_assets_folder()
+    asset_version = max(
+        os.path.getmtime(os.path.join(assets_folder, filename))
+        for filename in ("script.js", "style.css", "dark-theme.css")
+    )
     return render_template(
         "charts.html",
         refresh=(refresh * 60 * 1000),
         daysAgo=days_ago,
         logPollInterval=(log_poll_interval * 1000),
         dateFormat=Settings.logger.date_format,
+        assetVersion=int(asset_version),
     )
 
 
 def streamers():
-    return Response(
-        json.dumps(
-            [
-                {
-                    "name": s,
-                    "points": get_challenge_points(s),
-                    "last_activity": get_last_activity(s),
-                }
-                for s in sorted(streamers_available())
-            ]
-        ),
-        status=200,
-        mimetype="application/json",
+    available = sorted(streamers_available())
+    response = []
+    for streamer in available:
+        summary = get_streamer_summary(streamer)
+        response.append({"name": streamer, **summary})
+    logger.debug(
+        "Analytics points response path='%s' streamers=%d",
+        Settings.analytics_path,
+        len(response),
     )
+    return Response(json.dumps(response), status=200, mimetype="application/json")
 
 
 def delete_streamer_analytics(streamer):
@@ -382,18 +399,17 @@ class AnalyticsServer(Thread):
             log_file_path = os.path.join(logs_path, f"{username}.log")
             try:
                 file_size = os.path.getsize(log_file_path)
-                position = (
+                requested_position = (
                     last_received_index if last_received_index <= file_size else 0
                 )
+                position = bounded_log_start(
+                    file_size, requested_position, tail_bytes=tail_bytes
+                )
                 with open(log_file_path, "rb") as log_file:
-                    if (
-                        position == 0
-                        and tail_bytes is not None
-                        and file_size > tail_bytes
-                    ):
-                        position = file_size - tail_bytes
+                    if position > requested_position:
                         log_file.seek(position)
-                        # Avoid displaying the partial first line in the tailed chunk.
+                        # Avoid displaying the partial first line when the response
+                        # was capped to a recent window.
                         log_file.readline()
                     else:
                         log_file.seek(position)
