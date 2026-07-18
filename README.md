@@ -655,8 +655,9 @@ docker run --name user2 -it \
 
 #### Portainer
 
-See the [Portainer deployment guide](docs/portainer.md) for persistent storage,
-container settings, first-time authentication, analytics, and updates.
+See the [Portainer deployment guide](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/wiki/Deploy-with-Portainer)
+for persistent storage, container settings, first-time authentication, analytics,
+and updates.
 
 ### Replit
 
