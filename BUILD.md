@@ -47,7 +47,7 @@ Docker builds **images**. A container is created later when an image is run.
 
 - Docker Engine or Docker Desktop
 - A Docker Hub account
-- A Docker Hub repository named `twitch-channel-points-miner-v2`
+- Access to the `zacharmstrong/twitch-channel-points-miner` Docker Hub repository
 - A Docker Hub personal access token with read and write permission
 
 For a multi-platform build, Docker must also have the Buildx plugin. Docker
@@ -60,9 +60,9 @@ Replace the example values with your Docker Hub username or organization and
 the version you are publishing:
 
 ```sh
-export DOCKERHUB_NAMESPACE="your-dockerhub-username"
-export DOCKERHUB_USERNAME="your-dockerhub-username"
-export IMAGE="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2"
+export DOCKERHUB_NAMESPACE="zacharmstrong"
+export DOCKERHUB_USERNAME="zacharmstrong"
+export IMAGE="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
 export VERSION="3.0.0"
 ```
 

@@ -1,24 +1,22 @@
-![Twitch Channel Points Miner - v2](https://raw.githubusercontent.com/rdavydov/Twitch-Channel-Points-Miner-v2/master/assets/banner.png)
+![Twitch Channel Points Miner](assets/banner.png)
 <p align="center">
-<a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/releases"><img alt="Latest Version" src="https://img.shields.io/github/v/release/rdavydov/Twitch-Channel-Points-Miner-v2?style=flat&color=white&logo=github&logoColor=white"></a>
-<a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/stargazers"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/rdavydov/Twitch-Channel-Points-Miner-v2?style=flat&color=limegreen&logo=github&logoColor=white"></a>
-<a href='https://github.com/MShawon/github-clone-count-badge'><img alt='GitHub Traffic' src='https://img.shields.io/badge/dynamic/json?style=flat&color=blue&label=views&query=count&url=https://gist.githubusercontent.com/rdavydov/ad9a3c6a8d9c322f9a6b62781ea94a93/raw/traffic.json&logo=github&logoColor=white'></a>
-<a href='https://github.com/MShawon/github-clone-count-badge'><img alt='GitHub Clones' src='https://img.shields.io/badge/dynamic/json?style=flat&color=purple&label=clones&query=count&url=https://gist.githubusercontent.com/rdavydov/fed04b31a250ad522d9ea6547ce87f95/raw/clone.json&logo=github&logoColor=white'></a>
-<a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/blob/master/LICENSE"><img alt="License" src="https://img.shields.io/github/license/rdavydov/Twitch-Channel-Points-Miner-v2?style=flat&color=black&logo=unlicense&logoColor=white"></a>
-<a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2"><img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/rdavydov/Twitch-Channel-Points-Miner-v2?style=flat&color=lightyellow&logo=github&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases"><img alt="Latest Version" src="https://img.shields.io/github/v/release/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=white&logo=github&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=limegreen&logo=github&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/LICENSE"><img alt="License" src="https://img.shields.io/github/license/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=black&logo=unlicense&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"><img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=lightyellow&logo=github&logoColor=white"></a>
 </p>
 
 <p align="center">
-<a href="https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2"><img alt="Docker Version" src="https://img.shields.io/docker/v/rdavidoff/twitch-channel-points-miner-v2?style=flat&color=white&logo=docker&logoColor=white&label=release"></a>
-<a href="https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2"><img alt="Docker Stars" src="https://img.shields.io/docker/stars/rdavidoff/twitch-channel-points-miner-v2?style=flat&color=limegreen&logo=docker&logoColor=white&label=stars"></a>
-<a href="https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/rdavidoff/twitch-channel-points-miner-v2?style=flat&color=blue&logo=docker&logoColor=white&label=pulls"></a>
-<a href="https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2"><img alt="Docker Images Size AMD64" src="https://img.shields.io/docker/image-size/rdavidoff/twitch-channel-points-miner-v2/latest?arch=amd64&label=AMD64 image size&style=flat&color=purple&logo=amd&logoColor=white"></a>
-<a href="https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2"><img alt="Docker Images Size ARM64" src="https://img.shields.io/docker/image-size/rdavidoff/twitch-channel-points-miner-v2/latest?arch=arm64&label=ARM64 image size&style=flat&color=black&logo=arm&logoColor=white"></a>
-<a href="https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2"><img alt="Docker Images Size ARMv7" src="https://img.shields.io/docker/image-size/rdavidoff/twitch-channel-points-miner-v2/latest?arch=arm&label=ARMv7 image size&style=flat&color=lightyellow&logo=arm&logoColor=white"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Version" src="https://img.shields.io/docker/v/zacharmstrong/twitch-channel-points-miner?style=flat&color=white&logo=docker&logoColor=white&label=release"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Stars" src="https://img.shields.io/docker/stars/zacharmstrong/twitch-channel-points-miner?style=flat&color=limegreen&logo=docker&logoColor=white&label=stars"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/zacharmstrong/twitch-channel-points-miner?style=flat&color=blue&logo=docker&logoColor=white&label=pulls"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size AMD64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=amd64&label=AMD64 image size&style=flat&color=purple&logo=amd&logoColor=white"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size ARM64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=arm64&label=ARM64 image size&style=flat&color=black&logo=arm&logoColor=white"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size ARMv7" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=arm&label=ARMv7 image size&style=flat&color=lightyellow&logo=arm&logoColor=white"></a>
 </p>
 
 
-<h1 align="center">https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2</h1>
+<h1 align="center">https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3</h1>
 
 **Credits**
 - Main idea: https://github.com/gottagofaster236/Twitch-Channel-Points-Miner
@@ -96,16 +94,17 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
 ## Community
 If you want to help with this project, please leave a star 🌟 and share it with your friends! 😎
 
-If you want to offer me a coffee, I would be grateful! ❤️
+If you want to support development, you can donate through Ko-fi or cryptocurrency:
 
-|                                                                                                                                                                                                                                                                                                           |                                               |
-|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------|
-|<a href="https://bitcoin.org" target="_blank"><img src="https://dynamic-assets.coinbase.com/e785e0181f1a23a30d9476038d9be91e9f6c63959b538eabbc51a1abc8898940383291eede695c3b8dfaa1829a9b57f5a2d0a16b0523580346c6b8fab67af14b/asset_icons/b57ac673f06a4b0338a596817eb0a50ce16e2059f327dc117744449a47915cb2.png" alt="Donate BTC" height="16" width="16"></a>|`bc1qq49mvgda2zw4f9kta0a85xztwuxewqwac5eckd` _(<a href="https://bitcoin.org" target="_blank">BTC</a>)_|
-|<a href="https://dogechain.info" target="_blank"><img src="https://dynamic-assets.coinbase.com/3803f30367bb3972e192cd3fdd2230cd37e6d468eab12575a859229b20f12ff9c994d2c86ccd7bf9bc258e9bd5e46c5254283182f70caf4bd02cc4f8e3890d82/asset_icons/1597d628dd19b7885433a2ac2d7de6ad196c519aeab4bfe679706aacbf1df78a.png" alt="Donate DOGE" height="16" width="16"></a>|`DAKzncwKkpfPCm1xVU7u2pConpXwX7HS3D` _(<a href="https://dogechain.info" target="_blank">DOGE</a>)_|
-|<a href="https://www.donationalerts.com/r/rdavydov" target="_blank"><img src="https://www.donationalerts.com/static/donations/dist/favicon.ico" alt="Donate via DonationAlerts" height="16" width="16"></a>|https://www.donationalerts.com/r/rdavydov|
-|<a href="https://boosty.to/rdavydov/donate" target="_blank"><img src="https://static.boosty.to/static/favicon.png?v=11" alt="Donate via Boosty" height="16" width="16"></a>|https://boosty.to/rdavydov/donate|
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/B0B61NBJ0)
 
-If you have any issues or you want to contribute, you are welcome! But please read the [CONTRIBUTING.md](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/blob/master/CONTRIBUTING.md) file. Contributors working on code can find setup, test commands, and suite conventions in the [testing guide](tests/README.md).
+| Currency | Wallet address |
+| --- | --- |
+| Bitcoin (BTC) | `bc1qdpg70u7u6fganwtddf9z3uwugkxkpltre4cva3` |
+| Ethereum (ETH) | `0x926fce1Eb65e867Af751a9cB75394DF001b58DF0` |
+| Dogecoin (DOGE) | `DHo26McxeVLFwQmRXdUH7LyHsdEUoVFvga` |
+
+If you have any issues or you want to contribute, you are welcome! But please read the [CONTRIBUTING.md](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/CONTRIBUTING.md) file. Contributors working on code can find setup, test commands, and suite conventions in the [testing guide](tests/README.md).
 
 ## Features
 
@@ -517,8 +516,8 @@ Clone the repository, create an isolated environment, install dependencies, and
 copy the configuration template. Python 3.11 through 3.14 is supported.
 
 ```sh
-git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2
-cd Twitch-Channel-Points-Miner-v2
+git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3
+cd Twitch-Channel-Points-Miner-v3
 python3 -m venv venv
 source venv/bin/activate  # Windows PowerShell: .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -560,7 +559,7 @@ The runner checks `config/config.py` every five seconds. Set
 ### Docker
 
 #### Docker Hub
-Official Docker images are on https://hub.docker.com/r/rdavidoff/twitch-channel-points-miner-v2 for `linux/amd64` and `linux/arm64`.
+Official Docker images are on https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner for `linux/amd64` and `linux/arm64`.
 
 Maintainers building or publishing images from source should follow the
 [Docker image build guide](BUILD.md#docker-images).
@@ -583,7 +582,7 @@ version: "3.9"
 
 services:
   miner:
-    image: rdavidoff/twitch-channel-points-miner-v2
+    image: zacharmstrong/twitch-channel-points-miner
     stdin_open: true
     tty: true
     environment:
@@ -607,7 +606,7 @@ docker run \
     -v $(pwd)/logs:/usr/src/app/logs \
     -v $(pwd)/config:/usr/src/app/config \
     -p 5000:5000 \
-    rdavidoff/twitch-channel-points-miner-v2
+    zacharmstrong/twitch-channel-points-miner
 ```
 
 Set `TZ` to your [IANA time zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones),
@@ -640,7 +639,7 @@ docker run --name user1 -it \
     -v $(pwd)/user1/logs:/usr/src/app/logs \
     -v $(pwd)/user1/analytics:/usr/src/app/analytics \
     -p 5001:5000 \
-    rdavidoff/twitch-channel-points-miner-v2
+    zacharmstrong/twitch-channel-points-miner
 ```
 
 ```sh
@@ -650,18 +649,16 @@ docker run --name user2 -it \
     -v $(pwd)/user2/logs:/usr/src/app/logs \
     -v $(pwd)/user2/analytics:/usr/src/app/analytics \
     -p 5002:5000 \
-    rdavidoff/twitch-channel-points-miner-v2
+    zacharmstrong/twitch-channel-points-miner
 ```
 
 #### Portainer
 
-[Link](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/wiki/Deploy-Docker-container-in-Portainer) to the illustrated guide on how to deploy a Docker container in Portainer.
+[Link](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/wiki/Deploy-Docker-container-in-Portainer) to the illustrated guide on how to deploy a Docker container in Portainer.
 
 ### Replit
 
-Official Repl: https://replit.com/@rdavydov/Twitch-Channel-Points-Miner-v2
-
-Provided "as is" with no support. Testing purposes only. Updates may be delayed.
+This repository does not currently maintain an official Replit deployment.
 
 ### Limits
 _**Twitch has a limit - you can't watch more than two channels at one time. Set
@@ -671,7 +668,7 @@ concurrently; the default is `2`. The highest-priority streamers are selected.**
 The `streams_watched` option exists because each mined channel creates viewing
 activity on the account. Twitch Turbo users have reported that running two mined
 streams continuously, especially while also watching Twitch normally, may result
-in ads being served ([issue #787](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues/787)).
+in ads being served ([upstream issue #787](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues/787)).
 Setting the option to `1` reduces the miner's concurrent viewing activity. It is
 a mitigation rather than a guarantee, because Twitch does not document this
 behavior.
@@ -1127,7 +1124,7 @@ does not launch mining. Conversion still refuses to replace an existing config.
 docker run --rm \
     -v $(pwd)/config:/usr/src/app/config \
     -v $(pwd)/run.py:/usr/src/app/run.py \
-    rdavidoff/twitch-channel-points-miner-v2 --convert-only
+    zacharmstrong/twitch-channel-points-miner --convert-only
 ```
 
 ## Legacy cookie migration (optional)
@@ -1277,11 +1274,11 @@ pkg install python-pandas
 
 **4. Clone this repository**
 
-`git clone https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2`
+`git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3`
 
 **5. Go to the miner's directory**
 
-`cd Twitch-Channel-Points-Miner-v2`
+`cd Twitch-Channel-Points-Miner-v3`
 
 **6. Create and edit the configuration**
 
