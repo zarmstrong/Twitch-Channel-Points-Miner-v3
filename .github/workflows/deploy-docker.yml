@@ -41,7 +41,7 @@ jobs:
             ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
             ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
           tags: |
-            type=semver,pattern={{version}},value=${{ inputs.ref }},match=v2-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$
+            type=semver,pattern={{version}},value=${{ inputs.ref }}
             type=raw,value=latest
 
       - name: Build and push AMD64 and ARM64

@@ -61,8 +61,8 @@ Replace the example values with your Docker Hub username or organization and
 the version you are publishing:
 
 ```sh
-export DOCKERHUB_NAMESPACE="zacharmstrong"
-export DOCKERHUB_USERNAME="zacharmstrong"
+export DOCKERHUB_NAMESPACE="your-dockerhub-username"
+export DOCKERHUB_USERNAME="your-dockerhub-username"
 export IMAGE="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
 export LEGACY_IMAGE="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2"
 export VERSION="3.0.0"

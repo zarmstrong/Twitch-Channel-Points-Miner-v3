@@ -1,4 +1,4 @@
-![Twitch Channel Points Miner](assets/banner.png)
+![Twitch Channel Points Miner](https://raw.githubusercontent.com/zarmstrong/Twitch-Channel-Points-Miner-v3/master/assets/banner.png)
 <p align="center">
 <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases"><img alt="Latest Version" src="https://img.shields.io/github/v/release/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=white&logo=github&logoColor=white"></a>
 <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=limegreen&logo=github&logoColor=white"></a>
