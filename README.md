@@ -22,6 +22,7 @@
 - Main idea: https://github.com/gottagofaster236/Twitch-Channel-Points-Miner
 - ~~Bet system (Selenium): https://github.com/ClementRoyer/TwitchAutoCollect-AutoBet~~
 - Based on: https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2
+- Previous maintainer: [Roman Davydov](https://github.com/rdavydov), whose [v2 fork](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2) this project builds upon
 
 > A simple script that will watch a stream for you and earn the channel points.
 
