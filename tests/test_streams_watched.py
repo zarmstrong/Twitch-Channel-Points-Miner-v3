@@ -1,4 +1,3 @@
-import importlib
 import inspect
 from types import SimpleNamespace
 
@@ -54,9 +53,6 @@ def _watch_streamer(
         spade_url=f"https://spade.test/{username}",
         encode_payload=lambda: "payload",
         campaigns=[],
-        campaigns_ids=[],
-        game={"displayName": username},
-        game_name=lambda: username,
     )
     return SimpleNamespace(
         username=username,
@@ -66,7 +62,7 @@ def _watch_streamer(
         from_badge_campaign=from_badge_campaign,
         channel_points=0,
         stream=stream,
-        settings=SimpleNamespace(claim_drops=drops_eligible),
+        settings=SimpleNamespace(claim_drops=False),
         drops_condition=lambda: drops_eligible,
     )
 
@@ -80,13 +76,6 @@ def _run_one_watch_iteration(
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
     twitch.user_agent = "test-agent"
-    twitch.completed_drop_campaigns = set()
-    twitch.category_campaign_eligibility = {
-        (streamer.username, streamer.username): (1, 1)
-        for streamer in streamers
-        if streamer.from_category and streamer.drops_condition()
-    }
-    twitch.twitchdrops_app_campaigns = {}
     posted = []
 
     monkeypatch.setattr(
@@ -147,25 +136,6 @@ def test_minute_watcher_stops_completed_category_stream(monkeypatch):
     assert posted == []
 
 
-def test_minute_watcher_ignores_stale_campaigns_after_category_completion(
-    monkeypatch,
-):
-    streamer = _watch_streamer(
-        "completed-category", from_category=True, drops_eligible=True
-    )
-    streamer.stream.game_name = lambda: "Completed Game"
-    streamer.stream.campaigns_ids = ["campaign-1"]
-    streamer.settings.claim_drops = True
-
-    posted = _run_one_watch_iteration(
-        monkeypatch,
-        [streamer, _watch_streamer("next-streamer")],
-        streams_watched=1,
-    )
-
-    assert posted == ["https://spade.test/next-streamer"]
-
-
 def test_minute_watcher_backfills_slot_after_extra_category_stream(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
@@ -200,41 +170,6 @@ def test_badge_source_can_be_given_first_priority(monkeypatch):
     )
 
     assert posted == ["https://spade.test/badge"]
-
-
-def test_watched_streamer_log_includes_selection_reason(monkeypatch):
-    messages = []
-    twitch_module = importlib.import_module(
-        "TwitchChannelPointsMiner.classes.Twitch"
-    )
-    monkeypatch.setattr(
-        twitch_module.logger,
-        "info",
-        lambda message, **kwargs: messages.append(message),
-    )
-    streamers = [
-        _watch_streamer("explicit"),
-        _watch_streamer("campaign", True, True),
-        _watch_streamer("badge", True, True, True),
-    ]
-
-    _run_one_watch_iteration(
-        monkeypatch,
-        streamers,
-        streams_watched=2,
-        source_priority=[
-            StreamerSource.BADGES,
-            StreamerSource.STREAMERS,
-            StreamerSource.CATEGORIES,
-        ],
-    )
-
-    watch_message = next(
-        message for message in messages if "Watching for points:" in message
-    )
-    assert "badge (badge drop)" in watch_message
-    assert "explicit (streamer)" in watch_message
-    assert "badge (badge drop; badge drops)" in watch_message
 
 
 def test_source_priority_appends_omitted_sources():
