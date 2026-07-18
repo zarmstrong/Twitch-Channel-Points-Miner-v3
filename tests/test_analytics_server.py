@@ -100,4 +100,10 @@ def test_points_tab_reapplies_annotations_after_becoming_visible():
     )[0]
 
     assert "requestAnimationFrame" in switch_tab
-    assert "updateAnnotations();" in switch_tab
+    assert "renderPointsChart();" in switch_tab
+    assert "chartRendered" in switch_tab
+
+    assert "chart.render().then" in script
+    assert "switchDashboardTab(savedDashboardTab);" in script
+    assert "!chartRendered || $('#points-panel').is(':hidden')" in script
+    assert "pointSeries = response[\"series\"] || [];" in script

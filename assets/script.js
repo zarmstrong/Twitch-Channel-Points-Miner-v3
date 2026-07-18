@@ -81,7 +81,9 @@ var options = {
 };
 
 var chart = new ApexCharts(document.querySelector("#chart"), options);
+var chartRendered = false;
 var currentStreamer = null;
+var pointSeries = [];
 var annotations = [];
 var streamerRefreshTimeout = null;
 var streamerDataRequest = 0;
@@ -119,9 +121,9 @@ function switchDashboardTab(tabName) {
     // ApexCharts cannot reliably place annotations while its panel is hidden.
     // Reapply them after Points becomes visible, including when the page was
     // refreshed with the Drops tab saved in localStorage.
-    if (isPoints) {
+    if (isPoints && chartRendered) {
         window.requestAnimationFrame(function () {
-            updateAnnotations();
+            renderPointsChart();
             window.dispatchEvent(new Event('resize'));
         });
     }
@@ -141,7 +143,6 @@ $(document).ready(function () {
     $('#dark-theme').prop('disabled', savedDarkMode !== 'true');
 
     var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
-    switchDashboardTab(savedDashboardTab);
     dropsFilter = localStorage.getItem('dropsFilter') || 'active';
     $('#drops-filter').val(dropsFilter);
 
@@ -234,7 +235,12 @@ $(document).ready(function () {
         }
     });
 
-    chart.render();
+    // ApexCharts must initialize while its container is visible. If the saved
+    // tab is Drops, hide Points only after chart initialization completes.
+    chart.render().then(function () {
+        chartRendered = true;
+        switchDashboardTab(savedDashboardTab);
+    });
 
     if (!localStorage.getItem("annotations")) localStorage.setItem("annotations", true);
     if (!localStorage.getItem("sort-by")) localStorage.setItem("sort-by", "Name ascending");
@@ -343,12 +349,12 @@ function formatDisplayDate(date) {
 function changeStreamer(streamer, index) {
     if (!streamer) {
         currentStreamer = null;
+        pointSeries = [];
+        annotations = [];
         localStorage.removeItem("selectedStreamer");
         updateStreamerDeleteControls();
         options.title.text = 'Channel points (dates are displayed in UTC)';
-        chart.updateOptions(options);
-        chart.updateSeries([], true);
-        clearAnnotations();
+        renderPointsChart();
         return;
     }
 
@@ -359,7 +365,9 @@ function changeStreamer(streamer, index) {
 
     // Update the chart title with the current streamer's name
     options.title.text = `${streamer.replace(".json", "")}'s channel points (dates are displayed in UTC)`;
-    chart.updateOptions(options);
+    if (chartRendered && !$('#points-panel').is(':hidden')) {
+        chart.updateOptions({ title: options.title }, false, false);
+    }
 
     // Save the selected streamer in localStorage
     localStorage.setItem("selectedStreamer", currentStreamer);
@@ -382,12 +390,9 @@ function getStreamerData(streamer) {
             // Ignore a response for a range or streamer that has since changed.
             if (request !== streamerDataRequest || currentStreamer !== streamer) return;
 
-            chart.updateSeries([{
-                name: streamer.replace(".json", ""),
-                data: response["series"]
-            }], true)
+            pointSeries = response["series"] || [];
             annotations = response["annotations"];
-            updateAnnotations();
+            renderPointsChart();
             streamerRefreshTimeout = setTimeout(function () {
                 getStreamerData(streamer);
             }, 300000); // 5 minutes
@@ -652,6 +657,8 @@ function changeSortBy(option) {
 }
 
 function updateAnnotations() {
+    if (!chartRendered || $('#points-panel').is(':hidden')) return;
+
     if ($('#annotations').prop("checked") === true) {
         clearAnnotations()
         if (annotations && annotations.length > 0)
@@ -662,7 +669,26 @@ function updateAnnotations() {
     } else clearAnnotations()
 }
 
+function renderPointsChart() {
+    if (!chartRendered || $('#points-panel').is(':hidden')) return;
+
+    var series = currentStreamer ? [{
+        name: currentStreamer.replace(".json", ""),
+        data: pointSeries
+    }] : [];
+
+    chart.updateOptions({ title: options.title }, false, false)
+        .then(function () {
+            return chart.updateSeries(series, true);
+        })
+        .then(function () {
+            updateAnnotations();
+        });
+}
+
 function clearAnnotations() {
+    if (!chartRendered) return;
+
     if (annotations && annotations.length > 0)
         annotations.forEach((annotation, index) => {
             chart.removeAnnotation(annotation['id'])
