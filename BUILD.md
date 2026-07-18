@@ -47,9 +47,11 @@ Docker builds **images**. A container is created later when an image is run.
 
 - Docker Engine or Docker Desktop
 - A Docker Hub account
-- Access to the `zacharmstrong/twitch-channel-points-miner` and
-  `zacharmstrong/twitch-channel-points-miner-v2` Docker Hub repositories
+- Repositories named `twitch-channel-points-miner` and
+  `twitch-channel-points-miner-v2` in the namespace you will publish to
 - A Docker Hub personal access token with read and write permission
+
+The official images use the `zacharmstrong` namespace.
 
 For a multi-platform build, Docker must also have the Buildx plugin. Docker
 Desktop includes Buildx; recent Docker Engine installations normally include
