@@ -59,6 +59,18 @@ def test_get_streamer_summary_handles_invalid_file(tmp_path, monkeypatch):
     }
 
 
+def test_get_streamer_summary_handles_non_list_series(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "broken-series.json").write_text(
+        '{"series": 123}', encoding="utf-8"
+    )
+
+    assert get_streamer_summary("broken-series.json") == {
+        "points": 0,
+        "last_activity": 0,
+    }
+
+
 def test_filter_datas_filters_and_sorts_chart_records():
     data = {
         "series": [
@@ -90,6 +102,26 @@ def test_filter_datas_builds_no_stream_line_from_prior_balance():
 
     assert [entry["y"] for entry in result["series"]] == [20, 20]
     assert all(entry["z"] == "No Stream" for entry in result["series"])
+
+
+def test_filter_datas_handles_non_list_series_and_annotations():
+    result = filter_datas(
+        None,
+        None,
+        {"series": 123, "annotations": {"x": 1000}},
+    )
+
+    assert result == {"series": [], "annotations": []}
+
+
+def test_filter_datas_defaults_missing_prior_balance_to_zero():
+    result = filter_datas(
+        "1970-01-02",
+        "1970-01-02",
+        {"series": [{"x": 1000, "z": "Watch"}]},
+    )
+
+    assert [entry["y"] for entry in result["series"]] == [0, 0]
 
 
 def test_points_tab_reapplies_annotations_after_becoming_visible():

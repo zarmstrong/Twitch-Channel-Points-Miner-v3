@@ -64,13 +64,16 @@ def filter_datas(start_date, end_date, datas):
         else datetime.now()
     ).replace(hour=23, minute=59, second=59).timestamp() * 1000
 
-    original_series = datas.get("series", [])
+    raw_series = datas.get("series", [])
+    original_series = raw_series if isinstance(raw_series, list) else []
+    if not isinstance(datas.get("annotations", []), list):
+        datas["annotations"] = []
 
-    if "series" in datas:
+    if original_series:
         datas["series"] = sorted(
             (
                 entry
-                for entry in datas["series"]
+                for entry in original_series
                 if isinstance(entry, dict)
                 and start_date <= entry.get("x", -1) <= end_date
             ),
@@ -101,18 +104,19 @@ def filter_datas(start_date, end_date, datas):
         last_balance = max(
             earlier_entries,
             key=lambda entry: (entry.get("x", 0), entry.get("y", 0)),
-        )["y"]
+        ).get("y", 0)
 
         datas["series"] = [
             {"x": start_date, "y": last_balance, "z": "No Stream"},
             {"x": end_date, "y": last_balance, "z": "No Stream"},
         ]
 
-    if datas.get("annotations"):
+    raw_annotations = datas.get("annotations", [])
+    if isinstance(raw_annotations, list) and raw_annotations:
         datas["annotations"] = sorted(
             (
                 annotation
-                for annotation in datas["annotations"]
+                for annotation in raw_annotations
                 if isinstance(annotation, dict)
                 and start_date <= annotation.get("x", -1) <= end_date
             ),
@@ -179,6 +183,9 @@ def get_streamer_summary(streamer):
     except (json.JSONDecodeError, OSError, AttributeError) as error:
         logger.error("Unable to read analytics summary '%s': %s", file_path, error)
         return {"points": 0, "last_activity": 0}
+
+    if not isinstance(series, list):
+        series = []
 
     latest = max(
         (entry for entry in series if isinstance(entry, dict)),
