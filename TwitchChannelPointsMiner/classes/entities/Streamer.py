@@ -103,10 +103,10 @@ class Streamer(object):
         self,
         username,
         settings=None,
-        from_followers=False,
         from_category=False,
         explicitly_configured=False,
         from_badge_campaign=False,
+        from_followers=False,
     ):
         self.username: str = username.lower().strip()
         self.from_followers = from_followers

@@ -518,7 +518,12 @@ class TwitchChannelPointsMiner:
                 if username in streamers_name:
                     time.sleep(random.uniform(0.3, 0.7))
                     try:
-                        is_category_streamer = username in category_usernames
+                        is_follower_streamer = username in follower_usernames
+                        is_category_streamer = (
+                            username in category_usernames
+                            and username not in explicitly_configured_usernames
+                            and is_follower_streamer is False
+                        )
                         streamer = (
                             streamers_dict[username]
                             if isinstance(streamers_dict[username], Streamer) is True
@@ -530,7 +535,7 @@ class TwitchChannelPointsMiner:
                                     and category_chat is not None
                                     else None
                                 ),
-                                from_followers=(username in follower_usernames),
+                                from_followers=is_follower_streamer,
                                 from_category=is_category_streamer,
                                 explicitly_configured=(
                                     username in explicitly_configured_usernames
