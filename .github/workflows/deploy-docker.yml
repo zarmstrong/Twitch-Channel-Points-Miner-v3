@@ -9,7 +9,7 @@ on:
         type: string
 
 env:
-  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'rdavidoff' }}
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'zacharmstrong' }}
 
 jobs:
   deploy-docker:
@@ -37,9 +37,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
+          images: |
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
           tags: |
-            type=semver,pattern={{version}},value=${{ inputs.ref }},match=v2-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$
+            type=semver,pattern={{version}},value=${{ inputs.ref }}
             type=raw,value=latest
 
       - name: Build and push AMD64 and ARM64
@@ -60,7 +62,7 @@ jobs:
       #   with:
       #     username: ${{ secrets.DOCKER_USERNAME }}
       #     password: ${{ secrets.DOCKER_TOKEN }}
-      #     repository: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
+      #     repository: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
 
       - name: Image digest AMD64 and ARM64
         run: echo ${{ steps.docker_build.outputs.digest }}
