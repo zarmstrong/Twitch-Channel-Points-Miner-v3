@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.3.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.2.0...3.3.0) (2026-07-18)
+
+
+### Features
+
+* add followers to streamer source priority ([#18](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/18)) ([160678a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/160678a75313912b1e232d439cc7f99c3c6f51b0))
+
+
+### Bug Fixes
+
+* make streamer source priority default immutable ([619d76d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/619d76d87d75baa8372a72ebd23bc035148db55e))
+* switch away from completed drop campaigns ([9dc4a6d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9dc4a6d2472d3a2fcd6d7fc99ca8cc90243443e6))
+* switch away from completed drop campaigns ([#17](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/17)) ([7644156](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7644156144c47b8ed19a8725d6d90c6d2a81d6d4))
+
+
+### Documentation
+
+* document combined release workflow ([#13](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/13)) ([0fd98e2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0fd98e2b680c15703411fe9e9c8d092f1d9eb0f9))
+* update Docker Hub repository info ([#16](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/16)) ([d94c3f8](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d94c3f87fb052487c3b1fad3fcbced4f301b4f8e))
+* update project ownership and Docker Hub links ([#15](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/15)) ([ae31c29](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ae31c29b18a10c441a39b5605315cf06339fe12c))
+
 ## [3.2.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.1.1...3.2.0) (2026-07-17)
 
 
