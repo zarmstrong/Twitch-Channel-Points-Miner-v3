@@ -50,6 +50,7 @@ def test_streamer_source_priority_default_is_immutable():
 
     assert parameter.default == (
         StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
     )
