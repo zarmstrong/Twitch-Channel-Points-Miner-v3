@@ -15,6 +15,7 @@ class Priority(Enum):
 
 class StreamerSource(Enum):
     STREAMERS = auto()
+    FOLLOWERS = auto()
     CATEGORIES = auto()
     BADGES = auto()
 

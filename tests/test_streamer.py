@@ -42,6 +42,15 @@ def test_streamer_normalizes_username_and_builds_url():
     assert streamer.streamer_url.endswith("/some_channel")
 
 
+def test_streamer_preserves_existing_positional_source_flags():
+    streamer = Streamer("channel", None, True, True, True)
+
+    assert streamer.from_category is True
+    assert streamer.explicitly_configured is True
+    assert streamer.from_badge_campaign is True
+    assert streamer.from_followers is False
+
+
 def test_online_and_offline_transitions_update_state_and_timestamps(monkeypatch):
     times = iter([100.0, 200.0])
     monkeypatch.setattr(

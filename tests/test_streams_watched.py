@@ -50,6 +50,7 @@ def test_streamer_source_priority_default_is_immutable():
 
     assert parameter.default == (
         StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
     )
@@ -60,6 +61,7 @@ def _watch_streamer(
     from_category=False,
     drops_eligible=False,
     from_badge_campaign=False,
+    from_followers=False,
 ):
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
@@ -76,6 +78,7 @@ def _watch_streamer(
         online_at=0,
         from_category=from_category,
         from_badge_campaign=from_badge_campaign,
+        from_followers=from_followers,
         channel_points=0,
         stream=stream,
         settings=SimpleNamespace(claim_drops=drops_eligible),
@@ -214,6 +217,21 @@ def test_badge_source_can_be_given_first_priority(monkeypatch):
     assert posted == ["https://spade.test/badge"]
 
 
+def test_follower_source_can_be_prioritized_over_explicit_streamers(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("explicit"),
+            _watch_streamer("followed", from_followers=True),
+        ],
+        streams_watched=1,
+        source_priority=[
+            StreamerSource.FOLLOWERS,
+            StreamerSource.STREAMERS,
+        ],
+    )
+
+    assert posted == ["https://spade.test/followed"]
 def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     messages = []
     twitch_module = importlib.import_module(
@@ -253,6 +271,7 @@ def test_source_priority_appends_omitted_sources():
     assert _normalize_streamer_source_priority([StreamerSource.BADGES]) == [
         StreamerSource.BADGES,
         StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
     ]
 

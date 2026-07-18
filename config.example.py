@@ -37,6 +37,7 @@ MINER_CONFIG = {
     'streams_watched': 2,                       # Watch 1 stream to reduce concurrent sessions (which may help Twitch Turbo users avoid ads), or 2 for the default maximum
     'streamer_source_priority': [
         StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
     ],
@@ -169,4 +170,14 @@ MINE_CONFIG = {
     'badge_drop_streamer_limit': 1,
 }
 
+# Leave disabled unless MINER_CONFIG['enable_analytics'] is also set to True.
 ANALYTICS_CONFIG = None
+
+# ANALYTICS_CONFIG = {
+#     'host': "127.0.0.1",                     # Use 0.0.0.0 only on a trusted network and set a strong password
+#     'port': 5000,
+#     'refresh': 5,                             # Chart refresh interval in minutes
+#     'days_ago': 7,                            # Initial chart history range
+#     'password': None,                         # Required when binding to a non-loopback host
+#     'log_poll_interval': 5,                   # Log viewer polling interval in seconds (1-180)
+# }

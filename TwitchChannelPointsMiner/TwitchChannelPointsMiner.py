@@ -72,6 +72,7 @@ def _normalize_streams_watched(streams_watched):
 def _normalize_streamer_source_priority(source_priority):
     defaults = [
         StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
     ]
@@ -153,6 +154,7 @@ class TwitchChannelPointsMiner:
         streamer_source_priority: list
         | tuple = (
             StreamerSource.STREAMERS,
+            StreamerSource.FOLLOWERS,
             StreamerSource.CATEGORIES,
             StreamerSource.BADGES,
         ),
@@ -452,6 +454,7 @@ class TwitchChannelPointsMiner:
             streamers_name: list = []
             streamers_dict: dict = {}
             category_usernames = set()
+            follower_usernames = set()
             explicitly_configured_usernames = set()
 
             for streamer in streamers:
@@ -475,6 +478,7 @@ class TwitchChannelPointsMiner:
                     if username not in streamers_dict and username not in blacklist:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
+                        follower_usernames.add(username)
 
             if categories:
                 eligible_categories = self.twitch.filter_categories_with_active_drops(
@@ -515,7 +519,12 @@ class TwitchChannelPointsMiner:
                 if username in streamers_name:
                     time.sleep(random.uniform(0.3, 0.7))
                     try:
-                        is_category_streamer = username in category_usernames
+                        is_follower_streamer = username in follower_usernames
+                        is_category_streamer = (
+                            username in category_usernames
+                            and username not in explicitly_configured_usernames
+                            and is_follower_streamer is False
+                        )
                         streamer = (
                             streamers_dict[username]
                             if isinstance(streamers_dict[username], Streamer) is True
@@ -527,6 +536,7 @@ class TwitchChannelPointsMiner:
                                     and category_chat is not None
                                     else None
                                 ),
+                                from_followers=is_follower_streamer,
                                 from_category=is_category_streamer,
                                 explicitly_configured=(
                                     username in explicitly_configured_usernames

@@ -23,6 +23,14 @@ def _load_config(path):
     source = path.read_text(encoding="utf-8")
     module = types.ModuleType("twitch_miner_user_config")
     module.__file__ = str(path)
+    # Configs generated before StreamerSource was added to the migration output
+    # can already contain streamer_source_priority without its import. The audit
+    # marker lets us support those generated files without masking mistakes in
+    # user-authored configs.
+    if path.with_name(".converted-from-run-py").is_file():
+        from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+
+        module.StreamerSource = StreamerSource
     try:
         exec(compile(source, str(path), "exec"), module.__dict__)
     except NameError as error:

@@ -198,12 +198,13 @@ mining two channels alongside normal Twitch viewing may contribute to Turbo user
 being served ads. Invalid values are logged and replaced with `2`.
 
 `streamer_source_priority` controls which source gets the available viewing
-slots first. Its default is configured/followed streamers, ordinary category
-discovery, then automatic badge campaigns:
+slots first. Its default is configured streamers, followed streamers, ordinary
+category discovery, then automatic badge campaigns:
 
 ```python
 streamer_source_priority=[
     StreamerSource.STREAMERS,
+    StreamerSource.FOLLOWERS,
     StreamerSource.CATEGORIES,
     StreamerSource.BADGES,
 ]
