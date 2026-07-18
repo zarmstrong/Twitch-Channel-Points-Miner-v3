@@ -2217,6 +2217,7 @@ class Twitch(object):
 
                 default_source_priority = [
                     StreamerSource.STREAMERS,
+                    StreamerSource.FOLLOWERS,
                     StreamerSource.CATEGORIES,
                     StreamerSource.BADGES,
                 ]
@@ -2237,6 +2238,8 @@ class Twitch(object):
                         return StreamerSource.BADGES
                     if getattr(streamers[index], "from_category", False) is True:
                         return StreamerSource.CATEGORIES
+                    if getattr(streamers[index], "from_followers", False) is True:
+                        return StreamerSource.FOLLOWERS
                     return StreamerSource.STREAMERS
 
                 def remaining_watch_amount():

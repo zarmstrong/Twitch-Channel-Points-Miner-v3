@@ -44,7 +44,9 @@ def _is_runner_import(node):
     )
 
 
-def _render_dict(source, call, positional_names=(), ignore_args=False):
+def _render_dict(
+    source, call, positional_names=(), ignore_args=False, default_entries=()
+):
     if not ignore_args and len(call.args) > len(positional_names):
         raise ConfigMigrationError(
             f"Too many positional arguments in {_call_name(call.func)}()"
@@ -61,6 +63,10 @@ def _render_dict(source, call, positional_names=(), ignore_args=False):
         if keyword.arg is None:
             raise ConfigMigrationError("Expanded **kwargs cannot be converted safely")
         entries.append((keyword.arg, _source(source, keyword.value)))
+    existing_names = {name for name, _ in entries}
+    entries.extend(
+        (name, value) for name, value in default_entries if name not in existing_names
+    )
     if not entries:
         return "{}"
     body = "\n".join(f"    {name!r}: {value}," for name, value in entries)
@@ -114,13 +120,38 @@ def convert_runner_source(source, source_name="run.py"):
         if isinstance(node, (ast.Import, ast.ImportFrom))
         and not _is_runner_import(node)
     ]
+    has_streamer_source_import = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "TwitchChannelPointsMiner.classes.Settings"
+        and any(
+            alias.name == "StreamerSource" and alias.asname is None
+            for alias in node.names
+        )
+        for node in tree.body
+    )
+    if not has_streamer_source_import:
+        imports.append(
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+        )
     output = [
         "# -*- coding: utf-8 -*-",
         f"# Automatically converted from {source_name}; review before editing.",
         "",
         *imports,
         "",
-        f"MINER_CONFIG = {_render_dict(source, constructors[0], ('username',))}",
+        "MINER_CONFIG = "
+        + _render_dict(
+            source,
+            constructors[0],
+            ("username",),
+            default_entries=(
+                (
+                    "streamer_source_priority",
+                    "[StreamerSource.STREAMERS, StreamerSource.FOLLOWERS, "
+                    "StreamerSource.CATEGORIES, StreamerSource.BADGES]",
+                ),
+            ),
+        ),
         "",
         f"STREAMERS = {streamers}",
         "",

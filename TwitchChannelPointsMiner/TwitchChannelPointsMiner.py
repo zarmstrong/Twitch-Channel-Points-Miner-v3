@@ -72,6 +72,7 @@ def _normalize_streams_watched(streams_watched):
 def _normalize_streamer_source_priority(source_priority):
     defaults = [
         StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
     ]
@@ -152,6 +153,7 @@ class TwitchChannelPointsMiner:
         gql: AttemptStrategy | GQLFactory | None = None,
         streamer_source_priority: list = [
             StreamerSource.STREAMERS,
+            StreamerSource.FOLLOWERS,
             StreamerSource.CATEGORIES,
             StreamerSource.BADGES,
         ],
@@ -451,6 +453,7 @@ class TwitchChannelPointsMiner:
             streamers_name: list = []
             streamers_dict: dict = {}
             category_usernames = set()
+            follower_usernames = set()
             explicitly_configured_usernames = set()
 
             for streamer in streamers:
@@ -474,6 +477,7 @@ class TwitchChannelPointsMiner:
                     if username not in streamers_dict and username not in blacklist:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
+                        follower_usernames.add(username)
 
             if categories:
                 eligible_categories = self.twitch.filter_categories_with_active_drops(
@@ -526,6 +530,7 @@ class TwitchChannelPointsMiner:
                                     and category_chat is not None
                                     else None
                                 ),
+                                from_followers=(username in follower_usernames),
                                 from_category=is_category_streamer,
                                 explicitly_configured=(
                                     username in explicitly_configured_usernames

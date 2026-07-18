@@ -75,6 +75,7 @@ class StreamerSettings(object):
 class Streamer(object):
     __slots__ = [
         "username",
+        "from_followers",
         "from_category",
         "from_badge_campaign",
         "explicitly_configured",
@@ -102,11 +103,13 @@ class Streamer(object):
         self,
         username,
         settings=None,
+        from_followers=False,
         from_category=False,
         explicitly_configured=False,
         from_badge_campaign=False,
     ):
         self.username: str = username.lower().strip()
+        self.from_followers = from_followers
         self.from_category = from_category
         self.from_badge_campaign = from_badge_campaign
         self.explicitly_configured = explicitly_configured

@@ -29,6 +29,12 @@ def test_convert_runner_source_preserves_configuration_expressions():
     assert namespace["MINER_CONFIG"] == {
         "username": "alice",
         "claim_drops_startup": True,
+        "streamer_source_priority": [
+            namespace["StreamerSource"].STREAMERS,
+            namespace["StreamerSource"].FOLLOWERS,
+            namespace["StreamerSource"].CATEGORIES,
+            namespace["StreamerSource"].BADGES,
+        ],
     }
     assert namespace["STREAMERS"] == ["channel_one", "channel_two"]
     assert namespace["MINE_CONFIG"] == {"followers": True}
@@ -72,6 +78,27 @@ miner.mine([])
     namespace = {}
     exec(converted, namespace)
     assert namespace["MINER_CONFIG"]["priority"] == [namespace["Priority"].ORDER]
+
+
+def test_convert_runner_source_preserves_explicit_streamer_source_priority():
+    converted = convert_runner_source(
+        '''\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+
+miner = TwitchChannelPointsMiner(
+    "alice", streamer_source_priority=[StreamerSource.FOLLOWERS]
+)
+miner.mine([])
+'''
+    )
+
+    namespace = {}
+    exec(converted, namespace)
+
+    assert namespace["MINER_CONFIG"]["streamer_source_priority"] == [
+        namespace["StreamerSource"].FOLLOWERS
+    ]
 
 
 def test_convert_runner_source_rejects_configuration_with_missing_imports():
