@@ -150,11 +150,12 @@ class TwitchChannelPointsMiner:
         streamer_settings: StreamerSettings = StreamerSettings(),
         streams_watched: int = 2,
         gql: AttemptStrategy | GQLFactory | None = None,
-        streamer_source_priority: list = [
+        streamer_source_priority: list
+        | tuple = (
             StreamerSource.STREAMERS,
             StreamerSource.CATEGORIES,
             StreamerSource.BADGES,
-        ],
+        ),
     ):
 
         # Fixes TypeError: 'NoneType' object is not subscriptable

@@ -43,6 +43,18 @@ def test_minute_watcher_accepts_streams_watched_argument():
     assert parameter.default == 2
 
 
+def test_streamer_source_priority_default_is_immutable():
+    parameter = inspect.signature(TwitchChannelPointsMiner.__init__).parameters[
+        "streamer_source_priority"
+    ]
+
+    assert parameter.default == (
+        StreamerSource.STREAMERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+    )
+
+
 def _watch_streamer(
     username,
     from_category=False,
