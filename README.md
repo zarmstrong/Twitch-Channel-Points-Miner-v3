@@ -12,7 +12,6 @@
 <a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/zacharmstrong/twitch-channel-points-miner?style=flat&color=blue&logo=docker&logoColor=white&label=pulls"></a>
 <a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size AMD64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=amd64&label=AMD64 image size&style=flat&color=purple&logo=amd&logoColor=white"></a>
 <a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size ARM64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=arm64&label=ARM64 image size&style=flat&color=black&logo=arm&logoColor=white"></a>
-<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size ARMv7" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=arm&label=ARMv7 image size&style=flat&color=lightyellow&logo=arm&logoColor=white"></a>
 </p>
 
 
@@ -561,6 +560,12 @@ The runner checks `config/config.py` every five seconds. Set
 
 #### Docker Hub
 Official Docker images are on https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner for `linux/amd64` and `linux/arm64`. The same tags are also published to the legacy https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner-v2 repository so existing installations continue to receive updates.
+
+The ARM64 image can run in compatible 64-bit Android Linux environments where
+the device reports `aarch64` or `arm64-v8a`. Android itself is not a supported
+Docker host, and users are responsible for providing a suitable container,
+chroot, or Linux compatibility layer. Older 32-bit ARMv7 devices are not
+supported; see the [ARMv7 build limitation](BUILD.md#armv7-limitation).
 
 Maintainers building or publishing images from source should follow the
 [Docker image build guide](BUILD.md#docker-images).
