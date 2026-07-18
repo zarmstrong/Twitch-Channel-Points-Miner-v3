@@ -1633,20 +1633,29 @@ class Twitch(object):
         return False
 
     def __drops_condition(self, streamer):
+        # Category-discovered streams must follow the refreshed category
+        # eligibility cache. Their Stream campaign objects can remain populated
+        # after inventory discovery has determined that every reward is owned.
+        if getattr(streamer, "from_category", False) is True:
+            return self.__category_drops_condition(streamer)
+
         if streamer.drops_condition() is True:
             return True
 
-        category_eligible = self.__category_drops_condition(streamer)
-        if category_eligible:
-            logger.debug(
-                "[drops-check] Using category campaign eligibility fallback for "
-                f"streamer={streamer.username} "
-                f"game={self.__stream_game_label(streamer.stream)}"
-            )
-        return category_eligible
+        return False
 
     def __log_watched_streamers(self, streamers, streamers_watching):
-        points_streams = [streamers[index].username for index in streamers_watching]
+        def watch_reason(streamer):
+            if getattr(streamer, "from_badge_campaign", False) is True:
+                return "badge drop"
+            if getattr(streamer, "from_category", False) is True:
+                return "campaign drops"
+            return "streamer"
+
+        points_streams = [
+            f"{streamers[index].username} ({watch_reason(streamers[index])})"
+            for index in streamers_watching
+        ]
         drops_streams = []
 
         for index in streamers_watching:
@@ -1655,12 +1664,13 @@ class Twitch(object):
                 continue
 
             campaigns = self.__describe_campaigns(streamer.stream.campaigns)
+            reason = watch_reason(streamer)
             drops_streams.append(
-                f"{streamer.username} ({campaigns})"
+                f"{streamer.username} ({reason}; {campaigns})"
                 if campaigns
                 else (
                     f"{streamer.username} "
-                    f"({self.__stream_game_label(streamer.stream)} drops)"
+                    f"({reason}; {self.__stream_game_label(streamer.stream)} drops)"
                 )
             )
 
