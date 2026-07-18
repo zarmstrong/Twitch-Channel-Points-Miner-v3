@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     MAX_LOG_TAIL_BYTES,
     bounded_log_start,
@@ -88,3 +90,14 @@ def test_filter_datas_builds_no_stream_line_from_prior_balance():
 
     assert [entry["y"] for entry in result["series"]] == [20, 20]
     assert all(entry["z"] == "No Stream" for entry in result["series"])
+
+
+def test_points_tab_reapplies_annotations_after_becoming_visible():
+    script_path = Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    script = script_path.read_text(encoding="utf-8")
+    switch_tab = script.split("function switchDashboardTab", 1)[1].split(
+        "var startDate", 1
+    )[0]
+
+    assert "requestAnimationFrame" in switch_tab
+    assert "updateAnnotations();" in switch_tab

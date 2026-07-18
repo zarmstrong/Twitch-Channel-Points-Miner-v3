@@ -115,6 +115,16 @@ function switchDashboardTab(tabName) {
     $('#tab-drops').toggleClass('is-link', !isPoints);
 
     localStorage.setItem('dashboardTab', isPoints ? 'points' : 'drops');
+
+    // ApexCharts cannot reliably place annotations while its panel is hidden.
+    // Reapply them after Points becomes visible, including when the page was
+    // refreshed with the Drops tab saved in localStorage.
+    if (isPoints) {
+        window.requestAnimationFrame(function () {
+            updateAnnotations();
+            window.dispatchEvent(new Event('resize'));
+        });
+    }
 }
 
 var startDate = new Date();
