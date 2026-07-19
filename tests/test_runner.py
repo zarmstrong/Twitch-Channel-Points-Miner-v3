@@ -77,6 +77,28 @@ ANALYTICS_CONFIG = None
     assert (tmp_path / "config.py.v0.bak").is_file()
 
 
+def test_load_config_reports_migration_errors_without_executing_config(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION + 1}
+MINER_CONFIG = {{}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Unable to migrate configuration .*unsupported CONFIG_VERSION",
+    ) as raised:
+        _load_config(config)
+
+    assert raised.value.__cause__.__class__.__name__ == "ConfigMigrationError"
+
+
 def test_load_config_supports_migrated_config_missing_streamer_source_import(
     tmp_path,
 ):

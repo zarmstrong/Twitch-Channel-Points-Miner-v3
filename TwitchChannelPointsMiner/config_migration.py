@@ -89,7 +89,11 @@ def _closing_line_insertion(source, line_offsets, node, lines):
         *getattr(node, "elts", []),
     ]
     if closing_prefix.strip():
-        separator = ", " if candidates else ""
+        trimmed = closing_prefix.rstrip()
+        if candidates and trimmed.endswith(","):
+            separator = "" if closing_prefix.endswith((" ", "\t")) else " "
+        else:
+            separator = ", " if candidates else ""
         return closing_offset, separator + ", ".join(lines)
 
     if candidates:

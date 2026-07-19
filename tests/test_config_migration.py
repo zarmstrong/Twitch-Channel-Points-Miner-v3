@@ -89,6 +89,30 @@ def test_migrate_config_source_is_idempotent():
     assert second.count("Priority.FAVORITE") == 1
 
 
+def test_migrate_config_source_handles_single_line_trailing_commas():
+    source = '''\
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+PRIORITIES = [Priority.ORDER,]
+DEFAULT_SETTINGS = StreamerSettings(watch_streak=False,)
+MINER_CONFIG = {"priority": PRIORITIES, "streamer_settings": DEFAULT_SETTINGS}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["PRIORITIES"] == [
+        namespace["Priority"].ORDER,
+        namespace["Priority"].FAVORITE,
+    ]
+    assert namespace["DEFAULT_SETTINGS"].watch_streak is False
+    assert namespace["DEFAULT_SETTINGS"].points_limit is None
+
+
 def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(CONFIG, encoding="utf-8")
