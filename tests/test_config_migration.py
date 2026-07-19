@@ -145,6 +145,39 @@ ANALYTICS_CONFIG = None
         assert name in namespace["MINE_CONFIG"]
 
 
+def test_migration_preserves_aliased_priority_enum_prefixes():
+    source = '''\
+CONFIG_VERSION = 3
+from TwitchChannelPointsMiner.classes.Settings import Priority as P
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource as SS
+PRIORITIES = [P.ORDER, P.FAVORITE]
+SOURCES = [SS.STREAMERS, SS.BADGES]
+MINER_CONFIG = {
+    "username": "alice",
+    "priority": PRIORITIES,
+    "streamer_source_priority": SOURCES,
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["PRIORITIES"] == [namespace["P"].ORDER, namespace["P"].FAVORITE]
+    assert namespace["SOURCES"] == [
+        namespace["SS"].STREAMERS,
+        namespace["SS"].BADGES,
+        namespace["SS"].FOLLOWERS,
+        namespace["SS"].CATEGORIES,
+    ]
+    assert migrated.count("P.FAVORITE") == 1
+    assert "SS.FOLLOWERS" in migrated
+    assert "SS.CATEGORIES" in migrated
+
+
 def test_version_two_migration_normalizes_logger_settings():
     source = '''\
 CONFIG_VERSION = 2

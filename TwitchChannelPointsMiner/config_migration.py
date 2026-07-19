@@ -243,6 +243,42 @@ def _import_offset(source, line_offsets, tree):
     return first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
 
 
+def _enum_list_additions(
+    source,
+    tree,
+    node,
+    additions,
+    enum_name,
+    import_statement,
+    required_imports,
+):
+    existing_members = {
+        item.attr
+        for item in node.elts
+        if isinstance(item, ast.Attribute) and isinstance(item.attr, str)
+    }
+    prefix = next(
+        (
+            _source(source, item.value)
+            for item in node.elts
+            if isinstance(item, ast.Attribute)
+        ),
+        None,
+    )
+    if prefix is None:
+        prefix = enum_name
+        if (
+            not _name_is_defined(tree, enum_name)
+            and import_statement not in required_imports
+        ):
+            required_imports.append(import_statement)
+    return [
+        f"{prefix}.{addition.rsplit('.', 1)[-1]}"
+        for addition in additions
+        if addition.rsplit(".", 1)[-1] not in existing_members
+    ]
+
+
 def _line_start_offsets(source):
     offsets = []
     offset = 0
@@ -412,10 +448,15 @@ def migrate_config_source(source, source_name="config.py"):
 
     priority = _resolve_value(tree, _dict_value(config, "priority"))
     if isinstance(priority, (ast.List, ast.Tuple)):
-        existing = {_source(source, item) for item in priority.elts}
-        missing = [
-            value for value in CONFIG_PRIORITY_ADDITIONS if value not in existing
-        ]
+        missing = _enum_list_additions(
+            source,
+            tree,
+            priority,
+            CONFIG_PRIORITY_ADDITIONS,
+            "Priority",
+            "from TwitchChannelPointsMiner.classes.Settings import Priority",
+            required_imports,
+        )
         if missing:
             edits.extend(
                 _closing_line_insertion(source, line_offsets, priority, missing)
@@ -425,10 +466,15 @@ def migrate_config_source(source, source_name="config.py"):
         tree, _dict_value(config, "streamer_source_priority")
     )
     if isinstance(source_priority, (ast.List, ast.Tuple)):
-        existing = {_source(source, item) for item in source_priority.elts}
-        missing = [
-            value for value in CONFIG_STREAMER_SOURCE_ADDITIONS if value not in existing
-        ]
+        missing = _enum_list_additions(
+            source,
+            tree,
+            source_priority,
+            CONFIG_STREAMER_SOURCE_ADDITIONS,
+            "StreamerSource",
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
+            required_imports,
+        )
         if missing:
             edits.extend(
                 _closing_line_insertion(source, line_offsets, source_priority, missing)
