@@ -395,6 +395,31 @@ def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     assert migrate_config(config) is False
 
 
+def test_migrate_config_reuses_matching_backup_from_interrupted_migration(tmp_path):
+    config = tmp_path / "config.py"
+    source = "CONFIG_VERSION = 3\n" + CONFIG
+    backup = tmp_path / "config.py.v3.bak"
+    config.write_text(source, encoding="utf-8")
+    backup.write_text(source, encoding="utf-8")
+
+    assert migrate_config(config) is True
+    assert backup.read_text(encoding="utf-8") == source
+    assert f"CONFIG_VERSION = {CONFIG_VERSION}" in config.read_text(encoding="utf-8")
+
+
+def test_migrate_config_rejects_conflicting_existing_backup(tmp_path):
+    config = tmp_path / "config.py"
+    source = "CONFIG_VERSION = 3\n" + CONFIG
+    backup = tmp_path / "config.py.v3.bak"
+    config.write_text(source, encoding="utf-8")
+    backup.write_text("different configuration", encoding="utf-8")
+
+    with pytest.raises(ConfigMigrationError, match="do not match"):
+        migrate_config(config)
+
+    assert config.read_text(encoding="utf-8") == source
+
+
 def test_migrate_config_recovers_invalid_previous_migration_from_backup(tmp_path):
     config = tmp_path / "config.py"
     backup = tmp_path / "config.py.v0.bak"

@@ -262,5 +262,13 @@ def main(argv=None):
     return 0
 
 
+def cli(argv=None):
+    try:
+        return main(argv)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr, flush=True)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

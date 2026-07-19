@@ -99,6 +99,18 @@ ANALYTICS_CONFIG = None
     assert raised.value.__cause__.__class__.__name__ == "ConfigMigrationError"
 
 
+def test_cli_reports_runtime_errors_without_traceback(monkeypatch, capsys):
+    def fail(argv):
+        raise RuntimeError("configuration migration failed")
+
+    monkeypatch.setattr(runner, "main", fail)
+
+    assert runner.cli([]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == "ERROR: configuration migration failed\n"
+    assert "Traceback" not in captured.err
+
+
 def test_load_config_supports_migrated_config_missing_streamer_source_import(
     tmp_path,
 ):
