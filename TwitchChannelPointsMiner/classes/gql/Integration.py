@@ -90,12 +90,13 @@ def is_recoverable_error(e: Exception) -> bool:
 
 def error_context(e: Exception) -> str | None:
     """
-    Returns a context string (or None) for the given Error. GQLErrors are well understood and so don't need context,
-    anything else is likely a bug and so does need context.
+    Returns a context string (or None) for the given Error. GQLErrors and
+    recoverable transport errors are well understood and don't need context;
+    anything else is likely a bug and does need context.
     :param e: The Exception to check.
     :return: The context string, or None if no context is needed.
     """
-    if isinstance(e, (GQLError, requests.exceptions.RequestException)):
+    if isinstance(e, GQLError) or is_recoverable_error(e):
         return None
     else:
         return traceback.format_exc()

@@ -360,6 +360,26 @@ def test_transport_errors_do_not_capture_noisy_traceback():
     assert error_context(requests.ConnectionError("offline")) is None
 
 
+def test_permanent_http_errors_keep_debugging_traceback():
+    try:
+        FakeResponse({}, status_code=404).raise_for_status()
+    except requests.HTTPError as error:
+        context = error_context(error)
+
+    assert context is not None
+    assert "requests.exceptions.HTTPError: 404" in context
+
+
+def test_request_construction_errors_keep_debugging_traceback():
+    try:
+        raise requests.exceptions.InvalidURL("invalid")
+    except requests.exceptions.InvalidURL as error:
+        context = error_context(error)
+
+    assert context is not None
+    assert "requests.exceptions.InvalidURL: invalid" in context
+
+
 def test_non_transport_errors_keep_debugging_traceback():
     try:
         raise ValueError("bad parser")
