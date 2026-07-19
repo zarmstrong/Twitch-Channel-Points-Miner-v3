@@ -43,6 +43,7 @@ from TwitchChannelPointsMiner.utils import (
     is_newer_version,
     set_default_settings,
 )
+from TwitchChannelPointsMiner.WatchStreakCache import WatchStreakCache
 
 # Suppress:
 #   - chardet.charsetprober - [feed]
@@ -173,6 +174,7 @@ class TwitchChannelPointsMiner:
         "badge_drop_category_chat",
         "badge_drop_category_sort",
         "badge_drop_blacklist",
+        "watch_streak_cache",
     ]
 
     def __init__(
@@ -309,6 +311,15 @@ class TwitchChannelPointsMiner:
 
         self.logs_file, self.queue_listener = configure_loggers(
             self.username, logger_settings
+        )
+        watch_streak_cache_path = os.path.join(
+            Path().absolute(),
+            "logs",
+            ".state",
+            f"watch_streak_cache.{self.username.lower()}.json",
+        )
+        self.watch_streak_cache = WatchStreakCache.load(
+            watch_streak_cache_path, self.username
         )
 
         if os.environ.pop("TCPM_LEGACY_CONFIG_NOTICE", None):
@@ -592,6 +603,7 @@ class TwitchChannelPointsMiner:
                 streamer.explicitly_configured = (
                     username in explicitly_configured_usernames
                 )
+                streamer.watch_streak_cache = self.watch_streak_cache
                 streamer.channel_id = self.twitch.get_channel_id(username)
                 streamer.settings = set_default_settings(
                     streamer.settings, Settings.streamer_settings
