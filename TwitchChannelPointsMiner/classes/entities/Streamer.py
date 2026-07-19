@@ -97,6 +97,7 @@ class Streamer(object):
         "streamer_url",
         "mutex",
         "last_drop_watch_signature",
+        "watch_streak_cache",
     ]
 
     def __init__(
@@ -131,6 +132,7 @@ class Streamer(object):
         self.raid = None
         self.history = {}
         self.last_drop_watch_signature = None
+        self.watch_streak_cache = None
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -147,9 +149,15 @@ class Streamer(object):
         )
 
     def set_offline(self):
+        broadcast_id = self.stream.broadcast_id
         if self.is_online is True:
             self.offline_at = time.time()
             self.is_online = False
+
+            if self.watch_streak_cache is not None:
+                self.watch_streak_cache.mark_ended(
+                    self.username, broadcast_id, ended_at=self.offline_at
+                )
 
         self.toggle_chat()
 
@@ -166,6 +174,14 @@ class Streamer(object):
             self.online_at = time.time()
             self.is_online = True
             self.stream.init_watch_streak()
+            if self.watch_streak_cache is not None:
+                session = self.watch_streak_cache.ensure(
+                    self.username,
+                    self.stream.broadcast_id,
+                    started_at=self.online_at,
+                )
+                if session is not None and session.claimed is True:
+                    self.stream.watch_streak_missing = False
 
         self.toggle_chat()
 
@@ -199,6 +215,10 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
+            if self.watch_streak_cache is not None:
+                self.watch_streak_cache.mark_claimed(
+                    self.username, self.stream.broadcast_id
+                )
             logger.info(
                 "[watch-streak] "
                 f"Twitch confirmed streak for streamer={self.username}; "
