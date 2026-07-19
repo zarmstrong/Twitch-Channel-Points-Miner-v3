@@ -72,6 +72,21 @@ def test_get_streamer_summary_handles_non_list_series(tmp_path, monkeypatch):
     }
 
 
+def test_get_streamer_summary_ignores_non_numeric_timestamps(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "malformed-series.json").write_text(
+        '{"series": [{"x": "later", "y": 999}, {"x": 10, "y": "bad"}]}',
+        encoding="utf-8",
+    )
+
+    assert get_streamer_summary("malformed-series.json") == {
+        "points": 0,
+        "last_activity": 10,
+    }
+
+
 def test_filter_datas_filters_and_sorts_chart_records():
     data = {
         "series": [
@@ -123,6 +138,26 @@ def test_filter_datas_defaults_missing_prior_balance_to_zero():
     )
 
     assert [entry["y"] for entry in result["series"]] == [0, 0]
+
+
+def test_filter_datas_ignores_malformed_numeric_fields():
+    result = filter_datas(
+        "1970-01-02",
+        "1970-01-02",
+        {
+            "series": [
+                {"x": "bad", "y": 999},
+                {"x": 1000, "y": "bad"},
+            ],
+            "annotations": [
+                {"x": "bad", "label": "invalid"},
+                {"x": 120000000, "label": "valid"},
+            ],
+        },
+    )
+
+    assert [entry["y"] for entry in result["series"]] == [0, 0]
+    assert [entry["label"] for entry in result["annotations"]] == ["valid"]
 
 
 def test_points_tab_reapplies_annotations_after_becoming_visible():

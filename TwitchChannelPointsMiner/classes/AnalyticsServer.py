@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 MAX_LOG_TAIL_BYTES = 1024 * 1024
 
 
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _number_or_zero(value):
+    return value if _is_number(value) else 0
+
+
 def bounded_log_start(file_size, last_received_index, tail_bytes=None):
     """Return a safe absolute offset for an analytics log response.
 
@@ -75,9 +83,10 @@ def filter_datas(start_date, end_date, datas):
                 entry
                 for entry in original_series
                 if isinstance(entry, dict)
+                and _is_number(entry.get("x"))
                 and start_date <= entry.get("x", -1) <= end_date
             ),
-            key=lambda entry: (entry.get("x", 0), entry.get("y", 0)),
+            key=lambda entry: (entry["x"], _number_or_zero(entry.get("y"))),
         )
     else:
         datas["series"] = []
@@ -95,7 +104,9 @@ def filter_datas(start_date, end_date, datas):
         earlier_entries = [
             entry
             for entry in original_series
-            if isinstance(entry, dict) and 0 <= entry.get("x", -1) <= start_date
+            if isinstance(entry, dict)
+            and _is_number(entry.get("x"))
+            and 0 <= entry["x"] <= start_date
         ]
         if earlier_entries == []:
             datas["series"] = []
@@ -103,8 +114,9 @@ def filter_datas(start_date, end_date, datas):
             return datas
         last_balance = max(
             earlier_entries,
-            key=lambda entry: (entry.get("x", 0), entry.get("y", 0)),
-        ).get("y", 0)
+            key=lambda entry: (entry["x"], _number_or_zero(entry.get("y"))),
+        )
+        last_balance = _number_or_zero(last_balance.get("y"))
 
         datas["series"] = [
             {"x": start_date, "y": last_balance, "z": "No Stream"},
@@ -118,6 +130,7 @@ def filter_datas(start_date, end_date, datas):
                 annotation
                 for annotation in raw_annotations
                 if isinstance(annotation, dict)
+                and _is_number(annotation.get("x"))
                 and start_date <= annotation.get("x", -1) <= end_date
             ),
             key=lambda annotation: annotation.get("x", 0),
@@ -188,15 +201,19 @@ def get_streamer_summary(streamer):
         series = []
 
     latest = max(
-        (entry for entry in series if isinstance(entry, dict)),
-        key=lambda entry: entry.get("x", 0),
+        (
+            entry
+            for entry in series
+            if isinstance(entry, dict) and _is_number(entry.get("x"))
+        ),
+        key=lambda entry: entry["x"],
         default=None,
     )
     if latest is None:
         return {"points": 0, "last_activity": 0}
     return {
-        "points": latest.get("y", 0),
-        "last_activity": latest.get("x", 0),
+        "points": _number_or_zero(latest.get("y")),
+        "last_activity": latest["x"],
     }
 
 
