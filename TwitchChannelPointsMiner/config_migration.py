@@ -36,6 +36,55 @@ def _source(source, node):
     return value
 
 
+def _loaded_names(nodes):
+    return {
+        child.id
+        for node in nodes
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    }
+
+
+def _assigned_names(node):
+    targets = []
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+
+    return {
+        child.id
+        for target in targets
+        for child in ast.walk(target)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
+    }
+
+
+def _supporting_assignments(source, tree, expression_nodes):
+    assignments = [
+        node for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+    ]
+    assignments_by_name = {}
+    for node in assignments:
+        for name in _assigned_names(node):
+            assignments_by_name.setdefault(name, []).append(node)
+
+    needed_names = _loaded_names(expression_nodes)
+    selected = set()
+    while needed_names:
+        name = needed_names.pop()
+        for node in assignments_by_name.get(name, []):
+            node_id = id(node)
+            if node_id in selected:
+                continue
+            selected.add(node_id)
+            value = node.value
+            if value is not None:
+                needed_names.update(_loaded_names([value]))
+
+    return [_source(source, node) for node in assignments if id(node) in selected]
+
+
 def _is_runner_import(node):
     return (
         isinstance(node, ast.ImportFrom)
@@ -133,12 +182,23 @@ def convert_runner_source(source, source_name="run.py"):
         imports.append(
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
         )
+    expression_nodes = [
+        *constructors[0].args,
+        *(keyword.value for keyword in constructors[0].keywords),
+        *mine.args,
+        *(keyword.value for keyword in mine.keywords),
+    ]
+    if analytics:
+        expression_nodes.extend(analytics[0].args)
+        expression_nodes.extend(keyword.value for keyword in analytics[0].keywords)
+    supporting_assignments = _supporting_assignments(source, tree, expression_nodes)
     output = [
         "# -*- coding: utf-8 -*-",
         f"# Automatically converted from {source_name}; review before editing.",
         "",
         *imports,
         "",
+        *(supporting_assignments + [""] if supporting_assignments else []),
         "MINER_CONFIG = "
         + _render_dict(
             source,

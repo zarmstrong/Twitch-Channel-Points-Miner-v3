@@ -101,6 +101,67 @@ miner.mine([])
     ]
 
 
+def test_convert_runner_source_preserves_streamer_settings_assignments():
+    converted = convert_runner_source(
+        '''\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+
+USERNAME = "alice"
+UNRELATED = "do not copy"
+DEFAULT_STREAMER_SETTINGS = StreamerSettings(
+    make_predictions=False,
+    follow_raid=False,
+    claim_drops=False,
+    claim_moments=False,
+    watch_streak=False,
+    favorite=True,
+    points_limit=50000,
+    community_goals=True,
+    bet=BetSettings(max_points=1234),
+    chat=ChatPresence.NEVER,
+)
+STREAMERS = [
+    Streamer(
+        "favorite_channel",
+        settings=StreamerSettings(favorite=True, points_limit=150000),
+    )
+]
+
+miner = TwitchChannelPointsMiner(
+    USERNAME,
+    streamer_settings=DEFAULT_STREAMER_SETTINGS,
+)
+miner.mine(STREAMERS)
+'''
+    )
+    namespace = {}
+
+    exec(converted, namespace)
+
+    defaults = namespace["MINER_CONFIG"]["streamer_settings"]
+    assert {
+        name: getattr(defaults, name) for name in defaults.__slots__
+    } == {
+        "make_predictions": False,
+        "follow_raid": False,
+        "claim_drops": False,
+        "claim_moments": False,
+        "watch_streak": False,
+        "favorite": True,
+        "points_limit": 50000,
+        "community_goals": True,
+        "bet": defaults.bet,
+        "chat": namespace["ChatPresence"].NEVER,
+    }
+    assert defaults.bet.max_points == 1234
+    assert namespace["STREAMERS"][0].settings.favorite is True
+    assert namespace["STREAMERS"][0].settings.points_limit == 150000
+    assert "UNRELATED =" not in converted
+
+
 def test_convert_runner_source_rejects_configuration_with_missing_imports():
     source = '''\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner

@@ -889,6 +889,8 @@ Webhook(
 | `claim_drops` | bool | `True` | Accumulate Drop watch progress and claim available Drops. |
 | `claim_moments` | bool | `True` | Claim available [Moments](https://help.twitch.tv/s/article/moments). |
 | `watch_streak` | bool | `True` | Prioritize available watch-streak rewards. |
+| `favorite` | bool | `False` | Prioritize this streamer when `Priority.FAVORITE` is configured. |
+| `points_limit` | int or None | `None` | Stop watching at this balance, except for an eligible pending watch streak. |
 | `community_goals` | bool | `False` | Contribute the maximum allowed points to community goals. |
 | `bet` | BetSettings | Default settings | Configure prediction strategy, limits, filters, and timing. |
 | `chat` | ChatPresence | `ONLINE` | Control when the miner joins IRC chat. |
@@ -1160,7 +1162,9 @@ converter maps them as follows:
 | Keyword arguments to `.mine(...)` | `MINE_CONFIG` |
 | Arguments to `.analytics(...)` | `ANALYTICS_CONFIG`, or `None` when absent |
 
-Imports needed by enums and settings objects are retained. Expanded `**kwargs`,
+Imports and supporting assignments needed by configuration expressions are
+retained, including `StreamerSettings` defaults and per-streamer overrides.
+Unrelated assignments are omitted. Expanded `**kwargs`,
 extra positional arguments, multiple miner/mine calls, or syntax errors cannot
 be converted safely.
 
