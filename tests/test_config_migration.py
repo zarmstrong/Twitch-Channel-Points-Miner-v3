@@ -133,6 +133,33 @@ ANALYTICS_CONFIG = None
     assert namespace["DEFAULT_SETTINGS"].points_limit is None
 
 
+def test_migrate_config_source_adds_separator_after_nested_final_setting():
+    source = '''\
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
+from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+DEFAULT_SETTINGS = StreamerSettings(
+    bet=BetSettings(
+        max_points=1234,
+    )
+)
+MINER_CONFIG = {
+    "priority": [Priority.ORDER],
+    "streamer_settings": DEFAULT_SETTINGS,
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["DEFAULT_SETTINGS"].bet.max_points == 1234
+    assert namespace["DEFAULT_SETTINGS"].points_limit is None
+
+
 def test_migrate_config_source_leaves_expanded_streamer_settings_untouched():
     source = '''\
 from TwitchChannelPointsMiner.classes.Settings import Priority
@@ -174,6 +201,23 @@ def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     assert stat.S_IMODE(config.stat().st_mode) == 0o640
     assert stat.S_IMODE(backup.stat().st_mode) == 0o640
     assert migrate_config(config) is False
+
+
+def test_migrate_config_recovers_invalid_previous_migration_from_backup(tmp_path):
+    config = tmp_path / "config.py"
+    backup = tmp_path / "config.py.v0.bak"
+    corrupted = "CONFIG_VERSION = 1\nMINER_CONFIG = {invalid syntax}\n"
+    config.write_text(corrupted, encoding="utf-8")
+    backup.write_text(CONFIG, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    recovered = config.read_text(encoding="utf-8")
+    namespace = {}
+    exec(recovered, namespace)
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert namespace["DEFAULT_SETTINGS"].points_limit is None
+    assert backup.read_text(encoding="utf-8") == CONFIG
 
 
 def test_migrate_config_rejects_future_version():

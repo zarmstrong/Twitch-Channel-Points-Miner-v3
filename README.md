@@ -551,6 +551,9 @@ backed up as `config.py.v0.bak` and upgraded in place. The migration adds missin
 global `StreamerSettings` fields with their defaults and appends newly introduced
 priority values to the existing priority list without reordering it. A config
 created by a newer unsupported release is rejected rather than rewritten.
+Generated Python is parsed before replacement. If an earlier migration left an
+invalid file and a versioned backup exists, startup rebuilds the config from that
+backup without overwriting it.
 
 #### Configuration reload limitations
 

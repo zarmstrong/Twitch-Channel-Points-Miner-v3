@@ -99,7 +99,7 @@ def _closing_line_insertion(source, line_offsets, node, lines):
             separator = "" if closing_prefix.endswith((" ", "\t")) else " "
         else:
             separator = ", " if candidates else ""
-        return closing_offset, separator + ", ".join(lines)
+        return [(closing_offset, separator + ", ".join(lines))]
 
     if candidates:
         indent = source[
@@ -109,7 +109,13 @@ def _closing_line_insertion(source, line_offsets, node, lines):
         ]
     else:
         indent = closing_prefix + "    "
-    return closing_line_start, "".join(f"{indent}{line},\n" for line in lines)
+    insertions = [(closing_line_start, "".join(f"{indent}{line},\n" for line in lines))]
+    if candidates:
+        last = candidates[-1]
+        last_end = _source_offset(line_offsets, last.end_lineno, last.end_col_offset)
+        if not source[last_end:closing_offset].lstrip().startswith(","):
+            insertions.append((last_end, ","))
+    return insertions
 
 
 def _config_version(tree):
@@ -155,7 +161,7 @@ def migrate_config_source(source, source_name="config.py"):
             if name not in existing
         ]
         if missing:
-            edits.append(
+            edits.extend(
                 _closing_line_insertion(
                     source, line_offsets, streamer_settings, missing
                 )
@@ -168,7 +174,7 @@ def migrate_config_source(source, source_name="config.py"):
             value for value in CONFIG_PRIORITY_ADDITIONS if value not in existing
         ]
         if missing:
-            edits.append(
+            edits.extend(
                 _closing_line_insertion(source, line_offsets, priority, missing)
             )
 
@@ -196,6 +202,12 @@ def migrate_config_source(source, source_name="config.py"):
     ]
     for start, end, replacement in sorted(normalized_edits, reverse=True):
         migrated = migrated[:start] + replacement + migrated[end:]
+    try:
+        ast.parse(migrated, filename=source_name)
+    except SyntaxError as error:
+        raise ConfigMigrationError(
+            f"Migration generated invalid {source_name}: {error}"
+        ) from error
     return migrated, version, CONFIG_VERSION
 
 
@@ -206,23 +218,40 @@ def migrate_config(config_path):
             f"Refusing to migrate symlinked configuration {path}"
         )
     source = path.read_text(encoding="utf-8")
-    migrated, old_version, new_version = migrate_config_source(source, path.name)
+    recovery_backup = None
+    try:
+        migrated, old_version, new_version = migrate_config_source(source, path.name)
+    except ConfigMigrationError as error:
+        if not isinstance(error.__cause__, SyntaxError):
+            raise
+        backups = [
+            backup
+            for backup in sorted(path.parent.glob(f"{path.name}.v*.bak"))
+            if not backup.is_symlink() and backup.is_file()
+        ]
+        if not backups:
+            raise
+        recovery_backup = backups[-1]
+        source = recovery_backup.read_text(encoding="utf-8")
+        migrated, old_version, new_version = migrate_config_source(source, path.name)
     if migrated == source:
         return False
 
     backup = path.with_name(f"{path.name}.v{old_version}.bak")
-    if backup.exists():
+    if recovery_backup is None and backup.exists():
         raise ConfigMigrationError(f"Refusing to overwrite existing {backup}")
 
     temporary = path.with_name(path.name + ".migrating")
-    shutil.copy2(path, backup)
+    if recovery_backup is None:
+        shutil.copy2(path, backup)
     try:
         temporary.write_text(migrated, encoding="utf-8")
         os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
         os.replace(temporary, path)
     except Exception:
         temporary.unlink(missing_ok=True)
-        backup.unlink(missing_ok=True)
+        if recovery_backup is None:
+            backup.unlink(missing_ok=True)
         raise
     return old_version != new_version
 
