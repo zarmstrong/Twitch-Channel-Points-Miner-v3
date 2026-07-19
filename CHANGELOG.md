@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.4.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.3.0...3.4.0) (2026-07-19)
+
+
+### Features
+
+* improve analytics reliability and drop reporting ([#21](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/21)) ([02aa6d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/02aa6d647b07681991d56126aeb4e9ce5671ff03))
+
+
+### Bug Fixes
+
+* harden GQL request retries ([#23](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/23)) ([4fbced7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/4fbced7164f3796a62ffd58bca4cbf28dbfaea95))
+
 ## [3.3.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.2.0...3.3.0) (2026-07-18)
 
 
