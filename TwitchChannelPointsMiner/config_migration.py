@@ -141,6 +141,7 @@ def migrate_config_source(source, source_name="config.py"):
     if (
         isinstance(streamer_settings, ast.Call)
         and _call_name(streamer_settings.func) == "StreamerSettings"
+        and all(keyword.arg is not None for keyword in streamer_settings.keywords)
     ):
         existing = {keyword.arg for keyword in streamer_settings.keywords}
         missing = [

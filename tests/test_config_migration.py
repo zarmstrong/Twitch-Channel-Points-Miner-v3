@@ -113,6 +113,35 @@ ANALYTICS_CONFIG = None
     assert namespace["DEFAULT_SETTINGS"].points_limit is None
 
 
+def test_migrate_config_source_leaves_expanded_streamer_settings_untouched():
+    source = '''\
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+STREAMER_OVERRIDES = {"favorite": True, "points_limit": 50000}
+DEFAULT_SETTINGS = StreamerSettings(**STREAMER_OVERRIDES)
+MINER_CONFIG = {
+    "priority": [Priority.ORDER],
+    "streamer_settings": DEFAULT_SETTINGS,
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    settings = namespace["DEFAULT_SETTINGS"]
+    assert settings.favorite is True
+    assert settings.points_limit == 50000
+    assert "StreamerSettings(**STREAMER_OVERRIDES)" in migrated
+    assert namespace["MINER_CONFIG"]["priority"] == [
+        namespace["Priority"].ORDER,
+        namespace["Priority"].FAVORITE,
+    ]
+
+
 def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(CONFIG, encoding="utf-8")
