@@ -49,6 +49,24 @@ def test_migrate_analytics_directory_rejects_future_versions(tmp_path):
         migrate_analytics_directory(tmp_path)
 
 
+def test_migrate_analytics_directory_skips_symlinks(tmp_path):
+    external = tmp_path / "external-data"
+    external.mkdir()
+    target = external / "private.json"
+    original = {"series": [{"x": 1, "y": 10}]}
+    target.write_text(json.dumps(original), encoding="utf-8")
+    link = tmp_path / "linked.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("Creating symlinks is not supported in this environment")
+
+    assert migrate_analytics_directory(tmp_path) == 0
+
+    assert json.loads(target.read_text(encoding="utf-8")) == original
+    assert not (tmp_path / "linked.json.v0.bak").exists()
+
+
 def test_new_streamer_analytics_include_version(tmp_path):
     Settings.analytics_path = str(tmp_path)
     streamer = Streamer("channel")

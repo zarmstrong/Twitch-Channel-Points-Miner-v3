@@ -58,7 +58,12 @@ def migrate_analytics_directory(directory):
     path = Path(directory)
     if not path.is_dir():
         return 0
+    candidates = [
+        file_path
+        for file_path in sorted(path.glob("*.json"))
+        if not file_path.is_symlink() and file_path.is_file()
+    ]
     return sum(
         _migrate_json_file(file_path, ANALYTICS_DATA_VERSION)
-        for file_path in sorted(path.glob("*.json"))
+        for file_path in candidates
     )

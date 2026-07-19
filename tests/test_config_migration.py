@@ -137,6 +137,22 @@ def test_migrate_config_rejects_future_version():
         migrate_config_source(future)
 
 
+def test_migrate_config_rejects_symlink_without_reading_target(tmp_path):
+    target = tmp_path / "external.py"
+    target.write_text(CONFIG, encoding="utf-8")
+    config = tmp_path / "config.py"
+    try:
+        config.symlink_to(target)
+    except OSError:
+        pytest.skip("Creating symlinks is not supported in this environment")
+
+    with pytest.raises(ConfigMigrationError, match="symlinked configuration"):
+        migrate_config(config)
+
+    assert target.read_text(encoding="utf-8") == CONFIG
+    assert not (tmp_path / "config.py.v0.bak").exists()
+
+
 def test_convert_runner_source_preserves_configuration_expressions():
     converted = convert_runner_source(RUNNER)
     namespace = {}

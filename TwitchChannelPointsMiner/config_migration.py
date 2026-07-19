@@ -195,6 +195,10 @@ def migrate_config_source(source, source_name="config.py"):
 
 def migrate_config(config_path):
     path = Path(config_path)
+    if path.is_symlink():
+        raise ConfigMigrationError(
+            f"Refusing to migrate symlinked configuration {path}"
+        )
     source = path.read_text(encoding="utf-8")
     migrated, old_version, new_version = migrate_config_source(source, path.name)
     if migrated == source:
