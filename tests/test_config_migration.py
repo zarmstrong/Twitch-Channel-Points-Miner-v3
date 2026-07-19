@@ -381,6 +381,52 @@ ANALYTICS_CONFIG = None
     ]
 
 
+def test_migration_leaves_per_streamer_overrides_sparse():
+    source = '''\
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+DEFAULT_SETTINGS = StreamerSettings(
+    make_predictions=True,
+    bet=BetSettings(strategy=Strategy.SMART),
+)
+MINER_CONFIG = {
+    "username": "alice",
+    "priority": [Priority.ORDER],
+    "streamer_settings": DEFAULT_SETTINGS,
+}
+STREAMERS = [
+    Streamer(
+        "channel",
+        settings=StreamerSettings(
+            make_predictions=False,
+            follow_raid=True,
+            bet=BetSettings(max_points=1234),
+        ),
+    ),
+]
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    global_settings = namespace["DEFAULT_SETTINGS"]
+    override = namespace["STREAMERS"][0].settings
+    assert global_settings.points_limit is None
+    assert global_settings.bet.minimum_points is None
+    assert override.make_predictions is False
+    assert override.follow_raid is True
+    assert override.claim_moments is None
+    assert override.favorite is None
+    assert override.points_limit is None
+    assert override.bet.max_points == 1234
+    assert override.bet.minimum_points is None
+    assert "StreamerSettings(\n            make_predictions=False,\n            follow_raid=True,\n            bet=BetSettings(max_points=1234),\n        )" in migrated
+
+
 def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(CONFIG, encoding="utf-8")

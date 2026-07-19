@@ -150,6 +150,15 @@ def _dict_names(node):
     }
 
 
+def _call_keyword(node, name):
+    if not isinstance(node, ast.Call):
+        return None
+    for keyword in node.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
 def _resolve_value(tree, node):
     seen = set()
     while isinstance(node, ast.Name) and node.id not in seen:
@@ -400,18 +409,17 @@ def migrate_config_source(source, source_name="config.py"):
         edits.extend(
             _closing_line_insertion(source, line_offsets, config, missing_miner_options)
         )
-    for streamer_settings in _find_calls(tree, "StreamerSettings"):
-        missing = _missing_call_defaults(
-            streamer_settings, "StreamerSettings", STREAMER_SETTINGS_DEFAULTS
+    streamer_settings = _resolve_value(tree, _dict_value(config, "streamer_settings"))
+    missing = _missing_call_defaults(
+        streamer_settings, "StreamerSettings", STREAMER_SETTINGS_DEFAULTS
+    )
+    if missing:
+        edits.extend(
+            _closing_line_insertion(source, line_offsets, streamer_settings, missing)
         )
-        if missing:
-            edits.extend(
-                _closing_line_insertion(
-                    source, line_offsets, streamer_settings, missing
-                )
-            )
 
-    for bet_settings in _find_calls(tree, "BetSettings"):
+    bet_settings = _resolve_value(tree, _call_keyword(streamer_settings, "bet"))
+    if bet_settings is not None:
         missing = _missing_call_defaults(
             bet_settings, "BetSettings", BET_SETTINGS_DEFAULTS
         )
