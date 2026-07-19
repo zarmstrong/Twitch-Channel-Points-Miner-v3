@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
@@ -165,3 +166,13 @@ def test_analytics_error_clears_only_after_both_endpoints_recover():
     )[0]
     assert "dropsLoaded = true;" in drops_request
     assert "dropsLoaded = false;" in drops_request
+
+
+def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
+    template = (
+        Path(__file__).resolve().parents[1] / "assets" / "charts.html"
+    ).read_text(encoding="utf-8")
+    blank_links = re.findall(r'<a\b[^>]*target="_blank"[^>]*>', template)
+
+    assert blank_links
+    assert all('rel="noopener noreferrer"' in link for link in blank_links)
