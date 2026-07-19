@@ -71,7 +71,18 @@ def is_recoverable_error(e: Exception) -> bool:
     """
     if isinstance(e, requests.exceptions.RequestException):
         response = getattr(e, "response", None)
-        return response is None or response.status_code not in (401, 403)
+        if response is None:
+            return isinstance(
+                e,
+                (
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                ),
+            )
+        return (
+            response.status_code in (408, 425, 429) or 500 <= response.status_code < 600
+        )
     if isinstance(e, GQLError):
         return e.recoverable()
     return False
@@ -79,15 +90,16 @@ def is_recoverable_error(e: Exception) -> bool:
 
 def error_context(e: Exception) -> str | None:
     """
-    Returns a context string (or None) for the given Error. GQLErrors are well understood and so don't need context,
-    anything else is likely a bug and so does need context.
+    Returns a context string (or None) for the given Error. GQLErrors and
+    retryable request or transport errors are well understood and don't need
+    context; anything else is likely a bug and does need context.
     :param e: The Exception to check.
     :return: The context string, or None if no context is needed.
     """
-    if not isinstance(e, GQLError):
-        return traceback.format_exc()
-    else:
+    if isinstance(e, GQLError) or is_recoverable_error(e):
         return None
+    else:
+        return traceback.format_exc()
 
 
 def parse_raw_response(value: Any) -> dict:
@@ -123,7 +135,12 @@ class GQL:
         self.attempt_strategy = (
             attempt_strategy
             if attempt_strategy is not None
-            else AttemptStrategy(attempts=3, attempt_interval_seconds=1)
+            else AttemptStrategy(
+                attempts=3,
+                attempt_interval_seconds=1,
+                backoff_multiplier=2,
+                max_interval_seconds=10,
+            )
         )
         """Strategy for handling failed requests."""
         self.parser = Parser() if parser is None else parser
