@@ -1,3 +1,4 @@
+import importlib
 from types import SimpleNamespace
 from threading import Event
 
@@ -13,7 +14,11 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
     InvalidJsonShapeException,
     RetryError,
 )
-from TwitchChannelPointsMiner.classes.gql.Integration import GQL
+from TwitchChannelPointsMiner.classes.gql.Integration import (
+    GQL,
+    error_context,
+    is_recoverable_error,
+)
 from TwitchChannelPointsMiner.classes.gql.data.Parser import (
     Parser,
     expect_int,
@@ -304,6 +309,83 @@ def test_exhausted_transport_retries_raise_retry_error():
     assert len(error.value.errors) == 2
 
 
+@pytest.mark.parametrize("status_code", [408, 425, 429, 500, 503])
+def test_retries_transient_http_statuses(status_code):
+    attempts = 0
+
+    def post(url, json, headers):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return FakeResponse({}, status_code=status_code)
+        return FakeResponse(
+            {
+                "data": {"user": {"id": "123"}},
+                "extensions": {"operationName": "GetIDFromLogin"},
+            }
+        )
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=2, attempt_interval_seconds=0),
+        post_request=post,
+    )
+
+    assert gql.get_id_from_login("example").id == "123"
+    assert attempts == 2
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
+def test_does_not_retry_permanent_http_statuses(status_code):
+    attempts = 0
+
+    def post(url, json, headers):
+        nonlocal attempts
+        attempts += 1
+        return FakeResponse({}, status_code=status_code)
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=3, attempt_interval_seconds=0),
+        post_request=post,
+    )
+
+    with pytest.raises(RetryError):
+        gql.get_id_from_login("example")
+
+    assert attempts == 1
+
+
+def test_transport_errors_do_not_capture_noisy_traceback():
+    assert error_context(requests.ConnectionError("offline")) is None
+
+
+def test_non_transport_errors_keep_debugging_traceback():
+    try:
+        raise ValueError("bad parser")
+    except ValueError as error:
+        context = error_context(error)
+
+    assert context is not None
+    assert "ValueError: bad parser" in context
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.ConnectionError("offline"),
+        requests.ReadTimeout("slow"),
+        requests.exceptions.ChunkedEncodingError("truncated"),
+    ],
+)
+def test_recoverable_transport_errors(error):
+    assert is_recoverable_error(error) is True
+
+
+def test_non_transport_request_errors_are_not_retried():
+    assert is_recoverable_error(requests.exceptions.InvalidURL("invalid")) is False
+
+
 def test_unauthorized_response_invokes_recovery_callback():
     recovered = []
     gql = GQL(
@@ -401,11 +483,50 @@ def test_empty_batch_returns_without_making_http_request():
             {"attempt_interval_seconds": -1},
             "attempt_interval_seconds must be a non-negative number",
         ),
+        (
+            {"backoff_multiplier": 0.5},
+            "backoff_multiplier must be a number greater than or equal to 1",
+        ),
+        (
+            {"max_interval_seconds": -1},
+            "max_interval_seconds must be a non-negative number or None",
+        ),
     ],
 )
 def test_attempt_strategy_rejects_invalid_configuration(kwargs, message):
     with pytest.raises(ValueError, match=message):
         AttemptStrategy(**kwargs)
+
+
+def test_attempt_strategy_applies_bounded_exponential_backoff(monkeypatch):
+    sleeps = []
+    attempts = 0
+
+    def fail():
+        nonlocal attempts
+        attempts += 1
+        raise requests.ConnectionError("offline")
+
+    attempt_strategy_module = importlib.import_module(
+        "TwitchChannelPointsMiner.utils.AttemptStrategy"
+    )
+    monkeypatch.setattr(attempt_strategy_module.time, "sleep", sleeps.append)
+    strategy = AttemptStrategy(
+        attempts=4,
+        attempt_interval_seconds=1,
+        backoff_multiplier=3,
+        max_interval_seconds=5,
+    )
+
+    result = strategy.make_attempts(
+        fail,
+        lambda value: None,
+        lambda error: True,
+        lambda error: None,
+    )
+
+    assert result.attempts == 4
+    assert sleeps == [1, 3, 5]
 
 
 def test_channel_follows_stops_when_next_page_has_no_new_cursor(caplog):
