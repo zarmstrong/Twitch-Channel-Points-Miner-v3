@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -100,6 +101,10 @@ def _normalize_badge_drop_streamer_limit(limit):
         "badge_drop_streamer_limit must be either 1 or 2; using the default value 1"
     )
     return 1
+
+
+def _unique_streamer_names(streamer_names):
+    return list(dict.fromkeys(streamer_names))
 
 
 def _drop_progress_report_entries(original, current):
@@ -552,76 +557,95 @@ class TwitchChannelPointsMiner:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
 
+            streamers_name = _unique_streamer_names(streamers_name)
             logger.info(
                 f"Loading data for {len(streamers_name)} streamers. Please wait...",
                 extra={"emoji": ":nerd_face:"},
             )
-            for username in streamers_name:
-                if username in streamers_name:
-                    time.sleep(random.uniform(0.3, 0.7))
-                    try:
-                        is_follower_streamer = username in follower_usernames
-                        is_category_streamer = (
-                            username in category_usernames
-                            and username not in explicitly_configured_usernames
-                            and is_follower_streamer is False
-                        )
-                        streamer = (
-                            streamers_dict[username]
-                            if isinstance(streamers_dict[username], Streamer) is True
-                            else Streamer(
-                                username,
-                                settings=(
-                                    StreamerSettings(chat=category_chat)
-                                    if is_category_streamer is True
-                                    and category_chat is not None
-                                    else None
-                                ),
-                                from_followers=is_follower_streamer,
-                                from_category=is_category_streamer,
-                                explicitly_configured=(
-                                    username in explicitly_configured_usernames
-                                ),
-                            )
-                        )
-                        streamer.explicitly_configured = (
+
+            def build_streamer(username):
+                time.sleep(random.uniform(0.15, 0.35))
+                is_follower_streamer = username in follower_usernames
+                is_category_streamer = (
+                    username in category_usernames
+                    and username not in explicitly_configured_usernames
+                    and is_follower_streamer is False
+                )
+                streamer = (
+                    streamers_dict[username]
+                    if isinstance(streamers_dict[username], Streamer) is True
+                    else Streamer(
+                        username,
+                        settings=(
+                            StreamerSettings(chat=category_chat)
+                            if is_category_streamer is True
+                            and category_chat is not None
+                            else None
+                        ),
+                        from_followers=is_follower_streamer,
+                        from_category=is_category_streamer,
+                        explicitly_configured=(
                             username in explicitly_configured_usernames
-                        )
-                        streamer.channel_id = self.twitch.get_channel_id(username)
-                        streamer.settings = set_default_settings(
-                            streamer.settings, Settings.streamer_settings
-                        )
-                        streamer.settings.bet = set_default_settings(
-                            streamer.settings.bet, Settings.streamer_settings.bet
-                        )
-                        if streamer.settings.chat != ChatPresence.NEVER:
-                            streamer.irc_chat = ThreadChat(
-                                self.username,
-                                self.twitch.twitch_login.get_auth_token(),
-                                streamer.username,
+                        ),
+                    )
+                )
+                streamer.explicitly_configured = (
+                    username in explicitly_configured_usernames
+                )
+                streamer.channel_id = self.twitch.get_channel_id(username)
+                streamer.settings = set_default_settings(
+                    streamer.settings, Settings.streamer_settings
+                )
+                streamer.settings.bet = set_default_settings(
+                    streamer.settings.bet, Settings.streamer_settings.bet
+                )
+                if streamer.settings.chat != ChatPresence.NEVER:
+                    streamer.irc_chat = ThreadChat(
+                        self.username,
+                        self.twitch.twitch_login.get_auth_token(),
+                        streamer.username,
+                    )
+                return streamer
+
+            loaded_streamers = [None] * len(streamers_name)
+            workers = min(10, len(streamers_name))
+            if workers:
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="Streamer bootstrap"
+                ) as executor:
+                    futures = {
+                        executor.submit(build_streamer, username): (index, username)
+                        for index, username in enumerate(streamers_name)
+                    }
+                    for future in as_completed(futures):
+                        index, username = futures[future]
+                        try:
+                            loaded_streamers[index] = future.result()
+                        except StreamerDoesNotExistException:
+                            logger.info(
+                                f"Streamer {username} does not exist",
+                                extra={"emoji": ":cry:"},
                             )
-                        self.streamers.append(streamer)
-                    except StreamerDoesNotExistException:
-                        logger.info(
-                            f"Streamer {username} does not exist",
-                            extra={"emoji": ":cry:"},
-                        )
+                        except Exception:
+                            logger.error(
+                                f"Failed to load streamer {username}", exc_info=True
+                            )
+
+            self.streamers = [
+                streamer for streamer in loaded_streamers if streamer is not None
+            ]
 
             # Populate the streamers with default values.
             # 1. Load channel points and auto-claim bonus
             # 2. Check if streamers are online
             # 3. DEACTIVATED: Check if the user is a moderator. (was used before the 5th of April 2021 to deactivate predictions)
-            for streamer in self.streamers:
-                time.sleep(random.uniform(0.3, 0.7))
-                try:
-                    self.twitch.load_channel_points_context(streamer)
-                    self.twitch.check_streamer_online(streamer)
-                    # self.twitch.viewer_is_mod(streamer)
-                except StreamerDoesNotExistException:
-                    logger.info(
-                        f"Streamer {streamer.username} does not exist",
-                        extra={"emoji": ":cry:"},
-                    )
+            invalid_streamers = self.twitch.initialize_streamers_context(self.streamers)
+            if invalid_streamers:
+                self.streamers = [
+                    streamer
+                    for streamer in self.streamers
+                    if streamer.username not in invalid_streamers
+                ]
 
             self.original_streamers = [
                 streamer.channel_points for streamer in self.streamers

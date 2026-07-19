@@ -13,6 +13,7 @@ import re
 import string
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from secrets import choice, token_hex
@@ -2090,6 +2091,59 @@ class Twitch(object):
         except RetryError as error:
             logger.error(f"Unable to load moderator status for {streamer}: {error}")
             streamer.viewer_is_mod = False
+
+    def initialize_streamers_context(self, streamers, max_workers=10):
+        """Load initial points and online state concurrently.
+
+        Results are applied directly to each streamer, while the returned set lets
+        the caller remove only streamers whose initialization failed.
+        """
+        if not streamers:
+            return set()
+
+        failed_streamers = set()
+        # Resolve the account ID before worker threads call update_stream(). A cache
+        # miss uses TwitchLogin's shared requests.Session, which is not thread-safe.
+        try:
+            self.twitch_login.get_user_id()
+        except Exception:
+            logger.error(
+                "Failed to preload user ID; initializing streamer contexts " "serially",
+                exc_info=True,
+            )
+            max_workers = 1
+
+        def load_context(streamer):
+            time.sleep(random.uniform(0.15, 0.35))
+            self.load_channel_points_context(streamer)
+            self.check_streamer_online(streamer)
+
+        workers = max(1, min(max_workers, len(streamers)))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="Streamer context"
+        ) as executor:
+            futures = {
+                executor.submit(load_context, streamer): streamer
+                for streamer in streamers
+            }
+            for future in as_completed(futures):
+                streamer = futures[future]
+                try:
+                    future.result()
+                except StreamerDoesNotExistException:
+                    failed_streamers.add(streamer.username)
+                    logger.info(
+                        f"Streamer {streamer.username} does not exist",
+                        extra={"emoji": ":cry:"},
+                    )
+                except Exception:
+                    failed_streamers.add(streamer.username)
+                    logger.error(
+                        f"Failed to initialize streamer {streamer.username}",
+                        exc_info=True,
+                    )
+
+        return failed_streamers
 
     # === 'GLOBALS' METHODS === #
     # Create chunk of sleep of speed-up the break loop after CTRL+C
