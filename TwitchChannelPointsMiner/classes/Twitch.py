@@ -2102,6 +2102,9 @@ class Twitch(object):
             return set()
 
         failed_streamers = set()
+        # Resolve the account ID before worker threads call update_stream(). A cache
+        # miss uses TwitchLogin's shared requests.Session, which is not thread-safe.
+        self.twitch_login.get_user_id()
 
         def load_context(streamer):
             time.sleep(random.uniform(0.15, 0.35))

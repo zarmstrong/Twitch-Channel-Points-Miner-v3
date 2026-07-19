@@ -7,13 +7,24 @@ from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
 
+class TwitchLoginStub:
+    def __init__(self):
+        self.user_id_loaded = False
+
+    def get_user_id(self):
+        self.user_id_loaded = True
+        return 1234
+
+
 def test_initialize_streamers_context_runs_work_in_parallel(monkeypatch):
     twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = TwitchLoginStub()
     streamers = [Streamer(f"streamer{index}") for index in range(3)]
     barrier = threading.Barrier(len(streamers), timeout=2)
     initialized = []
 
     def load_channel_points_context(_twitch, streamer):
+        assert twitch.twitch_login.user_id_loaded is True
         barrier.wait()
         initialized.append(("points", streamer.username))
 
@@ -41,6 +52,7 @@ def test_initialize_streamers_context_runs_work_in_parallel(monkeypatch):
 
 def test_initialize_streamers_context_isolates_individual_failures(monkeypatch):
     twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = TwitchLoginStub()
     streamers = [Streamer("valid"), Streamer("missing"), Streamer("broken")]
     checked_online = []
 
