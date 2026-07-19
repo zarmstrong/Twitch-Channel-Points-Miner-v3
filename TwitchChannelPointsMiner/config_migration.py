@@ -8,6 +8,7 @@ import hashlib
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 CONFIG_VERSION = 4
@@ -521,7 +522,8 @@ def migrate_config(config_path):
         raise ConfigMigrationError(
             f"Refusing to migrate symlinked configuration {path}"
         )
-    source = path.read_text(encoding="utf-8")
+    current_source = path.read_text(encoding="utf-8")
+    source = current_source
     recovery_backup = None
     try:
         migrated, old_version, new_version = migrate_config_source(source, path.name)
@@ -538,26 +540,37 @@ def migrate_config(config_path):
         recovery_backup = backups[-1]
         source = recovery_backup.read_text(encoding="utf-8")
         migrated, old_version, new_version = migrate_config_source(source, path.name)
-    if migrated == source:
+    if migrated == current_source:
         return False
 
     backup = path.with_name(f"{path.name}.v{old_version}.bak")
     if recovery_backup is None and backup.exists():
         raise ConfigMigrationError(f"Refusing to overwrite existing {backup}")
 
-    temporary = path.with_name(path.name + ".migrating")
     if recovery_backup is None:
         shutil.copy2(path, backup)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor = None
+    temporary = None
     try:
-        temporary.write_text(migrated, encoding="utf-8")
-        os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".migrating", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(migrated)
+        os.chmod(temporary, mode)
         os.replace(temporary, path)
     except Exception:
-        temporary.unlink(missing_ok=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         if recovery_backup is None:
             backup.unlink(missing_ok=True)
         raise
-    return old_version != new_version
+    return recovery_backup is not None or old_version != new_version
 
 
 def _call_name(node):

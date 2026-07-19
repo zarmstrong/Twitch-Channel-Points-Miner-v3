@@ -96,6 +96,22 @@ def test_migrate_analytics_directory_rejects_symlinked_root(tmp_path):
         migrate_analytics_directory(link)
 
 
+def test_analytics_migration_does_not_follow_predictable_temporary_symlink(tmp_path):
+    path = tmp_path / "channel.json"
+    path.write_text(json.dumps({"series": []}), encoding="utf-8")
+    external = tmp_path / "external.txt"
+    external.write_text("do not overwrite", encoding="utf-8")
+    predictable = tmp_path / "channel.json.migrating"
+    try:
+        predictable.symlink_to(external)
+    except OSError:
+        pytest.skip("Creating symlinks is not supported in this environment")
+
+    assert migrate_analytics_directory(tmp_path) == 1
+    assert external.read_text(encoding="utf-8") == "do not overwrite"
+    assert predictable.is_symlink()
+
+
 def test_new_streamer_analytics_include_version(tmp_path):
     Settings.analytics_path = str(tmp_path)
     streamer = Streamer("channel")

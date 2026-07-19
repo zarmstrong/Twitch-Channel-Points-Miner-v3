@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 ANALYTICS_DATA_VERSION = 1
@@ -38,17 +39,26 @@ def _migrate_json_file(path, current_version):
     if backup.exists():
         raise DataMigrationError(f"Refusing to overwrite existing {backup}")
 
-    temporary = path.with_name(path.name + ".migrating")
     payload["version"] = current_version
     shutil.copy2(path, backup)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor = None
+    temporary = None
     try:
-        temporary.write_text(
-            json.dumps(payload, indent=4, ensure_ascii=False), encoding="utf-8"
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".migrating", dir=path.parent
         )
-        os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            json.dump(payload, handle, indent=4, ensure_ascii=False)
+        os.chmod(temporary, mode)
         os.replace(temporary, path)
     except Exception:
-        temporary.unlink(missing_ok=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         backup.unlink(missing_ok=True)
         raise
     return True

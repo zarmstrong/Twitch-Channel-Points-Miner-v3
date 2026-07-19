@@ -379,6 +379,33 @@ def test_migrate_config_recovers_invalid_previous_migration_from_backup(tmp_path
     assert backup.read_text(encoding="utf-8") == CONFIG
 
 
+def test_migrate_config_rewrites_invalid_file_from_current_version_backup(tmp_path):
+    config = tmp_path / "config.py"
+    backup = tmp_path / "config.py.v0.bak"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text("CONFIG_VERSION = 4\nMINER_CONFIG = {invalid syntax}\n", encoding="utf-8")
+    backup.write_text(current, encoding="utf-8")
+
+    assert migrate_config(config) is True
+    assert config.read_text(encoding="utf-8") == current
+
+
+def test_migrate_config_does_not_follow_predictable_temporary_symlink(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(CONFIG, encoding="utf-8")
+    external = tmp_path / "external.py"
+    external.write_text("do not overwrite", encoding="utf-8")
+    predictable = tmp_path / "config.py.migrating"
+    try:
+        predictable.symlink_to(external)
+    except OSError:
+        pytest.skip("Creating symlinks is not supported in this environment")
+
+    assert migrate_config(config) is True
+    assert external.read_text(encoding="utf-8") == "do not overwrite"
+    assert predictable.is_symlink()
+
+
 def test_migrate_config_rejects_future_version():
     future = CONFIG.replace(
         "# -*- coding: utf-8 -*-",
