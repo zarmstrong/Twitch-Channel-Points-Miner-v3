@@ -89,6 +89,7 @@ class Twitch(object):
         "discovered_open_drop_campaigns",
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
+        "twitchdrops_app_game_names",
         "twitchdrops_app_upcoming_starts",
         "category_campaign_eligibility",
         "completed_drop_campaigns",
@@ -141,6 +142,7 @@ class Twitch(object):
         self.discovered_open_drop_campaigns = None
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
+        self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
         self.category_campaign_eligibility = {}
         self.completed_drop_campaigns = set()
@@ -1182,6 +1184,7 @@ class Twitch(object):
     ):
         deadlines = {}
         self.twitchdrops_app_campaigns = {}
+        self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
         scraper = TwitchDropsAppScraper(timeout=20)
         now = datetime.utcnow()
@@ -1363,6 +1366,9 @@ class Twitch(object):
 
             if campaigns:
                 self.twitchdrops_app_campaigns[requested_slug] = campaigns
+                report_game_name = str(report.get("game") or "").strip()
+                if report_game_name:
+                    self.twitchdrops_app_game_names[requested_slug] = report_game_name
                 channel_count = len(
                     {
                         login
@@ -1749,7 +1755,10 @@ class Twitch(object):
             return []
 
         normalized_category = self.__normalize_category(category_name)
-        query = normalized_category.replace("-", " ")
+        requested_slug = self.__slugify(normalized_category.replace("-", " "))
+        query = self.twitchdrops_app_game_names.get(
+            requested_slug, normalized_category.replace("-", " ")
+        )
         categories_response = self.__helix_get(
             "search/categories", {"query": query, "first": 100}
         )
@@ -1765,7 +1774,7 @@ class Twitch(object):
         selected_category = None
         for candidate in categories:
             name_slug = self.__slugify(candidate.get("name", ""))
-            if name_slug == normalized_category:
+            if name_slug in {requested_slug, self.__slugify(query)}:
                 selected_category = candidate
                 break
 
