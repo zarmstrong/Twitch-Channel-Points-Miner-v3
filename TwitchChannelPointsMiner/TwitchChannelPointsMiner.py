@@ -127,6 +127,14 @@ def _drop_progress_report_entries(original, current):
     )
 
 
+def _capture_drop_progress_baseline(twitch, inventory_checked=False):
+    snapshot = twitch.drop_report_snapshot()
+    if snapshot == {} and inventory_checked is False:
+        twitch.scrape_drop_progress_from_inventory(reason="report_baseline")
+        snapshot = twitch.drop_report_snapshot()
+    return snapshot
+
+
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
@@ -478,7 +486,13 @@ class TwitchChannelPointsMiner:
             if self.claim_drops_startup is True:
                 self.twitch.claim_all_drops_from_inventory()
 
-            self.original_drop_progress = self.twitch.drop_report_snapshot()
+            self.original_drop_progress = _capture_drop_progress_baseline(
+                self.twitch,
+                inventory_checked=(
+                    self.twitch.scrape_drop_progress_on_load is True
+                    or self.claim_drops_startup is True
+                ),
+            )
 
             streamers_name: list = []
             streamers_dict: dict = {}

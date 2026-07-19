@@ -1101,11 +1101,6 @@ function escapeHtml(text) {
         .replace(/'/g, '&#039;');
 }
 
-// Toggle
-$('#dark-mode').click(() => {
-    toggleDarkMode();
-});
-
 $('.dropdown').click(() => {
     $('.dropdown').toggleClass('is-active');
 });

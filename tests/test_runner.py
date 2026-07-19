@@ -1,6 +1,7 @@
 import pytest
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+    _capture_drop_progress_baseline,
     _drop_progress_report_entries,
 )
 
@@ -164,3 +165,37 @@ def test_drop_progress_report_entries_includes_status_only_change():
     }
 
     assert _drop_progress_report_entries(original, current)[0]["minutes_gained"] == 0
+
+
+def test_capture_drop_progress_baseline_scrapes_when_not_preloaded():
+    class TwitchStub:
+        def __init__(self):
+            self.snapshot = {}
+            self.reasons = []
+
+        def drop_report_snapshot(self):
+            return self.snapshot.copy()
+
+        def scrape_drop_progress_from_inventory(self, reason):
+            self.reasons.append(reason)
+            self.snapshot = {"drop": {"current_minutes_watched": 25}}
+
+    twitch = TwitchStub()
+
+    assert _capture_drop_progress_baseline(twitch) == {
+        "drop": {"current_minutes_watched": 25}
+    }
+    assert twitch.reasons == ["report_baseline"]
+
+
+def test_capture_drop_progress_baseline_does_not_repeat_inventory_check():
+    class TwitchStub:
+        def drop_report_snapshot(self):
+            return {}
+
+        def scrape_drop_progress_from_inventory(self, reason):
+            raise AssertionError("inventory should not be scraped twice")
+
+    assert _capture_drop_progress_baseline(
+        TwitchStub(), inventory_checked=True
+    ) == {}
