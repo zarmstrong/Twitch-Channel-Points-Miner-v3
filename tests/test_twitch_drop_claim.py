@@ -109,3 +109,26 @@ def test_completed_reward_campaign_ids_suppress_stale_campaigns(monkeypatch):
     twitch.completed_drop_campaigns.update(completed)
 
     assert twitch.completed_drop_campaigns == {"campaign-1", "campaign-2"}
+
+
+def test_drop_report_snapshot_uses_analytics_mutex():
+    class RecordingLock:
+        def __init__(self):
+            self.entered = 0
+
+        def __enter__(self):
+            self.entered += 1
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    twitch = object.__new__(Twitch)
+    twitch.analytics_mutex = RecordingLock()
+    twitch.drop_report_state = {"drop": {"current_minutes_watched": 25}}
+
+    snapshot = twitch.drop_report_snapshot()
+
+    assert snapshot == {"drop": {"current_minutes_watched": 25}}
+    assert twitch.analytics_mutex.entered == 1
+    assert snapshot is not twitch.drop_report_state
+    assert snapshot["drop"] is not twitch.drop_report_state["drop"]

@@ -109,7 +109,7 @@ def _drop_progress_report_entries(original, current):
         current_minutes = payload.get("current_minutes_watched", 0) or 0
         previous_minutes = previous.get("current_minutes_watched", 0) or 0
         current_status = payload.get("status") or "in_progress"
-        previous_status = previous.get("status")
+        previous_status = previous.get("status") or "in_progress"
         if current_minutes == previous_minutes and current_status == previous_status:
             continue
 

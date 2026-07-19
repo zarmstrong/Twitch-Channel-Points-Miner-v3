@@ -167,6 +167,18 @@ def test_drop_progress_report_entries_includes_status_only_change():
     assert _drop_progress_report_entries(original, current)[0]["minutes_gained"] == 0
 
 
+def test_drop_progress_report_entries_ignores_new_zero_progress_reward():
+    current = {
+        "drop": {
+            "item_name": "Reward",
+            "current_minutes_watched": 0,
+            "status": "in_progress",
+        }
+    }
+
+    assert _drop_progress_report_entries({}, current) == []
+
+
 def test_capture_drop_progress_baseline_scrapes_when_not_preloaded():
     class TwitchStub:
         def __init__(self):

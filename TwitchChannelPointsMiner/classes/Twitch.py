@@ -3339,7 +3339,8 @@ class Twitch(object):
                 str(payload.get("category") or ""),
             ]
         )
-        self.drop_report_state[report_key] = payload.copy()
+        with self.analytics_mutex:
+            self.drop_report_state[report_key] = payload.copy()
 
         if Settings.enable_analytics is not True:
             return
@@ -3403,10 +3404,11 @@ class Twitch(object):
 
     def drop_report_snapshot(self):
         """Return the latest structured drop state tracked by this session."""
-        return {
-            tracking_key: payload.copy()
-            for tracking_key, payload in self.drop_report_state.items()
-        }
+        with self.analytics_mutex:
+            return {
+                tracking_key: payload.copy()
+                for tracking_key, payload in self.drop_report_state.items()
+            }
 
     def __save_drop_progress_analytics(
         self,
