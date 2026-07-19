@@ -227,6 +227,33 @@ ANALYTICS_CONFIG = None
     assert "LoggerSettings(**LOGGER_OVERRIDES)" in migrated
 
 
+def test_multiple_logger_settings_add_required_imports_once():
+    source = '''\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+FIRST_LOGGER = LoggerSettings(save=False)
+SECOND_LOGGER = LoggerSettings(colored=True)
+MINER_CONFIG = {"username": "alice", "logger_settings": FIRST_LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert migrated.count("import logging") == 1
+    assert (
+        migrated.count(
+            "from TwitchChannelPointsMiner.logger import ColorPalette"
+        )
+        == 1
+    )
+    assert namespace["FIRST_LOGGER"].save is False
+    assert namespace["SECOND_LOGGER"].colored is True
+
+
 def test_version_three_adds_missing_source_priority_and_comments_notifications():
     source = '''\
 CONFIG_VERSION = 3

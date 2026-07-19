@@ -445,10 +445,14 @@ def migrate_config_source(source, source_name="config.py"):
                 and "import logging" not in required_imports
             ):
                 required_imports.append("import logging")
-            if not _name_is_defined(tree, "ColorPalette"):
-                required_imports.append(
-                    "from TwitchChannelPointsMiner.logger import ColorPalette"
-                )
+            color_palette_import = (
+                "from TwitchChannelPointsMiner.logger import ColorPalette"
+            )
+            if (
+                not _name_is_defined(tree, "ColorPalette")
+                and color_palette_import not in required_imports
+            ):
+                required_imports.append(color_palette_import)
             edits.extend(
                 _closing_line_insertion(source, line_offsets, logger_settings, missing)
             )
