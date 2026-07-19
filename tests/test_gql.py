@@ -1242,6 +1242,37 @@ def test_category_eligibility_replacement_preserves_other_games():
     }
 
 
+def test_category_search_uses_fallback_game_name_for_directory_slug(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.twitchdrops_app_campaigns = {"bitcraft": [{"channels": []}]}
+    twitch.twitchdrops_app_game_names = {"bitcraft": "BitCraft Online"}
+    twitch.category_campaign_eligibility = {}
+    calls = []
+
+    def helix_get(endpoint, params):
+        calls.append((endpoint, params))
+        if endpoint == "search/categories":
+            return {
+                "data": [
+                    {"id": "wrong", "name": "BIT RAT : Singularity"},
+                    {"id": "bitcraft-id", "name": "BitCraft Online"},
+                ]
+            }
+        return {"data": []}
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category("bitcraft") == []
+    assert calls[0] == (
+        "search/categories",
+        {"query": "BitCraft Online", "first": 100},
+    )
+    assert calls[1][1]["game_id"] == "bitcraft-id"
+
+
 def test_campaign_inventory_merge_keeps_new_drop_and_existing_progress():
     twitch = twitch_with_gql(SimpleNamespace())
     fresh = {
