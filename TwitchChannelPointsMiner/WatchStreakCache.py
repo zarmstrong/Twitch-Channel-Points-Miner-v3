@@ -164,25 +164,30 @@ class WatchStreakCache:
     def prune(self, now=None, ttl_seconds=STALE_SESSION_TTL_SECONDS):
         current_time = time.time() if now is None else float(now)
         with self._lock:
-            stale_keys = [
-                key
-                for key, session in self._sessions.items()
-                if session.ended_at is not None
-                and current_time - session.ended_at > ttl_seconds
-            ]
-            for key in stale_keys:
-                del self._sessions[key]
-            if stale_keys:
-                self._save_locked()
+            if self._prune_locked(current_time, ttl_seconds):
+                self._save_locked(prune=False)
 
     def _key(self, streamer_login, broadcast_id):
         return ":".join(
             (self.account_name, streamer_login.lower().strip(), str(broadcast_id))
         )
 
-    def _save_locked(self):
+    def _prune_locked(self, current_time, ttl_seconds):
+        stale_keys = [
+            key
+            for key, session in self._sessions.items()
+            if session.ended_at is not None
+            and current_time - session.ended_at > ttl_seconds
+        ]
+        for key in stale_keys:
+            del self._sessions[key]
+        return bool(stale_keys)
+
+    def _save_locked(self, prune=True):
         target = Path(self.path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        if prune:
+            self._prune_locked(time.time(), STALE_SESSION_TTL_SECONDS)
         payload = {
             "version": WATCH_STREAK_CACHE_VERSION,
             "sessions": [asdict(session) for session in self._sessions.values()],

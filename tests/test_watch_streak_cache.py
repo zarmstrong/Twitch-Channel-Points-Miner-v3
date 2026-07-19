@@ -1,7 +1,10 @@
 import json
 from types import SimpleNamespace
 
-from TwitchChannelPointsMiner.WatchStreakCache import WatchStreakCache
+from TwitchChannelPointsMiner.WatchStreakCache import (
+    STALE_SESSION_TTL_SECONDS,
+    WatchStreakCache,
+)
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
@@ -57,7 +60,15 @@ def test_offline_transition_is_persisted(tmp_path, monkeypatch):
     streamer.watch_streak_cache = cache
     streamer.stream.broadcast_id = "broadcast-1"
 
-    times = iter([2_000_000_000.0, 2_000_000_100.0, 2_000_000_101.0])
+    times = iter(
+        [
+            2_000_000_000.0,
+            2_000_000_001.0,
+            2_000_000_100.0,
+            2_000_000_101.0,
+            2_000_000_102.0,
+        ]
+    )
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.classes.entities.Streamer.time.time",
         lambda: next(times),
@@ -67,6 +78,26 @@ def test_offline_transition_is_persisted(tmp_path, monkeypatch):
 
     restored = WatchStreakCache.load(cache_path, "viewer")
     assert restored.get("channel", "broadcast-1").ended_at == 2_000_000_100
+
+
+def test_saving_prunes_stale_sessions_without_restart(tmp_path, monkeypatch):
+    cache_path = tmp_path / "watch-streak.json"
+    current_time = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.WatchStreakCache.time.time",
+        lambda: current_time[0],
+    )
+    cache = WatchStreakCache.load(cache_path, "viewer")
+    cache.ensure("old-channel", "old-broadcast", started_at=current_time[0])
+    cache.mark_ended("old-channel", "old-broadcast", ended_at=current_time[0])
+
+    current_time[0] += STALE_SESSION_TTL_SECONDS + 1
+    cache.ensure("new-channel", "new-broadcast", started_at=current_time[0])
+
+    assert cache.get("old-channel", "old-broadcast") is None
+    assert cache.get("new-channel", "new-broadcast") is not None
+    restored = WatchStreakCache.load(cache_path, "viewer")
+    assert restored.get("old-channel", "old-broadcast") is None
 
 
 def test_cache_filters_sessions_from_other_accounts(tmp_path):
