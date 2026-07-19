@@ -2262,7 +2262,8 @@ class Twitch(object):
             return False
 
         offline_at = getattr(streamer, "offline_at", 0)
-        return offline_at == 0 or (((now or time.time()) - offline_at) // 60) > 30
+        timestamp = time.time() if now is None else now
+        return offline_at == 0 or ((timestamp - offline_at) // 60) > 30
 
     @staticmethod
     def _has_reached_points_limit(streamer):

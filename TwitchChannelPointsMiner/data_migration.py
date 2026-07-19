@@ -56,6 +56,10 @@ def _migrate_json_file(path, current_version):
 
 def migrate_analytics_directory(directory):
     path = Path(directory)
+    if path.is_symlink():
+        raise DataMigrationError(
+            f"Refusing to migrate symlinked analytics directory {path}"
+        )
     if not path.is_dir():
         return 0
     candidates = [

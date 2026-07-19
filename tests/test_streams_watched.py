@@ -197,6 +197,13 @@ def test_pending_watch_streak_bypasses_points_limit(monkeypatch):
     assert posted == ["https://spade.test/capped-streak"]
 
 
+def test_pending_watch_streak_honors_explicit_zero_timestamp():
+    streamer = _watch_streamer("streak", watch_streak=True)
+    streamer.offline_at = -60
+
+    assert Twitch._has_pending_watch_streak(streamer, now=0) is False
+
+
 def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,

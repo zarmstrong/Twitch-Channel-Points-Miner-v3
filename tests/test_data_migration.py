@@ -83,6 +83,19 @@ def test_migrate_analytics_directory_skips_symlinks(tmp_path):
     assert not (tmp_path / "linked.json.v0.bak").exists()
 
 
+def test_migrate_analytics_directory_rejects_symlinked_root(tmp_path):
+    target = tmp_path / "external-analytics"
+    target.mkdir()
+    link = tmp_path / "analytics"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating symlinks is not supported in this environment")
+
+    with pytest.raises(DataMigrationError, match="symlinked analytics directory"):
+        migrate_analytics_directory(link)
+
+
 def test_new_streamer_analytics_include_version(tmp_path):
     Settings.analytics_path = str(tmp_path)
     streamer = Streamer("channel")
