@@ -62,6 +62,10 @@ def _watch_streamer(
     drops_eligible=False,
     from_badge_campaign=False,
     from_followers=False,
+    favorite=False,
+    points=0,
+    points_limit=None,
+    watch_streak=False,
 ):
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
@@ -71,6 +75,8 @@ def _watch_streamer(
         campaigns_ids=[],
         game={"displayName": username},
         game_name=lambda: username,
+        watch_streak_missing=watch_streak,
+        minute_watched=0,
     )
     return SimpleNamespace(
         username=username,
@@ -79,9 +85,15 @@ def _watch_streamer(
         from_category=from_category,
         from_badge_campaign=from_badge_campaign,
         from_followers=from_followers,
-        channel_points=0,
+        channel_points=points,
+        offline_at=0,
         stream=stream,
-        settings=SimpleNamespace(claim_drops=drops_eligible),
+        settings=SimpleNamespace(
+            claim_drops=drops_eligible,
+            favorite=favorite,
+            points_limit=points_limit,
+            watch_streak=watch_streak,
+        ),
         drops_condition=lambda: drops_eligible,
     )
 
@@ -91,6 +103,7 @@ def _run_one_watch_iteration(
     streamers,
     streams_watched,
     source_priority=None,
+    priority=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -117,11 +130,71 @@ def _run_one_watch_iteration(
 
     twitch.send_minute_watched_events(
         streamers,
-        [Priority.ORDER],
+        priority or [Priority.ORDER],
         streams_watched=streams_watched,
         source_priority=source_priority,
     )
     return posted
+
+
+def test_minute_watcher_prioritizes_favorites(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("first"),
+            _watch_streamer("favorite", favorite=True),
+        ],
+        streams_watched=1,
+        priority=[Priority.FAVORITE, Priority.ORDER],
+    )
+
+    assert posted == ["https://spade.test/favorite"]
+
+
+def test_minute_watcher_fills_slot_after_selecting_favorite(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("first"),
+            _watch_streamer("favorite", favorite=True),
+            _watch_streamer("third"),
+        ],
+        streams_watched=2,
+        priority=[Priority.FAVORITE, Priority.ORDER],
+    )
+
+    assert posted == ["https://spade.test/first", "https://spade.test/favorite"]
+
+
+def test_minute_watcher_skips_streamers_at_their_points_limit(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("capped", points=500, points_limit=500),
+            _watch_streamer("eligible", points=499, points_limit=500),
+        ],
+        streams_watched=2,
+    )
+
+    assert posted == ["https://spade.test/eligible"]
+
+
+def test_pending_watch_streak_bypasses_points_limit(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer(
+                "capped-streak",
+                points=500,
+                points_limit=500,
+                watch_streak=True,
+            )
+        ],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/capped-streak"]
 
 
 def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):

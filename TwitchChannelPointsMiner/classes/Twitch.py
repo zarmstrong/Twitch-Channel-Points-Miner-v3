@@ -2249,6 +2249,35 @@ class Twitch(object):
             logger.error(f"Error with update_client_version: {e}")
             return self.client_version
 
+    @staticmethod
+    def _has_pending_watch_streak(streamer, now=None):
+        settings = getattr(streamer, "settings", None)
+        stream = getattr(streamer, "stream", None)
+        if (
+            getattr(settings, "watch_streak", False) is not True
+            or getattr(stream, "watch_streak_missing", False) is not True
+            or getattr(stream, "minute_watched", 0) >= 11
+        ):
+            return False
+
+        offline_at = getattr(streamer, "offline_at", 0)
+        return offline_at == 0 or (((now or time.time()) - offline_at) // 60) > 30
+
+    @staticmethod
+    def _has_reached_points_limit(streamer):
+        settings = getattr(streamer, "settings", None)
+        points_limit = getattr(settings, "points_limit", None)
+        if points_limit in (None, ""):
+            return False
+
+        try:
+            points_limit = int(points_limit)
+            channel_points = int(streamer.channel_points)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+        return points_limit >= 0 and channel_points >= points_limit
+
     def send_minute_watched_events(
         self,
         streamers,
@@ -2260,6 +2289,7 @@ class Twitch(object):
         while self.running:
             iteration_started_at = time.time()
             try:
+                now = time.time()
                 streamers_index = [
                     i
                     for i in range(0, len(streamers))
@@ -2270,7 +2300,11 @@ class Twitch(object):
                     )
                     and (
                         streamers[i].online_at == 0
-                        or (time.time() - streamers[i].online_at) > 30
+                        or (now - streamers[i].online_at) > 30
+                    )
+                    and (
+                        self._has_reached_points_limit(streamers[i]) is False
+                        or self._has_pending_watch_streak(streamers[i], now)
                     )
                 ]
 
@@ -2333,9 +2367,26 @@ class Twitch(object):
                         if remaining_watch_amount() <= 0:
                             break
 
+                        available_source_indexes = [
+                            index
+                            for index in source_indexes
+                            if index not in streamers_watching
+                        ]
+
                         if prior == Priority.ORDER:
                             streamers_watching.update(
-                                source_indexes[: remaining_watch_amount()]
+                                available_source_indexes[: remaining_watch_amount()]
+                            )
+
+                        elif prior == Priority.FAVORITE:
+                            favorite_indexes = [
+                                index
+                                for index in available_source_indexes
+                                if getattr(streamers[index].settings, "favorite", False)
+                                is True
+                            ]
+                            streamers_watching.update(
+                                favorite_indexes[: remaining_watch_amount()]
                             )
 
                         elif prior in [
@@ -2347,7 +2398,7 @@ class Twitch(object):
                                     "points": streamers[index].channel_points,
                                     "index": index,
                                 }
-                                for index in source_indexes
+                                for index in available_source_indexes
                             ]
                             items = sorted(
                                 items,
@@ -2361,27 +2412,16 @@ class Twitch(object):
                             )
 
                         elif prior == Priority.STREAK:
-                            for index in source_indexes:
-                                if (
-                                    streamers[index].settings.watch_streak is True
-                                    and streamers[index].stream.watch_streak_missing
-                                    is True
-                                    and (
-                                        streamers[index].offline_at == 0
-                                        or (
-                                            (time.time() - streamers[index].offline_at)
-                                            // 60
-                                        )
-                                        > 30
-                                    )
-                                    and streamers[index].stream.minute_watched < 11
+                            for index in available_source_indexes:
+                                if self._has_pending_watch_streak(
+                                    streamers[index], now
                                 ):
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
                                         break
 
                         elif prior == Priority.DROPS:
-                            for index in source_indexes:
+                            for index in available_source_indexes:
                                 if self.__drops_condition(streamers[index]) is True:
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
@@ -2390,7 +2430,7 @@ class Twitch(object):
                         elif prior == Priority.SUBSCRIBED:
                             streamers_with_multiplier = [
                                 index
-                                for index in source_indexes
+                                for index in available_source_indexes
                                 if streamers[index].viewer_has_points_multiplier()
                             ]
                             streamers_with_multiplier = sorted(

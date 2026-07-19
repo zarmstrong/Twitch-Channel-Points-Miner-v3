@@ -726,6 +726,7 @@ been handled.
 
 Available values:
  - `STREAK` - Catch the watch streak from all streamers
+ - `FAVORITE` - Prioritize streamers with `StreamerSettings(favorite=True)`
  - `DROPS` - Claim all drops from streamers with drops tags enabled
  - `SUBSCRIBED` - Prioritize streamers you're subscribed to (higher subscription tiers are mined first)
  - `ORDER` - Following the order of the list
@@ -734,6 +735,11 @@ Available values:
 
 Priorities can be combined in order. Avoid contradictory fallback rules such as
 `ORDER` and `POINTS_ASCENDING` in the same list.
+
+Set `points_limit` in `StreamerSettings` to stop watching a streamer once its
+channel-points balance reaches that value. A pending watch streak can temporarily
+bypass the limit so its reward is not missed. Set `favorite=True` per streamer
+and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 
 ### LoggerSettings
 

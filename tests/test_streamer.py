@@ -14,6 +14,8 @@ def streamer_settings(**overrides):
         "claim_drops": True,
         "claim_moments": True,
         "watch_streak": True,
+        "favorite": False,
+        "points_limit": None,
         "community_goals": False,
         "bet": BetSettings(delay=6, delay_mode=DelayMode.FROM_END),
         "chat": ChatPresence.NEVER,
@@ -31,6 +33,8 @@ def test_streamer_settings_default_preserves_values_and_fills_missing_ones():
     assert settings.follow_raid is True
     assert settings.claim_drops is True
     assert settings.community_goals is True
+    assert settings.favorite is False
+    assert settings.points_limit is None
     assert isinstance(settings.bet, BetSettings)
     assert settings.chat is ChatPresence.ONLINE
 

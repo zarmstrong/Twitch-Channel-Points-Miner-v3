@@ -7,6 +7,7 @@ ANALYTICS_FILE_MUTEX = Lock()
 class Priority(Enum):
     ORDER = auto()
     STREAK = auto()
+    FAVORITE = auto()
     DROPS = auto()
     SUBSCRIBED = auto()
     POINTS_ASCENDING = auto()
