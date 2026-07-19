@@ -32,6 +32,7 @@ def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     twitch.completed_drop_campaigns = set()
     twitch.log_drop_checks = False
     twitch.category_campaign_eligibility = {}
+    twitch.evaluated_category_campaigns = set()
     twitch.twitchdrops_app_campaigns = {}
     twitch.gql = SimpleNamespace(
         claim_drop_rewards=lambda drop_instance_id: SimpleNamespace(
@@ -71,6 +72,50 @@ def test_completed_campaign_overrides_category_eligibility(monkeypatch):
     )
 
     assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
+def test_negative_category_refresh_does_not_resurrect_collected_fallback(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.evaluated_category_campaigns.add("example-game")
+    twitch.twitchdrops_app_campaigns["example-game"] = [
+        {"name": "Collected campaign", "channels": []}
+    ]
+    stream = SimpleNamespace(
+        campaigns_ids=[],
+        game_name=lambda: "Example Game",
+    )
+    streamer = SimpleNamespace(
+        username="stale-channel",
+        from_category=True,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=stream,
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
+def test_discovered_eligibility_applies_to_existing_configured_streamer(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.evaluated_category_campaigns.add("example-game")
+    twitch.category_campaign_eligibility[("example-game", "configured")] = (1, 1)
+    stream = SimpleNamespace(
+        campaigns_ids=[],
+        campaigns=[],
+        game_name=lambda: "Example Game",
+    )
+    streamer = SimpleNamespace(
+        username="configured",
+        from_category=False,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=stream,
+        drops_condition=lambda: False,
+    )
+
+    assert twitch._Twitch__drops_condition(streamer) is True
 
 
 def test_bulk_inventory_claim_marks_completed_campaign(monkeypatch):

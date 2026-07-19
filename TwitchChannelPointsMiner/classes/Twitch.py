@@ -93,6 +93,7 @@ class Twitch(object):
         "twitchdrops_app_game_names",
         "twitchdrops_app_upcoming_starts",
         "category_campaign_eligibility",
+        "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "available_badge_names",
         "restart_requested",
@@ -146,6 +147,7 @@ class Twitch(object):
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
         self.category_campaign_eligibility = {}
+        self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.available_badge_names = None
         self.restart_requested = Event()
@@ -224,6 +226,11 @@ class Twitch(object):
             }
         )
         self.category_campaign_eligibility = updated_eligibility
+        evaluated_categories = getattr(self, "evaluated_category_campaigns", None)
+        if evaluated_categories is None:
+            evaluated_categories = set()
+            self.evaluated_category_campaigns = evaluated_categories
+        evaluated_categories.add(game_slug)
 
     def __drop_tracking_key(self, drop, campaign_name=None, category_name=None):
         return "|".join(
@@ -1599,11 +1606,7 @@ class Twitch(object):
         return stream.game.get("displayName") or stream.game.get("name") or "Unknown"
 
     def __category_drops_condition(self, streamer):
-        if (
-            getattr(streamer, "from_category", False) is not True
-            or streamer.settings.claim_drops is not True
-            or streamer.is_online is not True
-        ):
+        if streamer.settings.claim_drops is not True or streamer.is_online is not True:
             return False
 
         game_name = streamer.stream.game_name()
@@ -1629,6 +1632,16 @@ class Twitch(object):
             eligible_campaigns, _ = eligibility
             return eligible_campaigns > 0
 
+        # A refresh can prove that a previously selected category has no
+        # incomplete campaigns. Keep that negative result authoritative rather
+        # than falling back to the unfiltered campaign catalog and resurrecting
+        # a fully collected campaign.
+        if game_slug in getattr(self, "evaluated_category_campaigns", set()):
+            return False
+
+        if getattr(streamer, "from_category", False) is not True:
+            return False
+
         # Category discovery has already removed fully collected campaigns.
         # Use its remaining gist campaign data when Twitch's private
         # campaign query fails to populate Stream.campaigns.
@@ -1643,11 +1656,13 @@ class Twitch(object):
         return False
 
     def __drops_condition(self, streamer):
-        # Category-discovered streams must follow the refreshed category
-        # eligibility cache. Their Stream campaign objects can remain populated
-        # after inventory discovery has determined that every reward is owned.
+        # Refreshed eligibility also applies when category discovery selects an
+        # already configured streamer. Conversely, category-only streams must
+        # not fall back to stale Stream campaign objects after a negative refresh.
+        if self.__category_drops_condition(streamer) is True:
+            return True
         if getattr(streamer, "from_category", False) is True:
-            return self.__category_drops_condition(streamer)
+            return False
 
         if streamer.drops_condition() is True:
             return True
