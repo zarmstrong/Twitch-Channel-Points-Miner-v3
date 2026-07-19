@@ -37,6 +37,20 @@ def bounded_log_start(file_size, last_received_index, tail_bytes=None):
     return max(position, file_size - response_limit)
 
 
+def seek_log_start(log_file, position, discard_partial_line=False):
+    """Seek to a log offset, skipping only an incomplete leading line."""
+    log_file.seek(position)
+    if discard_partial_line is False or position == 0:
+        return
+
+    log_file.seek(position - 1)
+    if log_file.read(1) != b"\n":
+        log_file.seek(position)
+        log_file.readline()
+    else:
+        log_file.seek(position)
+
+
 def get_assets_folder():
     repository_assets = Path(__file__).resolve().parents[2] / "assets"
     if repository_assets.is_dir():
@@ -433,13 +447,11 @@ class AnalyticsServer(Thread):
                     file_size, requested_position, tail_bytes=tail_bytes
                 )
                 with open(log_file_path, "rb") as log_file:
-                    if position > requested_position:
-                        log_file.seek(position)
-                        # Avoid displaying the partial first line when the response
-                        # was capped to a recent window.
-                        log_file.readline()
-                    else:
-                        log_file.seek(position)
+                    seek_log_start(
+                        log_file,
+                        position,
+                        discard_partial_line=position > requested_position,
+                    )
                     new_log_entries = log_file.read()
                     next_position = log_file.tell()
 

@@ -1,4 +1,5 @@
 import re
+from io import BytesIO
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
@@ -6,6 +7,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     bounded_log_start,
     filter_datas,
     get_streamer_summary,
+    seek_log_start,
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
@@ -35,6 +37,22 @@ def test_bounded_log_start_recovers_from_rotated_log_position():
     file_size = 4096
 
     assert bounded_log_start(file_size, file_size + 1) == 0
+
+
+def test_seek_log_start_keeps_complete_line_at_boundary():
+    log_file = BytesIO(b"first\nsecond\nthird\n")
+
+    seek_log_start(log_file, 6, discard_partial_line=True)
+
+    assert log_file.read() == b"second\nthird\n"
+
+
+def test_seek_log_start_discards_partial_first_line():
+    log_file = BytesIO(b"first\nsecond\nthird\n")
+
+    seek_log_start(log_file, 8, discard_partial_line=True)
+
+    assert log_file.read() == b"third\n"
 
 
 def test_get_streamer_summary_uses_latest_timestamp(tmp_path, monkeypatch):
