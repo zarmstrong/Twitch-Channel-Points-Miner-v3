@@ -21,6 +21,10 @@ def test_claimed_broadcast_is_restored_after_restart(tmp_path, monkeypatch):
         "TwitchChannelPointsMiner.classes.entities.Streamer.time.time",
         lambda: 2_000_000_000.0,
     )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.WatchStreakCache.time.time",
+        lambda: 2_000_000_000.0,
+    )
     streamer.set_online()
     streamer.update_history("WATCH_STREAK", earned=450)
 
@@ -32,6 +36,7 @@ def test_claimed_broadcast_is_restored_after_restart(tmp_path, monkeypatch):
 
     assert restarted_streamer.stream.watch_streak_missing is False
     assert restored.get("channel", "broadcast-1").claimed is True
+    assert restored.get("channel", "broadcast-1").claimed_at == 2_000_000_000
 
 
 def test_new_broadcast_gets_a_new_pending_session(tmp_path):
