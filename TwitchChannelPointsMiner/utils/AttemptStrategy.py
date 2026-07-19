@@ -115,9 +115,9 @@ class AttemptStrategy:
         self.attempts = attempts
         """The number of attempts that should be made."""
         self.attempt_interval_seconds = attempt_interval_seconds
-        """The number of seconds to wait between attempts."""
+        """Base number of seconds to wait between attempts before backoff."""
         self.backoff_multiplier = backoff_multiplier
-        """Multiplier applied to the wait after each failed attempt."""
+        """Multiplier applied to the base wait after each failed attempt."""
         self.max_interval_seconds = max_interval_seconds
         """Optional upper bound for the wait between attempts."""
 
