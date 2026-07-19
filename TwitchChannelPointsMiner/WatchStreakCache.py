@@ -56,6 +56,18 @@ class WatchStreakCache:
             )
             payload = {}
 
+        if isinstance(payload, dict) and payload.get("version") not in (
+            None,
+            WATCH_STREAK_CACHE_VERSION,
+        ):
+            logger.warning(
+                "Unsupported watch-streak cache version %s in %s; starting "
+                "with an empty cache",
+                payload.get("version"),
+                path,
+            )
+            payload = {}
+
         if isinstance(payload, dict) and isinstance(payload.get("sessions"), list):
             for item in payload["sessions"]:
                 if not isinstance(item, dict):

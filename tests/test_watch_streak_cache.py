@@ -89,6 +89,7 @@ def test_cache_filters_sessions_from_other_accounts(tmp_path):
 
 
 def test_corrupt_cache_starts_empty(tmp_path, caplog):
+    caplog.set_level("WARNING")
     cache_path = tmp_path / "watch-streak.json"
     cache_path.write_text("not-json", encoding="utf-8")
 
@@ -96,3 +97,30 @@ def test_corrupt_cache_starts_empty(tmp_path, caplog):
 
     assert cache.get("channel", "broadcast-1") is None
     assert "starting with an empty cache" in caplog.text
+
+
+def test_unsupported_cache_version_starts_empty(tmp_path, caplog):
+    caplog.set_level("WARNING")
+    cache_path = tmp_path / "watch-streak.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 999,
+                "sessions": [
+                    {
+                        "account_name": "viewer",
+                        "streamer_login": "channel",
+                        "broadcast_id": "broadcast-1",
+                        "started_at": 100,
+                        "claimed": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cache = WatchStreakCache.load(cache_path, "viewer")
+
+    assert cache.get("channel", "broadcast-1") is None
+    assert "Unsupported watch-streak cache version 999" in caplog.text
