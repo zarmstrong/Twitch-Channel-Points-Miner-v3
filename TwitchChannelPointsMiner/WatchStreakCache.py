@@ -73,10 +73,19 @@ class WatchStreakCache:
                 if not isinstance(item, dict):
                     continue
                 try:
+                    account_value = item.get("account_name")
+                    login_value = item.get("streamer_login")
+                    broadcast_value = item.get("broadcast_id")
+                    if (
+                        account_value in [None, ""]
+                        or login_value in [None, ""]
+                        or broadcast_value in [None, ""]
+                    ):
+                        continue
                     session = WatchStreakSession(
-                        account_name=str(item["account_name"]).lower().strip(),
-                        streamer_login=str(item["streamer_login"]).lower().strip(),
-                        broadcast_id=str(item["broadcast_id"]),
+                        account_name=str(account_value).lower().strip(),
+                        streamer_login=str(login_value).lower().strip(),
+                        broadcast_id=str(broadcast_value),
                         started_at=float(item["started_at"]),
                         claimed=bool(item.get("claimed", False)),
                         claimed_at=(

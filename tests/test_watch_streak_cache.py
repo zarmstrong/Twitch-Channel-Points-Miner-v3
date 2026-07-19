@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from TwitchChannelPointsMiner.WatchStreakCache import (
     STALE_SESSION_TTL_SECONDS,
     WatchStreakCache,
@@ -116,6 +118,38 @@ def test_cache_filters_sessions_from_other_accounts(tmp_path):
                 ],
             }
         ),
+        encoding="utf-8",
+    )
+
+    cache = WatchStreakCache.load(cache_path, "viewer")
+
+    assert cache.get("channel", "broadcast-1") is None
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("account_name", None),
+        ("account_name", ""),
+        ("streamer_login", None),
+        ("streamer_login", ""),
+        ("broadcast_id", None),
+        ("broadcast_id", ""),
+    ],
+)
+def test_cache_ignores_sessions_with_invalid_identity_fields(
+    tmp_path, field, invalid_value
+):
+    cache_path = tmp_path / "watch-streak.json"
+    session = {
+        "account_name": "viewer",
+        "streamer_login": "channel",
+        "broadcast_id": "broadcast-1",
+        "started_at": 100,
+    }
+    session[field] = invalid_value
+    cache_path.write_text(
+        json.dumps({"version": 1, "sessions": [session]}),
         encoding="utf-8",
     )
 
