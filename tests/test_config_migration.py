@@ -78,6 +78,26 @@ def test_migrate_config_source_adds_version_settings_and_new_priority_last():
     assert settings.chat is None
 
 
+def test_migrate_config_source_resolves_aliased_miner_config():
+    source = CONFIG.replace(
+        'MINER_CONFIG = {\n    "username": "alice",',
+        'DEFAULT_CONFIG = {\n    "username": "alice",',
+    ).replace(
+        "STREAMERS = []",
+        "MINER_CONFIG = DEFAULT_CONFIG\nSTREAMERS = []",
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["MINER_CONFIG"] is namespace["DEFAULT_CONFIG"]
+    assert namespace["DEFAULT_CONFIG"]["priority"][-1] is namespace[
+        "Priority"
+    ].FAVORITE
+    assert namespace["DEFAULT_SETTINGS"].points_limit is None
+
+
 def test_migrate_config_source_is_idempotent():
     migrated, _, _ = migrate_config_source(CONFIG)
 

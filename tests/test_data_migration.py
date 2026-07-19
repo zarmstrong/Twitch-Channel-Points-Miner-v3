@@ -3,6 +3,7 @@ import stat
 
 import pytest
 
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import _migrate_analytics_data
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.data_migration import (
@@ -47,6 +48,21 @@ def test_migrate_analytics_directory_rejects_future_versions(tmp_path):
 
     with pytest.raises(DataMigrationError, match="unsupported version"):
         migrate_analytics_directory(tmp_path)
+
+
+def test_analytics_startup_reports_migration_errors_with_context(tmp_path):
+    path = tmp_path / "channel.json"
+    path.write_text(
+        json.dumps({"version": ANALYTICS_DATA_VERSION + 1}), encoding="utf-8"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Unable to migrate analytics data in .*unsupported version",
+    ) as raised:
+        _migrate_analytics_data(tmp_path)
+
+    assert isinstance(raised.value.__cause__, DataMigrationError)
 
 
 def test_migrate_analytics_directory_skips_symlinks(tmp_path):

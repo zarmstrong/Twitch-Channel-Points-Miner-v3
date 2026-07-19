@@ -43,7 +43,7 @@ def _assignment_value(tree, name):
 
 
 def _config_dict(tree):
-    value = _assignment_value(tree, "MINER_CONFIG")
+    value = _resolve_value(tree, _assignment_value(tree, "MINER_CONFIG"))
     return value if isinstance(value, ast.Dict) else None
 
 
@@ -57,8 +57,13 @@ def _dict_value(node, name):
 
 
 def _resolve_value(tree, node):
-    if isinstance(node, ast.Name):
-        return _assignment_value(tree, node.id)
+    seen = set()
+    while isinstance(node, ast.Name) and node.id not in seen:
+        seen.add(node.id)
+        resolved = _assignment_value(tree, node.id)
+        if resolved is None:
+            break
+        node = resolved
     return node
 
 
