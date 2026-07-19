@@ -179,59 +179,38 @@ def test_drop_progress_report_entries_ignores_new_zero_progress_reward():
     assert _drop_progress_report_entries({}, current) == []
 
 
-def test_capture_drop_progress_baseline_scrapes_when_not_preloaded():
-    class TwitchStub:
-        def __init__(self):
-            self.snapshot = {}
-            self.reasons = []
+def test_drop_progress_report_entries_requires_complete_baseline():
+    current = {
+        "drop": {
+            "current_minutes_watched": 25,
+            "status": "in_progress",
+        }
+    }
 
+    assert _drop_progress_report_entries(None, current) == []
+
+
+def test_capture_drop_progress_baseline_skips_disabled_scrape():
+    class TwitchStub:
         def drop_report_snapshot(self):
-            return self.snapshot.copy()
+            raise AssertionError("snapshot should not be used without a full scrape")
 
         def scrape_drop_progress_from_inventory(self, reason):
-            self.reasons.append(reason)
-            self.snapshot = {"drop": {"current_minutes_watched": 25}}
+            raise AssertionError("baseline capture should not trigger a scrape")
 
-    twitch = TwitchStub()
-
-    assert _capture_drop_progress_baseline(twitch) == {
-        "drop": {"current_minutes_watched": 25}
-    }
-    assert twitch.reasons == ["report_baseline"]
+    assert _capture_drop_progress_baseline(TwitchStub()) is None
 
 
 def test_capture_drop_progress_baseline_does_not_repeat_progress_scrape():
     class TwitchStub:
         def drop_report_snapshot(self):
-            return {}
+            return {"drop": {"current_minutes_watched": 25}}
 
         def scrape_drop_progress_from_inventory(self, reason):
             raise AssertionError("inventory should not be scraped twice")
 
     assert _capture_drop_progress_baseline(
         TwitchStub(), progress_scraped=True
-    ) == {}
-
-
-def test_capture_drop_progress_baseline_refreshes_partial_claim_snapshot():
-    class TwitchStub:
-        def __init__(self):
-            self.snapshot = {"captured": {"status": "captured"}}
-
-        def drop_report_snapshot(self):
-            return self.snapshot.copy()
-
-        def scrape_drop_progress_from_inventory(self, reason):
-            assert reason == "report_baseline"
-            self.snapshot["in-progress"] = {
-                "status": "in_progress",
-                "current_minutes_watched": 25,
-            }
-
-    assert _capture_drop_progress_baseline(TwitchStub()) == {
-        "captured": {"status": "captured"},
-        "in-progress": {
-            "status": "in_progress",
-            "current_minutes_watched": 25,
-        },
+    ) == {
+        "drop": {"current_minutes_watched": 25}
     }

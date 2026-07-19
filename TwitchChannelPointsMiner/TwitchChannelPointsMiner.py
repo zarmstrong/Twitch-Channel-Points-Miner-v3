@@ -103,6 +103,9 @@ def _normalize_badge_drop_streamer_limit(limit):
 
 
 def _drop_progress_report_entries(original, current):
+    if original is None:
+        return []
+
     entries = []
     for tracking_key, payload in current.items():
         previous = original.get(tracking_key, {})
@@ -129,7 +132,7 @@ def _drop_progress_report_entries(original, current):
 
 def _capture_drop_progress_baseline(twitch, progress_scraped=False):
     if progress_scraped is False:
-        twitch.scrape_drop_progress_from_inventory(reason="report_baseline")
+        return None
     return twitch.drop_report_snapshot()
 
 
@@ -281,7 +284,7 @@ class TwitchChannelPointsMiner:
         self.running = False
         self.start_datetime = None
         self.original_streamers = []
-        self.original_drop_progress = {}
+        self.original_drop_progress = None
         self.config_reload_lock = threading.Lock()
         self.drop_badge_catalog = None
         self.drop_badge_catalog_thread = None

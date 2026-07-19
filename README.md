@@ -331,7 +331,7 @@ settings.
 | `track_category_streamer_points` | `False` | Include point earn/spend events from category-only streamers in balance tracking and analytics. Explicit streamers are always tracked. |
 | `drop_item_art` | `False` | Store and display Drop item artwork URLs in Drops analytics. |
 | `print_open_drop_campaigns_on_load` | `False` | Log all open Drop campaigns during startup. Useful for checking category names and campaign dates. |
-| `scrape_drop_progress_on_load` | `False` | Read inventory Drop progress immediately at startup. |
+| `scrape_drop_progress_on_load` | `False` | Read inventory Drop progress immediately at startup. Required for accurate per-session Drop progress in the graceful-shutdown report. |
 | `log_drop_checks` | `False` | Enable verbose Drop GraphQL/inventory diagnostics. Leave disabled unless troubleshooting. |
 
 ##### Category input formats
@@ -1091,9 +1091,12 @@ During a controlled shutdown—such as `Ctrl+C` or Docker's normal stop signal�
 miner summarizes session duration, the log path, prediction results, and points
 gained or spent per streamer and event type. It also reports Drop rewards whose
 progress changed during the session, including watched minutes, minutes gained,
-required minutes, and final status. Docker users should configure the
-[recommended stop grace period](#graceful-docker-shutdowns). A hard kill, host
-crash, or power loss cannot produce this report.
+required minutes, and final status. Enable `scrape_drop_progress_on_load` to
+capture the startup baseline required for this part of the report. When it is
+disabled, the miner does not make an implicit startup inventory request or
+estimate Drop gains from an incomplete baseline. Docker users should configure
+the [recommended stop grace period](#graceful-docker-shutdowns). A hard kill,
+host crash, or power loss cannot produce this report.
 
 ```text
 14/07/26 18:00:00 - 🛑 Ending session: 'session-id'
