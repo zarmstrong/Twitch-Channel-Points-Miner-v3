@@ -139,3 +139,29 @@ def test_points_tab_reapplies_annotations_after_becoming_visible():
     assert "switchDashboardTab(savedDashboardTab);" in script
     assert "!chartRendered || $('#points-panel').is(':hidden')" in script
     assert "pointSeries = response[\"series\"] || [];" in script
+
+
+def test_analytics_error_clears_only_after_both_endpoints_recover():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+
+    assert "var pointsLoaded = false;" in script
+    assert "var dropsLoaded = false;" in script
+    clear_error = script.split("function clearAnalyticsLoadError", 1)[1].split(
+        "function switchDashboardTab", 1
+    )[0]
+    assert "pointsLoaded && dropsLoaded" in clear_error
+    assert "$('#analytics-load-error').text('').hide();" in clear_error
+
+    points_request = script.split("function getStreamers", 1)[1].split(
+        "function renderStreamers", 1
+    )[0]
+    assert "pointsLoaded = true;" in points_request
+    assert "pointsLoaded = false;" in points_request
+
+    drops_request = script.split("function getDropsByCategory", 1)[1].split(
+        "function getDropTimestamp", 1
+    )[0]
+    assert "dropsLoaded = true;" in drops_request
+    assert "dropsLoaded = false;" in drops_request

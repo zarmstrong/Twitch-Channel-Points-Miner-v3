@@ -102,10 +102,18 @@ var selectedStreamerAnalytics = new Set();
 var lastStreamerCheckboxIndex = null;
 var pendingDeleteStreamers = [];
 var analyticsDeleteInProgress = false;
+var pointsLoaded = false;
+var dropsLoaded = false;
 
 function showAnalyticsLoadError(message, details) {
     console.error(`[analytics] ${message}`, details || '');
     $('#analytics-load-error').text(message).show();
+}
+
+function clearAnalyticsLoadError() {
+    if (pointsLoaded && dropsLoaded) {
+        $('#analytics-load-error').text('').hide();
+    }
 }
 
 function switchDashboardTab(tabName) {
@@ -413,6 +421,8 @@ function getAllStreamersData() {
 
 function getStreamers() {
     $.getJSON('streamers', function (response) {
+        pointsLoaded = true;
+        clearAnalyticsLoadError();
         console.debug('[analytics] Points response', response);
         streamersList = response;
         sortStreamers();
@@ -437,6 +447,7 @@ function getStreamers() {
         // Ensure the selected streamer is still active and scrolled into view
         renderStreamers();
     }).fail(function (xhr, status, error) {
+        pointsLoaded = false;
         showAnalyticsLoadError(
             `Points failed to load (${xhr.status || status}): ${error || xhr.responseText || 'Unknown error'}`,
             xhr.responseText
@@ -698,6 +709,8 @@ function clearAnnotations() {
 
 function getDropsByCategory() {
     $.getJSON('./drops_by_category', function (response) {
+        dropsLoaded = true;
+        clearAnalyticsLoadError();
         console.debug('[analytics] Drops response', response);
         renderDropsByCategory(response);
         if (dropsRefreshTimeout) {
@@ -707,6 +720,7 @@ function getDropsByCategory() {
             getDropsByCategory();
         }, refresh);
     }).fail(function (xhr, status, error) {
+        dropsLoaded = false;
         showAnalyticsLoadError(
             `Drops failed to load (${xhr.status || status}): ${error || xhr.responseText || 'Unknown error'}`,
             xhr.responseText
