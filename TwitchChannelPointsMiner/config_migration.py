@@ -150,6 +150,13 @@ def _dict_names(node):
     }
 
 
+def _dict_has_literal_string_keys(node):
+    return isinstance(node, ast.Dict) and all(
+        isinstance(key, ast.Constant) and isinstance(key.value, str)
+        for key in node.keys
+    )
+
+
 def _call_keyword(node, name):
     if not isinstance(node, ast.Call):
         return None
@@ -375,7 +382,7 @@ def migrate_config_source(source, source_name="config.py"):
     line_offsets = _line_start_offsets(source)
     edits = []
     config_names = _dict_names(config)
-    safe_config = all(key is not None for key in config.keys)
+    safe_config = _dict_has_literal_string_keys(config)
     missing_miner_options = (
         [
             f"{name!r}: {value}"
@@ -497,7 +504,7 @@ def migrate_config_source(source, source_name="config.py"):
                 for name, value in MINE_CONFIG_DEFAULTS
                 if name not in mine_names
             ]
-            if all(key is not None for key in mine_config.keys)
+            if _dict_has_literal_string_keys(mine_config)
             else []
         )
         if missing_mine_options:
@@ -514,9 +521,7 @@ def migrate_config_source(source, source_name="config.py"):
             )
 
     analytics_config = _resolve_value(tree, _assignment_value(tree, "ANALYTICS_CONFIG"))
-    if isinstance(analytics_config, ast.Dict) and all(
-        key is not None for key in analytics_config.keys
-    ):
+    if _dict_has_literal_string_keys(analytics_config):
         missing_analytics_options = [
             f"{name!r}: {value}"
             for name, value in ANALYTICS_CONFIG_DEFAULTS

@@ -427,6 +427,31 @@ ANALYTICS_CONFIG = None
     assert "StreamerSettings(\n            make_predictions=False,\n            follow_raid=True,\n            bet=BetSettings(max_points=1234),\n        )" in migrated
 
 
+def test_migration_does_not_override_computed_dictionary_keys():
+    source = '''\
+CONFIG_VERSION = 3
+USERNAME = "username"
+PASSWORD = "password"
+BLACKLIST = "blacklist"
+PORT = "port"
+MINER_CONFIG = {USERNAME: "alice", PASSWORD: "secret"}
+STREAMERS = []
+MINE_CONFIG = {BLACKLIST: ["blocked"]}
+ANALYTICS_CONFIG = {PORT: 6000}
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["MINER_CONFIG"] == {
+        "username": "alice",
+        "password": "secret",
+    }
+    assert namespace["MINE_CONFIG"] == {"blacklist": ["blocked"]}
+    assert namespace["ANALYTICS_CONFIG"] == {"port": 6000}
+
+
 def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(CONFIG, encoding="utf-8")
