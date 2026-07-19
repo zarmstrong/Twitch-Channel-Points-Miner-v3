@@ -1,11 +1,15 @@
 import hashlib
+import inspect
 import stat
 
 import pytest
 
 from TwitchChannelPointsMiner.config_migration import (
+    ANALYTICS_CONFIG_DEFAULTS,
+    BET_SETTINGS_DEFAULTS,
     CONFIG_VERSION,
     LOGGER_SETTINGS_DEFAULTS,
+    LOGGER_NOTIFICATION_SETTINGS,
     MINE_CONFIG_DEFAULTS,
     MINER_CONFIG_DEFAULTS,
     STREAMER_SETTINGS_DEFAULTS,
@@ -15,6 +19,10 @@ from TwitchChannelPointsMiner.config_migration import (
     migrate_config,
     migrate_config_source,
 )
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
+from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+from TwitchChannelPointsMiner.logger import LoggerSettings
 
 
 RUNNER = """\
@@ -158,7 +166,9 @@ ANALYTICS_CONFIG = None
     settings = namespace["LOGGER"]
     assert settings.save is False
     assert settings.colored is True
-    assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} == set(settings.__slots__)
+    assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} | set(
+        LOGGER_NOTIFICATION_SETTINGS
+    ) == set(settings.__slots__)
     assert settings.console_level == namespace["logging"].INFO
     assert settings.console_username is False
     assert settings.time_zone is None
@@ -182,6 +192,69 @@ ANALYTICS_CONFIG = None
     migrated, _, _ = migrate_config_source(source)
 
     assert "LoggerSettings(**LOGGER_OVERRIDES)" in migrated
+
+
+def test_version_three_adds_missing_source_priority_and_comments_notifications():
+    source = '''\
+CONFIG_VERSION = 3
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(
+    save=False,
+)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = {"port": 6000}
+'''
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 3
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["streamer_source_priority"] == [
+        namespace["StreamerSource"].STREAMERS,
+        namespace["StreamerSource"].FOLLOWERS,
+        namespace["StreamerSource"].CATEGORIES,
+        namespace["StreamerSource"].BADGES,
+    ]
+    for name in LOGGER_NOTIFICATION_SETTINGS:
+        assert f"# {name}=" in migrated
+    assert namespace["LOGGER"].telegram is None
+    assert namespace["ANALYTICS_CONFIG"]["port"] == 6000
+    for name, _ in ANALYTICS_CONFIG_DEFAULTS:
+        assert name in namespace["ANALYTICS_CONFIG"]
+
+
+def test_migration_defaults_cover_runtime_configuration_signatures():
+    def parameters(callable_object):
+        return set(inspect.signature(callable_object).parameters) - {"self"}
+
+    assert {name for name, _ in STREAMER_SETTINGS_DEFAULTS} == parameters(
+        StreamerSettings.__init__
+    )
+    assert {name for name, _ in BET_SETTINGS_DEFAULTS} == parameters(
+        BetSettings.__init__
+    )
+    assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} | set(
+        LOGGER_NOTIFICATION_SETTINGS
+    ) == parameters(LoggerSettings.__init__)
+    assert {name for name, _ in MINE_CONFIG_DEFAULTS} == parameters(
+        TwitchChannelPointsMiner.mine
+    ) - {"streamers"}
+    assert {name for name, _ in ANALYTICS_CONFIG_DEFAULTS} == parameters(
+        TwitchChannelPointsMiner.analytics
+    )
+    assert {name for name, _ in MINER_CONFIG_DEFAULTS} | {
+        "priority",
+        "streamer_source_priority",
+    } == parameters(TwitchChannelPointsMiner.__init__) - {
+        "username",
+        "logger_settings",
+        "streamer_settings",
+        "gql",
+    }
 
 
 def test_migrate_config_source_is_idempotent():

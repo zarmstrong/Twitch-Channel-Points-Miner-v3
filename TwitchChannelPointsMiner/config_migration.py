@@ -10,7 +10,7 @@ import shutil
 import stat
 from pathlib import Path
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -35,13 +35,34 @@ LOGGER_SETTINGS_DEFAULTS = (
     ("colored", "False"),
     ("color_palette", "ColorPalette()"),
     ("auto_clear", "True"),
-    ("telegram", "None"),
-    ("discord", "None"),
-    ("webhook", "None"),
-    ("matrix", "None"),
-    ("pushover", "None"),
-    ("gotify", "None"),
     ("username", "None"),
+)
+LOGGER_NOTIFICATION_SETTINGS = (
+    "telegram",
+    "discord",
+    "webhook",
+    "matrix",
+    "pushover",
+    "gotify",
+)
+LOGGER_NOTIFICATION_TEMPLATES = {
+    "telegram": 'Telegram(chat_id=123456789, token="TOKEN", events=[])',
+    "discord": 'Discord(webhook_api="https://discord.com/api/webhooks/...", events=[])',
+    "webhook": 'Webhook(endpoint="https://example.com/webhook", method="POST", events=[])',
+    "matrix": 'Matrix(username="USER", password="PASSWORD", homeserver="matrix.org", room_id="ROOM", events=[])',
+    "pushover": 'Pushover(userkey="USER_KEY", token="TOKEN", priority=0, sound="pushover", events=[])',
+    "gotify": 'Gotify(endpoint="https://example.com/message?token=TOKEN", priority=0, events=[])',
+}
+BET_SETTINGS_DEFAULTS = (
+    ("strategy", "None"),
+    ("percentage", "None"),
+    ("percentage_gap", "None"),
+    ("max_points", "None"),
+    ("minimum_points", "None"),
+    ("stealth_mode", "None"),
+    ("filter_condition", "None"),
+    ("delay", "None"),
+    ("delay_mode", "None"),
 )
 CONFIG_PRIORITY_ADDITIONS = ("Priority.FAVORITE",)
 CONFIG_STREAMER_SOURCE_ADDITIONS = (
@@ -51,6 +72,7 @@ CONFIG_STREAMER_SOURCE_ADDITIONS = (
     "StreamerSource.BADGES",
 )
 MINER_CONFIG_DEFAULTS = (
+    ("password", "None"),
     ("claim_drops_startup", "False"),
     ("enable_analytics", "False"),
     ("disable_ssl_cert_verification", "False"),
@@ -60,11 +82,14 @@ MINER_CONFIG_DEFAULTS = (
 MINE_CONFIG_DEFAULTS = (
     ("blacklist", "[]"),
     ("followers", "False"),
+    ("followers_order", '"ASC"'),
     ("categories", "[]"),
     ("category_drops_enabled", "True"),
     ("category_limit", "30"),
     ("category_sort", '"VIEWERS_DESC"'),
+    ("category_campaign_order", '"ORDER"'),
     ("category_chat", "None"),
+    ("category_log_level", "logging.INFO"),
     ("drop_item_art", "False"),
     ("print_open_drop_campaigns_on_load", "False"),
     ("scrape_drop_progress_on_load", "False"),
@@ -75,6 +100,14 @@ MINE_CONFIG_DEFAULTS = (
     ("drop_badge_refresh_interval_hours", "1"),
     ("auto_mine_badge_drops", "False"),
     ("badge_drop_streamer_limit", "1"),
+)
+ANALYTICS_CONFIG_DEFAULTS = (
+    ("host", '"127.0.0.1"'),
+    ("port", "5000"),
+    ("refresh", "5"),
+    ("days_ago", "7"),
+    ("password", "None"),
+    ("log_poll_interval", "5"),
 )
 
 
@@ -136,6 +169,77 @@ def _missing_call_defaults(call, call_name, defaults):
         return []
     existing = {keyword.arg for keyword in call.keywords}
     return [f"{name}={value}" for name, value in defaults if name not in existing]
+
+
+def _commented_call_defaults(source, line_offsets, call, names):
+    if not isinstance(call, ast.Call) or any(
+        keyword.arg is None for keyword in call.keywords
+    ):
+        return []
+    existing = {keyword.arg for keyword in call.keywords}
+    missing = [name for name in names if name not in existing]
+    if not missing:
+        return []
+
+    closing_offset = _source_offset(
+        line_offsets, call.end_lineno, call.end_col_offset - 1
+    )
+    closing_line_start = line_offsets[call.end_lineno - 1]
+    closing_prefix = source[closing_line_start:closing_offset]
+    if closing_prefix.strip():
+        # Keep compact calls compact. Adding line comments before their closing
+        # delimiter can comment out surrounding syntax, especially when the
+        # call is nested in a single-line dictionary.
+        return []
+
+    candidates = [*call.args, *call.keywords]
+    if candidates:
+        first = candidates[0]
+        indent = source[
+            line_offsets[first.lineno - 1] : _source_offset(
+                line_offsets, first.lineno, first.col_offset
+            )
+        ]
+    else:
+        call_line_start = line_offsets[call.lineno - 1]
+        indent = source[call_line_start : call_line_start + call.col_offset] + "    "
+    return [
+        (
+            closing_line_start,
+            "".join(
+                f"{indent}# {name}={LOGGER_NOTIFICATION_TEMPLATES[name]},\n"
+                for name in missing
+            ),
+        )
+    ]
+
+
+def _name_is_defined(tree, name):
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            if any(
+                (alias.asname or alias.name.split(".")[0]) == name
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if any((alias.asname or alias.name) == name for alias in node.names):
+                return True
+    return False
+
+
+def _import_offset(source, line_offsets, tree):
+    imports = [
+        node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    if imports:
+        node = imports[-1]
+        return _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
+    version = _assignment_value(tree, "CONFIG_VERSION")
+    if version is not None:
+        return line_offsets[version.end_lineno]
+    first_line_end = source.find("\n") + 1
+    return first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
 
 
 def _line_start_offsets(source):
@@ -224,35 +328,85 @@ def migrate_config_source(source, source_name="config.py"):
 
     line_offsets = _line_start_offsets(source)
     edits = []
+    config_names = _dict_names(config)
+    safe_config = all(key is not None for key in config.keys)
     missing_miner_options = (
         [
             f"{name!r}: {value}"
             for name, value in MINER_CONFIG_DEFAULTS
-            if name not in _dict_names(config)
+            if name not in config_names
         ]
-        if all(key is not None for key in config.keys)
+        if safe_config
         else []
     )
+    required_imports = []
+    if safe_config and "priority" not in config_names:
+        missing_miner_options.append(
+            "'priority': [Priority.STREAK, Priority.DROPS, Priority.ORDER, "
+            "Priority.FAVORITE]"
+        )
+        if not _name_is_defined(tree, "Priority"):
+            required_imports.append(
+                "from TwitchChannelPointsMiner.classes.Settings import Priority"
+            )
+    if safe_config and "streamer_source_priority" not in config_names:
+        missing_miner_options.append(
+            "'streamer_source_priority': [StreamerSource.STREAMERS, "
+            "StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES, "
+            "StreamerSource.BADGES]"
+        )
+        if not _name_is_defined(tree, "StreamerSource"):
+            required_imports.append(
+                "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+            )
     if missing_miner_options:
         edits.extend(
             _closing_line_insertion(source, line_offsets, config, missing_miner_options)
         )
-    streamer_settings = _resolve_value(tree, _dict_value(config, "streamer_settings"))
-    missing = _missing_call_defaults(
-        streamer_settings, "StreamerSettings", STREAMER_SETTINGS_DEFAULTS
-    )
-    if missing:
-        edits.extend(
-            _closing_line_insertion(source, line_offsets, streamer_settings, missing)
+    for streamer_settings in _find_calls(tree, "StreamerSettings"):
+        missing = _missing_call_defaults(
+            streamer_settings, "StreamerSettings", STREAMER_SETTINGS_DEFAULTS
         )
+        if missing:
+            edits.extend(
+                _closing_line_insertion(
+                    source, line_offsets, streamer_settings, missing
+                )
+            )
 
-    logger_settings = _resolve_value(tree, _dict_value(config, "logger_settings"))
-    missing = _missing_call_defaults(
-        logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
-    )
-    if missing:
+    for bet_settings in _find_calls(tree, "BetSettings"):
+        missing = _missing_call_defaults(
+            bet_settings, "BetSettings", BET_SETTINGS_DEFAULTS
+        )
+        if missing:
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, bet_settings, missing)
+            )
+
+    for logger_settings in _find_calls(tree, "LoggerSettings"):
+        missing = _missing_call_defaults(
+            logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
+        )
+        if missing:
+            if (
+                not _name_is_defined(tree, "logging")
+                and "import logging" not in required_imports
+            ):
+                required_imports.append("import logging")
+            if not _name_is_defined(tree, "ColorPalette"):
+                required_imports.append(
+                    "from TwitchChannelPointsMiner.logger import ColorPalette"
+                )
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, logger_settings, missing)
+            )
         edits.extend(
-            _closing_line_insertion(source, line_offsets, logger_settings, missing)
+            _commented_call_defaults(
+                source,
+                line_offsets,
+                logger_settings,
+                LOGGER_NOTIFICATION_SETTINGS,
+            )
         )
 
     priority = _resolve_value(tree, _dict_value(config, "priority"))
@@ -281,21 +435,52 @@ def migrate_config_source(source, source_name="config.py"):
 
     mine_config = _resolve_value(tree, _assignment_value(tree, "MINE_CONFIG"))
     if isinstance(mine_config, ast.Dict):
+        mine_names = _dict_names(mine_config)
         missing_mine_options = (
             [
                 f"{name!r}: {value}"
                 for name, value in MINE_CONFIG_DEFAULTS
-                if name not in _dict_names(mine_config)
+                if name not in mine_names
             ]
             if all(key is not None for key in mine_config.keys)
             else []
         )
         if missing_mine_options:
+            if (
+                "category_log_level" not in mine_names
+                and not _name_is_defined(tree, "logging")
+                and "import logging" not in required_imports
+            ):
+                required_imports.append("import logging")
             edits.extend(
                 _closing_line_insertion(
                     source, line_offsets, mine_config, missing_mine_options
                 )
             )
+
+    analytics_config = _resolve_value(tree, _assignment_value(tree, "ANALYTICS_CONFIG"))
+    if isinstance(analytics_config, ast.Dict) and all(
+        key is not None for key in analytics_config.keys
+    ):
+        missing_analytics_options = [
+            f"{name!r}: {value}"
+            for name, value in ANALYTICS_CONFIG_DEFAULTS
+            if name not in _dict_names(analytics_config)
+        ]
+        if missing_analytics_options:
+            edits.extend(
+                _closing_line_insertion(
+                    source,
+                    line_offsets,
+                    analytics_config,
+                    missing_analytics_options,
+                )
+            )
+
+    if required_imports:
+        import_offset = _import_offset(source, line_offsets, tree)
+        prefix = "\n" if import_offset and source[import_offset - 1] != "\n" else ""
+        edits.append((import_offset, prefix + "\n".join(required_imports) + "\n"))
 
     version_node = _assignment_value(tree, "CONFIG_VERSION")
     if version_node is None:
