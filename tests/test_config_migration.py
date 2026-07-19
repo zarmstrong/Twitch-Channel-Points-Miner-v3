@@ -5,6 +5,8 @@ import pytest
 
 from TwitchChannelPointsMiner.config_migration import (
     CONFIG_VERSION,
+    MINE_CONFIG_DEFAULTS,
+    MINER_CONFIG_DEFAULTS,
     STREAMER_SETTINGS_DEFAULTS,
     ConfigMigrationError,
     convert_runner,
@@ -96,6 +98,42 @@ def test_migrate_config_source_resolves_aliased_miner_config():
         "Priority"
     ].FAVORITE
     assert namespace["DEFAULT_SETTINGS"].points_limit is None
+
+
+def test_version_one_migration_adds_missing_options_and_follower_source_last():
+    source = '''\
+CONFIG_VERSION = 1
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+MINER_CONFIG = {
+    "username": "alice",
+    "streamer_source_priority": [
+        StreamerSource.STREAMERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+    ],
+}
+STREAMERS = []
+MINE_CONFIG = {"followers": True}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 1
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["streamer_source_priority"] == [
+        namespace["StreamerSource"].STREAMERS,
+        namespace["StreamerSource"].CATEGORIES,
+        namespace["StreamerSource"].BADGES,
+        namespace["StreamerSource"].FOLLOWERS,
+    ]
+    for name, _ in MINER_CONFIG_DEFAULTS:
+        assert name in namespace["MINER_CONFIG"]
+    assert namespace["MINE_CONFIG"]["followers"] is True
+    for name, _ in MINE_CONFIG_DEFAULTS:
+        assert name in namespace["MINE_CONFIG"]
 
 
 def test_migrate_config_source_is_idempotent():

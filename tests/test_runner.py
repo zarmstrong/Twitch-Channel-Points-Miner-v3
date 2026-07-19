@@ -125,7 +125,7 @@ ANALYTICS_CONFIG = None
 
     assert [
         source.name for source in loaded.MINER_CONFIG["streamer_source_priority"]
-    ] == ["STREAMERS", "FOLLOWERS"]
+    ] == ["STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES"]
 
 
 def test_load_config_still_rejects_user_config_missing_streamer_source_import(

@@ -10,7 +10,7 @@ import shutil
 import stat
 from pathlib import Path
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -24,6 +24,38 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("chat", "None"),
 )
 CONFIG_PRIORITY_ADDITIONS = ("Priority.FAVORITE",)
+CONFIG_STREAMER_SOURCE_ADDITIONS = (
+    "StreamerSource.STREAMERS",
+    "StreamerSource.FOLLOWERS",
+    "StreamerSource.CATEGORIES",
+    "StreamerSource.BADGES",
+)
+MINER_CONFIG_DEFAULTS = (
+    ("claim_drops_startup", "False"),
+    ("enable_analytics", "False"),
+    ("disable_ssl_cert_verification", "False"),
+    ("disable_at_in_nickname", "False"),
+    ("streams_watched", "2"),
+)
+MINE_CONFIG_DEFAULTS = (
+    ("blacklist", "[]"),
+    ("followers", "False"),
+    ("categories", "[]"),
+    ("category_drops_enabled", "True"),
+    ("category_limit", "30"),
+    ("category_sort", '"VIEWERS_DESC"'),
+    ("category_chat", "None"),
+    ("drop_item_art", "False"),
+    ("print_open_drop_campaigns_on_load", "False"),
+    ("scrape_drop_progress_on_load", "False"),
+    ("log_drop_checks", "False"),
+    ("track_category_streamer_points", "False"),
+    ("category_refresh_interval_hours", "6"),
+    ("drop_badge_catalog", "True"),
+    ("drop_badge_refresh_interval_hours", "1"),
+    ("auto_mine_badge_drops", "False"),
+    ("badge_drop_streamer_limit", "1"),
+)
 
 
 class ConfigMigrationError(ValueError):
@@ -54,6 +86,14 @@ def _dict_value(node, name):
         if isinstance(key, ast.Constant) and key.value == name:
             return value
     return None
+
+
+def _dict_names(node):
+    return {
+        key.value
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
 
 
 def _resolve_value(tree, node):
@@ -88,11 +128,16 @@ def _closing_line_insertion(source, line_offsets, node, lines):
     )
     closing_line_start = line_offsets[node.end_lineno - 1]
     closing_prefix = source[closing_line_start:closing_offset]
-    candidates = [
-        *getattr(node, "args", []),
-        *getattr(node, "keywords", []),
-        *getattr(node, "elts", []),
-    ]
+    if isinstance(node, ast.Dict):
+        candidates = node.keys
+        final_candidates = node.values
+    else:
+        candidates = [
+            *getattr(node, "args", []),
+            *getattr(node, "keywords", []),
+            *getattr(node, "elts", []),
+        ]
+        final_candidates = candidates
     if closing_prefix.strip():
         trimmed = closing_prefix.rstrip()
         if candidates and trimmed.endswith(","):
@@ -110,8 +155,8 @@ def _closing_line_insertion(source, line_offsets, node, lines):
     else:
         indent = closing_prefix + "    "
     insertions = [(closing_line_start, "".join(f"{indent}{line},\n" for line in lines))]
-    if candidates:
-        last = candidates[-1]
+    if final_candidates:
+        last = final_candidates[-1]
         last_end = _source_offset(line_offsets, last.end_lineno, last.end_col_offset)
         if not source[last_end:closing_offset].lstrip().startswith(","):
             insertions.append((last_end, ","))
@@ -148,6 +193,19 @@ def migrate_config_source(source, source_name="config.py"):
 
     line_offsets = _line_start_offsets(source)
     edits = []
+    missing_miner_options = (
+        [
+            f"{name!r}: {value}"
+            for name, value in MINER_CONFIG_DEFAULTS
+            if name not in _dict_names(config)
+        ]
+        if all(key is not None for key in config.keys)
+        else []
+    )
+    if missing_miner_options:
+        edits.extend(
+            _closing_line_insertion(source, line_offsets, config, missing_miner_options)
+        )
     streamer_settings = _resolve_value(tree, _dict_value(config, "streamer_settings"))
     if (
         isinstance(streamer_settings, ast.Call)
@@ -176,6 +234,37 @@ def migrate_config_source(source, source_name="config.py"):
         if missing:
             edits.extend(
                 _closing_line_insertion(source, line_offsets, priority, missing)
+            )
+
+    source_priority = _resolve_value(
+        tree, _dict_value(config, "streamer_source_priority")
+    )
+    if isinstance(source_priority, (ast.List, ast.Tuple)):
+        existing = {_source(source, item) for item in source_priority.elts}
+        missing = [
+            value for value in CONFIG_STREAMER_SOURCE_ADDITIONS if value not in existing
+        ]
+        if missing:
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, source_priority, missing)
+            )
+
+    mine_config = _resolve_value(tree, _assignment_value(tree, "MINE_CONFIG"))
+    if isinstance(mine_config, ast.Dict):
+        missing_mine_options = (
+            [
+                f"{name!r}: {value}"
+                for name, value in MINE_CONFIG_DEFAULTS
+                if name not in _dict_names(mine_config)
+            ]
+            if all(key is not None for key in mine_config.keys)
+            else []
+        )
+        if missing_mine_options:
+            edits.extend(
+                _closing_line_insertion(
+                    source, line_offsets, mine_config, missing_mine_options
+                )
             )
 
     version_node = _assignment_value(tree, "CONFIG_VERSION")

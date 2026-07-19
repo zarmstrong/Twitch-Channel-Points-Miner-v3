@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 import logging
 from colorama import Fore
@@ -30,9 +30,9 @@ MINER_CONFIG = {
     'claim_drops_startup': False,
     'priority': [                                  # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
-        Priority.FAVORITE,                      # - Then watch streamers marked as favorites
         Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
-        Priority.ORDER                          # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
+        Priority.ORDER,                         # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
+        Priority.FAVORITE                       # - New priority options are appended last during config migration; move this earlier to favor marked streamers
     ],
     'enable_analytics': False,
     'disable_ssl_cert_verification': False,
