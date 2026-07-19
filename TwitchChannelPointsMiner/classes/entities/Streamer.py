@@ -301,8 +301,9 @@ class Streamer(object):
     def persistent_series(self, event_type="Watch"):
         self.__save_json("series", event_type=event_type)
 
-    def __save_json(self, key, data={}, event_type="Watch"):
+    def __save_json(self, key, data=None, event_type="Watch"):
         # https://stackoverflow.com/questions/4676195/why-do-i-need-to-multiply-unix-timestamps-by-1000-in-javascript
+        data = {} if data is None else data.copy()
         now = datetime.now().replace(microsecond=0)
         data.update({"x": round(datetime.timestamp(now) * 1000)})
 

@@ -122,3 +122,20 @@ def test_new_streamer_analytics_include_version(tmp_path):
     payload = json.loads((tmp_path / "channel.json").read_text(encoding="utf-8"))
     assert payload["version"] == ANALYTICS_DATA_VERSION
     assert payload["series"][0]["y"] == 100
+
+
+def test_streamer_analytics_do_not_share_default_series_data(tmp_path):
+    Settings.analytics_path = str(tmp_path)
+    streamer = Streamer("channel")
+    streamer.channel_points = 100
+
+    streamer.persistent_series(event_type="Watch")
+    streamer.channel_points = 200
+    streamer.persistent_series(event_type=None)
+
+    series = json.loads((tmp_path / "channel.json").read_text(encoding="utf-8"))[
+        "series"
+    ]
+    assert series[0]["z"] == "Watch"
+    assert series[1]["y"] == 200
+    assert "z" not in series[1]
