@@ -321,7 +321,7 @@ class Streamer(object):
                     with open(fname, "r", encoding="utf-8") as analytics_file:
                         json_data = json.load(analytics_file)
                 else:
-                    json_data = {"version": ANALYTICS_DATA_VERSION}
+                    json_data = {}
                 json_data["version"] = ANALYTICS_DATA_VERSION
                 if key not in json_data:
                     json_data[key] = []

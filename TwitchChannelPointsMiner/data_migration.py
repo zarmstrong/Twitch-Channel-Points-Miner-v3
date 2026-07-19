@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import stat
 from pathlib import Path
 
 ANALYTICS_DATA_VERSION = 1
@@ -44,7 +45,7 @@ def _migrate_json_file(path, current_version):
         temporary.write_text(
             json.dumps(payload, indent=4, ensure_ascii=False), encoding="utf-8"
         )
-        os.chmod(temporary, path.stat().st_mode)
+        os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
         os.replace(temporary, path)
     except Exception:
         temporary.unlink(missing_ok=True)

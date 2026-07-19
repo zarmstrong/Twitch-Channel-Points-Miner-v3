@@ -7,6 +7,7 @@ import builtins
 import hashlib
 import os
 import shutil
+import stat
 from pathlib import Path
 
 CONFIG_VERSION = 1
@@ -203,7 +204,7 @@ def migrate_config(config_path):
     shutil.copy2(path, backup)
     try:
         temporary.write_text(migrated, encoding="utf-8")
-        os.chmod(temporary, path.stat().st_mode)
+        os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
         os.replace(temporary, path)
     except Exception:
         temporary.unlink(missing_ok=True)
