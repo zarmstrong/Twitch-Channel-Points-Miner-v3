@@ -10,7 +10,7 @@ import shutil
 import stat
 from pathlib import Path
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -22,6 +22,26 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("community_goals", "False"),
     ("bet", "None"),
     ("chat", "None"),
+)
+LOGGER_SETTINGS_DEFAULTS = (
+    ("save", "True"),
+    ("less", "False"),
+    ("console_level", "logging.INFO"),
+    ("console_username", "False"),
+    ("time_zone", "None"),
+    ("date_format", '"dd/mm/yy"'),
+    ("file_level", "logging.DEBUG"),
+    ("emoji", "True"),
+    ("colored", "False"),
+    ("color_palette", "ColorPalette()"),
+    ("auto_clear", "True"),
+    ("telegram", "None"),
+    ("discord", "None"),
+    ("webhook", "None"),
+    ("matrix", "None"),
+    ("pushover", "None"),
+    ("gotify", "None"),
+    ("username", "None"),
 )
 CONFIG_PRIORITY_ADDITIONS = ("Priority.FAVORITE",)
 CONFIG_STREAMER_SOURCE_ADDITIONS = (
@@ -105,6 +125,17 @@ def _resolve_value(tree, node):
             break
         node = resolved
     return node
+
+
+def _missing_call_defaults(call, call_name, defaults):
+    if (
+        not isinstance(call, ast.Call)
+        or _call_name(call.func) != call_name
+        or any(keyword.arg is None for keyword in call.keywords)
+    ):
+        return []
+    existing = {keyword.arg for keyword in call.keywords}
+    return [f"{name}={value}" for name, value in defaults if name not in existing]
 
 
 def _line_start_offsets(source):
@@ -207,23 +238,22 @@ def migrate_config_source(source, source_name="config.py"):
             _closing_line_insertion(source, line_offsets, config, missing_miner_options)
         )
     streamer_settings = _resolve_value(tree, _dict_value(config, "streamer_settings"))
-    if (
-        isinstance(streamer_settings, ast.Call)
-        and _call_name(streamer_settings.func) == "StreamerSettings"
-        and all(keyword.arg is not None for keyword in streamer_settings.keywords)
-    ):
-        existing = {keyword.arg for keyword in streamer_settings.keywords}
-        missing = [
-            f"{name}={value}"
-            for name, value in STREAMER_SETTINGS_DEFAULTS
-            if name not in existing
-        ]
-        if missing:
-            edits.extend(
-                _closing_line_insertion(
-                    source, line_offsets, streamer_settings, missing
-                )
-            )
+    missing = _missing_call_defaults(
+        streamer_settings, "StreamerSettings", STREAMER_SETTINGS_DEFAULTS
+    )
+    if missing:
+        edits.extend(
+            _closing_line_insertion(source, line_offsets, streamer_settings, missing)
+        )
+
+    logger_settings = _resolve_value(tree, _dict_value(config, "logger_settings"))
+    missing = _missing_call_defaults(
+        logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
+    )
+    if missing:
+        edits.extend(
+            _closing_line_insertion(source, line_offsets, logger_settings, missing)
+        )
 
     priority = _resolve_value(tree, _dict_value(config, "priority"))
     if isinstance(priority, (ast.List, ast.Tuple)):

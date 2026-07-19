@@ -5,6 +5,7 @@ import pytest
 
 from TwitchChannelPointsMiner.config_migration import (
     CONFIG_VERSION,
+    LOGGER_SETTINGS_DEFAULTS,
     MINE_CONFIG_DEFAULTS,
     MINER_CONFIG_DEFAULTS,
     STREAMER_SETTINGS_DEFAULTS,
@@ -134,6 +135,53 @@ ANALYTICS_CONFIG = None
     assert namespace["MINE_CONFIG"]["followers"] is True
     for name, _ in MINE_CONFIG_DEFAULTS:
         assert name in namespace["MINE_CONFIG"]
+
+
+def test_version_two_migration_normalizes_logger_settings():
+    source = '''\
+CONFIG_VERSION = 2
+import logging
+from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
+LOGGER = LoggerSettings(save=False, colored=True)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 2
+    assert new_version == CONFIG_VERSION
+    settings = namespace["LOGGER"]
+    assert settings.save is False
+    assert settings.colored is True
+    assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} == set(settings.__slots__)
+    assert settings.console_level == namespace["logging"].INFO
+    assert settings.console_username is False
+    assert settings.time_zone is None
+    assert settings.date_format == "dd/mm/yy"
+    assert settings.telegram is None
+    assert settings.gotify is None
+
+
+def test_logger_settings_with_expanded_kwargs_is_not_modified():
+    source = '''\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER_OVERRIDES = {"save": False}
+LOGGER = LoggerSettings(**LOGGER_OVERRIDES)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert "LoggerSettings(**LOGGER_OVERRIDES)" in migrated
 
 
 def test_migrate_config_source_is_idempotent():
