@@ -200,7 +200,7 @@ def test_capture_drop_progress_baseline_scrapes_when_not_preloaded():
     assert twitch.reasons == ["report_baseline"]
 
 
-def test_capture_drop_progress_baseline_does_not_repeat_inventory_check():
+def test_capture_drop_progress_baseline_does_not_repeat_progress_scrape():
     class TwitchStub:
         def drop_report_snapshot(self):
             return {}
@@ -209,5 +209,29 @@ def test_capture_drop_progress_baseline_does_not_repeat_inventory_check():
             raise AssertionError("inventory should not be scraped twice")
 
     assert _capture_drop_progress_baseline(
-        TwitchStub(), inventory_checked=True
+        TwitchStub(), progress_scraped=True
     ) == {}
+
+
+def test_capture_drop_progress_baseline_refreshes_partial_claim_snapshot():
+    class TwitchStub:
+        def __init__(self):
+            self.snapshot = {"captured": {"status": "captured"}}
+
+        def drop_report_snapshot(self):
+            return self.snapshot.copy()
+
+        def scrape_drop_progress_from_inventory(self, reason):
+            assert reason == "report_baseline"
+            self.snapshot["in-progress"] = {
+                "status": "in_progress",
+                "current_minutes_watched": 25,
+            }
+
+    assert _capture_drop_progress_baseline(TwitchStub()) == {
+        "captured": {"status": "captured"},
+        "in-progress": {
+            "status": "in_progress",
+            "current_minutes_watched": 25,
+        },
+    }

@@ -130,6 +130,13 @@ def test_filter_datas_handles_non_list_series_and_annotations():
     assert result == {"series": [], "annotations": []}
 
 
+def test_filter_datas_handles_non_dict_document():
+    assert filter_datas(None, None, [{"x": 1000}]) == {
+        "series": [],
+        "annotations": [],
+    }
+
+
 def test_filter_datas_defaults_missing_prior_balance_to_zero():
     result = filter_datas(
         "1970-01-02",

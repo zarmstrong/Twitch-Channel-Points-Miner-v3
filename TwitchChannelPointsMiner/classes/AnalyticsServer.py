@@ -61,6 +61,9 @@ def streamers_available():
 
 def filter_datas(start_date, end_date, datas):
     # Note: https://stackoverflow.com/questions/4676195/why-do-i-need-to-multiply-unix-timestamps-by-1000-in-javascript
+    if not isinstance(datas, dict):
+        datas = {}
+
     start_date = (
         datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000
         if start_date is not None
