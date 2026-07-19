@@ -80,6 +80,7 @@ class Twitch(object):
         "analytics_mutex",
         "drop_progress_last_saved",
         "drop_status_last_saved",
+        "drop_report_state",
         "track_drop_item_art",
         "scrape_drop_progress_on_load",
         "log_drop_checks",
@@ -131,6 +132,7 @@ class Twitch(object):
         self.analytics_mutex = Lock()
         self.drop_progress_last_saved = {}
         self.drop_status_last_saved = {}
+        self.drop_report_state = {}
         self.track_drop_item_art = False
         self.scrape_drop_progress_on_load = False
         self.log_drop_checks = False
@@ -3278,9 +3280,6 @@ class Twitch(object):
         benefit_override=None,
         item_art_url_override=None,
     ):
-        if Settings.enable_analytics is not True:
-            return
-
         category_name = category_name_override or "Unknown"
         campaign_name = campaign_name_override
         if campaign is not None:
@@ -3330,6 +3329,21 @@ class Twitch(object):
                 else (drop.item_art_url if self.track_drop_item_art is True else None)
             ),
         }
+
+        report_key = "|".join(
+            [
+                str(payload.get("drop_id") or ""),
+                str(payload.get("item_art_url") or ""),
+                str(payload.get("item_name") or ""),
+                str(payload.get("campaign") or ""),
+                str(payload.get("category") or ""),
+            ]
+        )
+        with self.analytics_mutex:
+            self.drop_report_state[report_key] = payload.copy()
+
+        if Settings.enable_analytics is not True:
+            return
 
         analytics_file = os.path.join(Settings.analytics_path, "drops_by_category.json")
         temp_file = analytics_file + ".temp"
@@ -3387,6 +3401,14 @@ class Twitch(object):
                 json.dump(data, temp_handle, indent=4)
 
             os.replace(temp_file, analytics_file)
+
+    def drop_report_snapshot(self):
+        """Return the latest structured drop state tracked by this session."""
+        with self.analytics_mutex:
+            return {
+                tracking_key: payload.copy()
+                for tracking_key, payload in self.drop_report_state.items()
+            }
 
     def __save_drop_progress_analytics(
         self,

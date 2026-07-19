@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Twitch-Channel-Points-Miner-v2</title>
+    <title>Twitch-Channel-Points-Miner-v3</title>
     <link rel="icon" type="image/png" sizes="32x32"
         href="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png">
     <link rel="icon" type="image/png" sizes="16x16"
@@ -18,13 +18,13 @@
         integrity="sha512-1ycn6IcaQQ40/MKBW2W4Rhis/DbILU74C1vSrLJxCq57o941Ym01SwNsOMqvEBFlcgUa6xLiPY/NS5R+E6ztJQ=="
         crossorigin="anonymous" referrerpolicy="no-referrer" />
 
-    <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css')}}" rel="stylesheet" />
+    <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css', v=assetVersion)}}" rel="stylesheet" />
     <script>
         if (localStorage.getItem('dark-mode') === 'false') {
             document.getElementById('dark-theme').disabled = true;
         }
     </script>
-    <link href="{{url_for('static', filename='style.css')}}" rel="stylesheet" />
+    <link href="{{url_for('static', filename='style.css', v=assetVersion)}}" rel="stylesheet" />
 
 </head>
 
@@ -32,50 +32,52 @@
     <div class="container has-text-centered" style="height: 100vh;">
         <div class="columns" id="header">
             <div class="column has-text-right">
-                <a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2" target="_blank"><img
+                <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3" target="_blank"
+                    rel="noopener noreferrer"><img
                         style="margin-top: -20px;" width="600px" src="{{url_for('static', filename='banner.png')}}"
                         alt="banner"></a>
             </div>
             <div class="column is-4 has-text-left" style="margin-top: 35px;">
                 <table>
                     <tr>
-                        <td><a href="https://github.com/rdavydov" target="_blank">rdavydov</a></td>
+                        <td><a href="https://github.com/zarmstrong" target="_blank"
+                                rel="noopener noreferrer">zarmstrong</a></td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/blob/master/LICENSE">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/LICENSE">
                                 <img alt="License"
-                                    src="https://img.shields.io/github/license/rdavydov/Twitch-Channel-Points-Miner-v2" /></a>
+                                    src="https://img.shields.io/github/license/zarmstrong/Twitch-Channel-Points-Miner-v3" /></a>
                         </td>
                     </tr>
                     <tr>
                         <td><a href="https://www.python.org/downloads/">
                                 <img alt="Python3"
-                                    src="https://img.shields.io/badge/built%20for-Python%203.11--3.13-red.svg?style=flat"></a>
+                                    src="https://img.shields.io/badge/built%20for-Python%203.11--3.14-red.svg?style=flat"></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/pulls">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/pulls">
                                 <img alt="PRsWelcome"
                                     src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat" /></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/stargazers">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers">
                                 <img alt="GitHub Repo stars"
-                                    src="https://img.shields.io/github/stars/rdavydov/Twitch-Channel-Points-Miner-v2" /></a>
+                                    src="https://img.shields.io/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3" /></a>
                         </td>
                     </tr>
                     <tr>
                         <td><a
-                                href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2/issues?q=is%3Aissue+is%3Aclosed">
+                                href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues?q=is%3Aissue+is%3Aclosed">
                                 <img alt="GitHub closed issues"
-                                    src="https://img.shields.io/github/issues-closed/rdavydov/Twitch-Channel-Points-Miner-v2"></a>
+                                    src="https://img.shields.io/github/issues-closed/zarmstrong/Twitch-Channel-Points-Miner-v3"></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3">
                                 <img alt="GitHub last commit"
-                                    src="https://img.shields.io/github/last-commit/rdavydov/Twitch-Channel-Points-Miner-v2" /></a>
+                                    src="https://img.shields.io/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3" /></a>
                         </td>
                     </tr>
                 </table>
@@ -109,6 +111,8 @@
                 </label>
             </div>
         </div>
+
+        <div id="analytics-load-error" class="notification is-danger" role="alert" style="display: none;"></div>
 
         <div id="points-panel">
         <div class="columns">
@@ -273,6 +277,17 @@
     var logPollInterval = parseInt("{{ logPollInterval }}");
     var dateFormat = {{ dateFormat | tojson }};
 </script>
-<script type="text/javascript" src="{{url_for('static', filename='script.js')}}"></script>
+<script type="text/javascript" src="{{url_for('static', filename='script.js', v=assetVersion)}}"></script>
+<script>
+    if (typeof window.jQuery === 'undefined' || typeof window.ApexCharts === 'undefined') {
+        var missingDependencies = [];
+        if (typeof window.jQuery === 'undefined') missingDependencies.push('jQuery');
+        if (typeof window.ApexCharts === 'undefined') missingDependencies.push('ApexCharts');
+        var dependencyError = document.getElementById('analytics-load-error');
+        dependencyError.textContent = 'Analytics could not load required browser libraries: ' + missingDependencies.join(', ') + '. Check browser console or network filtering.';
+        dependencyError.style.display = 'block';
+        console.error('[analytics] Missing browser dependencies:', missingDependencies);
+    }
+</script>
 
 </html>

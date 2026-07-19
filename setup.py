@@ -34,7 +34,6 @@ setuptools.setup(
         "colorama==0.4.6",
         "flask==3.0.2",
         "irc==20.4.0",
-        "pandas==2.2.3",
         "pytz==2024.1",
     ],
     long_description=read("README.md"),

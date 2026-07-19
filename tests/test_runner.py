@@ -1,5 +1,10 @@
 import pytest
 
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+    _capture_drop_progress_baseline,
+    _drop_progress_report_entries,
+)
+
 from TwitchChannelPointsMiner import runner
 from TwitchChannelPointsMiner.runner import _load_config
 
@@ -105,3 +110,107 @@ def test_restart_process_relaunches_frozen_executable(monkeypatch):
     runner.restart_process()
 
     assert calls == [("miner.exe", ["miner.exe", "--example"])]
+
+
+def test_drop_progress_report_entries_only_returns_session_changes():
+    unchanged = {
+        "item_name": "Unchanged",
+        "category": "Game",
+        "campaign": "Campaign",
+        "current_minutes_watched": 10,
+        "status": "in_progress",
+    }
+    original = {
+        "unchanged": unchanged,
+        "advanced": {
+            "current_minutes_watched": 6,
+            "status": "in_progress",
+        },
+    }
+    current = {
+        "unchanged": unchanged.copy(),
+        "advanced": {
+            "item_name": "Reward",
+            "category": "Game",
+            "campaign": "Campaign",
+            "current_minutes_watched": 25,
+            "minutes_required": 60,
+            "status": "in_progress",
+        },
+    }
+
+    assert _drop_progress_report_entries(original, current) == [
+        {
+            "item_name": "Reward",
+            "category": "Game",
+            "campaign": "Campaign",
+            "current_minutes_watched": 25,
+            "minutes_required": 60,
+            "status": "in_progress",
+            "minutes_gained": 19,
+        }
+    ]
+
+
+def test_drop_progress_report_entries_includes_status_only_change():
+    original = {
+        "drop": {"current_minutes_watched": 60, "status": "in_progress"}
+    }
+    current = {
+        "drop": {
+            "item_name": "Reward",
+            "current_minutes_watched": 60,
+            "status": "captured",
+        }
+    }
+
+    assert _drop_progress_report_entries(original, current)[0]["minutes_gained"] == 0
+
+
+def test_drop_progress_report_entries_ignores_new_zero_progress_reward():
+    current = {
+        "drop": {
+            "item_name": "Reward",
+            "current_minutes_watched": 0,
+            "status": "in_progress",
+        }
+    }
+
+    assert _drop_progress_report_entries({}, current) == []
+
+
+def test_drop_progress_report_entries_requires_complete_baseline():
+    current = {
+        "drop": {
+            "current_minutes_watched": 25,
+            "status": "in_progress",
+        }
+    }
+
+    assert _drop_progress_report_entries(None, current) == []
+
+
+def test_capture_drop_progress_baseline_skips_disabled_scrape():
+    class TwitchStub:
+        def drop_report_snapshot(self):
+            raise AssertionError("snapshot should not be used without a full scrape")
+
+        def scrape_drop_progress_from_inventory(self, reason):
+            raise AssertionError("baseline capture should not trigger a scrape")
+
+    assert _capture_drop_progress_baseline(TwitchStub()) is None
+
+
+def test_capture_drop_progress_baseline_does_not_repeat_progress_scrape():
+    class TwitchStub:
+        def drop_report_snapshot(self):
+            return {"drop": {"current_minutes_watched": 25}}
+
+        def scrape_drop_progress_from_inventory(self, reason):
+            raise AssertionError("inventory should not be scraped twice")
+
+    assert _capture_drop_progress_baseline(
+        TwitchStub(), progress_scraped=True
+    ) == {
+        "drop": {"current_minutes_watched": 25}
+    }

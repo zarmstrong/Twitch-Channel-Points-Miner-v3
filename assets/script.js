@@ -81,7 +81,9 @@ var options = {
 };
 
 var chart = new ApexCharts(document.querySelector("#chart"), options);
+var chartRendered = false;
 var currentStreamer = null;
+var pointSeries = [];
 var annotations = [];
 var streamerRefreshTimeout = null;
 var streamerDataRequest = 0;
@@ -100,6 +102,19 @@ var selectedStreamerAnalytics = new Set();
 var lastStreamerCheckboxIndex = null;
 var pendingDeleteStreamers = [];
 var analyticsDeleteInProgress = false;
+var pointsLoaded = false;
+var dropsLoaded = false;
+
+function showAnalyticsLoadError(message, details) {
+    console.error(`[analytics] ${message}`, details || '');
+    $('#analytics-load-error').text(message).show();
+}
+
+function clearAnalyticsLoadError() {
+    if (pointsLoaded && dropsLoaded) {
+        $('#analytics-load-error').text('').hide();
+    }
+}
 
 function switchDashboardTab(tabName) {
     var isPoints = tabName !== 'drops';
@@ -110,6 +125,16 @@ function switchDashboardTab(tabName) {
     $('#tab-drops').toggleClass('is-link', !isPoints);
 
     localStorage.setItem('dashboardTab', isPoints ? 'points' : 'drops');
+
+    // ApexCharts cannot reliably place annotations while its panel is hidden.
+    // Reapply them after Points becomes visible, including when the page was
+    // refreshed with the Drops tab saved in localStorage.
+    if (isPoints && chartRendered) {
+        window.requestAnimationFrame(function () {
+            renderPointsChart();
+            window.dispatchEvent(new Event('resize'));
+        });
+    }
 }
 
 var startDate = new Date();
@@ -126,7 +151,6 @@ $(document).ready(function () {
     $('#dark-theme').prop('disabled', savedDarkMode !== 'true');
 
     var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
-    switchDashboardTab(savedDashboardTab);
     dropsFilter = localStorage.getItem('dropsFilter') || 'active';
     $('#drops-filter').val(dropsFilter);
 
@@ -219,7 +243,12 @@ $(document).ready(function () {
         }
     });
 
-    chart.render();
+    // ApexCharts must initialize while its container is visible. If the saved
+    // tab is Drops, hide Points only after chart initialization completes.
+    chart.render().then(function () {
+        chartRendered = true;
+        switchDashboardTab(savedDashboardTab);
+    });
 
     if (!localStorage.getItem("annotations")) localStorage.setItem("annotations", true);
     if (!localStorage.getItem("sort-by")) localStorage.setItem("sort-by", "Name ascending");
@@ -328,12 +357,12 @@ function formatDisplayDate(date) {
 function changeStreamer(streamer, index) {
     if (!streamer) {
         currentStreamer = null;
+        pointSeries = [];
+        annotations = [];
         localStorage.removeItem("selectedStreamer");
         updateStreamerDeleteControls();
         options.title.text = 'Channel points (dates are displayed in UTC)';
-        chart.updateOptions(options);
-        chart.updateSeries([], true);
-        clearAnnotations();
+        renderPointsChart();
         return;
     }
 
@@ -344,7 +373,9 @@ function changeStreamer(streamer, index) {
 
     // Update the chart title with the current streamer's name
     options.title.text = `${streamer.replace(".json", "")}'s channel points (dates are displayed in UTC)`;
-    chart.updateOptions(options);
+    if (chartRendered && !$('#points-panel').is(':hidden')) {
+        chart.updateOptions({ title: options.title }, false, false);
+    }
 
     // Save the selected streamer in localStorage
     localStorage.setItem("selectedStreamer", currentStreamer);
@@ -367,13 +398,9 @@ function getStreamerData(streamer) {
             // Ignore a response for a range or streamer that has since changed.
             if (request !== streamerDataRequest || currentStreamer !== streamer) return;
 
-            chart.updateSeries([{
-                name: streamer.replace(".json", ""),
-                data: response["series"]
-            }], true)
-            clearAnnotations();
+            pointSeries = response["series"] || [];
             annotations = response["annotations"];
-            updateAnnotations();
+            renderPointsChart();
             streamerRefreshTimeout = setTimeout(function () {
                 getStreamerData(streamer);
             }, 300000); // 5 minutes
@@ -394,6 +421,9 @@ function getAllStreamersData() {
 
 function getStreamers() {
     $.getJSON('streamers', function (response) {
+        pointsLoaded = true;
+        clearAnalyticsLoadError();
+        console.debug('[analytics] Points response', response);
         streamersList = response;
         sortStreamers();
         var availableStreamers = new Set(streamersList.map(streamer => streamer.name));
@@ -416,6 +446,12 @@ function getStreamers() {
 
         // Ensure the selected streamer is still active and scrolled into view
         renderStreamers();
+    }).fail(function (xhr, status, error) {
+        pointsLoaded = false;
+        showAnalyticsLoadError(
+            `Points failed to load (${xhr.status || status}): ${error || xhr.responseText || 'Unknown error'}`,
+            xhr.responseText
+        );
     });
 }
 
@@ -632,6 +668,8 @@ function changeSortBy(option) {
 }
 
 function updateAnnotations() {
+    if (!chartRendered || $('#points-panel').is(':hidden')) return;
+
     if ($('#annotations').prop("checked") === true) {
         clearAnnotations()
         if (annotations && annotations.length > 0)
@@ -642,7 +680,26 @@ function updateAnnotations() {
     } else clearAnnotations()
 }
 
+function renderPointsChart() {
+    if (!chartRendered || $('#points-panel').is(':hidden')) return;
+
+    var series = currentStreamer ? [{
+        name: currentStreamer.replace(".json", ""),
+        data: pointSeries
+    }] : [];
+
+    chart.updateOptions({ title: options.title }, false, false)
+        .then(function () {
+            return chart.updateSeries(series, true);
+        })
+        .then(function () {
+            updateAnnotations();
+        });
+}
+
 function clearAnnotations() {
+    if (!chartRendered) return;
+
     if (annotations && annotations.length > 0)
         annotations.forEach((annotation, index) => {
             chart.removeAnnotation(annotation['id'])
@@ -652,6 +709,9 @@ function clearAnnotations() {
 
 function getDropsByCategory() {
     $.getJSON('./drops_by_category', function (response) {
+        dropsLoaded = true;
+        clearAnalyticsLoadError();
+        console.debug('[analytics] Drops response', response);
         renderDropsByCategory(response);
         if (dropsRefreshTimeout) {
             clearTimeout(dropsRefreshTimeout);
@@ -659,7 +719,12 @@ function getDropsByCategory() {
         dropsRefreshTimeout = setTimeout(function () {
             getDropsByCategory();
         }, refresh);
-    }).fail(function () {
+    }).fail(function (xhr, status, error) {
+        dropsLoaded = false;
+        showAnalyticsLoadError(
+            `Drops failed to load (${xhr.status || status}): ${error || xhr.responseText || 'Unknown error'}`,
+            xhr.responseText
+        );
         renderDropsByCategory({ drops: [] });
         if (dropsRefreshTimeout) {
             clearTimeout(dropsRefreshTimeout);
@@ -1049,14 +1114,6 @@ function escapeHtml(text) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
 }
-
-// Toggle
-$('#annotations').click(() => {
-    updateAnnotations();
-});
-$('#dark-mode').click(() => {
-    toggleDarkMode();
-});
 
 $('.dropdown').click(() => {
     $('.dropdown').toggleClass('is-active');
