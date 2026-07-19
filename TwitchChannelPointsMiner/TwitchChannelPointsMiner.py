@@ -103,6 +103,10 @@ def _normalize_badge_drop_streamer_limit(limit):
     return 1
 
 
+def _unique_streamer_names(streamer_names):
+    return list(dict.fromkeys(streamer_names))
+
+
 def _drop_progress_report_entries(original, current):
     if original is None:
         return []
@@ -553,6 +557,7 @@ class TwitchChannelPointsMiner:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
 
+            streamers_name = _unique_streamer_names(streamers_name)
             logger.info(
                 f"Loading data for {len(streamers_name)} streamers. Please wait...",
                 extra={"emoji": ":nerd_face:"},
