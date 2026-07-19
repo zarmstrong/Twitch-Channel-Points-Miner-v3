@@ -49,6 +49,7 @@ from TwitchChannelPointsMiner.constants import (
     URL,
     GQLOperations,
 )
+from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -3463,6 +3464,7 @@ class Twitch(object):
 
                 if "drops" not in data:
                     data["drops"] = []
+                data["version"] = ANALYTICS_DATA_VERSION
 
                 compacted = {}
                 for item in data["drops"]:
@@ -3622,6 +3624,7 @@ class Twitch(object):
                 updated += 1
 
             data["drops"] = drops
+            data["version"] = ANALYTICS_DATA_VERSION
 
             with open(temp_file, "w", encoding="utf-8") as temp_handle:
                 json.dump(data, temp_handle, indent=4)

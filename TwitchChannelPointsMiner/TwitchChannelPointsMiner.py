@@ -32,6 +32,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+from TwitchChannelPointsMiner.data_migration import migrate_analytics_directory
 from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
 from TwitchChannelPointsMiner.utils import (
     AttemptStrategy,
@@ -253,6 +254,7 @@ class TwitchChannelPointsMiner:
                 Path().absolute(), "analytics", username
             )
             Path(Settings.analytics_path).mkdir(parents=True, exist_ok=True)
+            migrate_analytics_directory(Settings.analytics_path)
 
         self.username = username
 

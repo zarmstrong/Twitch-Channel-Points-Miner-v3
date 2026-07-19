@@ -1,0 +1,61 @@
+import json
+import stat
+
+import pytest
+
+from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+from TwitchChannelPointsMiner.data_migration import (
+    ANALYTICS_DATA_VERSION,
+    DataMigrationError,
+    migrate_analytics_directory,
+)
+
+
+def test_migrate_analytics_directory_versions_existing_files(tmp_path):
+    streamer_file = tmp_path / "channel.json"
+    drops_file = tmp_path / "drops_by_category.json"
+    streamer_payload = {"series": [{"x": 1, "y": 10}]}
+    drops_payload = {"drops": [{"drop_id": "one"}]}
+    streamer_file.write_text(json.dumps(streamer_payload), encoding="utf-8")
+    drops_file.write_text(json.dumps(drops_payload), encoding="utf-8")
+    streamer_file.chmod(0o640)
+
+    assert migrate_analytics_directory(tmp_path) == 2
+
+    assert json.loads(streamer_file.read_text(encoding="utf-8")) == {
+        **streamer_payload,
+        "version": ANALYTICS_DATA_VERSION,
+    }
+    assert json.loads(drops_file.read_text(encoding="utf-8")) == {
+        **drops_payload,
+        "version": ANALYTICS_DATA_VERSION,
+    }
+    assert (
+        json.loads((tmp_path / "channel.json.v0.bak").read_text(encoding="utf-8"))
+        == streamer_payload
+    )
+    assert stat.S_IMODE(streamer_file.stat().st_mode) == 0o640
+    assert migrate_analytics_directory(tmp_path) == 0
+
+
+def test_migrate_analytics_directory_rejects_future_versions(tmp_path):
+    path = tmp_path / "channel.json"
+    path.write_text(
+        json.dumps({"version": ANALYTICS_DATA_VERSION + 1}), encoding="utf-8"
+    )
+
+    with pytest.raises(DataMigrationError, match="unsupported version"):
+        migrate_analytics_directory(tmp_path)
+
+
+def test_new_streamer_analytics_include_version(tmp_path):
+    Settings.analytics_path = str(tmp_path)
+    streamer = Streamer("channel")
+    streamer.channel_points = 100
+
+    streamer.persistent_series()
+
+    payload = json.loads((tmp_path / "channel.json").read_text(encoding="utf-8"))
+    assert payload["version"] == ANALYTICS_DATA_VERSION
+    assert payload["series"][0]["y"] == 100

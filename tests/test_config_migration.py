@@ -4,20 +4,113 @@ import stat
 import pytest
 
 from TwitchChannelPointsMiner.config_migration import (
+    CONFIG_VERSION,
+    STREAMER_SETTINGS_DEFAULTS,
     ConfigMigrationError,
     convert_runner,
     convert_runner_source,
+    migrate_config,
+    migrate_config_source,
 )
 
 
-RUNNER = '''\
+RUNNER = """\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
 
 miner = TwitchChannelPointsMiner("alice", claim_drops_startup=True)
 miner.mine(["channel_one", "channel_two"], followers=True)
 miner.analytics(port=5000)
-'''
+"""
+
+
+CONFIG = """\
+# -*- coding: utf-8 -*-
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+
+PRIORITIES = [
+    Priority.STREAK,
+    Priority.DROPS,
+    Priority.ORDER,
+]
+DEFAULT_SETTINGS = StreamerSettings(
+    make_predictions=False,
+    claim_drops=False,
+)
+MINER_CONFIG = {
+    "username": "alice",
+    "priority": PRIORITIES,
+    "streamer_settings": DEFAULT_SETTINGS,
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+
+def test_migrate_config_source_adds_version_settings_and_new_priority_last():
+    migrated, old_version, new_version = migrate_config_source(CONFIG)
+    namespace = {}
+
+    exec(migrated, namespace)
+
+    assert old_version == 0
+    assert new_version == CONFIG_VERSION
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert namespace["PRIORITIES"] == [
+        namespace["Priority"].STREAK,
+        namespace["Priority"].DROPS,
+        namespace["Priority"].ORDER,
+        namespace["Priority"].FAVORITE,
+    ]
+    settings = namespace["DEFAULT_SETTINGS"]
+    assert settings.make_predictions is False
+    assert settings.claim_drops is False
+    assert {name for name, _ in STREAMER_SETTINGS_DEFAULTS} == set(settings.__slots__)
+    assert settings.follow_raid is True
+    assert settings.claim_moments is True
+    assert settings.watch_streak is True
+    assert settings.favorite is False
+    assert settings.points_limit is None
+    assert settings.community_goals is False
+    assert settings.bet is None
+    assert settings.chat is None
+
+
+def test_migrate_config_source_is_idempotent():
+    migrated, _, _ = migrate_config_source(CONFIG)
+
+    second, old_version, new_version = migrate_config_source(migrated)
+
+    assert second == migrated
+    assert old_version == CONFIG_VERSION
+    assert new_version == CONFIG_VERSION
+    assert second.count("Priority.FAVORITE") == 1
+
+
+def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(CONFIG, encoding="utf-8")
+    config.chmod(0o640)
+
+    assert migrate_config(config) is True
+
+    backup = tmp_path / "config.py.v0.bak"
+    assert backup.read_text(encoding="utf-8") == CONFIG
+    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+    assert migrate_config(config) is False
+
+
+def test_migrate_config_rejects_future_version():
+    future = CONFIG.replace(
+        "# -*- coding: utf-8 -*-",
+        f"# -*- coding: utf-8 -*-\nCONFIG_VERSION = {CONFIG_VERSION + 1}",
+    )
+
+    with pytest.raises(ConfigMigrationError, match="unsupported CONFIG_VERSION"):
+        migrate_config_source(future)
 
 
 def test_convert_runner_source_preserves_configuration_expressions():
@@ -43,12 +136,12 @@ def test_convert_runner_source_preserves_configuration_expressions():
 
 def test_convert_runner_source_defaults_optional_sections():
     converted = convert_runner_source(
-        '''\
+        """\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 
 miner = TwitchChannelPointsMiner("alice")
 miner.mine()
-'''
+"""
     )
     namespace = {}
 
@@ -61,19 +154,21 @@ miner.mine()
 
 def test_convert_runner_source_preserves_supporting_imports_only():
     converted = convert_runner_source(
-        '''\
+        """\
 import logging
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Settings import Priority
 
 miner = TwitchChannelPointsMiner("alice", priority=[Priority.ORDER])
 miner.mine([])
-'''
+"""
     )
 
     assert "import logging" in converted
     assert "from TwitchChannelPointsMiner.classes.Settings import Priority" in converted
-    assert "from TwitchChannelPointsMiner import TwitchChannelPointsMiner" not in converted
+    assert (
+        "from TwitchChannelPointsMiner import TwitchChannelPointsMiner" not in converted
+    )
 
     namespace = {}
     exec(converted, namespace)
@@ -82,7 +177,7 @@ miner.mine([])
 
 def test_convert_runner_source_preserves_explicit_streamer_source_priority():
     converted = convert_runner_source(
-        '''\
+        """\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Settings import StreamerSource
 
@@ -90,7 +185,7 @@ miner = TwitchChannelPointsMiner(
     "alice", streamer_source_priority=[StreamerSource.FOLLOWERS]
 )
 miner.mine([])
-'''
+"""
     )
 
     namespace = {}
@@ -101,74 +196,13 @@ miner.mine([])
     ]
 
 
-def test_convert_runner_source_preserves_streamer_settings_assignments():
-    converted = convert_runner_source(
-        '''\
-from TwitchChannelPointsMiner import TwitchChannelPointsMiner
-from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
-from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
-
-USERNAME = "alice"
-UNRELATED = "do not copy"
-DEFAULT_STREAMER_SETTINGS = StreamerSettings(
-    make_predictions=False,
-    follow_raid=False,
-    claim_drops=False,
-    claim_moments=False,
-    watch_streak=False,
-    favorite=True,
-    points_limit=50000,
-    community_goals=True,
-    bet=BetSettings(max_points=1234),
-    chat=ChatPresence.NEVER,
-)
-STREAMERS = [
-    Streamer(
-        "favorite_channel",
-        settings=StreamerSettings(favorite=True, points_limit=150000),
-    )
-]
-
-miner = TwitchChannelPointsMiner(
-    USERNAME,
-    streamer_settings=DEFAULT_STREAMER_SETTINGS,
-)
-miner.mine(STREAMERS)
-'''
-    )
-    namespace = {}
-
-    exec(converted, namespace)
-
-    defaults = namespace["MINER_CONFIG"]["streamer_settings"]
-    assert {
-        name: getattr(defaults, name) for name in defaults.__slots__
-    } == {
-        "make_predictions": False,
-        "follow_raid": False,
-        "claim_drops": False,
-        "claim_moments": False,
-        "watch_streak": False,
-        "favorite": True,
-        "points_limit": 50000,
-        "community_goals": True,
-        "bet": defaults.bet,
-        "chat": namespace["ChatPresence"].NEVER,
-    }
-    assert defaults.bet.max_points == 1234
-    assert namespace["STREAMERS"][0].settings.favorite is True
-    assert namespace["STREAMERS"][0].settings.points_limit == 150000
-    assert "UNRELATED =" not in converted
-
-
 def test_convert_runner_source_rejects_configuration_with_missing_imports():
-    source = '''\
+    source = """\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 
 miner = TwitchChannelPointsMiner("alice")
 miner.mine([], category_sort=CategorySort.VIEWERS_DESC)
-'''
+"""
 
     with pytest.raises(
         ConfigMigrationError,

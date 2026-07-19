@@ -6,11 +6,210 @@ import ast
 import builtins
 import hashlib
 import os
+import shutil
 from pathlib import Path
+
+CONFIG_VERSION = 1
+STREAMER_SETTINGS_DEFAULTS = (
+    ("make_predictions", "True"),
+    ("follow_raid", "True"),
+    ("claim_drops", "True"),
+    ("claim_moments", "True"),
+    ("watch_streak", "True"),
+    ("favorite", "False"),
+    ("points_limit", "None"),
+    ("community_goals", "False"),
+    ("bet", "None"),
+    ("chat", "None"),
+)
+CONFIG_PRIORITY_ADDITIONS = ("Priority.FAVORITE",)
 
 
 class ConfigMigrationError(ValueError):
     pass
+
+
+def _assignment_value(tree, name):
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        if any(
+            isinstance(target, ast.Name) and target.id == name for target in targets
+        ):
+            return node.value
+    return None
+
+
+def _config_dict(tree):
+    value = _assignment_value(tree, "MINER_CONFIG")
+    return value if isinstance(value, ast.Dict) else None
+
+
+def _dict_value(node, name):
+    if not isinstance(node, ast.Dict):
+        return None
+    for key, value in zip(node.keys, node.values):
+        if isinstance(key, ast.Constant) and key.value == name:
+            return value
+    return None
+
+
+def _resolve_value(tree, node):
+    if isinstance(node, ast.Name):
+        return _assignment_value(tree, node.id)
+    return node
+
+
+def _line_start_offsets(source):
+    offsets = []
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        offsets.append(offset)
+        offset += len(line)
+    if not offsets or offset == len(source):
+        offsets.append(offset)
+    return offsets
+
+
+def _source_offset(line_offsets, lineno, col_offset):
+    return line_offsets[lineno - 1] + col_offset
+
+
+def _closing_line_insertion(source, line_offsets, node, lines):
+    closing_offset = _source_offset(
+        line_offsets, node.end_lineno, node.end_col_offset - 1
+    )
+    closing_line_start = line_offsets[node.end_lineno - 1]
+    closing_prefix = source[closing_line_start:closing_offset]
+    candidates = [
+        *getattr(node, "args", []),
+        *getattr(node, "keywords", []),
+        *getattr(node, "elts", []),
+    ]
+    if closing_prefix.strip():
+        separator = ", " if candidates else ""
+        return closing_offset, separator + ", ".join(lines)
+
+    if candidates:
+        indent = source[
+            line_offsets[candidates[0].lineno - 1] : _source_offset(
+                line_offsets, candidates[0].lineno, candidates[0].col_offset
+            )
+        ]
+    else:
+        indent = closing_prefix + "    "
+    return closing_line_start, "".join(f"{indent}{line},\n" for line in lines)
+
+
+def _config_version(tree):
+    value = _assignment_value(tree, "CONFIG_VERSION")
+    if value is None:
+        return 0
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, int):
+        raise ConfigMigrationError("CONFIG_VERSION must be an integer")
+    return value.value
+
+
+def migrate_config_source(source, source_name="config.py"):
+    try:
+        tree = ast.parse(source, filename=source_name)
+    except SyntaxError as error:
+        raise ConfigMigrationError(f"Cannot parse {source_name}: {error}") from error
+
+    version = _config_version(tree)
+    if version > CONFIG_VERSION:
+        raise ConfigMigrationError(
+            f"{source_name} uses unsupported CONFIG_VERSION {version}; "
+            f"this release supports up to {CONFIG_VERSION}"
+        )
+    if version == CONFIG_VERSION:
+        return source, version, version
+
+    config = _config_dict(tree)
+    if config is None:
+        raise ConfigMigrationError("MINER_CONFIG must be a dictionary")
+
+    line_offsets = _line_start_offsets(source)
+    edits = []
+    streamer_settings = _resolve_value(tree, _dict_value(config, "streamer_settings"))
+    if (
+        isinstance(streamer_settings, ast.Call)
+        and _call_name(streamer_settings.func) == "StreamerSettings"
+    ):
+        existing = {keyword.arg for keyword in streamer_settings.keywords}
+        missing = [
+            f"{name}={value}"
+            for name, value in STREAMER_SETTINGS_DEFAULTS
+            if name not in existing
+        ]
+        if missing:
+            edits.append(
+                _closing_line_insertion(
+                    source, line_offsets, streamer_settings, missing
+                )
+            )
+
+    priority = _resolve_value(tree, _dict_value(config, "priority"))
+    if isinstance(priority, (ast.List, ast.Tuple)):
+        existing = {_source(source, item) for item in priority.elts}
+        missing = [
+            value for value in CONFIG_PRIORITY_ADDITIONS if value not in existing
+        ]
+        if missing:
+            edits.append(
+                _closing_line_insertion(source, line_offsets, priority, missing)
+            )
+
+    version_node = _assignment_value(tree, "CONFIG_VERSION")
+    if version_node is None:
+        first_line_end = source.find("\n") + 1
+        version_offset = (
+            first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
+        )
+        edits.append(
+            (version_offset, version_offset, f"CONFIG_VERSION = {CONFIG_VERSION}\n")
+        )
+    else:
+        start = _source_offset(
+            line_offsets, version_node.lineno, version_node.col_offset
+        )
+        end = _source_offset(
+            line_offsets, version_node.end_lineno, version_node.end_col_offset
+        )
+        edits.append((start, end, str(CONFIG_VERSION)))
+
+    migrated = source
+    normalized_edits = [
+        edit if len(edit) == 3 else (edit[0], edit[0], edit[1]) for edit in edits
+    ]
+    for start, end, replacement in sorted(normalized_edits, reverse=True):
+        migrated = migrated[:start] + replacement + migrated[end:]
+    return migrated, version, CONFIG_VERSION
+
+
+def migrate_config(config_path):
+    path = Path(config_path)
+    source = path.read_text(encoding="utf-8")
+    migrated, old_version, new_version = migrate_config_source(source, path.name)
+    if migrated == source:
+        return False
+
+    backup = path.with_name(f"{path.name}.v{old_version}.bak")
+    if backup.exists():
+        raise ConfigMigrationError(f"Refusing to overwrite existing {backup}")
+
+    temporary = path.with_name(path.name + ".migrating")
+    shutil.copy2(path, backup)
+    try:
+        temporary.write_text(migrated, encoding="utf-8")
+        os.chmod(temporary, path.stat().st_mode)
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        backup.unlink(missing_ok=True)
+        raise
+    return old_version != new_version
 
 
 def _call_name(node):
@@ -34,55 +233,6 @@ def _source(source, node):
     if value is None:
         raise ConfigMigrationError("Unable to preserve a configuration expression")
     return value
-
-
-def _loaded_names(nodes):
-    return {
-        child.id
-        for node in nodes
-        for child in ast.walk(node)
-        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-    }
-
-
-def _assigned_names(node):
-    targets = []
-    if isinstance(node, ast.Assign):
-        targets = node.targets
-    elif isinstance(node, ast.AnnAssign):
-        targets = [node.target]
-
-    return {
-        child.id
-        for target in targets
-        for child in ast.walk(target)
-        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
-    }
-
-
-def _supporting_assignments(source, tree, expression_nodes):
-    assignments = [
-        node for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
-    ]
-    assignments_by_name = {}
-    for node in assignments:
-        for name in _assigned_names(node):
-            assignments_by_name.setdefault(name, []).append(node)
-
-    needed_names = _loaded_names(expression_nodes)
-    selected = set()
-    while needed_names:
-        name = needed_names.pop()
-        for node in assignments_by_name.get(name, []):
-            node_id = id(node)
-            if node_id in selected:
-                continue
-            selected.add(node_id)
-            value = node.value
-            if value is not None:
-                needed_names.update(_loaded_names([value]))
-
-    return [_source(source, node) for node in assignments if id(node) in selected]
 
 
 def _is_runner_import(node):
@@ -182,23 +332,12 @@ def convert_runner_source(source, source_name="run.py"):
         imports.append(
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
         )
-    expression_nodes = [
-        *constructors[0].args,
-        *(keyword.value for keyword in constructors[0].keywords),
-        *mine.args,
-        *(keyword.value for keyword in mine.keywords),
-    ]
-    if analytics:
-        expression_nodes.extend(analytics[0].args)
-        expression_nodes.extend(keyword.value for keyword in analytics[0].keywords)
-    supporting_assignments = _supporting_assignments(source, tree, expression_nodes)
     output = [
         "# -*- coding: utf-8 -*-",
         f"# Automatically converted from {source_name}; review before editing.",
         "",
         *imports,
         "",
-        *(supporting_assignments + [""] if supporting_assignments else []),
         "MINER_CONFIG = "
         + _render_dict(
             source,

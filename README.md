@@ -546,6 +546,12 @@ from the configuration and should be persisted as described in [Docker](#docker)
 The runner checks `config/config.py` every five seconds. Set
 `TCPM_CONFIG_RELOAD_SECONDS` to change the interval; the minimum is one second.
 
+At startup, the runner checks `CONFIG_VERSION`. Unversioned configurations are
+backed up as `config.py.v0.bak` and upgraded in place. The migration adds missing
+global `StreamerSettings` fields with their defaults and appends newly introduced
+priority values to the existing priority list without reordering it. A config
+created by a newer unsupported release is rejected rather than rewritten.
+
 #### Configuration reload limitations
 
 - New entries in `STREAMERS` are applied without a restart. Removing a streamer
@@ -1162,11 +1168,25 @@ converter maps them as follows:
 | Keyword arguments to `.mine(...)` | `MINE_CONFIG` |
 | Arguments to `.analytics(...)` | `ANALYTICS_CONFIG`, or `None` when absent |
 
-Imports and supporting assignments needed by configuration expressions are
-retained, including `StreamerSettings` defaults and per-streamer overrides.
-Unrelated assignments are omitted. Expanded `**kwargs`,
+Imports needed by enums and settings objects are retained. Expanded `**kwargs`,
 extra positional arguments, multiple miner/mine calls, or syntax errors cannot
 be converted safely.
+
+### Persisted data versions
+
+User-owned formats are checked when their corresponding feature starts:
+
+- `config/config.py` uses `CONFIG_VERSION` and is migrated before execution.
+- Streamer analytics JSON and `drops_by_category.json` use a root `version` and
+  are migrated when analytics is enabled. Pre-migration files are retained as
+  `<filename>.v0.bak`.
+- Watch-streak state and `drop_badge_catalog.json` already carry independent
+  version fields checked by their loaders.
+- Cookie JSON keeps Twitch's cookie-dictionary shape and is not wrapped in a
+  project schema. Authentication remains responsible for validating it.
+
+Migrations are idempotent and refuse to overwrite an existing backup or consume
+a format version newer than the running release.
 
 If conversion fails, any incomplete output is removed, a migration warning is
 printed, and the original runner executes unchanged. Correct the legacy file and

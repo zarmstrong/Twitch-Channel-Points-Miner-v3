@@ -6,18 +6,20 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 )
 
 from TwitchChannelPointsMiner import runner
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
 from TwitchChannelPointsMiner.runner import _load_config
 
 
 def test_load_config_reports_missing_import(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
-        '''\
+        """\
 MINER_CONFIG = {}
 STREAMERS = []
 MINE_CONFIG = {"category_sort": CategorySort.VIEWERS_DESC}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
 
@@ -33,14 +35,14 @@ ANALYTICS_CONFIG = None
 def test_load_config_accepts_imported_configuration_names(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
-        '''\
+        """\
 from TwitchChannelPointsMiner.classes.Settings import CategorySort
 
 MINER_CONFIG = {}
 STREAMERS = []
 MINE_CONFIG = {"category_sort": CategorySort.VIEWERS_DESC}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
 
@@ -49,12 +51,38 @@ ANALYTICS_CONFIG = None
     assert loaded.MINE_CONFIG["category_sort"].name == "VIEWERS_DESC"
 
 
+def test_load_config_migrates_existing_config_before_execution(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        """\
+from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+
+MINER_CONFIG = {
+    "priority": [Priority.ORDER],
+    "streamer_settings": StreamerSettings(watch_streak=False),
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+
+    loaded = _load_config(config)
+
+    assert loaded.CONFIG_VERSION == CONFIG_VERSION
+    assert loaded.MINER_CONFIG["priority"] == [Priority.ORDER, Priority.FAVORITE]
+    assert loaded.MINER_CONFIG["streamer_settings"].points_limit is None
+    assert (tmp_path / "config.py.v0.bak").is_file()
+
+
 def test_load_config_supports_migrated_config_missing_streamer_source_import(
     tmp_path,
 ):
     config = tmp_path / "config.py"
     config.write_text(
-        '''\
+        """\
 MINER_CONFIG = {
     "streamer_source_priority": [
         StreamerSource.STREAMERS,
@@ -64,7 +92,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
     (tmp_path / ".converted-from-run-py").write_text(
@@ -83,12 +111,12 @@ def test_load_config_still_rejects_user_config_missing_streamer_source_import(
 ):
     config = tmp_path / "config.py"
     config.write_text(
-        '''\
+        """\
 MINER_CONFIG = {"streamer_source_priority": [StreamerSource.STREAMERS]}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
 
@@ -153,9 +181,7 @@ def test_drop_progress_report_entries_only_returns_session_changes():
 
 
 def test_drop_progress_report_entries_includes_status_only_change():
-    original = {
-        "drop": {"current_minutes_watched": 60, "status": "in_progress"}
-    }
+    original = {"drop": {"current_minutes_watched": 60, "status": "in_progress"}}
     current = {
         "drop": {
             "item_name": "Reward",
@@ -209,8 +235,6 @@ def test_capture_drop_progress_baseline_does_not_repeat_progress_scrape():
         def scrape_drop_progress_from_inventory(self, reason):
             raise AssertionError("inventory should not be scraped twice")
 
-    assert _capture_drop_progress_baseline(
-        TwitchStub(), progress_scraped=True
-    ) == {
+    assert _capture_drop_progress_baseline(TwitchStub(), progress_scraped=True) == {
         "drop": {"current_minutes_watched": 25}
     }

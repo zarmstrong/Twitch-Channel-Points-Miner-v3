@@ -14,6 +14,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
 )
 from TwitchChannelPointsMiner.constants import URL
+from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import _millify
 
 logger = logging.getLogger(__name__)
@@ -320,7 +321,8 @@ class Streamer(object):
                     with open(fname, "r", encoding="utf-8") as analytics_file:
                         json_data = json.load(analytics_file)
                 else:
-                    json_data = {}
+                    json_data = {"version": ANALYTICS_DATA_VERSION}
+                json_data["version"] = ANALYTICS_DATA_VERSION
                 if key not in json_data:
                     json_data[key] = []
                 json_data[key].append(data)

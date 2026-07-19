@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
+CONFIG_VERSION = 1
+
 import logging
 from colorama import Fore
 from TwitchChannelPointsMiner.logger import LoggerSettings, ColorPalette
