@@ -2399,8 +2399,7 @@ class Twitch(object):
                             favorite_indexes = [
                                 index
                                 for index in available_source_indexes
-                                if getattr(streamers[index].settings, "favorite", False)
-                                is True
+                                if streamers[index].settings.favorite
                             ]
                             streamers_watching.update(
                                 favorite_indexes[: remaining_watch_amount()]
