@@ -15,11 +15,37 @@ jobs:
     name: Create release
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_created: ${{ steps.release_retry_2.outputs.release_created || steps.release_retry_1.outputs.release_created || steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release_retry_2.outputs.tag_name || steps.release_retry_1.outputs.tag_name || steps.release.outputs.tag_name }}
     steps:
       - name: Run Release Please
         id: release
+        continue-on-error: true
+        uses: googleapis/release-please-action@v5
+        with:
+          target-branch: master
+
+      - name: Wait before retrying Release Please
+        if: steps.release.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - name: Retry Release Please
+        if: steps.release.outcome == 'failure'
+        id: release_retry_1
+        continue-on-error: true
+        uses: googleapis/release-please-action@v5
+        with:
+          target-branch: master
+
+      - name: Wait before final Release Please attempt
+        if: steps.release.outcome == 'failure' && steps.release_retry_1.outcome == 'failure'
+        shell: bash
+        run: sleep 60
+
+      - name: Run final Release Please attempt
+        if: steps.release.outcome == 'failure' && steps.release_retry_1.outcome == 'failure'
+        id: release_retry_2
         uses: googleapis/release-please-action@v5
         with:
           target-branch: master
