@@ -71,18 +71,18 @@ jobs:
           RELEASE_TAG: ${{ inputs.ref }}
         shell: bash
         run: |
-          version="${RELEASE_TAG#Twitch-Channel-Points-Miner-v2-}"
-          version="${version#v}"
-          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body')
+          version="${RELEASE_TAG#v}"
+          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
+          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')
           release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
           docker_notes=$(cat <<EOF
           <!-- docker-image:start -->
           ### Docker image
 
-          * [\`zacharmstrong/twitch-channel-points-miner:${version}\`](https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner/tags?name=${version})
+          * [\`${image}:${version}\`](https://hub.docker.com/r/${image}/tags?name=${version})
 
           \`\`\`bash
-          docker pull zacharmstrong/twitch-channel-points-miner:${version}
+          docker pull ${image}:${version}
           \`\`\`
           <!-- docker-image:end -->
           EOF
