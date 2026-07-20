@@ -5,38 +5,59 @@
 
 ### Features
 
-* add favorite priority and points limits ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
+* **config:** add schema-versioned configuration migrations ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
+* **points:** add per-streamer channel points limits ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
+* **priority:** add favorite streamer priority ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
 * parallelize streamer startup ([#24](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/24)) ([ee947cd](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ee947cd999027b5f3da4e0cd116c0dd02108ca15))
 * persist watch streak sessions ([#26](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/26)) ([9b43ec0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9b43ec01c4971123c338848aeb732434e988b7bf))
 
 
 ### Bug Fixes
 
+* **drops:** refresh eligibility and skip collected fallback campaigns ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
 * resolve fallback Twitch category names ([#27](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/27)) ([5f2b6d5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5f2b6d54cd7b114940ad8682eb2e655f8cab669e))
 * retry transient release please failures ([#29](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/29)) ([5fd85d4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5fd85d41682fe866b4cc46f23b3f600903e30e8d))
+
+
+### Documentation
+
+* document favorite priority, points limits, and migrated configuration ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
 
 ## [3.4.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.3.0...3.4.0) (2026-07-19)
 
 
 ### Features
 
-* improve analytics reliability and drop reporting ([#21](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/21)) ([02aa6d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/02aa6d647b07681991d56126aeb4e9ce5671ff03))
+* **drops:** report session progress during graceful shutdown ([#21](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/21)) ([02aa6d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/02aa6d647b07681991d56126aeb4e9ce5671ff03))
 
 
 ### Bug Fixes
 
+* **analytics:** restore dashboards and bound log responses ([#21](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/21)) ([02aa6d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/02aa6d647b07681991d56126aeb4e9ce5671ff03))
 * harden GQL request retries ([#23](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/23)) ([4fbced7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/4fbced7164f3796a62ffd58bca4cbf28dbfaea95))
+
+
+### Performance Improvements
+
+* **analytics:** replace pandas chart filtering with lightweight processing ([#21](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/21)) ([02aa6d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/02aa6d647b07681991d56126aeb4e9ce5671ff03))
+
+
+### Documentation
+
+* **docker:** document reliable graceful shutdown settings ([#21](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/21)) ([02aa6d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/02aa6d647b07681991d56126aeb4e9ce5671ff03))
 
 ## [3.3.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.2.0...3.3.0) (2026-07-18)
 
 
 ### Features
 
-* add followers to streamer source priority ([#18](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/18)) ([160678a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/160678a75313912b1e232d439cc7f99c3c6f51b0))
+* **priority:** add followers to streamer source priority ([#18](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/18)) ([160678a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/160678a75313912b1e232d439cc7f99c3c6f51b0))
 
 
 ### Bug Fixes
 
+* **config:** restore missing `StreamerSource` imports in migrated configurations ([#18](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/18)) ([160678a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/160678a75313912b1e232d439cc7f99c3c6f51b0))
+* **discovery:** preserve configured and followed streamer source precedence ([#18](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/18)) ([160678a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/160678a75313912b1e232d439cc7f99c3c6f51b0))
 * make streamer source priority default immutable ([619d76d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/619d76d87d75baa8372a72ebd23bc035148db55e))
 * switch away from completed drop campaigns ([9dc4a6d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9dc4a6d2472d3a2fcd6d7fc99ca8cc90243443e6))
 * switch away from completed drop campaigns ([#17](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/17)) ([7644156](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7644156144c47b8ed19a8725d6d90c6d2a81d6d4))
@@ -45,6 +66,7 @@
 ### Documentation
 
 * document combined release workflow ([#13](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/13)) ([0fd98e2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0fd98e2b680c15703411fe9e9c8d092f1d9eb0f9))
+* document streamer source order and analytics configuration ([#18](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/18)) ([160678a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/160678a75313912b1e232d439cc7f99c3c6f51b0))
 * update Docker Hub repository info ([#16](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/16)) ([d94c3f8](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d94c3f87fb052487c3b1fad3fcbced4f301b4f8e))
 * update project ownership and Docker Hub links ([#15](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/15)) ([ae31c29](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ae31c29b18a10c441a39b5605315cf06339fe12c))
 
@@ -53,12 +75,25 @@
 
 ### Features
 
-* load Twitch Drops from shared gists ([#10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/10)) ([5d06130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5d0613025858a88b544635fcbfbe2b59b9334587))
+* **drops:** batch restricted-channel discovery ([#10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/10)) ([5d06130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5d0613025858a88b544635fcbfbe2b59b9334587))
+* **drops:** load campaign and badge catalogs from shared gists ([#10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/10)) ([5d06130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5d0613025858a88b544635fcbfbe2b59b9334587))
+* **drops:** support cross-category Special Events campaigns ([#10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/10)) ([5d06130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5d0613025858a88b544635fcbfbe2b59b9334587))
+
+
+### Performance Improvements
+
+* **drops:** cache gist data and batch catalog persistence ([#10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/10)) ([5d06130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5d0613025858a88b544635fcbfbe2b59b9334587))
 
 
 ### Documentation
 
-* improve platform setup and test workflow ([#11](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/11)) ([e57bff9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e57bff9f0e5acfd05f5fcce3ffd8109a3a69f468))
+* **termux:** mark legacy setup instructions as outdated ([#11](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/11)) ([e57bff9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e57bff9f0e5acfd05f5fcce3ffd8109a3a69f468))
+* **windows:** expand executable setup and troubleshooting ([#11](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/11)) ([e57bff9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e57bff9f0e5acfd05f5fcce3ffd8109a3a69f468))
+
+
+### Continuous Integration
+
+* avoid duplicate feature-branch test runs ([#11](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/11)) ([e57bff9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e57bff9f0e5acfd05f5fcce3ffd8109a3a69f468))
 
 ## [3.1.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.1.0...3.1.1) (2026-07-17)
 

@@ -65,5 +65,29 @@ jobs:
           short-description: Automatically earn Twitch channel points, claim Drops, and manage predictions.
           readme-filepath: ./DOCKERHUB.md
 
+      - name: Add Docker image to GitHub release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#Twitch-Channel-Points-Miner-v2-}"
+          version="${version#v}"
+          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body')
+          release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
+          docker_notes=$(cat <<EOF
+          <!-- docker-image:start -->
+          ### Docker image
+
+          * [\`zacharmstrong/twitch-channel-points-miner:${version}\`](https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner/tags?name=${version})
+
+          \`\`\`bash
+          docker pull zacharmstrong/twitch-channel-points-miner:${version}
+          \`\`\`
+          <!-- docker-image:end -->
+          EOF
+          )
+          gh release edit "${RELEASE_TAG}" --notes "${release_notes}"$'\n\n'"${docker_notes}"
+
       - name: Image digest AMD64 and ARM64
         run: echo ${{ steps.docker_build.outputs.digest }}

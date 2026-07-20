@@ -31,6 +31,8 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 - Let the open Release Please PR accumulate all ordinary PRs intended for the next release; merge the release PR only when that release is ready to publish.
 - Give each ordinary PR a Conventional Commit title and preserve that title when squash-merging so Release Please can produce a distinct changelog entry.
 - Prefer separate PRs or commits for independently notable features, fixes, performance changes, and documentation updates instead of hiding them in one broad squash commit.
+- When a single PR intentionally contains multiple user-facing changes, list each additional change at the bottom of the squash commit message as its own Conventional Commit entry (for example, `fix(gql): ...` or `feat(drops): ...`) so Release Please includes each one in the changelog. Keep the PR title as the primary entry and follow the [Release Please multiple-changes guidance](https://github.com/googleapis/release-please#what-if-my-pr-contains-multiple-fixes-or-features).
+- Keep any metadata for an additional entry indented directly below that entry, including `BREAKING-CHANGE: ...`, and do not place unrelated text after the additional entries.
 - Before merging the Release Please PR, review its generated changelog and release notes for user-facing completeness and expand the summary when a single entry contains several notable changes.
 - Do not enable auto-merge on the Release Please PR because merging it is the action that publishes the combined release.
 

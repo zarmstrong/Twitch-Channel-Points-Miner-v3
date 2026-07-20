@@ -100,7 +100,7 @@ jobs:
       - detect_code_changes
     if: needs.detect_code_changes.outputs.code_changed == 'true'
     permissions:
-      contents: read
+      contents: write
     uses: ./.github/workflows/deploy-docker.yml
     with:
       ref: ${{ needs.release_please.outputs.tag_name }}
