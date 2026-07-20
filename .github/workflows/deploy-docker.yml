@@ -71,8 +71,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.ref }}
         shell: bash
         run: |
+          set -euo pipefail
           version="${RELEASE_TAG#v}"
           image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
+
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
+            exit 0
+          fi
+
           release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')
           release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
           docker_notes=$(cat <<EOF
@@ -87,7 +94,10 @@ jobs:
           <!-- docker-image:end -->
           EOF
           )
-          gh release edit "${RELEASE_TAG}" --notes "${release_notes}"$'\n\n'"${docker_notes}"
+          notes_file=$(mktemp)
+          trap 'rm -f "${notes_file}"' EXIT
+          printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
+          gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
 
       - name: Image digest AMD64 and ARM64
         run: echo ${{ steps.docker_build.outputs.digest }}
