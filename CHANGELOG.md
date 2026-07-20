@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.5.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.4.0...3.5.0) (2026-07-20)
+
+
+### Features
+
+* add favorite priority and points limits ([#28](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/28)) ([064016d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/064016d561988a2981306a51fb61af38a3ff1bd9))
+* parallelize streamer startup ([#24](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/24)) ([ee947cd](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ee947cd999027b5f3da4e0cd116c0dd02108ca15))
+* persist watch streak sessions ([#26](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/26)) ([9b43ec0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9b43ec01c4971123c338848aeb732434e988b7bf))
+
+
+### Bug Fixes
+
+* resolve fallback Twitch category names ([#27](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/27)) ([5f2b6d5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5f2b6d54cd7b114940ad8682eb2e655f8cab669e))
+* retry transient release please failures ([#29](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/29)) ([5fd85d4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5fd85d41682fe866b4cc46f23b3f600903e30e8d))
+
 ## [3.4.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.3.0...3.4.0) (2026-07-19)
 
 
