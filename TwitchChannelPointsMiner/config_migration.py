@@ -6,11 +6,647 @@ import ast
 import builtins
 import hashlib
 import os
+import shutil
+import stat
+import tempfile
 from pathlib import Path
+
+CONFIG_VERSION = 4
+STREAMER_SETTINGS_DEFAULTS = (
+    ("make_predictions", "True"),
+    ("follow_raid", "True"),
+    ("claim_drops", "True"),
+    ("claim_moments", "True"),
+    ("watch_streak", "True"),
+    ("favorite", "False"),
+    ("points_limit", "None"),
+    ("community_goals", "False"),
+    ("bet", "None"),
+    ("chat", "None"),
+)
+LOGGER_SETTINGS_DEFAULTS = (
+    ("save", "True"),
+    ("less", "False"),
+    ("console_level", "logging.INFO"),
+    ("console_username", "False"),
+    ("time_zone", "None"),
+    ("date_format", '"dd/mm/yy"'),
+    ("file_level", "logging.DEBUG"),
+    ("emoji", "True"),
+    ("colored", "False"),
+    ("color_palette", "ColorPalette()"),
+    ("auto_clear", "True"),
+    ("username", "None"),
+)
+LOGGER_NOTIFICATION_SETTINGS = (
+    "telegram",
+    "discord",
+    "webhook",
+    "matrix",
+    "pushover",
+    "gotify",
+)
+LOGGER_NOTIFICATION_TEMPLATES = {
+    "telegram": 'Telegram(chat_id=123456789, token="TOKEN", events=[])',
+    "discord": 'Discord(webhook_api="https://discord.com/api/webhooks/...", events=[])',
+    "webhook": 'Webhook(endpoint="https://example.com/webhook", method="POST", events=[])',
+    "matrix": 'Matrix(username="USER", password="PASSWORD", homeserver="matrix.org", room_id="ROOM", events=[])',
+    "pushover": 'Pushover(userkey="USER_KEY", token="TOKEN", priority=0, sound="pushover", events=[])',
+    "gotify": 'Gotify(endpoint="https://example.com/message?token=TOKEN", priority=0, events=[])',
+}
+BET_SETTINGS_DEFAULTS = (
+    ("strategy", "None"),
+    ("percentage", "None"),
+    ("percentage_gap", "None"),
+    ("max_points", "None"),
+    ("minimum_points", "None"),
+    ("stealth_mode", "None"),
+    ("filter_condition", "None"),
+    ("delay", "None"),
+    ("delay_mode", "None"),
+)
+CONFIG_PRIORITY_ADDITIONS = ("Priority.FAVORITE",)
+CONFIG_STREAMER_SOURCE_ADDITIONS = (
+    "StreamerSource.STREAMERS",
+    "StreamerSource.FOLLOWERS",
+    "StreamerSource.CATEGORIES",
+    "StreamerSource.BADGES",
+)
+MINER_CONFIG_DEFAULTS = (
+    ("password", "None"),
+    ("claim_drops_startup", "False"),
+    ("enable_analytics", "False"),
+    ("disable_ssl_cert_verification", "False"),
+    ("disable_at_in_nickname", "False"),
+    ("streams_watched", "2"),
+)
+MINE_CONFIG_DEFAULTS = (
+    ("blacklist", "[]"),
+    ("followers", "False"),
+    ("followers_order", '"ASC"'),
+    ("categories", "[]"),
+    ("category_drops_enabled", "True"),
+    ("category_limit", "30"),
+    ("category_sort", '"VIEWERS_DESC"'),
+    ("category_campaign_order", '"ORDER"'),
+    ("category_chat", "None"),
+    ("category_log_level", "logging.INFO"),
+    ("drop_item_art", "False"),
+    ("print_open_drop_campaigns_on_load", "False"),
+    ("scrape_drop_progress_on_load", "False"),
+    ("log_drop_checks", "False"),
+    ("track_category_streamer_points", "False"),
+    ("category_refresh_interval_hours", "6"),
+    ("drop_badge_catalog", "True"),
+    ("drop_badge_refresh_interval_hours", "1"),
+    ("auto_mine_badge_drops", "False"),
+    ("badge_drop_streamer_limit", "1"),
+)
+ANALYTICS_CONFIG_DEFAULTS = (
+    ("host", '"127.0.0.1"'),
+    ("port", "5000"),
+    ("refresh", "5"),
+    ("days_ago", "7"),
+    ("password", "None"),
+    ("log_poll_interval", "5"),
+)
 
 
 class ConfigMigrationError(ValueError):
     pass
+
+
+def _assignment_value(tree, name):
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        if any(
+            isinstance(target, ast.Name) and target.id == name for target in targets
+        ):
+            return node.value
+    return None
+
+
+def _config_dict(tree):
+    value = _resolve_value(tree, _assignment_value(tree, "MINER_CONFIG"))
+    return value if isinstance(value, ast.Dict) else None
+
+
+def _dict_value(node, name):
+    if not isinstance(node, ast.Dict):
+        return None
+    for key, value in zip(node.keys, node.values):
+        if isinstance(key, ast.Constant) and key.value == name:
+            return value
+    return None
+
+
+def _dict_names(node):
+    return {
+        key.value
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+
+
+def _dict_has_literal_string_keys(node):
+    return isinstance(node, ast.Dict) and all(
+        isinstance(key, ast.Constant) and isinstance(key.value, str)
+        for key in node.keys
+    )
+
+
+def _call_keyword(node, name):
+    if not isinstance(node, ast.Call):
+        return None
+    for keyword in node.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
+def _resolve_value(tree, node):
+    seen = set()
+    while isinstance(node, ast.Name) and node.id not in seen:
+        seen.add(node.id)
+        resolved = _assignment_value(tree, node.id)
+        if resolved is None:
+            break
+        node = resolved
+    return node
+
+
+def _missing_call_defaults(call, call_name, defaults):
+    if (
+        not isinstance(call, ast.Call)
+        or _call_name(call.func) != call_name
+        or any(keyword.arg is None for keyword in call.keywords)
+    ):
+        return []
+    existing = {keyword.arg for keyword in call.keywords}
+    return [f"{name}={value}" for name, value in defaults if name not in existing]
+
+
+def _commented_call_defaults(source, line_offsets, call, names):
+    if not isinstance(call, ast.Call) or any(
+        keyword.arg is None for keyword in call.keywords
+    ):
+        return []
+    existing = {keyword.arg for keyword in call.keywords}
+    missing = [name for name in names if name not in existing]
+    if not missing:
+        return []
+
+    closing_offset = _source_offset(
+        line_offsets, call.end_lineno, call.end_col_offset - 1
+    )
+    closing_line_start = line_offsets[call.end_lineno - 1]
+    closing_prefix = source[closing_line_start:closing_offset]
+    if closing_prefix.strip():
+        # Keep compact calls compact. Adding line comments before their closing
+        # delimiter can comment out surrounding syntax, especially when the
+        # call is nested in a single-line dictionary.
+        return []
+
+    candidates = [*call.args, *call.keywords]
+    if candidates:
+        first = candidates[0]
+        indent = source[
+            line_offsets[first.lineno - 1] : _source_offset(
+                line_offsets, first.lineno, first.col_offset
+            )
+        ]
+    else:
+        call_line_start = line_offsets[call.lineno - 1]
+        indent = source[call_line_start : call_line_start + call.col_offset] + "    "
+    return [
+        (
+            closing_line_start,
+            "".join(
+                f"{indent}# {name}={LOGGER_NOTIFICATION_TEMPLATES[name]},\n"
+                for name in missing
+            ),
+        )
+    ]
+
+
+def _name_is_defined(tree, name):
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            if any(
+                (alias.asname or alias.name.split(".")[0]) == name
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if any((alias.asname or alias.name) == name for alias in node.names):
+                return True
+    return False
+
+
+def _import_offset(source, line_offsets, tree):
+    imports = [
+        node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    if imports:
+        node = imports[-1]
+        return _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
+    version = _assignment_value(tree, "CONFIG_VERSION")
+    if version is not None:
+        return line_offsets[version.end_lineno]
+    first_line_end = source.find("\n") + 1
+    return first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
+
+
+def _enum_list_additions(
+    source,
+    tree,
+    node,
+    additions,
+    enum_name,
+    import_statement,
+    required_imports,
+):
+    existing_members = {
+        item.attr
+        for item in node.elts
+        if isinstance(item, ast.Attribute) and isinstance(item.attr, str)
+    }
+    prefix = next(
+        (
+            _source(source, item.value)
+            for item in node.elts
+            if isinstance(item, ast.Attribute)
+        ),
+        None,
+    )
+    if prefix is None:
+        prefix = enum_name
+        if (
+            not _name_is_defined(tree, enum_name)
+            and import_statement not in required_imports
+        ):
+            required_imports.append(import_statement)
+    return [
+        f"{prefix}.{addition.rsplit('.', 1)[-1]}"
+        for addition in additions
+        if addition.rsplit(".", 1)[-1] not in existing_members
+    ]
+
+
+def _line_start_offsets(source):
+    offsets = []
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        offsets.append(offset)
+        offset += len(line)
+    if not offsets or offset == len(source):
+        offsets.append(offset)
+    return offsets
+
+
+def _source_offset(line_offsets, lineno, col_offset):
+    return line_offsets[lineno - 1] + col_offset
+
+
+def _closing_line_insertion(source, line_offsets, node, lines):
+    closing_offset = _source_offset(
+        line_offsets, node.end_lineno, node.end_col_offset - 1
+    )
+    closing_line_start = line_offsets[node.end_lineno - 1]
+    closing_prefix = source[closing_line_start:closing_offset]
+    if isinstance(node, ast.Dict):
+        candidates = node.keys
+        final_candidates = node.values
+    else:
+        candidates = [
+            *getattr(node, "args", []),
+            *getattr(node, "keywords", []),
+            *getattr(node, "elts", []),
+        ]
+        final_candidates = candidates
+    if closing_prefix.strip():
+        trimmed = closing_prefix.rstrip()
+        if candidates and trimmed.endswith(","):
+            separator = "" if closing_prefix.endswith((" ", "\t")) else " "
+        else:
+            separator = ", " if candidates else ""
+        return [(closing_offset, separator + ", ".join(lines))]
+
+    if candidates:
+        indent = source[
+            line_offsets[candidates[0].lineno - 1] : _source_offset(
+                line_offsets, candidates[0].lineno, candidates[0].col_offset
+            )
+        ]
+    else:
+        indent = closing_prefix + "    "
+    insertions = [(closing_line_start, "".join(f"{indent}{line},\n" for line in lines))]
+    if final_candidates:
+        last = final_candidates[-1]
+        last_end = _source_offset(line_offsets, last.end_lineno, last.end_col_offset)
+        if not source[last_end:closing_offset].lstrip().startswith(","):
+            insertions.append((last_end, ","))
+    return insertions
+
+
+def _config_version(tree):
+    value = _assignment_value(tree, "CONFIG_VERSION")
+    if value is None:
+        return 0
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, int):
+        raise ConfigMigrationError("CONFIG_VERSION must be an integer")
+    return value.value
+
+
+def migrate_config_source(source, source_name="config.py"):
+    try:
+        tree = ast.parse(source, filename=source_name)
+    except SyntaxError as error:
+        raise ConfigMigrationError(f"Cannot parse {source_name}: {error}") from error
+
+    version = _config_version(tree)
+    if version > CONFIG_VERSION:
+        raise ConfigMigrationError(
+            f"{source_name} uses unsupported CONFIG_VERSION {version}; "
+            f"this release supports up to {CONFIG_VERSION}"
+        )
+    if version == CONFIG_VERSION:
+        return source, version, version
+
+    config = _config_dict(tree)
+    if config is None:
+        raise ConfigMigrationError("MINER_CONFIG must be a dictionary")
+
+    line_offsets = _line_start_offsets(source)
+    edits = []
+    config_names = _dict_names(config)
+    safe_config = _dict_has_literal_string_keys(config)
+    missing_miner_options = (
+        [
+            f"{name!r}: {value}"
+            for name, value in MINER_CONFIG_DEFAULTS
+            if name not in config_names
+        ]
+        if safe_config
+        else []
+    )
+    required_imports = []
+    if safe_config and "priority" not in config_names:
+        missing_miner_options.append(
+            "'priority': [Priority.STREAK, Priority.DROPS, Priority.ORDER, "
+            "Priority.FAVORITE]"
+        )
+        if not _name_is_defined(tree, "Priority"):
+            required_imports.append(
+                "from TwitchChannelPointsMiner.classes.Settings import Priority"
+            )
+    if safe_config and "streamer_source_priority" not in config_names:
+        missing_miner_options.append(
+            "'streamer_source_priority': [StreamerSource.STREAMERS, "
+            "StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES, "
+            "StreamerSource.BADGES]"
+        )
+        if not _name_is_defined(tree, "StreamerSource"):
+            required_imports.append(
+                "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+            )
+    if missing_miner_options:
+        edits.extend(
+            _closing_line_insertion(source, line_offsets, config, missing_miner_options)
+        )
+    streamer_settings = _resolve_value(tree, _dict_value(config, "streamer_settings"))
+    missing = _missing_call_defaults(
+        streamer_settings, "StreamerSettings", STREAMER_SETTINGS_DEFAULTS
+    )
+    if missing:
+        edits.extend(
+            _closing_line_insertion(source, line_offsets, streamer_settings, missing)
+        )
+
+    bet_settings = _resolve_value(tree, _call_keyword(streamer_settings, "bet"))
+    if bet_settings is not None:
+        missing = _missing_call_defaults(
+            bet_settings, "BetSettings", BET_SETTINGS_DEFAULTS
+        )
+        if missing:
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, bet_settings, missing)
+            )
+
+    for logger_settings in _find_calls(tree, "LoggerSettings"):
+        missing = _missing_call_defaults(
+            logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
+        )
+        if missing:
+            if (
+                not _name_is_defined(tree, "logging")
+                and "import logging" not in required_imports
+            ):
+                required_imports.append("import logging")
+            color_palette_import = (
+                "from TwitchChannelPointsMiner.logger import ColorPalette"
+            )
+            if (
+                not _name_is_defined(tree, "ColorPalette")
+                and color_palette_import not in required_imports
+            ):
+                required_imports.append(color_palette_import)
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, logger_settings, missing)
+            )
+        edits.extend(
+            _commented_call_defaults(
+                source,
+                line_offsets,
+                logger_settings,
+                LOGGER_NOTIFICATION_SETTINGS,
+            )
+        )
+
+    priority = _resolve_value(tree, _dict_value(config, "priority"))
+    if isinstance(priority, (ast.List, ast.Tuple)):
+        missing = _enum_list_additions(
+            source,
+            tree,
+            priority,
+            CONFIG_PRIORITY_ADDITIONS,
+            "Priority",
+            "from TwitchChannelPointsMiner.classes.Settings import Priority",
+            required_imports,
+        )
+        if missing:
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, priority, missing)
+            )
+
+    source_priority = _resolve_value(
+        tree, _dict_value(config, "streamer_source_priority")
+    )
+    if isinstance(source_priority, (ast.List, ast.Tuple)):
+        missing = _enum_list_additions(
+            source,
+            tree,
+            source_priority,
+            CONFIG_STREAMER_SOURCE_ADDITIONS,
+            "StreamerSource",
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
+            required_imports,
+        )
+        if missing:
+            edits.extend(
+                _closing_line_insertion(source, line_offsets, source_priority, missing)
+            )
+
+    mine_config = _resolve_value(tree, _assignment_value(tree, "MINE_CONFIG"))
+    if isinstance(mine_config, ast.Dict):
+        mine_names = _dict_names(mine_config)
+        missing_mine_options = (
+            [
+                f"{name!r}: {value}"
+                for name, value in MINE_CONFIG_DEFAULTS
+                if name not in mine_names
+            ]
+            if _dict_has_literal_string_keys(mine_config)
+            else []
+        )
+        if missing_mine_options:
+            if (
+                "category_log_level" not in mine_names
+                and not _name_is_defined(tree, "logging")
+                and "import logging" not in required_imports
+            ):
+                required_imports.append("import logging")
+            edits.extend(
+                _closing_line_insertion(
+                    source, line_offsets, mine_config, missing_mine_options
+                )
+            )
+
+    analytics_config = _resolve_value(tree, _assignment_value(tree, "ANALYTICS_CONFIG"))
+    if _dict_has_literal_string_keys(analytics_config):
+        missing_analytics_options = [
+            f"{name!r}: {value}"
+            for name, value in ANALYTICS_CONFIG_DEFAULTS
+            if name not in _dict_names(analytics_config)
+        ]
+        if missing_analytics_options:
+            edits.extend(
+                _closing_line_insertion(
+                    source,
+                    line_offsets,
+                    analytics_config,
+                    missing_analytics_options,
+                )
+            )
+
+    if required_imports:
+        import_offset = _import_offset(source, line_offsets, tree)
+        prefix = "\n" if import_offset and source[import_offset - 1] != "\n" else ""
+        edits.append((import_offset, prefix + "\n".join(required_imports) + "\n"))
+
+    version_node = _assignment_value(tree, "CONFIG_VERSION")
+    if version_node is None:
+        first_line_end = source.find("\n") + 1
+        version_offset = (
+            first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
+        )
+        edits.append(
+            (version_offset, version_offset, f"CONFIG_VERSION = {CONFIG_VERSION}\n")
+        )
+    else:
+        start = _source_offset(
+            line_offsets, version_node.lineno, version_node.col_offset
+        )
+        end = _source_offset(
+            line_offsets, version_node.end_lineno, version_node.end_col_offset
+        )
+        edits.append((start, end, str(CONFIG_VERSION)))
+
+    migrated = source
+    normalized_edits = [
+        edit if len(edit) == 3 else (edit[0], edit[0], edit[1]) for edit in edits
+    ]
+    for start, end, replacement in sorted(normalized_edits, reverse=True):
+        migrated = migrated[:start] + replacement + migrated[end:]
+    try:
+        ast.parse(migrated, filename=source_name)
+    except SyntaxError as error:
+        raise ConfigMigrationError(
+            f"Migration generated invalid {source_name}: {error}"
+        ) from error
+    return migrated, version, CONFIG_VERSION
+
+
+def migrate_config(config_path):
+    path = Path(config_path)
+    if path.is_symlink():
+        raise ConfigMigrationError(
+            f"Refusing to migrate symlinked configuration {path}"
+        )
+    current_source = path.read_text(encoding="utf-8")
+    source = current_source
+    recovery_backup = None
+    try:
+        migrated, old_version, new_version = migrate_config_source(source, path.name)
+    except ConfigMigrationError as error:
+        if not isinstance(error.__cause__, SyntaxError):
+            raise
+        backups = [
+            backup
+            for backup in sorted(path.parent.glob(f"{path.name}.v*.bak"))
+            if not backup.is_symlink() and backup.is_file()
+        ]
+        if not backups:
+            raise
+        recovery_backup = backups[-1]
+        source = recovery_backup.read_text(encoding="utf-8")
+        migrated, old_version, new_version = migrate_config_source(source, path.name)
+    if migrated == current_source:
+        return False
+
+    backup = path.with_name(f"{path.name}.v{old_version}.bak")
+    reuse_backup = False
+    if recovery_backup is None:
+        if backup.is_symlink():
+            raise ConfigMigrationError(f"Refusing to use symlinked backup {backup}")
+        if backup.exists():
+            if not backup.is_file():
+                raise ConfigMigrationError(f"Backup path is not a file: {backup}")
+            if backup.read_text(encoding="utf-8") != current_source:
+                raise ConfigMigrationError(
+                    f"Refusing to overwrite existing {backup}: its contents do "
+                    "not match the current configuration"
+                )
+            reuse_backup = True
+
+    backup_created = False
+    if recovery_backup is None and not reuse_backup:
+        shutil.copy2(path, backup)
+        backup_created = True
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".migrating", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(migrated)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if backup_created:
+            backup.unlink(missing_ok=True)
+        raise
+    return recovery_backup is not None or old_version != new_version
 
 
 def _call_name(node):

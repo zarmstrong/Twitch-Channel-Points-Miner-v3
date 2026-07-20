@@ -49,6 +49,7 @@ from TwitchChannelPointsMiner.constants import (
     URL,
     GQLOperations,
 )
+from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -92,6 +93,7 @@ class Twitch(object):
         "twitchdrops_app_game_names",
         "twitchdrops_app_upcoming_starts",
         "category_campaign_eligibility",
+        "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "available_badge_names",
         "restart_requested",
@@ -145,6 +147,7 @@ class Twitch(object):
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
         self.category_campaign_eligibility = {}
+        self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.available_badge_names = None
         self.restart_requested = Event()
@@ -223,6 +226,11 @@ class Twitch(object):
             }
         )
         self.category_campaign_eligibility = updated_eligibility
+        evaluated_categories = getattr(self, "evaluated_category_campaigns", None)
+        if evaluated_categories is None:
+            evaluated_categories = set()
+            self.evaluated_category_campaigns = evaluated_categories
+        evaluated_categories.add(game_slug)
 
     def __drop_tracking_key(self, drop, campaign_name=None, category_name=None):
         return "|".join(
@@ -1598,11 +1606,7 @@ class Twitch(object):
         return stream.game.get("displayName") or stream.game.get("name") or "Unknown"
 
     def __category_drops_condition(self, streamer):
-        if (
-            getattr(streamer, "from_category", False) is not True
-            or streamer.settings.claim_drops is not True
-            or streamer.is_online is not True
-        ):
+        if streamer.settings.claim_drops is not True or streamer.is_online is not True:
             return False
 
         game_name = streamer.stream.game_name()
@@ -1628,6 +1632,16 @@ class Twitch(object):
             eligible_campaigns, _ = eligibility
             return eligible_campaigns > 0
 
+        # A refresh can prove that a previously selected category has no
+        # incomplete campaigns. Keep that negative result authoritative rather
+        # than falling back to the unfiltered campaign catalog and resurrecting
+        # a fully collected campaign.
+        if game_slug in getattr(self, "evaluated_category_campaigns", set()):
+            return False
+
+        if getattr(streamer, "from_category", False) is not True:
+            return False
+
         # Category discovery has already removed fully collected campaigns.
         # Use its remaining gist campaign data when Twitch's private
         # campaign query fails to populate Stream.campaigns.
@@ -1642,11 +1656,13 @@ class Twitch(object):
         return False
 
     def __drops_condition(self, streamer):
-        # Category-discovered streams must follow the refreshed category
-        # eligibility cache. Their Stream campaign objects can remain populated
-        # after inventory discovery has determined that every reward is owned.
+        # Refreshed eligibility also applies when category discovery selects an
+        # already configured streamer. Conversely, category-only streams must
+        # not fall back to stale Stream campaign objects after a negative refresh.
+        if self.__category_drops_condition(streamer) is True:
+            return True
         if getattr(streamer, "from_category", False) is True:
-            return self.__category_drops_condition(streamer)
+            return False
 
         if streamer.drops_condition() is True:
             return True
@@ -2249,6 +2265,36 @@ class Twitch(object):
             logger.error(f"Error with update_client_version: {e}")
             return self.client_version
 
+    @staticmethod
+    def _has_pending_watch_streak(streamer, now=None):
+        settings = getattr(streamer, "settings", None)
+        stream = getattr(streamer, "stream", None)
+        if (
+            getattr(settings, "watch_streak", False) is not True
+            or getattr(stream, "watch_streak_missing", False) is not True
+            or getattr(stream, "minute_watched", 0) >= 11
+        ):
+            return False
+
+        offline_at = getattr(streamer, "offline_at", 0)
+        timestamp = time.time() if now is None else now
+        return offline_at == 0 or ((timestamp - offline_at) // 60) > 30
+
+    @staticmethod
+    def _has_reached_points_limit(streamer):
+        settings = getattr(streamer, "settings", None)
+        points_limit = getattr(settings, "points_limit", None)
+        if points_limit in (None, ""):
+            return False
+
+        try:
+            points_limit = int(points_limit)
+            channel_points = int(streamer.channel_points)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+        return points_limit >= 0 and channel_points >= points_limit
+
     def send_minute_watched_events(
         self,
         streamers,
@@ -2260,6 +2306,7 @@ class Twitch(object):
         while self.running:
             iteration_started_at = time.time()
             try:
+                now = time.time()
                 streamers_index = [
                     i
                     for i in range(0, len(streamers))
@@ -2270,7 +2317,11 @@ class Twitch(object):
                     )
                     and (
                         streamers[i].online_at == 0
-                        or (time.time() - streamers[i].online_at) > 30
+                        or (now - streamers[i].online_at) > 30
+                    )
+                    and (
+                        self._has_reached_points_limit(streamers[i]) is False
+                        or self._has_pending_watch_streak(streamers[i], now)
                     )
                 ]
 
@@ -2333,9 +2384,25 @@ class Twitch(object):
                         if remaining_watch_amount() <= 0:
                             break
 
+                        available_source_indexes = [
+                            index
+                            for index in source_indexes
+                            if index not in streamers_watching
+                        ]
+
                         if prior == Priority.ORDER:
                             streamers_watching.update(
-                                source_indexes[: remaining_watch_amount()]
+                                available_source_indexes[: remaining_watch_amount()]
+                            )
+
+                        elif prior == Priority.FAVORITE:
+                            favorite_indexes = [
+                                index
+                                for index in available_source_indexes
+                                if streamers[index].settings.favorite
+                            ]
+                            streamers_watching.update(
+                                favorite_indexes[: remaining_watch_amount()]
                             )
 
                         elif prior in [
@@ -2347,7 +2414,7 @@ class Twitch(object):
                                     "points": streamers[index].channel_points,
                                     "index": index,
                                 }
-                                for index in source_indexes
+                                for index in available_source_indexes
                             ]
                             items = sorted(
                                 items,
@@ -2361,27 +2428,16 @@ class Twitch(object):
                             )
 
                         elif prior == Priority.STREAK:
-                            for index in source_indexes:
-                                if (
-                                    streamers[index].settings.watch_streak is True
-                                    and streamers[index].stream.watch_streak_missing
-                                    is True
-                                    and (
-                                        streamers[index].offline_at == 0
-                                        or (
-                                            (time.time() - streamers[index].offline_at)
-                                            // 60
-                                        )
-                                        > 30
-                                    )
-                                    and streamers[index].stream.minute_watched < 11
+                            for index in available_source_indexes:
+                                if self._has_pending_watch_streak(
+                                    streamers[index], now
                                 ):
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
                                         break
 
                         elif prior == Priority.DROPS:
-                            for index in source_indexes:
+                            for index in available_source_indexes:
                                 if self.__drops_condition(streamers[index]) is True:
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
@@ -2390,7 +2446,7 @@ class Twitch(object):
                         elif prior == Priority.SUBSCRIBED:
                             streamers_with_multiplier = [
                                 index
-                                for index in source_indexes
+                                for index in available_source_indexes
                                 if streamers[index].viewer_has_points_multiplier()
                             ]
                             streamers_with_multiplier = sorted(
@@ -3423,6 +3479,7 @@ class Twitch(object):
 
                 if "drops" not in data:
                     data["drops"] = []
+                data["version"] = ANALYTICS_DATA_VERSION
 
                 compacted = {}
                 for item in data["drops"]:
@@ -3582,6 +3639,7 @@ class Twitch(object):
                 updated += 1
 
             data["drops"] = drops
+            data["version"] = ANALYTICS_DATA_VERSION
 
             with open(temp_file, "w", encoding="utf-8") as temp_handle:
                 json.dump(data, temp_handle, indent=4)

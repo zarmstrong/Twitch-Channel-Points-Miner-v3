@@ -14,6 +14,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
 )
 from TwitchChannelPointsMiner.constants import URL
+from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import _millify
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,8 @@ class StreamerSettings(object):
         "claim_drops",
         "claim_moments",
         "watch_streak",
+        "favorite",
+        "points_limit",
         "community_goals",
         "bet",
         "chat",
@@ -38,6 +41,8 @@ class StreamerSettings(object):
         claim_drops: bool = None,
         claim_moments: bool = None,
         watch_streak: bool = None,
+        favorite: bool = None,
+        points_limit: int = None,
         community_goals: bool = None,
         bet: BetSettings = None,
         chat: ChatPresence = None,
@@ -47,6 +52,8 @@ class StreamerSettings(object):
         self.claim_drops = claim_drops
         self.claim_moments = claim_moments
         self.watch_streak = watch_streak
+        self.favorite = favorite
+        self.points_limit = points_limit
         self.community_goals = community_goals
         self.bet = bet
         self.chat = chat
@@ -63,13 +70,15 @@ class StreamerSettings(object):
                 setattr(self, name, True)
         if self.community_goals is None:
             self.community_goals = False
+        if self.favorite is None:
+            self.favorite = False
         if self.bet is None:
             self.bet = BetSettings()
         if self.chat is None:
             self.chat = ChatPresence.ONLINE
 
     def __repr__(self):
-        return f"BetSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, community_goals={self.community_goals}, bet={self.bet}, chat={self.chat})"
+        return f"StreamerSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, favorite={self.favorite}, points_limit={self.points_limit}, community_goals={self.community_goals}, bet={self.bet}, chat={self.chat})"
 
 
 class Streamer(object):
@@ -292,8 +301,9 @@ class Streamer(object):
     def persistent_series(self, event_type="Watch"):
         self.__save_json("series", event_type=event_type)
 
-    def __save_json(self, key, data={}, event_type="Watch"):
+    def __save_json(self, key, data=None, event_type="Watch"):
         # https://stackoverflow.com/questions/4676195/why-do-i-need-to-multiply-unix-timestamps-by-1000-in-javascript
+        data = {} if data is None else data.copy()
         now = datetime.now().replace(microsecond=0)
         data.update({"x": round(datetime.timestamp(now) * 1000)})
 
@@ -313,6 +323,7 @@ class Streamer(object):
                         json_data = json.load(analytics_file)
                 else:
                     json_data = {}
+                json_data["version"] = ANALYTICS_DATA_VERSION
                 if key not in json_data:
                     json_data[key] = []
                 json_data[key].append(data)

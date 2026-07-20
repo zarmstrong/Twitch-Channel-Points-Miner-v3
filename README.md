@@ -546,6 +546,15 @@ from the configuration and should be persisted as described in [Docker](#docker)
 The runner checks `config/config.py` every five seconds. Set
 `TCPM_CONFIG_RELOAD_SECONDS` to change the interval; the minimum is one second.
 
+At startup, the runner checks `CONFIG_VERSION`. Unversioned configurations are
+backed up as `config.py.v0.bak` and upgraded in place. The migration adds missing
+global `StreamerSettings` fields with their defaults and appends newly introduced
+priority values to the existing priority list without reordering it. A config
+created by a newer unsupported release is rejected rather than rewritten.
+Generated Python is parsed before replacement. If an earlier migration left an
+invalid file and a versioned backup exists, startup rebuilds the config from that
+backup without overwriting it.
+
 #### Configuration reload limitations
 
 - New entries in `STREAMERS` are applied without a restart. Removing a streamer
@@ -726,6 +735,7 @@ been handled.
 
 Available values:
  - `STREAK` - Catch the watch streak from all streamers
+ - `FAVORITE` - Prioritize streamers with `StreamerSettings(favorite=True)`
  - `DROPS` - Claim all drops from streamers with drops tags enabled
  - `SUBSCRIBED` - Prioritize streamers you're subscribed to (higher subscription tiers are mined first)
  - `ORDER` - Following the order of the list
@@ -734,6 +744,11 @@ Available values:
 
 Priorities can be combined in order. Avoid contradictory fallback rules such as
 `ORDER` and `POINTS_ASCENDING` in the same list.
+
+Set `points_limit` in `StreamerSettings` to stop watching a streamer once its
+channel-points balance reaches that value. A pending watch streak can temporarily
+bypass the limit so its reward is not missed. Set `favorite=True` per streamer
+and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 
 ### LoggerSettings
 
@@ -883,6 +898,8 @@ Webhook(
 | `claim_drops` | bool | `True` | Accumulate Drop watch progress and claim available Drops. |
 | `claim_moments` | bool | `True` | Claim available [Moments](https://help.twitch.tv/s/article/moments). |
 | `watch_streak` | bool | `True` | Prioritize available watch-streak rewards. |
+| `favorite` | bool | `False` | Prioritize this streamer when `Priority.FAVORITE` is configured. |
+| `points_limit` | int or None | `None` | Stop watching at this balance, except for an eligible pending watch streak. |
 | `community_goals` | bool | `False` | Contribute the maximum allowed points to community goals. |
 | `bet` | BetSettings | Default settings | Configure prediction strategy, limits, filters, and timing. |
 | `chat` | ChatPresence | `ONLINE` | Control when the miner joins IRC chat. |
@@ -1157,6 +1174,22 @@ converter maps them as follows:
 Imports needed by enums and settings objects are retained. Expanded `**kwargs`,
 extra positional arguments, multiple miner/mine calls, or syntax errors cannot
 be converted safely.
+
+### Persisted data versions
+
+User-owned formats are checked when their corresponding feature starts:
+
+- `config/config.py` uses `CONFIG_VERSION` and is migrated before execution.
+- Streamer analytics JSON and `drops_by_category.json` use a root `version` and
+  are migrated when analytics is enabled. Pre-migration files are retained as
+  `<filename>.v0.bak`.
+- Watch-streak state and `drop_badge_catalog.json` already carry independent
+  version fields checked by their loaders.
+- Cookie JSON keeps Twitch's cookie-dictionary shape and is not wrapped in a
+  project schema. Authentication remains responsible for validating it.
+
+Migrations are idempotent and refuse to overwrite an existing backup or consume
+a format version newer than the running release.
 
 If conversion fails, any incomplete output is removed, a migration warning is
 printed, and the original runner executes unchanged. Correct the legacy file and

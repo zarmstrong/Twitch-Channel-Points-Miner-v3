@@ -56,7 +56,8 @@ The current suite covers these areas:
 | `test_bet.py` | Prediction settings, outcome calculations, strategies, spending limits, and filters |
 | `test_campaign.py` | Campaign filtering, Drop synchronization and claiming, and community goals |
 | `test_entities.py` | Streams, Drops, PubSub messages, topics, timestamps, and payload encoding |
-| `test_config_migration.py` | Legacy runner conversion, invalid inputs, output permissions, and migration markers |
+| `test_config_migration.py` | Versioned config updates, legacy conversion, backups, invalid inputs, permissions, and migration markers |
+| `test_data_migration.py` | Analytics schema versions, backups, future-version rejection, and versioned writes |
 | `test_streamer.py` | Streamer settings, state transitions, histories, multipliers, Drops, and prediction timing |
 
 `conftest.py` contains fixtures shared across the suite, including the minimal

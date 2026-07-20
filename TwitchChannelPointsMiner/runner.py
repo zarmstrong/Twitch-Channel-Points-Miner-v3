@@ -12,7 +12,11 @@ import time
 import types
 from pathlib import Path
 
-from TwitchChannelPointsMiner.config_migration import convert_runner
+from TwitchChannelPointsMiner.config_migration import (
+    ConfigMigrationError,
+    convert_runner,
+    migrate_config,
+)
 
 DEFAULT_CONFIG_DIR = Path("/usr/src/app/config")
 DEFAULT_LEGACY_RUNNER = Path("/usr/src/app/run.py")
@@ -20,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 def _load_config(path):
+    try:
+        migrated = migrate_config(path)
+    except (ConfigMigrationError, OSError) as error:
+        raise RuntimeError(
+            f"Unable to migrate configuration {path}: {error}"
+        ) from error
+    if migrated:
+        logger.info("Migrated configuration schema in %s", path)
     source = path.read_text(encoding="utf-8")
     module = types.ModuleType("twitch_miner_user_config")
     module.__file__ = str(path)
@@ -250,5 +262,13 @@ def main(argv=None):
     return 0
 
 
+def cli(argv=None):
+    try:
+        return main(argv)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr, flush=True)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

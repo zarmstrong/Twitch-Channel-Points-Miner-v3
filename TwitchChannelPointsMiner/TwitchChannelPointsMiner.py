@@ -32,6 +32,10 @@ from TwitchChannelPointsMiner.classes.Settings import (
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+from TwitchChannelPointsMiner.data_migration import (
+    DataMigrationError,
+    migrate_analytics_directory,
+)
 from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
 from TwitchChannelPointsMiner.utils import (
     AttemptStrategy,
@@ -61,6 +65,15 @@ logging.getLogger("seleniumwire").setLevel(logging.ERROR)
 logging.getLogger("websocket").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
+
+
+def _migrate_analytics_data(path):
+    try:
+        return migrate_analytics_directory(path)
+    except (DataMigrationError, OSError) as error:
+        raise RuntimeError(
+            f"Unable to migrate analytics data in {path}: {error}"
+        ) from error
 
 
 def _normalize_streams_watched(streams_watched):
@@ -253,6 +266,7 @@ class TwitchChannelPointsMiner:
                 Path().absolute(), "analytics", username
             )
             Path(Settings.analytics_path).mkdir(parents=True, exist_ok=True)
+            _migrate_analytics_data(Settings.analytics_path)
 
         self.username = username
 

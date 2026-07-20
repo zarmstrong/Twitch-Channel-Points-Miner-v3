@@ -40,6 +40,10 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 - Run the automated test suite with `python -m pytest`; prefer focused tests for the files or behavior you change.
 - The project follows Black formatting; keep edits compatible with the existing style and line lengths.
 
+## Pull request reviews
+
+- When an agent fixes an actionable Copilot review item, verify the change and resolve the corresponding review thread. Do not resolve comments that remain unfixed or unverified.
+
 ## Implementation notes
 
 - The top-level `TwitchChannelPointsMiner` class coordinates Twitch access, websocket handling, and streamer state.

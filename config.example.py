@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
+CONFIG_VERSION = 4
+
 import logging
 from colorama import Fore
 from TwitchChannelPointsMiner.logger import LoggerSettings, ColorPalette
@@ -29,7 +31,8 @@ MINER_CONFIG = {
     'priority': [                                  # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
         Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
-        Priority.ORDER                          # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
+        Priority.ORDER,                         # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
+        Priority.FAVORITE                       # - New priority options are appended last during config migration; move this earlier to favor marked streamers
     ],
     'enable_analytics': False,
     'disable_ssl_cert_verification': False,
@@ -55,7 +58,7 @@ MINER_CONFIG = {
         color_palette=ColorPalette(             # You can also create a custom palette color (for the common message).
             STREAMER_online="GREEN",            # Don't worry about lower/upper case. The script will parse all the values.
             streamer_offline="red",             # Read more in README.md
-            BET_wiN=Fore.MAGENTA                # Color allowed are: [BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET].
+            BET_WIN=Fore.MAGENTA                # Color allowed are: [BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET].
         ),
         telegram=Telegram(                                                          # You can omit or set to None if you don't want to receive updates on Telegram
             chat_id=123456789,                                                      # Chat ID to send messages @getmyid_bot
@@ -102,6 +105,8 @@ MINER_CONFIG = {
         claim_drops=True,                       # We can't filter rewards base on stream. Set to False for skip viewing counter increase and you will never obtain a drop reward from this script. Issue #21
         claim_moments=True,                     # If set to True, https://help.twitch.tv/s/article/moments will be claimed when available
         watch_streak=True,                      # If a streamer go online change the priority of streamers array and catch the watch screak. Issue #11
+        favorite=False,                         # Prioritize this streamer when Priority.FAVORITE is configured
+        points_limit=None,                      # Stop watching after reaching this balance; pending watch streaks still take priority
         community_goals=False,                  # If True, contributes the max channel points per stream to the streamers' community challenge goals
         chat=ChatPresence.ONLINE,               # Join irc chat to increase watch-time [ALWAYS, NEVER, ONLINE, OFFLINE]
         bet=BetSettings(
