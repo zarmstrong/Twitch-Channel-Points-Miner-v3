@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.6.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.5.0...3.6.0) (2026-07-20)
+
+
+### Features
+
+* **release:** link Docker images from release notes ([be94b99](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/be94b99a4d4fb37f7a1b447d054f3ed5a07cd0b4))
+* **release:** link Docker images from release notes ([#30](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/30)) ([be94b99](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/be94b99a4d4fb37f7a1b447d054f3ed5a07cd0b4))
+
+
+### Documentation
+
+* document multi-entry squash commits ([be94b99](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/be94b99a4d4fb37f7a1b447d054f3ed5a07cd0b4))
+* expand historical changelog entries ([be94b99](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/be94b99a4d4fb37f7a1b447d054f3ed5a07cd0b4))
+
 ## [3.5.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.4.0...3.5.0) (2026-07-20)
 
 
