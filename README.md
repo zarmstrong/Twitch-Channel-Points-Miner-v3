@@ -783,6 +783,7 @@ can be included in the same list for immediate email alerts.
 
 ```python
 from TwitchChannelPointsMiner.classes.Email import Email
+from TwitchChannelPointsMiner.classes.Settings import Events
 
 Email(
     host="smtp.example.com",

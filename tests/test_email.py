@@ -1,9 +1,11 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Settings import Events
+from TwitchChannelPointsMiner.logger import GlobalFormatter
 
 
 def test_email_sends_with_starttls_and_authentication():
@@ -56,3 +58,21 @@ def test_email_rejects_two_tls_modes():
             use_ssl=True,
             starttls=True,
         )
+
+
+def test_logger_skips_placeholder_email_host():
+    notifier = Email(
+        "smtp.example.com",
+        587,
+        "miner@example.com",
+        "you@example.com",
+        [Events.DAILY_REPORT],
+    )
+    formatter = GlobalFormatter.__new__(GlobalFormatter)
+    formatter.settings = MagicMock(email=notifier)
+    record = SimpleNamespace()
+
+    with patch.object(formatter, "_send") as send:
+        formatter.email(record)
+
+    send.assert_not_called()

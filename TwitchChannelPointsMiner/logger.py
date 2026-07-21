@@ -311,7 +311,11 @@ class GlobalFormatter(logging.Formatter):
 
     def email(self, record):
         skip_email = hasattr(record, "skip_email")
-        if self.settings.email is not None and skip_email is False:
+        if (
+            self.settings.email is not None
+            and skip_email is False
+            and self.settings.email.host != "smtp.example.com"
+        ):
             self._send(self.settings.email, record)
 
     @staticmethod
