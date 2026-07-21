@@ -12,6 +12,7 @@ import pytz
 from colorama import Fore, init
 
 from TwitchChannelPointsMiner.classes.Discord import Discord
+from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
@@ -82,6 +83,9 @@ class LoggerSettings:
         "matrix",
         "pushover",
         "gotify",
+        "email",
+        "daily_report",
+        "daily_report_time",
         "username",
     ]
 
@@ -104,6 +108,9 @@ class LoggerSettings:
         matrix: Matrix or None = None,
         pushover: Pushover or None = None,
         gotify: Gotify or None = None,
+        email: Email or None = None,
+        daily_report: bool = False,
+        daily_report_time: str = "00:00",
         username: str or None = None,
     ):
         self.save = save
@@ -134,6 +141,15 @@ class LoggerSettings:
         self.matrix = matrix
         self.pushover = pushover
         self.gotify = gotify
+        self.email = email
+        self.daily_report = daily_report
+        try:
+            datetime.strptime(daily_report_time, "%H:%M")
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "daily_report_time must use 24-hour HH:MM format"
+            ) from error
+        self.daily_report_time = daily_report_time
         self.username = username
 
 
@@ -222,6 +238,7 @@ class GlobalFormatter(logging.Formatter):
             self.matrix(record)
             self.pushover(record)
             self.gotify(record)
+            self.email(record)
 
             if self.settings.colored is True:
                 record.msg = f"{self.settings.color_palette.get(record.event)}{record.msg}{Fore.RESET}"
@@ -291,6 +308,11 @@ class GlobalFormatter(logging.Formatter):
             != "https://example.com/message?token=TOKEN"
         ):
             self._send(self.settings.gotify, record)
+
+    def email(self, record):
+        skip_email = hasattr(record, "skip_email")
+        if self.settings.email is not None and skip_email is False:
+            self._send(self.settings.email, record)
 
     @staticmethod
     def _send(notifier, record):

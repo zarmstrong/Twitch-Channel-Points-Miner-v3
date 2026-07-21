@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 
+import json
 import logging
 import os
 import random
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
@@ -155,6 +157,70 @@ def _capture_drop_progress_baseline(twitch, progress_scraped=False):
     return twitch.drop_report_snapshot()
 
 
+DAILY_REPORT_STATE_VERSION = 1
+
+
+def _load_daily_report_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as state_file:
+            payload = json.load(state_file)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != DAILY_REPORT_STATE_VERSION
+            or not isinstance(payload.get("streamers"), dict)
+        ):
+            raise ValueError("unsupported or malformed state")
+        last_report = payload.get("last_report_date")
+        return {
+            "date": date.fromisoformat(last_report) if last_report else None,
+            "streamers": {
+                str(username): int(points)
+                for username, points in payload["streamers"].items()
+            },
+            "drop_progress": payload.get("drop_progress"),
+        }
+    except FileNotFoundError:
+        return None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        logger.warning(
+            f"Unable to read daily-report state from {path}; starting fresh: {error}"
+        )
+        return None
+
+
+def _save_daily_report_state(path, report_date, streamers, drop_progress):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": DAILY_REPORT_STATE_VERSION,
+        "last_report_date": report_date.isoformat() if report_date else None,
+        "streamers": streamers,
+        "drop_progress": drop_progress,
+    }
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as state_file:
+            temporary = state_file.name
+            json.dump(payload, state_file, indent=2, sort_keys=True)
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temporary, target)
+    except (OSError, TypeError, ValueError) as error:
+        logger.warning(f"Unable to save daily-report state to {target}: {error}")
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
@@ -188,6 +254,10 @@ class TwitchChannelPointsMiner:
         "badge_drop_category_sort",
         "badge_drop_blacklist",
         "watch_streak_cache",
+        "daily_report_date",
+        "daily_report_streamers",
+        "daily_report_drop_progress",
+        "daily_report_state_path",
     ]
 
     def __init__(
@@ -334,6 +404,24 @@ class TwitchChannelPointsMiner:
         )
         self.watch_streak_cache = WatchStreakCache.load(
             watch_streak_cache_path, self.username
+        )
+        self.daily_report_state_path = os.path.join(
+            Path().absolute(),
+            "logs",
+            ".state",
+            f"daily_report.{self.username.lower()}.json",
+        )
+        daily_report_state = _load_daily_report_state(self.daily_report_state_path)
+        self.daily_report_date = (
+            daily_report_state["date"] if daily_report_state is not None else None
+        )
+        self.daily_report_streamers = (
+            daily_report_state["streamers"] if daily_report_state is not None else {}
+        )
+        self.daily_report_drop_progress = (
+            daily_report_state["drop_progress"]
+            if daily_report_state is not None
+            else None
         )
 
         if os.environ.pop("TCPM_LEGACY_CONFIG_NOTICE", None):
@@ -676,6 +764,28 @@ class TwitchChannelPointsMiner:
             self.original_streamers = [
                 streamer.channel_points for streamer in self.streamers
             ]
+            if Settings.logger.daily_report is True and self.daily_report_date is None:
+                self.daily_report_streamers = {
+                    streamer.username: streamer.channel_points
+                    for streamer in self.streamers
+                }
+                self.daily_report_drop_progress = self.twitch.drop_report_snapshot()
+                report_now = datetime.now()
+                report_time = datetime.strptime(
+                    Settings.logger.daily_report_time, "%H:%M"
+                ).time()
+                self.daily_report_date = (
+                    report_now.date()
+                    if report_now.time() >= report_time
+                    else report_now.date() - timedelta(days=1)
+                )
+                self.__save_daily_report_state()
+            elif Settings.logger.daily_report is True:
+                for streamer in self.streamers:
+                    self.daily_report_streamers.setdefault(
+                        streamer.username, streamer.channel_points
+                    )
+                self.__save_daily_report_state()
 
             # If we have at least one streamer with settings = make_predictions True
             make_predictions = at_least_one_value_in_settings_is(
@@ -794,6 +904,7 @@ class TwitchChannelPointsMiner:
             while self.running and self.twitch.running:
                 if self.twitch.restart_requested.wait(random.uniform(20, 60)):
                     break
+                self.__send_daily_report_if_due()
                 # Do an external control for WebSocket. Check if the thread is running
                 # Check if is not None because maybe we have already created a new connection on array+1 and now index is None
                 for index in range(0, len(self.ws_pool.ws)):
@@ -854,6 +965,56 @@ class TwitchChannelPointsMiner:
                             )
                             + 5,
                         )
+
+    def __send_daily_report_if_due(self, now=None):
+        if Settings.logger.daily_report is not True or not self.streamers:
+            return
+        now = now or datetime.now()
+        scheduled = datetime.strptime(Settings.logger.daily_report_time, "%H:%M").time()
+        if now.time() < scheduled or self.daily_report_date == now.date():
+            return
+
+        lines = [f"Daily report for {now.date().isoformat()}"]
+        for streamer in self.streamers:
+            baseline = self.daily_report_streamers.get(
+                streamer.username, streamer.channel_points
+            )
+            gained = streamer.channel_points - baseline
+            lines.append(f"{streamer.username}: {gained:+,} channel points")
+
+        drop_entries = _drop_progress_report_entries(
+            self.daily_report_drop_progress,
+            self.twitch.drop_report_snapshot(),
+        )
+        if drop_entries:
+            lines.append(f"Drop progress updated for {len(drop_entries)} reward(s):")
+            for entry in drop_entries:
+                lines.append(
+                    f"- {entry.get('item_name') or 'Unknown reward'}: "
+                    f"+{entry.get('minutes_gained', 0) or 0}m, "
+                    f"{str(entry.get('status') or 'in_progress').replace('_', ' ')}"
+                )
+        else:
+            lines.append("No Drop progress changes recorded.")
+
+        logger.info(
+            "\n".join(lines),
+            extra={"emoji": ":bar_chart:", "event": Events.DAILY_REPORT},
+        )
+        self.daily_report_date = now.date()
+        self.daily_report_streamers = {
+            streamer.username: streamer.channel_points for streamer in self.streamers
+        }
+        self.daily_report_drop_progress = self.twitch.drop_report_snapshot()
+        self.__save_daily_report_state()
+
+    def __save_daily_report_state(self):
+        _save_daily_report_state(
+            self.daily_report_state_path,
+            self.daily_report_date,
+            self.daily_report_streamers,
+            self.daily_report_drop_progress,
+        )
 
     def __drop_badge_catalog_loop(self, refresh_seconds):
         logger.info(
