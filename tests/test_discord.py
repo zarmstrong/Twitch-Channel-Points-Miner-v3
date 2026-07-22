@@ -42,3 +42,24 @@ def test_discord_formats_multiline_message_as_code_block():
         },
         timeout=(5, 15),
     )
+
+
+def test_discord_uses_longer_inline_fence_for_message_with_backticks():
+    discord = Discord("https://example.com/discord", [Events.CHAT_MENTION])
+
+    with patch("TwitchChannelPointsMiner.classes.Discord.requests.post") as request:
+        discord.send("Use `code` @everyone", Events.CHAT_MENTION)
+
+    assert request.call_args.kwargs["data"]["content"] == "`` Use `code` @everyone ``"
+
+
+def test_discord_uses_longer_code_fence_for_multiline_message_with_backticks():
+    discord = Discord("https://example.com/discord", [Events.DROP_STATUS])
+
+    with patch("TwitchChannelPointsMiner.classes.Discord.requests.post") as request:
+        discord.send("First line\n```dangerous\n@everyone", Events.DROP_STATUS)
+
+    assert (
+        request.call_args.kwargs["data"]["content"]
+        == "````\nFirst line\n```dangerous\n@everyone\n````"
+    )
