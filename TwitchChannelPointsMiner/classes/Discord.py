@@ -19,18 +19,20 @@ class Discord(object):
                 max_backticks = 0
                 backticks = 0
                 for character in message:
-                    backticks = backticks + 1 if character == "`" else 0
-                    max_backticks = max(max_backticks, backticks)
+                    if character == "`":
+                        backticks += 1
+                        max_backticks = max(max_backticks, backticks)
+                    else:
+                        backticks = 0
 
                 multiline = "\n" in message
                 fence = "`" * max(3 if multiline else 1, max_backticks + 1)
-                content = (
-                    f"{fence}\n{message}\n{fence}"
-                    if multiline
-                    else f"{fence} {message} {fence}"
-                    if max_backticks
-                    else f"`{message}`"
-                )
+                if multiline:
+                    content = f"{fence}\n{message}\n{fence}"
+                elif max_backticks:
+                    content = f"{fence} {message} {fence}"
+                else:
+                    content = f"`{message}`"
                 requests.post(
                     url=self.webhook_api,
                     data={
