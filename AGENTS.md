@@ -45,6 +45,7 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 ## Pull request reviews
 
 - When an agent fixes an actionable Copilot review item, verify the change and resolve the corresponding review thread. Do not resolve comments that remain unfixed or unverified.
+- After pushing new commits to a branch with an open pull request, request a fresh Copilot review so the latest changes are reviewed. Do not request another review when one is already pending for the current head commit.
 
 ## Implementation notes
 
