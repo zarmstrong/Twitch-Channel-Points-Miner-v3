@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.7.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.0...3.7.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* format Discord alerts as code ([1840c7e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1840c7ed77ca6cf870a8c5cb17d3c42fedd6f55e))
+* format Discord alerts as code ([#34](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/34)) ([1840c7e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1840c7ed77ca6cf870a8c5cb17d3c42fedd6f55e))
+
 ## [3.7.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.6.0...3.7.0) (2026-07-22)
 
 
