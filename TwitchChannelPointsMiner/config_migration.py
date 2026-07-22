@@ -11,7 +11,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -36,6 +36,8 @@ LOGGER_SETTINGS_DEFAULTS = (
     ("colored", "False"),
     ("color_palette", "ColorPalette()"),
     ("auto_clear", "True"),
+    ("daily_report", "False"),
+    ("daily_report_time", '"00:00"'),
     ("username", "None"),
 )
 LOGGER_NOTIFICATION_SETTINGS = (
@@ -45,6 +47,7 @@ LOGGER_NOTIFICATION_SETTINGS = (
     "matrix",
     "pushover",
     "gotify",
+    "email",
 )
 LOGGER_NOTIFICATION_TEMPLATES = {
     "telegram": 'Telegram(chat_id=123456789, token="TOKEN", events=[])',
@@ -53,6 +56,7 @@ LOGGER_NOTIFICATION_TEMPLATES = {
     "matrix": 'Matrix(username="USER", password="PASSWORD", homeserver="matrix.org", room_id="ROOM", events=[])',
     "pushover": 'Pushover(userkey="USER_KEY", token="TOKEN", priority=0, sound="pushover", events=[])',
     "gotify": 'Gotify(endpoint="https://example.com/message?token=TOKEN", priority=0, events=[])',
+    "email": 'Email(host="smtp.example.com", port=587, sender="miner@example.com", recipients=["you@example.com"], events=[])',
 }
 BET_SETTINGS_DEFAULTS = (
     ("strategy", "None"),
@@ -436,6 +440,18 @@ def migrate_config_source(source, source_name="config.py"):
             )
 
     for logger_settings in _find_calls(tree, "LoggerSettings"):
+        logger_names = {
+            keyword.arg
+            for keyword in logger_settings.keywords
+            if keyword.arg is not None
+        }
+        email_import = "from TwitchChannelPointsMiner.classes.Email import Email"
+        if (
+            "email" not in logger_names
+            and not _name_is_defined(tree, "Email")
+            and email_import not in required_imports
+        ):
+            required_imports.append(email_import)
         missing = _missing_call_defaults(
             logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
         )

@@ -62,6 +62,7 @@ class Settings(object):
 
 
 class Events(Enum):
+    DAILY_REPORT = auto()
     STREAMER_ONLINE = auto()
     STREAMER_OFFLINE = auto()
     GAIN_FOR_RAID = auto()

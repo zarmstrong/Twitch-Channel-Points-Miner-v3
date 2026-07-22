@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 import logging
 from colorama import Fore
 from TwitchChannelPointsMiner.logger import LoggerSettings, ColorPalette
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.Discord import Discord
+from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Webhook import Webhook
 from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
@@ -78,6 +79,18 @@ MINER_CONFIG = {
             events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
                     Events.BET_LOSE, Events.CHAT_MENTION],                                  # Only these events will be sent to the endpoint
         ),
+        email=Email(                                                                    # SMTP email alerts; omit or set to None to disable
+            host="smtp.example.com",
+            port=587,
+            username="miner@example.com",
+            password="YOUR_SMTP_PASSWORD",
+            sender="miner@example.com",
+            recipients=["you@example.com"],
+            events=[Events.DAILY_REPORT, Events.CONFIGURATION],
+            starttls=True,                                                              # Use use_ssl=True and starttls=False for implicit TLS (usually port 465)
+        ),
+        daily_report=True,                                                              # Send a daily point/Drop activity summary through notifiers subscribed to DAILY_REPORT
+        daily_report_time="00:00",                                                     # Local time in 24-hour HH:MM format
         matrix=Matrix(
             username="twitch_miner",                                                   # Matrix username (without homeserver)
             password="...",                                                            # Matrix password

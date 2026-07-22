@@ -287,6 +287,33 @@ ANALYTICS_CONFIG = {"port": 6000}
         assert name in namespace["ANALYTICS_CONFIG"]
 
 
+def test_version_four_adds_daily_report_settings_and_email_template():
+    source = '''\
+CONFIG_VERSION = 4
+import logging
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(
+    save=False,
+)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 4
+    assert new_version == CONFIG_VERSION
+    assert namespace["CONFIG_VERSION"] == 5
+    assert namespace["LOGGER"].daily_report is False
+    assert namespace["LOGGER"].daily_report_time == "00:00"
+    assert "# email=Email(" in migrated
+    assert "from TwitchChannelPointsMiner.classes.Email import Email" in migrated
+
+
 def test_migration_defaults_cover_runtime_configuration_signatures():
     def parameters(callable_object):
         return set(inspect.signature(callable_object).parameters) - {"self"}

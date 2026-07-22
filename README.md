@@ -771,6 +771,38 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 | `matrix` | Matrix or None | `None` | Send selected events to a Matrix room. |
 | `pushover` | Pushover or None | `None` | Send selected events through Pushover. |
 | `gotify` | Gotify or None | `None` | Send selected events to a Gotify server. |
+| `email` | Email or None | `None` | Send selected events through an SMTP server. |
+| `daily_report` | bool | `False` | Generate a daily channel-points and Drop activity report. |
+| `daily_report_time` | str | `"00:00"` | Local delivery time for the daily report, in 24-hour `HH:MM` format. |
+
+#### Email / SMTP
+
+Email uses Python's built-in SMTP support and adds no dependency. Subscribe the
+notifier to `Events.DAILY_REPORT` to receive daily summaries; other event types
+can be included in the same list for immediate email alerts.
+
+```python
+from TwitchChannelPointsMiner.classes.Email import Email
+from TwitchChannelPointsMiner.classes.Settings import Events
+
+Email(
+    host="smtp.example.com",
+    port=587,
+    username="miner@example.com",
+    password="YOUR_SMTP_PASSWORD",
+    sender="miner@example.com",
+    recipients=["you@example.com"],
+    events=[Events.DAILY_REPORT, Events.CONFIGURATION],
+    starttls=True,
+)
+```
+
+Use `use_ssl=True, starttls=False` for implicit TLS, commonly on port 465. SMTP
+failures are handled like the other alert transports and do not stop mining.
+Daily-report progress is saved per account under `logs/.state/`, so point and
+Drop baselines survive normal stops and restarts. If the scheduled delivery was
+missed while the miner was stopped, the overdue report is sent after startup
+finishes refreshing current streamer balances.
 
 #### Color Palette
 `ColorPalette` customizes console colors by event name. Unspecified events use
@@ -868,6 +900,7 @@ Webhook(
 
 
 #### Events
+ - `DAILY_REPORT`
  - `STREAMER_ONLINE`
  - `STREAMER_OFFLINE`
  - `GAIN_FOR_RAID`
