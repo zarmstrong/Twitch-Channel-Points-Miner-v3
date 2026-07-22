@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.7.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.6.0...3.7.0) (2026-07-22)
+
+
+### Features
+
+* add SMTP alerts and persistent daily reports ([f3cdcbb](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f3cdcbb0110936a641aee49188874b92182aa6d6))
+* add SMTP alerts and persistent daily reports ([#32](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/32)) ([f3cdcbb](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f3cdcbb0110936a641aee49188874b92182aa6d6))
+* **reports:** persist daily report baselines across restarts ([f3cdcbb](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f3cdcbb0110936a641aee49188874b92182aa6d6))
+
+
+### Bug Fixes
+
+* **config:** migrate existing configurations to SMTP and daily report settings ([f3cdcbb](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f3cdcbb0110936a641aee49188874b92182aa6d6))
+
+
+### Documentation
+
+* document email alerts and daily report configuration ([f3cdcbb](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f3cdcbb0110936a641aee49188874b92182aa6d6))
+
 ## [3.6.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.5.0...3.6.0) (2026-07-20)
 
 
