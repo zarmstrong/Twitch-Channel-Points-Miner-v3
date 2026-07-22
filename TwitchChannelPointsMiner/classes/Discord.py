@@ -15,10 +15,12 @@ class Discord(object):
     def send(self, message: str, event: Events) -> None:
         if str(event) in self.events:
             try:
+                message = dedent(message).strip()
+                content = f"```\n{message}\n```" if "\n" in message else f"`{message}`"
                 requests.post(
                     url=self.webhook_api,
                     data={
-                        "content": dedent(message),
+                        "content": content,
                         "username": "Twitch Channel Points Miner",
                         "avatar_url": "https://i.imgur.com/X9fEkhT.png",
                     },
