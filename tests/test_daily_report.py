@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
@@ -20,7 +20,7 @@ def _miner():
     miner.daily_report_drop_progress = {}
     miner.daily_report_date = date(2026, 7, 20)
     miner.daily_report_state_path = "/unused/daily-report.json"
-    miner.twitch = SimpleNamespace(drop_report_snapshot=lambda: {})
+    miner.twitch = SimpleNamespace(drop_report_snapshot=MagicMock(return_value={}))
     return miner
 
 
@@ -43,6 +43,7 @@ def test_daily_report_emits_event_and_advances_baseline():
     assert info.call_args.kwargs["extra"]["event"] is Events.DAILY_REPORT
     assert miner.daily_report_date == date(2026, 7, 21)
     assert miner.daily_report_streamers == {"alice": 1250, "bob": 500}
+    miner.twitch.drop_report_snapshot.assert_called_once_with()
     save.assert_called_once()
 
 
@@ -79,5 +80,15 @@ def test_daily_report_state_survives_reload(tmp_path):
 def test_invalid_daily_report_state_starts_fresh(tmp_path):
     path = tmp_path / "daily-report.json"
     path.write_text("not json", encoding="utf-8")
+
+    assert _load_daily_report_state(path) is None
+
+
+def test_malformed_drop_progress_state_starts_fresh(tmp_path):
+    path = tmp_path / "daily-report.json"
+    path.write_text(
+        '{"version": 1, "streamers": {}, "drop_progress": []}',
+        encoding="utf-8",
+    )
 
     assert _load_daily_report_state(path) is None

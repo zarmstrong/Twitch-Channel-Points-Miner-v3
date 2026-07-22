@@ -168,6 +168,10 @@ def _load_daily_report_state(path):
             not isinstance(payload, dict)
             or payload.get("version") != DAILY_REPORT_STATE_VERSION
             or not isinstance(payload.get("streamers"), dict)
+            or (
+                payload.get("drop_progress") is not None
+                and not isinstance(payload.get("drop_progress"), dict)
+            )
         ):
             raise ValueError("unsupported or malformed state")
         last_report = payload.get("last_report_date")
@@ -982,9 +986,10 @@ class TwitchChannelPointsMiner:
             gained = streamer.channel_points - baseline
             lines.append(f"{streamer.username}: {gained:+,} channel points")
 
+        drop_progress = self.twitch.drop_report_snapshot()
         drop_entries = _drop_progress_report_entries(
             self.daily_report_drop_progress,
-            self.twitch.drop_report_snapshot(),
+            drop_progress,
         )
         if drop_entries:
             lines.append(f"Drop progress updated for {len(drop_entries)} reward(s):")
@@ -1005,7 +1010,7 @@ class TwitchChannelPointsMiner:
         self.daily_report_streamers = {
             streamer.username: streamer.channel_points for streamer in self.streamers
         }
-        self.daily_report_drop_progress = self.twitch.drop_report_snapshot()
+        self.daily_report_drop_progress = drop_progress
         self.__save_daily_report_state()
 
     def __save_daily_report_state(self):

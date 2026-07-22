@@ -30,7 +30,7 @@ def test_email_sends_with_starttls_and_authentication():
     smtp.login.assert_called_once_with("user", "secret")
     message = smtp.send_message.call_args.args[0]
     assert message["To"] == "one@example.com, two@example.com"
-    assert "Daily Report" in message["Subject"]
+    assert message["Subject"] == "Twitch Channel Points Miner: Daily Report"
 
 
 def test_email_ignores_events_not_selected():

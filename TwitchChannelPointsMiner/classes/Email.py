@@ -52,7 +52,7 @@ class Email(object):
             return
 
         email = EmailMessage()
-        event_name = str(event).replace("_", " ").title()
+        event_name = event.name.replace("_", " ").title()
         email["Subject"] = f"Twitch Channel Points Miner: {event_name}"
         email["From"] = self.sender
         email["To"] = ", ".join(self.recipients)
