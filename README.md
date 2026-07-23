@@ -1,9 +1,9 @@
 ![Twitch Channel Points Miner](https://raw.githubusercontent.com/zarmstrong/Twitch-Channel-Points-Miner-v3/master/assets/banner.png)
 <p align="center">
-<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases"><img alt="Latest Version" src="https://img.shields.io/github/v/release/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=white&logo=github&logoColor=white"></a>
-<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=limegreen&logo=github&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases"><img alt="Latest Version" src="https://badgen.net/github/release/zarmstrong/Twitch-Channel-Points-Miner-v3?icon=github&iconColor=fff&color=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers"><img alt="GitHub Repo stars" src="https://badgen.net/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3?icon=github&iconColor=fff&color=32CD32"></a>
 <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/LICENSE"><img alt="License" src="https://img.shields.io/github/license/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=black&logo=unlicense&logoColor=white"></a>
-<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"><img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=lightyellow&logo=github&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"><img alt="GitHub last commit" src="https://badgen.net/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3?icon=github&iconColor=fff&color=FFFFE0"></a>
 </p>
 
 <p align="center">
@@ -542,7 +542,8 @@ command override is needed. On first authentication the process may require an
 interactive terminal. Cookies, logs, and analytics data are stored separately
 from the configuration and should be persisted as described in [Docker](#docker).
 
-The runner checks `config/config.py` every five seconds. Set
+The runner checks `config/config.py` and dashboard-managed `web-config.json`
+every five seconds. Set
 `TCPM_CONFIG_RELOAD_SECONDS` to change the interval; the minimum is one second.
 
 At startup, the runner checks `CONFIG_VERSION`. Unversioned configurations are
@@ -559,9 +560,10 @@ backup without overwriting it.
 
 #### Configuration reload limitations
 
-- New entries in `STREAMERS` are applied without a restart. Removing a streamer
-  does not remove its loaded state, chat connection, or PubSub subscriptions;
-  restart the miner to remove it completely.
+- New entries in `STREAMERS` are applied without a restart. Removing an
+  explicitly configured streamer also removes its loaded state, chat connection,
+  and channel PubSub subscriptions. A channel discovered from another enabled
+  source remains loaded under that source.
 - Changes to `MINE_CONFIG["categories"]` trigger discovery after the watcher
   detects the edit. Previously discovered channels remain loaded until restart.
 - Changes to existing streamer settings, `MINER_CONFIG`, `ANALYTICS_CONFIG`, and
@@ -1052,6 +1054,21 @@ history, Drops, and miner logs. The points chart includes tooltips with the
 balance, timestamp, and gain or spend reason. Annotations highlight predictions,
 watch streaks, and other significant changes, and can be disabled in the page.
 The interface also includes light and dark themes.
+
+The **Config** tab manages explicit streamers, categories and their order,
+per-streamer behavior, category discovery, stream sources, logging, daily
+reports, and notification providers. Streamer additions/removals and category
+list changes are detected by the running miner; controls marked in the page as
+restart-required take effect on the next start.
+
+Dashboard changes are stored in `web-config.json` beside `config.py`, leaving
+hand-written Python settings and comments intact; managed values in that file
+take precedence over their `config.py` counterparts. The file is created with
+owner-only permissions where the filesystem supports them. Notification
+credentials are write-only in the browser: existing values are reported only
+as configured, never returned by the API, and blank credential fields retain
+the saved value. Protect the Config tab with the same analytics authentication
+and HTTPS guidance described below.
 
 | Light theme | Dark theme |
 | ----------- | ---------- |

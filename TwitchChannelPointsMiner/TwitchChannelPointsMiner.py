@@ -1035,13 +1035,16 @@ class TwitchChannelPointsMiner:
         if now.time() < scheduled or self.daily_report_date == now.date():
             return
 
-        lines = [f"Daily report for {now.date().isoformat()}"]
+        activity_lines = []
         for streamer in self.streamers:
             baseline = self.daily_report_streamers.get(
                 streamer.username, streamer.channel_points
             )
             gained = streamer.channel_points - baseline
-            lines.append(f"{streamer.username}: {gained:+,} channel points")
+            if gained != 0:
+                activity_lines.append(
+                    f"{streamer.username}: {gained:+,} channel points"
+                )
 
         drop_progress = self.twitch.drop_report_snapshot()
         drop_entries = _drop_progress_report_entries(
@@ -1049,20 +1052,25 @@ class TwitchChannelPointsMiner:
             drop_progress,
         )
         if drop_entries:
-            lines.append(f"Drop progress updated for {len(drop_entries)} reward(s):")
+            activity_lines.append(
+                f"Drop progress updated for {len(drop_entries)} reward(s):"
+            )
             for entry in drop_entries:
-                lines.append(
-                    f"- {entry.get('item_name') or 'Unknown reward'}: "
+                category = entry.get("category") or "Unknown game"
+                campaign = entry.get("campaign") or "Unknown campaign"
+                activity_lines.append(
+                    f"- {category} — {campaign} — "
+                    f"{entry.get('item_name') or 'Unknown reward'}: "
                     f"+{entry.get('minutes_gained', 0) or 0}m, "
                     f"{str(entry.get('status') or 'in_progress').replace('_', ' ')}"
                 )
-        else:
-            lines.append("No Drop progress changes recorded.")
 
-        logger.info(
-            "\n".join(lines),
-            extra={"emoji": ":bar_chart:", "event": Events.DAILY_REPORT},
-        )
+        if activity_lines:
+            lines = [f"Daily report for {now.date().isoformat()}", *activity_lines]
+            logger.info(
+                "\n".join(lines),
+                extra={"emoji": ":bar_chart:", "event": Events.DAILY_REPORT},
+            )
         self.daily_report_date = now.date()
         self.daily_report_streamers = {
             streamer.username: streamer.channel_points for streamer in self.streamers
@@ -1250,6 +1258,7 @@ class TwitchChannelPointsMiner:
                     self.twitch.load_channel_points_context(streamer)
                     self.twitch.check_streamer_online(streamer)
                     self.streamers.append(streamer)
+                    self.original_streamers.append(streamer.channel_points)
                     existing_usernames.add(username)
                     added += 1
 
@@ -1374,6 +1383,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.load_channel_points_context(streamer)
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
+                self.original_streamers.append(streamer.channel_points)
                 existing_usernames.add(username)
                 added += 1
 
@@ -1421,6 +1431,44 @@ class TwitchChannelPointsMiner:
         with self.config_reload_lock:
             self._add_streamers(streamers)
 
+    def remove_streamers(self, usernames):
+        """Remove explicit streamers from a running miner safely."""
+        if not self.running or self.ws_pool is None:
+            raise RuntimeError("The miner is not ready for live configuration changes")
+        requested = {str(username).lower().strip() for username in usernames}
+        with self.config_reload_lock:
+            retained = []
+            retained_baselines = []
+            for index, streamer in enumerate(self.streamers):
+                baseline = (
+                    self.original_streamers[index]
+                    if index < len(self.original_streamers)
+                    else streamer.channel_points
+                )
+                if streamer.username not in requested:
+                    retained.append(streamer)
+                    retained_baselines.append(baseline)
+                    continue
+                streamer.explicitly_configured = False
+                if (
+                    streamer.from_followers
+                    or streamer.from_category
+                    or streamer.from_badge_campaign
+                ):
+                    retained.append(streamer)
+                    retained_baselines.append(baseline)
+                    continue
+                self.ws_pool.remove_streamer_topics(streamer)
+                if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
+                    streamer.irc_chat.stop()
+                    streamer.irc_chat.join(timeout=5)
+                logger.info(
+                    f"Removed {streamer.username} from the reloaded configuration",
+                    extra={"emoji": ":heavy_minus_sign:"},
+                )
+            self.streamers[:] = retained
+            self.original_streamers[:] = retained_baselines
+
     def _add_streamers(self, streamers):
         existing = {streamer.username for streamer in self.streamers}
         for configured in streamers:
@@ -1454,6 +1502,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.load_channel_points_context(streamer)
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
+                self.original_streamers.append(streamer.channel_points)
                 existing.add(username)
                 self.ws_pool.submit(
                     PubsubTopic("video-playback-by-id", streamer=streamer)

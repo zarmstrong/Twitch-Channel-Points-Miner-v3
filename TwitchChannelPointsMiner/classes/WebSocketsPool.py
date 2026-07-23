@@ -4,7 +4,7 @@ import random
 import time
 
 # import os
-from threading import Thread, Timer
+from threading import RLock, Thread, Timer
 
 from dateutil import parser
 
@@ -27,13 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketsPool:
-    __slots__ = ["ws", "twitch", "streamers", "events_predictions"]
+    __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
 
     def __init__(self, twitch, streamers, events_predictions):
         self.ws = []
         self.twitch = twitch
         self.streamers = streamers
         self.events_predictions = events_predictions
+        self.topic_lock = RLock()
 
     """
     API Limits
@@ -43,22 +44,73 @@ class WebSocketsPool:
     """
 
     def submit(self, topic):
-        # Check if we need to create a new WebSocket instance
-        if self.ws == [] or len(self.ws[-1].topics) >= 50:
-            self.ws.append(self.__new(len(self.ws)))
-            self.__start(-1)
+        with self.topic_lock:
+            # Check if we need to create a new WebSocket instance
+            if self.ws == [] or len(self.ws[-1].topics) >= 50:
+                self.ws.append(self.__new(len(self.ws)))
+                self.__start(-1)
+            index = len(self.ws) - 1
+            websocket, should_listen = self.__register(index, topic)
 
-        self.__submit(-1, topic)
+        if should_listen:
+            self.__listen(websocket, topic)
 
-    def __submit(self, index, topic):
+    def remove_streamer_topics(self, streamer):
+        """Unsubscribe and forget every PubSub topic owned by a streamer."""
+        with self.topic_lock:
+            removals = []
+            for websocket in self.ws:
+                removed = [
+                    topic for topic in websocket.topics if topic.streamer is streamer
+                ]
+                websocket.topics[:] = [
+                    topic
+                    for topic in websocket.topics
+                    if topic.streamer is not streamer
+                ]
+                websocket.pending_topics[:] = [
+                    topic
+                    for topic in websocket.pending_topics
+                    if topic.streamer is not streamer
+                ]
+                removals.append((websocket, removed))
+        for websocket, removed in removals:
+            if websocket.is_opened and removed:
+                auth_token = self.twitch.twitch_login.get_auth_token()
+                for topic in removed:
+                    websocket.unlisten(topic, auth_token)
+
+    def __submit(self, index, topic, replay=False):
+        with self.topic_lock:
+            if replay and topic not in self.ws[index].topics:
+                return
+            websocket, should_listen = self.__register(index, topic)
+            if replay and websocket.is_opened:
+                should_listen = True
+
+        if should_listen:
+            self.__listen(websocket, topic)
+
+    def __register(self, index, topic):
+        websocket = self.ws[index]
         # Topic in topics should never happen. Anyway prevent any types of duplicates
-        if topic not in self.ws[index].topics:
-            self.ws[index].topics.append(topic)
+        newly_added = topic not in websocket.topics
+        if newly_added:
+            websocket.topics.append(topic)
+        if websocket.is_opened is False:
+            if topic not in websocket.pending_topics:
+                websocket.pending_topics.append(topic)
+            return websocket, False
+        return websocket, newly_added
 
-        if self.ws[index].is_opened is False:
-            self.ws[index].pending_topics.append(topic)
-        else:
-            self.ws[index].listen(topic, self.twitch.twitch_login.get_auth_token())
+    def __listen(self, websocket, topic, auth_token=None):
+        if auth_token is None:
+            auth_token = self.twitch.twitch_login.get_auth_token()
+        websocket.listen(topic, auth_token)
+        with self.topic_lock:
+            still_configured = websocket in self.ws and topic in websocket.topics
+        if not still_configured:
+            websocket.unlisten(topic, auth_token)
 
     def __new(self, index):
         return TwitchWebSocket(
@@ -99,8 +151,11 @@ class WebSocketsPool:
             ws.is_opened = True
             ws.ping()
 
-            for topic in ws.pending_topics:
-                ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
+            with ws.parent_pool.topic_lock:
+                pending_topics = list(ws.pending_topics)
+                ws.pending_topics.clear()
+            for topic in pending_topics:
+                ws.parent_pool.__listen(ws, topic)
 
             while ws.is_closed is False:
                 # Else: the ws is currently in reconnecting phase, you can't do ping or other operation.
@@ -159,14 +214,17 @@ class WebSocketsPool:
 
                 # Why not create a new ws on the same array index? Let's try.
                 self = ws.parent_pool
-                # Create a new connection.
-                self.ws[ws.index] = self.__new(ws.index)
+                with self.topic_lock:
+                    topics = list(ws.topics)
+                    replacement = self.__new(ws.index)
+                    replacement.topics.extend(topics)
+                    self.ws[ws.index] = replacement
 
                 self.__start(ws.index)  # Start a new thread.
                 time.sleep(30)
 
-                for topic in ws.topics:
-                    self.__submit(ws.index, topic)
+                for topic in topics:
+                    self.__submit(ws.index, topic, replay=True)
 
     @staticmethod
     def on_message(ws, message):

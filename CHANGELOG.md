@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.7.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.4...3.7.5) (2026-07-23)
+
+
+### Bug Fixes
+
+* **docs:** replace broken GitHub badges ([#44](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/44)) ([52c0de5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/52c0de5a62a3383904b97917017aa09471607125))
+
+## [3.7.4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.3...3.7.4) (2026-07-23)
+
+
+### Bug Fixes
+
+* **drops:** include game and campaign in daily progress entries ([bcad721](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcad72188e5a2251e8020534efcb75d0d1ee8608))
+* improve daily report activity details ([#41](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/41)) ([bcad721](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcad72188e5a2251e8020534efcb75d0d1ee8608))
+
 ## [3.7.3](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.2...3.7.3) (2026-07-23)
 
 

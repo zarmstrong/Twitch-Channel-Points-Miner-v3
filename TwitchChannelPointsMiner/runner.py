@@ -13,6 +13,11 @@ import time
 import types
 from pathlib import Path
 
+from TwitchChannelPointsMiner.config_editor import (
+    WEB_CONFIG_FILENAME,
+    ConfigEditError,
+    apply_web_overrides,
+)
 from TwitchChannelPointsMiner.config_migration import (
     ConfigMigrationError,
     convert_runner,
@@ -70,7 +75,16 @@ def _load_config(path):
             "Removed obsolete Twitch password from MINER_CONFIG; "
             "authentication uses the TV activation flow."
         )
-    return module
+    try:
+        return apply_web_overrides(module, path)
+    except ConfigEditError as error:
+        raise RuntimeError(
+            f"Unable to apply dashboard-managed configuration: {error}"
+        ) from error
+    except OSError as error:
+        raise RuntimeError(
+            "Unable to access dashboard-managed configuration."
+        ) from error
 
 
 def _streamer_username(streamer):
@@ -79,7 +93,16 @@ def _streamer_username(streamer):
 
 
 def _config_digest(path):
-    return hashlib.sha256(path.read_bytes()).digest()
+    digest = hashlib.sha256(path.read_bytes())
+    web_config_path = path.with_name(WEB_CONFIG_FILENAME)
+    if web_config_path.is_file():
+        try:
+            digest.update(web_config_path.read_bytes())
+        except OSError:
+            # Keep watching the main config. A recovery of the override file
+            # changes the digest and triggers another reload attempt.
+            digest.update(b"web-config-unreadable")
+    return digest.digest()
 
 
 def _freeze(value):
@@ -104,12 +127,20 @@ def _freeze(value):
     return repr(value)
 
 
+def _streamer_settings_snapshot(streamer):
+    return _freeze(getattr(streamer, "settings", None))
+
+
 def _watch_config(path, miner, initial_config, interval):
     from TwitchChannelPointsMiner.classes.Settings import Events
 
     digest = _config_digest(path)
     known_streamers = {
         _streamer_username(streamer) for streamer in initial_config.STREAMERS
+    }
+    streamer_snapshot = {
+        _streamer_username(streamer): _streamer_settings_snapshot(streamer)
+        for streamer in initial_config.STREAMERS
     }
     live_categories = initial_config.MINE_CONFIG.setdefault("categories", [])
     restart_snapshot = {
@@ -145,7 +176,19 @@ def _watch_config(path, miner, initial_config, interval):
             ]
             if additions:
                 miner.add_streamers(additions)
-                known_streamers.update(updated_streamers)
+            removals = set(known_streamers) - set(updated_streamers)
+            if removals:
+                miner.remove_streamers(removals)
+            known_streamers = set(updated_streamers)
+            updated_streamer_snapshot = {
+                username: _streamer_settings_snapshot(streamer)
+                for username, streamer in updated_streamers.items()
+            }
+            changed_streamer_settings = any(
+                username in streamer_snapshot
+                and updated_streamer_snapshot[username] != streamer_snapshot[username]
+                for username in updated_streamer_snapshot
+            )
 
             updated_categories = list(updated.MINE_CONFIG.get("categories", []))
             if updated_categories != live_categories:
@@ -163,12 +206,18 @@ def _watch_config(path, miner, initial_config, interval):
                     }
                 ),
             }
-            if updated_restart_snapshot != restart_snapshot:
+            if (
+                updated_restart_snapshot != restart_snapshot
+                or changed_streamer_settings
+            ):
                 logger.warning(
-                    "Configuration reloaded, but constructor, analytics, and "
-                    "non-category mining changes require a restart.",
+                    "Configuration reloaded, but constructor, analytics, "
+                    "per-streamer, and non-category mining changes require "
+                    "a restart.",
                     extra={"event": Events.CONFIGURATION},
                 )
+            streamer_snapshot = updated_streamer_snapshot
+            restart_snapshot = updated_restart_snapshot
             digest = current_digest
             logger.info(
                 "Configuration reloaded from %s", path, extra={"emoji": ":repeat:"}
