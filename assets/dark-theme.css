@@ -76,6 +76,16 @@ a:hover {
     opacity: 1;
 }
 
+#config-panel .event-capsule:not(.is-link) {
+    border-color: rgba(255, 255, 255, 0.28);
+    color: rgba(255, 255, 255, 0.82);
+    background: rgba(52, 62, 89, 0.72);
+}
+
+#config-panel .event-capsules {
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
 body .drop-row {
     background: rgba(52, 62, 89, 0.35);
 }

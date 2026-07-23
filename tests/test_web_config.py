@@ -77,6 +77,8 @@ def test_managed_web_config_masks_credentials_and_reads_effective_settings(tmp_p
         "webhook_api": True
     }
     assert result["notifications"]["discord"]["test_available"] is True
+    assert "DROP_CLAIM" in result["notification_event_options"]
+    assert "DAILY_REPORT" in result["notification_event_options"]
     assert "secret.example" not in json.dumps(result)
 
 

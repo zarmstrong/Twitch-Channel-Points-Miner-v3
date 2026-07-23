@@ -1345,10 +1345,10 @@ function renderNotificationSettings(config) {
         var enabled = $('<input>').attr({ type: 'checkbox', 'data-notification-enabled': true }).prop('checked', state.enabled);
         fields.append($('<label>').addClass('checkbox config-checkbox').append(enabled).append(' Enabled'));
         schema.fields.forEach(function (name) {
-            fields.append(buildNotificationField(name, state.fields[name], false, false));
+            fields.append(buildNotificationField(name, state.fields[name], false, false, config.notification_event_options));
         });
         schema.secrets.forEach(function (name) {
-            fields.append(buildNotificationField(name, '', true, state.secrets[name] === true));
+            fields.append(buildNotificationField(name, '', true, state.secrets[name] === true, config.notification_event_options));
         });
         var actions = $('<div>').addClass('config-item-actions notification-actions');
         actions.append($('<button>').addClass('button is-small is-link save-notification').attr('type', 'button').text('Save notification'));
@@ -1363,14 +1363,34 @@ function renderNotificationSettings(config) {
     });
     $('.save-notification').off('click').on('click', saveNotificationSettings);
     $('.test-notification').off('click').on('click', sendTestNotification);
+    $('.event-capsule').off('click').on('click', function () {
+        var capsule = $(this);
+        var selected = capsule.attr('aria-pressed') !== 'true';
+        capsule.attr('aria-pressed', selected ? 'true' : 'false');
+        capsule.toggleClass('is-link', selected);
+    });
 }
 
-function buildNotificationField(name, value, secret, configured) {
+function buildNotificationField(name, value, secret, configured, eventOptions) {
     var label = $('<label>').addClass('label').text(name.replace(/_/g, ' '));
     var booleanFields = ['disable_notification', 'use_ssl', 'starttls'];
     var arrayFields = ['events', 'recipients'];
     var numberFields = ['chat_id', 'port', 'priority'];
     var input;
+    if (name === 'events') {
+        var selectedEvents = Array.isArray(value) ? value : [];
+        var eventField = $('<div>').addClass('notification-event-field');
+        var capsules = $('<div>').addClass('event-capsules').attr({ 'data-field': name, 'data-array': 'true' });
+        (eventOptions || []).forEach(function (eventName) {
+            var selected = selectedEvents.indexOf(eventName) !== -1;
+            capsules.append($('<button>')
+                .addClass('button is-small event-capsule')
+                .toggleClass('is-link', selected)
+                .attr({ type: 'button', 'data-event': eventName, 'aria-pressed': selected ? 'true' : 'false' })
+                .text(eventName.replace(/_/g, ' ')));
+        });
+        return eventField.append($('<span>').addClass('label').text('events')).append(capsules);
+    }
     if (booleanFields.indexOf(name) !== -1) {
         input = $('<input>').attr({ type: 'checkbox', 'data-field': name }).prop('checked', value === true);
         return $('<label>').addClass('checkbox config-checkbox').append(input).append(` ${name.replace(/_/g, ' ')}`);
@@ -1393,9 +1413,16 @@ function saveNotificationSettings() {
     card.find('[data-field]').each(function () {
         var input = $(this);
         var name = input.data('field');
-        var value = input.attr('type') === 'checkbox' ? input.prop('checked') : input.val().trim();
+        var value;
+        if (input.hasClass('event-capsules')) {
+            value = input.find('.event-capsule[aria-pressed="true"]').map(function () {
+                return $(this).data('event');
+            }).get();
+        } else {
+            value = input.attr('type') === 'checkbox' ? input.prop('checked') : input.val().trim();
+        }
         if (input.data('secret') && value === '') return;
-        if (input.data('array')) value = value ? value.split(',').map(item => item.trim()).filter(Boolean) : [];
+        if (input.data('array') && !Array.isArray(value)) value = value ? value.split(',').map(item => item.trim()).filter(Boolean) : [];
         if (input.attr('type') === 'number' && value !== '') value = Number(value);
         values[name] = value;
     });

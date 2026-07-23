@@ -188,6 +188,8 @@ def _simple_value(node):
 
 
 def _base_web_config(config_path):
+    from TwitchChannelPointsMiner.classes.Settings import Events
+
     source = Path(config_path).read_text(encoding="utf-8")
     tree, streamer_nodes, category_nodes = _config_lists(source)
     miner = _simple_value(_assignment(tree, "MINER_CONFIG")) or {}
@@ -278,6 +280,7 @@ def _base_web_config(config_path):
         },
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
+        "notification_event_options": [event.name for event in Events],
     }
 
 

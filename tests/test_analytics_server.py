@@ -321,3 +321,16 @@ def test_notification_forms_do_not_nest_two_column_grids():
     assert ".notification-config" in stylesheet
     assert ".notification-fields .input" in stylesheet
     assert "min-width: 0;" in stylesheet
+
+
+def test_notification_events_use_clickable_capsules():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+    stylesheet = (root / "assets" / "style.css").read_text(encoding="utf-8")
+
+    assert "config.notification_event_options" in script
+    assert "event-capsules" in script
+    assert "event-capsule" in script
+    assert "aria-pressed" in script
+    assert ".event-capsule[aria-pressed=\"true\"]" in script
+    assert ".event-capsules" in stylesheet
