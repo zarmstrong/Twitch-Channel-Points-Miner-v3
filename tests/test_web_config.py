@@ -133,6 +133,28 @@ def test_managed_web_config_updates_release_check_settings(tmp_path):
     assert loaded.MINER_CONFIG["update_check_interval_hours"] == math.inf
 
 
+def test_managed_web_config_reads_math_inf_as_startup_only(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    source = source.replace("import logging\n", "import logging\nimport math\n", 1)
+    source = source.replace(
+        '    "username": "example",\n',
+        '    "username": "example",\n'
+        '    "update_check_interval_hours": math.inf,\n',
+        1,
+    )
+    config.write_text(source, encoding="utf-8")
+
+    result = read_managed_web_config(config)
+
+    assert result["updates"] == {
+        "enabled": True,
+        "interval_hours": 24,
+        "startup_only": True,
+    }
+
+
 @pytest.mark.parametrize(
     "values",
     [

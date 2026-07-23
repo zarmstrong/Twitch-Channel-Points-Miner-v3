@@ -207,7 +207,7 @@ def _base_web_config(config_path):
     )
     logger_settings = miner.get("logger_settings") or {}
     update_interval = miner.get("update_check_interval_hours", 24)
-    startup_only = (
+    startup_only = update_interval == "inf" or (
         isinstance(update_interval, dict)
         and update_interval.get("__call__") == "float"
         and update_interval.get("__args__") == ["inf"]
