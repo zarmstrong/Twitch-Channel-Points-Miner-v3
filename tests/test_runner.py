@@ -257,6 +257,28 @@ ANALYTICS_CONFIG = None
     assert raised.value.__cause__.__class__.__name__ == "ConfigMigrationError"
 
 
+def test_load_config_wraps_dashboard_override_errors(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+''',
+        encoding="utf-8",
+    )
+    (tmp_path / "web-config.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError, match="Unable to apply dashboard-managed configuration"
+    ) as raised:
+        _load_config(config)
+
+    assert raised.value.__cause__.__class__.__name__ == "ConfigEditError"
+
+
 def test_cli_reports_runtime_errors_without_traceback(monkeypatch, capsys):
     def fail(argv):
         raise RuntimeError("configuration migration failed")

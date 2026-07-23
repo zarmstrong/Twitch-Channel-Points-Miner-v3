@@ -15,6 +15,7 @@ from pathlib import Path
 
 from TwitchChannelPointsMiner.config_editor import (
     WEB_CONFIG_FILENAME,
+    ConfigEditError,
     apply_web_overrides,
 )
 from TwitchChannelPointsMiner.config_migration import (
@@ -74,7 +75,12 @@ def _load_config(path):
             "Removed obsolete Twitch password from MINER_CONFIG; "
             "authentication uses the TV activation flow."
         )
-    return apply_web_overrides(module, path)
+    try:
+        return apply_web_overrides(module, path)
+    except (ConfigEditError, OSError) as error:
+        raise RuntimeError(
+            f"Unable to apply dashboard-managed configuration: {error}"
+        ) from error
 
 
 def _streamer_username(streamer):

@@ -79,14 +79,21 @@ class WebSocketsPool:
 
     def __submit(self, index, topic):
         with self.topic_lock:
+            websocket = self.ws[index]
             # Topic in topics should never happen. Anyway prevent any types of duplicates
-            if topic not in self.ws[index].topics:
-                self.ws[index].topics.append(topic)
+            if topic not in websocket.topics:
+                websocket.topics.append(topic)
 
-            if self.ws[index].is_opened is False:
-                self.ws[index].pending_topics.append(topic)
-            else:
-                self.ws[index].listen(topic, self.twitch.twitch_login.get_auth_token())
+            if websocket.is_opened is False:
+                websocket.pending_topics.append(topic)
+                return
+
+        auth_token = self.twitch.twitch_login.get_auth_token()
+        websocket.listen(topic, auth_token)
+        with self.topic_lock:
+            still_configured = websocket in self.ws and topic in websocket.topics
+        if not still_configured:
+            websocket.unlisten(topic, auth_token)
 
     def __new(self, index):
         return TwitchWebSocket(

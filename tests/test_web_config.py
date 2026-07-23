@@ -351,6 +351,46 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
     assert websocket.removed == [(target_topic, "oauth-token")]
 
 
+def test_websocket_pool_listens_after_releasing_topic_lock():
+    class RecordingLock:
+        active = False
+
+        def __enter__(self):
+            self.active = True
+
+        def __exit__(self, *_args):
+            self.active = False
+
+    topic_lock = RecordingLock()
+    listened = []
+
+    def listen(topic, token):
+        assert topic_lock.active is False
+        listened.append((topic, token))
+
+    websocket = SimpleNamespace(
+        topics=[],
+        pending_topics=[],
+        is_opened=True,
+        listen=listen,
+        unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+        ),
+        [],
+        {},
+    )
+    pool.ws = [websocket]
+    pool.topic_lock = topic_lock
+    topic = SimpleNamespace(streamer=Streamer("target"))
+
+    pool.submit(topic)
+
+    assert listened == [(topic, "oauth-token")]
+
+
 def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):
     existing = SimpleNamespace(
         homeserver="matrix.example",
