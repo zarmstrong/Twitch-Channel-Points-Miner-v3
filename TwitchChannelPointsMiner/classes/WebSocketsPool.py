@@ -80,9 +80,13 @@ class WebSocketsPool:
                 for topic in removed:
                     websocket.unlisten(topic, auth_token)
 
-    def __submit(self, index, topic):
+    def __submit(self, index, topic, replay=False):
         with self.topic_lock:
+            if replay and topic not in self.ws[index].topics:
+                return
             websocket, should_listen = self.__register(index, topic)
+            if replay and websocket.is_opened:
+                should_listen = True
 
         if should_listen:
             self.__listen(websocket, topic)
@@ -90,13 +94,14 @@ class WebSocketsPool:
     def __register(self, index, topic):
         websocket = self.ws[index]
         # Topic in topics should never happen. Anyway prevent any types of duplicates
-        if topic not in websocket.topics:
+        newly_added = topic not in websocket.topics
+        if newly_added:
             websocket.topics.append(topic)
         if websocket.is_opened is False:
             if topic not in websocket.pending_topics:
                 websocket.pending_topics.append(topic)
             return websocket, False
-        return websocket, True
+        return websocket, newly_added
 
     def __listen(self, websocket, topic, auth_token=None):
         if auth_token is None:
@@ -219,7 +224,7 @@ class WebSocketsPool:
                 time.sleep(30)
 
                 for topic in topics:
-                    self.__submit(ws.index, topic)
+                    self.__submit(ws.index, topic, replay=True)
 
     @staticmethod
     def on_message(ws, message):

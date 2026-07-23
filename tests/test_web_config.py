@@ -507,6 +507,32 @@ def test_websocket_pool_listens_after_releasing_topic_lock():
     assert listened == [(topic, "oauth-token")]
 
 
+def test_websocket_pool_does_not_relisten_an_existing_topic():
+    topic = SimpleNamespace(streamer=Streamer("target"))
+    websocket = SimpleNamespace(
+        topics=[topic],
+        pending_topics=[],
+        is_opened=True,
+        listen=lambda _topic, _token: pytest.fail("unexpected duplicate listen"),
+        unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(
+                get_auth_token=lambda: pytest.fail("unexpected token request")
+            )
+        ),
+        [],
+        {},
+    )
+    pool.ws = [websocket]
+
+    pool.submit(topic)
+
+    assert websocket.topics == [topic]
+    assert websocket.pending_topics == []
+
+
 def test_websocket_selection_and_registration_share_one_lock_scope():
     class RecordingLock:
         depth = 0
