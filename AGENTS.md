@@ -36,6 +36,16 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 - Before merging the Release Please PR, review its generated changelog and release notes for user-facing completeness and expand the summary when a single entry contains several notable changes.
 - Do not enable auto-merge on the Release Please PR because merging it is the action that publishes the combined release.
 
+### Updating published release notes
+
+- Follow the formatting established by the [3.5.0 release](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/tag/3.5.0) and its predecessor, the [3.4.0 release](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/tag/3.4.0).
+- Start with `## [VERSION](COMPARE_URL) (YYYY-MM-DD)`, where `COMPARE_URL` compares the previous bare SemVer tag with the current bare SemVer tag.
+- Keep generated changes grouped under the applicable `### Features`, `### Bug Fixes`, `### Performance Improvements`, and `### Documentation` headings, in that order. Omit empty sections.
+- Format each generated entry as `* **scope:** summary ([#PR](PR_URL)) ([short-sha](COMMIT_URL))`; omit the scope only when the source Conventional Commit has no scope.
+- Add or expand a concise user-facing summary only when the generated entries do not adequately explain the release. Preserve the generated headings, issue or PR links, and commit links so the notes remain auditable.
+- Read the existing body before editing a published release, write the complete revised Markdown to a file, and apply it with `gh release edit TAG --notes-file FILE`. Do not replace the body with only the new text.
+- Preserve the `<!-- docker-image:start -->` and `<!-- docker-image:end -->` block exactly when it is already present. The Docker publish workflow owns and replaces that entire block, including the `### Docker image` heading, tagged-image link, and `docker pull` command; do not add a second Docker section manually.
+
 ## Validation
 
 - Install dependencies with `pip install -r requirements.txt`.
