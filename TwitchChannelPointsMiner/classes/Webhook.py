@@ -1,5 +1,6 @@
 import requests
 
+from TwitchChannelPointsMiner.classes.NotificationError import format_request_failure
 from TwitchChannelPointsMiner.classes.Settings import Events
 
 
@@ -33,10 +34,6 @@ class Webhook(object):
                     raise ValueError("Invalid method, use POST or GET")
                 response.raise_for_status()
                 return True, None
-            except requests.HTTPError as error:
-                status = getattr(error.response, "status_code", None)
-                detail = f" (HTTP {status})" if status is not None else ""
-                return False, f"Webhook rejected the test notification{detail}."
-            except requests.RequestException:
-                return False, "Unable to connect to the webhook endpoint."
+            except requests.RequestException as error:
+                return False, format_request_failure("webhook endpoint", error)
         return False, "This event is not enabled for the webhook."
