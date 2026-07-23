@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.7.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.4...3.7.5) (2026-07-23)
+
+
+### Bug Fixes
+
+* **docs:** replace broken GitHub badges ([#44](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/44)) ([52c0de5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/52c0de5a62a3383904b97917017aa09471607125))
+
 ## [3.7.4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.3...3.7.4) (2026-07-23)
 
 
