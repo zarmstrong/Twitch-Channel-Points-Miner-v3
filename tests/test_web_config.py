@@ -1,4 +1,5 @@
 import json
+import math
 import stat
 import threading
 from types import SimpleNamespace
@@ -83,6 +84,76 @@ def test_managed_web_config_masks_credentials_and_reads_effective_settings(tmp_p
     assert "DROP_CLAIM" in result["notification_event_options"]
     assert "DAILY_REPORT" in result["notification_event_options"]
     assert "secret.example" not in json.dumps(result)
+    assert result["updates"] == {
+        "enabled": True,
+        "interval_hours": 24,
+        "startup_only": False,
+    }
+
+
+def test_managed_web_config_updates_release_check_settings(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_updates",
+            "values": {
+                "enabled": False,
+                "interval_hours": 12,
+                "startup_only": False,
+            },
+        },
+    )
+
+    assert result["updates"] == {
+        "enabled": False,
+        "interval_hours": 12,
+        "startup_only": False,
+    }
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["update_check"] is False
+    assert loaded.MINER_CONFIG["update_check_interval_hours"] == 12
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_updates",
+            "values": {
+                "enabled": True,
+                "interval_hours": 24,
+                "startup_only": True,
+            },
+        },
+    )
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["update_check"] is True
+    assert loaded.MINER_CONFIG["update_check_interval_hours"] == math.inf
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"enabled": "yes"},
+        {"startup_only": "yes"},
+        {"interval_hours": 2},
+        {"interval_hours": 3.5},
+        {"unknown": True},
+    ],
+)
+def test_managed_web_config_rejects_invalid_release_check_settings(
+    tmp_path, values
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(
+            config,
+            {"action": "update_updates", "values": values},
+        )
 
 
 def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):

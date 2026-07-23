@@ -310,6 +310,8 @@ $(document).ready(function () {
     $('#category-settings-form').submit(saveCategorySettings);
     $('#source-settings-form').submit(saveSourceSettings);
     $('#logging-settings-form').submit(saveLoggingSettings);
+    $('#update-settings-form').submit(saveUpdateSettings);
+    $('#update-check-startup-only').change(toggleUpdateInterval);
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
     });
@@ -1130,6 +1132,10 @@ function renderWebConfig(config) {
     $('#file-log-level').val(config.logging.file_level);
     $('#daily-report-enabled').prop('checked', config.logging.daily_report);
     $('#daily-report-time').val(config.logging.daily_report_time);
+    $('#update-check-enabled').prop('checked', config.updates.enabled);
+    $('#update-check-interval').val(config.updates.interval_hours);
+    $('#update-check-startup-only').prop('checked', config.updates.startup_only);
+    toggleUpdateInterval();
     renderNotificationSettings(config);
 }
 
@@ -1330,6 +1336,26 @@ function saveLoggingSettings(event) {
             daily_report_time: $('#daily-report-time').val()
         }
     }, 'Logging settings were saved. Restart the miner to apply them.', button);
+}
+
+function toggleUpdateInterval() {
+    $('#update-check-interval').prop(
+        'disabled',
+        $('#update-check-startup-only').prop('checked')
+    );
+}
+
+function saveUpdateSettings(event) {
+    event.preventDefault();
+    var button = $(this).find('button[type="submit"]');
+    updateWebConfig({
+        action: 'update_updates',
+        values: {
+            enabled: $('#update-check-enabled').prop('checked'),
+            interval_hours: Number($('#update-check-interval').val()),
+            startup_only: $('#update-check-startup-only').prop('checked')
+        }
+    }, 'Update-check settings were saved. Restart the miner to apply them.', button);
 }
 
 function renderNotificationSettings(config) {

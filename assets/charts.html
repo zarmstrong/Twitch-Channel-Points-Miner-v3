@@ -303,6 +303,18 @@
                 </div>
             </div>
             <div class="box config-box">
+                <h3 class="title is-5">Update checks</h3>
+                <p class="config-help">Check GitHub Releases and notify configured alerting services when a newer version is available.</p>
+                <form id="update-settings-form" class="config-settings-grid">
+                    <label class="checkbox config-checkbox"><input id="update-check-enabled" type="checkbox"> Check for updates</label>
+                    <label class="label">Check interval (hours)
+                        <input id="update-check-interval" class="input" type="number" min="3" step="1" required>
+                    </label>
+                    <label class="checkbox config-checkbox"><input id="update-check-startup-only" type="checkbox"> Check only at startup</label>
+                    <button class="button is-link" type="submit">Save update settings</button>
+                </form>
+            </div>
+            <div class="box config-box">
                 <h3 class="title is-5">Notifications</h3>
                 <p class="config-help">Credentials are write-only. Saved credentials are shown only as “configured” and are never sent to the browser. Notification changes require a restart.</p>
                 <div id="notification-settings" class="notification-settings"></div>

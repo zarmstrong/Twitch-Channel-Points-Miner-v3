@@ -326,6 +326,7 @@ def test_config_ui_exposes_requested_management_controls():
         "category-settings-form",
         "source-settings-form",
         "logging-settings-form",
+        "update-settings-form",
         "notification-settings",
     ):
         assert f'id="{selector}"' in template
@@ -344,6 +345,8 @@ def test_config_ui_exposes_requested_management_controls():
     assert "data-secret" in script
     assert "Configured — leave blank to keep" in script
     assert "test-notification" in script
+    assert "update_check" in template.lower().replace("-", "_")
+    assert "update_updates" in script
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "'aria-label': `Move ${category} up`" in script
     assert "'aria-label': `Move ${category} down`" in script

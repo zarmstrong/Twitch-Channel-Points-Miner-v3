@@ -206,8 +206,9 @@ def check_versions():
             timeout=(5, 15),
         )
         response.raise_for_status()
-        github_version = str(response.json().get("tag_name", "")).removeprefix("v")
-        if not github_version:
+        tag_name = response.json().get("tag_name")
+        github_version = tag_name.removeprefix("v") if isinstance(tag_name, str) else ""
+        if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].*)?", github_version) is None:
             github_version = "0.0.0"
     except Exception:
         github_version = "0.0.0"

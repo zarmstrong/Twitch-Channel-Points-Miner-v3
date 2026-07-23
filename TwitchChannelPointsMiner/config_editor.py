@@ -5,6 +5,7 @@
 import ast
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -205,6 +206,12 @@ def _base_web_config(config_path):
         }
     )
     logger_settings = miner.get("logger_settings") or {}
+    update_interval = miner.get("update_check_interval_hours", 24)
+    startup_only = (
+        isinstance(update_interval, dict)
+        and update_interval.get("__call__") == "float"
+        and update_interval.get("__args__") == ["inf"]
+    )
 
     streamers = []
     for node in streamer_nodes.elts:
@@ -278,6 +285,11 @@ def _base_web_config(config_path):
             "daily_report": logger_settings.get("daily_report", False),
             "daily_report_time": logger_settings.get("daily_report_time", "00:00"),
         },
+        "updates": {
+            "enabled": miner.get("update_check", True),
+            "interval_hours": 24 if startup_only else update_interval,
+            "startup_only": startup_only,
+        },
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
         "notification_event_options": [event.name for event in Events],
@@ -312,7 +324,7 @@ def _merge_web_config(base, overrides):
     for name in ("streamers", "categories"):
         if name in overrides:
             result[name] = overrides[name]
-    for name in ("category", "sources", "logging"):
+    for name in ("category", "sources", "logging", "updates"):
         result[name].update(overrides.get(name, {}))
     if "categories" not in overrides.get("sources", {}):
         result["sources"]["categories"] = bool(result["categories"])
@@ -534,6 +546,10 @@ def _update_managed_web_config(config_path, payload):
         ):
             raise ConfigEditError("Daily report time must use HH:MM.")
         overrides.setdefault("logging", {}).update(values)
+    elif action == "update_updates":
+        values = payload.get("values") or {}
+        _validate_update_settings(values)
+        overrides.setdefault("updates", {}).update(values)
     elif action == "update_notification":
         provider = payload.get("provider")
         schema = NOTIFICATION_SCHEMAS.get(provider)
@@ -707,6 +723,17 @@ def apply_web_overrides(config, config_path):
         if source_name in category:
             config.MINE_CONFIG[target_name] = category[source_name]
 
+    update_overrides = overrides.get("updates", {})
+    _validate_update_settings(update_overrides)
+    if "enabled" in update_overrides:
+        config.MINER_CONFIG["update_check"] = update_overrides["enabled"]
+    if update_overrides.get("startup_only") is True:
+        config.MINER_CONFIG["update_check_interval_hours"] = math.inf
+    elif "interval_hours" in update_overrides:
+        config.MINER_CONFIG["update_check_interval_hours"] = update_overrides[
+            "interval_hours"
+        ]
+
     logger_settings = config.MINER_CONFIG.get("logger_settings")
     logging_overrides = overrides.get("logging", {})
     if not isinstance(logging_overrides, dict) or set(logging_overrides) - {
@@ -792,6 +819,23 @@ def apply_web_overrides(config, config_path):
             )
             setattr(logger_settings, provider, constructors[provider](**kwargs))
     return config
+
+
+def _validate_update_settings(values):
+    allowed = {"enabled", "interval_hours", "startup_only"}
+    if not isinstance(values, dict) or set(values) - allowed:
+        raise ConfigEditError("Unsupported update-check setting.")
+    for name in ("enabled", "startup_only"):
+        if name in values and not isinstance(values[name], bool):
+            raise ConfigEditError(f"{name} must be true or false.")
+    if "interval_hours" in values and (
+        not isinstance(values["interval_hours"], int)
+        or isinstance(values["interval_hours"], bool)
+        or values["interval_hours"] < 3
+    ):
+        raise ConfigEditError(
+            "Update-check interval must be a whole number of at least 3 hours."
+        )
 
 
 def _notification_constructor_kwargs(provider, existing, fields, secrets):

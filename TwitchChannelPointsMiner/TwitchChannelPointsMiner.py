@@ -996,7 +996,8 @@ class TwitchChannelPointsMiner:
         if self.next_update_check_at is not None and now < self.next_update_check_at:
             return False
 
-        current_version, github_version = check_versions()
+        _, github_version = check_versions()
+        current_version = __version__
         update_available = is_newer_version(github_version, current_version)
         interval = self.update_check_interval_seconds
         if update_available:

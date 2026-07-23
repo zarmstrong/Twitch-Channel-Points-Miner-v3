@@ -50,6 +50,35 @@ def test_check_versions_reads_latest_github_release(monkeypatch):
     assert latest == "3.8.0"
 
 
+@pytest.mark.parametrize("tag_name", [None, "", "latest", "3.8"])
+def test_check_versions_rejects_missing_or_malformed_release_tags(
+    monkeypatch, tag_name
+):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tag_name": tag_name}
+
+    monkeypatch.setattr(utils.requests, "get", lambda *args, **kwargs: Response())
+
+    assert utils.check_versions()[1] == "0.0.0"
+
+
+def test_update_check_uses_imported_package_version(monkeypatch, caplog):
+    miner = _miner_for_update_check()
+    monkeypatch.setattr(miner_module, "__version__", "3.7.3")
+    monkeypatch.setattr(miner_module, "check_versions", lambda: ("0.0.0", "3.8.0"))
+    monkeypatch.setattr(miner_module, "_is_running_in_container", lambda: False)
+
+    with caplog.at_level(logging.INFO):
+        miner._TwitchChannelPointsMiner__check_for_update(now=100)
+
+    record = next(record for record in caplog.records if "Update available" in record.msg)
+    assert "running 3.7.3" in record.msg
+
+
 def test_container_detection_supports_docker_and_container_engines(monkeypatch):
     monkeypatch.setattr(
         miner_module.Path,
