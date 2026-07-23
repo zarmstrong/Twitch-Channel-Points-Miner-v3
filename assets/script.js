@@ -1193,8 +1193,8 @@ function renderConfiguredCategories(categories) {
         var row = $('<div>').addClass('config-item config-category');
         row.append($('<span>').addClass('config-item-name').text(category));
         var actions = $('<div>').addClass('config-item-actions');
-        actions.append($('<button>').addClass('button is-small move-category-up').attr({ type: 'button', disabled: index === 0, title: 'Move up' }).html('↑'));
-        actions.append($('<button>').addClass('button is-small move-category-down').attr({ type: 'button', disabled: index === categories.length - 1, title: 'Move down' }).html('↓'));
+        actions.append($('<button>').addClass('button is-small move-category-up').attr({ type: 'button', disabled: index === 0, title: 'Move up', 'aria-label': `Move ${category} up` }).html('↑'));
+        actions.append($('<button>').addClass('button is-small move-category-down').attr({ type: 'button', disabled: index === categories.length - 1, title: 'Move down', 'aria-label': `Move ${category} down` }).html('↓'));
         actions.append($('<button>').addClass('button is-small is-danger remove-category').attr('type', 'button').text('Remove'));
         row.append(actions).attr('data-index', index);
         container.append(row);

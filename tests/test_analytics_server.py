@@ -345,6 +345,8 @@ def test_config_ui_exposes_requested_management_controls():
     assert "Configured — leave blank to keep" in script
     assert "test-notification" in script
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
+    assert "'aria-label': `Move ${category} up`" in script
+    assert "'aria-label': `Move ${category} down`" in script
 
 
 def test_notification_forms_do_not_nest_two_column_grids():
