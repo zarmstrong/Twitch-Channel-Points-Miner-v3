@@ -438,7 +438,14 @@ def test_web_notification(provider):
                 status=502,
                 mimetype="application/json",
             )
-    except (ConfigEditError, OSError, TypeError, AttributeError, ValueError):
+    except (
+        ConfigEditError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        AttributeError,
+        ValueError,
+    ):
         logger.exception("Unable to send %s test notification", provider)
         return Response(
             json.dumps({"error": "Unable to send test notification."}),

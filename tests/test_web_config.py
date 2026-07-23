@@ -501,6 +501,27 @@ def test_notification_test_endpoint_requires_complete_enabled_provider(
     }
 
 
+def test_notification_test_endpoint_sanitizes_config_load_failures(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+
+    def fail_load(_path):
+        raise RuntimeError("Unable to parse /private/config/web-config.json")
+
+    monkeypatch.setattr("TwitchChannelPointsMiner.runner._load_config", fail_load)
+    app = Flask(__name__)
+
+    with app.test_request_context(
+        "/config/notifications/discord/test", method="POST"
+    ):
+        response = send_web_notification_test("discord")
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "Unable to send test notification."}
+    assert b"/private/config" not in response.data
+
+
 def test_notification_test_endpoint_returns_sanitized_delivery_failure(
     tmp_path, monkeypatch
 ):
