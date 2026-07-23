@@ -27,9 +27,9 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, Streame
 
 MINER_CONFIG = {
     'username': "your-twitch-username",
-    'password': "write-your-secure-psw",
+    'password': "",
     'claim_drops_startup': False,
-    'priority': [                                  # Custom priority in this case for example:
+    'priority': [                               # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
         Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
         Priority.ORDER,                         # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
