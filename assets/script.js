@@ -312,6 +312,7 @@ $(document).ready(function () {
     $('#logging-settings-form').submit(saveLoggingSettings);
     $('#update-settings-form').submit(saveUpdateSettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
+    $('#dismiss-update-banner').click(dismissUpdateBanner);
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
     });
@@ -328,6 +329,14 @@ $(document).ready(function () {
     toggleDarkMode();
 
 });
+
+function dismissUpdateBanner() {
+    var banner = $('#update-available-banner');
+    var version = banner.data('version');
+    if (!version) return;
+    document.cookie = `${updateDismissalCookie}=${encodeURIComponent(version)}; Max-Age=31536000; Path=/; SameSite=Lax`;
+    banner.fadeOut(200);
+}
 
 function formatDate(date) {
     var d = new Date(date),

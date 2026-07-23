@@ -4,7 +4,7 @@ import importlib
 
 import pytest
 
-from TwitchChannelPointsMiner.classes.Settings import Events
+from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
     _is_running_in_container,
@@ -15,6 +15,12 @@ from TwitchChannelPointsMiner import utils
 miner_module = importlib.import_module(
     "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_shared_update_state(monkeypatch):
+    monkeypatch.setattr(Settings, "latest_release_version", None, raising=False)
+    monkeypatch.setattr(Settings, "update_instructions", None, raising=False)
 
 
 @pytest.mark.parametrize("hours", [3, 24, 168, math.inf])
@@ -110,6 +116,8 @@ def test_available_update_forces_alert_and_throttles_to_daily(monkeypatch, caplo
     assert record.event is Events.UPDATE_AVAILABLE
     assert record.force_alert is True
     assert "/releases/latest" in record.msg
+    assert Settings.latest_release_version == "3.8.0"
+    assert "/releases/latest" in Settings.update_instructions
     assert miner.next_update_check_at == 100 + (24 * 60 * 60)
 
 
@@ -133,6 +141,8 @@ def test_no_update_keeps_configured_interval(monkeypatch):
 
     assert miner._TwitchChannelPointsMiner__check_for_update(now=100) is False
     assert miner.next_update_check_at == 100 + (3 * 60 * 60)
+    assert Settings.latest_release_version is None
+    assert Settings.update_instructions is None
 
 
 def test_update_check_waits_until_next_scheduled_check(monkeypatch):

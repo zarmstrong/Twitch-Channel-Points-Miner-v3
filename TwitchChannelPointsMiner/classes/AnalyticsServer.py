@@ -9,6 +9,7 @@ from threading import Thread
 from flask import Flask, Response, cli, render_template, request
 from werkzeug.serving import WSGIRequestHandler
 
+from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
 from TwitchChannelPointsMiner.config_editor import (
     NOTIFICATION_SCHEMAS,
@@ -16,11 +17,13 @@ from TwitchChannelPointsMiner.config_editor import (
     read_managed_web_config,
     update_managed_web_config,
 )
+from TwitchChannelPointsMiner.constants import GITHUB_REPOSITORY_URL
 
 cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
 
 MAX_LOG_TAIL_BYTES = 1024 * 1024
+UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
 
 
 def _is_number(value):
@@ -305,6 +308,8 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         os.path.getmtime(os.path.join(assets_folder, filename))
         for filename in ("script.js", "style.css", "dark-theme.css")
     )
+    latest_version = getattr(Settings, "latest_release_version", None)
+    dismissed_version = request.cookies.get(UPDATE_DISMISSAL_COOKIE)
     return render_template(
         "charts.html",
         refresh=(refresh * 60 * 1000),
@@ -312,6 +317,14 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         logPollInterval=(log_poll_interval * 1000),
         dateFormat=Settings.logger.date_format,
         assetVersion=int(asset_version),
+        currentVersion=__version__,
+        latestVersion=latest_version,
+        updateInstructions=getattr(Settings, "update_instructions", None),
+        updateReleaseUrl=f"{GITHUB_REPOSITORY_URL}/releases/latest",
+        showUpdateBanner=(
+            latest_version is not None and dismissed_version != latest_version
+        ),
+        updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
     )
 
 

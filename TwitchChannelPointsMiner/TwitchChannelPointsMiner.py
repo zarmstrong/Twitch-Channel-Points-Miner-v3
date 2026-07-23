@@ -342,6 +342,8 @@ class TwitchChannelPointsMiner:
         self.update_check_enabled = update_check
         self.update_check_interval_seconds = update_check_interval_hours * 60 * 60
         self.next_update_check_at = None
+        Settings.latest_release_version = None
+        Settings.update_instructions = None
 
         import socket
 
@@ -1013,6 +1015,8 @@ class TwitchChannelPointsMiner:
                 update_instructions = (
                     f"Download it from {GITHUB_REPOSITORY_URL}/releases/latest"
                 )
+            Settings.latest_release_version = github_version
+            Settings.update_instructions = update_instructions
             logger.info(
                 f"Update available: Twitch Channel Points Miner {github_version} "
                 f"(running {current_version}). {update_instructions}",
@@ -1022,6 +1026,9 @@ class TwitchChannelPointsMiner:
                     "force_alert": True,
                 },
             )
+        elif github_version != "0.0.0":
+            Settings.latest_release_version = None
+            Settings.update_instructions = None
         elif github_version == "0.0.0":
             logger.warning("Unable to check GitHub for a newer release")
 

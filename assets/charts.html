@@ -115,6 +115,16 @@
 
         <div id="analytics-load-error" class="notification is-danger" role="alert" style="display: none;"></div>
 
+        {% if showUpdateBanner %}
+        <div id="update-available-banner" class="notification is-warning update-banner" role="status"
+            data-version="{{ latestVersion }}">
+            <button id="dismiss-update-banner" class="delete" type="button" aria-label="Dismiss update notification"></button>
+            <strong>Version {{ latestVersion }} is available.</strong>
+            <span>{{ updateInstructions }}</span>
+            <a href="{{ updateReleaseUrl }}" target="_blank" rel="noopener noreferrer">View release</a>
+        </div>
+        {% endif %}
+
         <div id="points-panel">
         <div class="columns">
             <div class="column is-narrow has-text-center">
@@ -330,8 +340,14 @@
             </div>
         </div>
         <footer class="analytics-footer">
-            This project is based on code originally developed by
-            <a href="https://github.com/Tkd-Alex" target="_blank" rel="noopener noreferrer">Tkd-Alex</a>.
+            <span>Running version {{ currentVersion }}.</span>
+            {% if latestVersion %}
+            <span class="footer-update-available">
+                <a href="{{ updateReleaseUrl }}" target="_blank" rel="noopener noreferrer">Upgrade available: {{ latestVersion }}</a>.
+            </span>
+            {% endif %}
+            <span>This project is based on code originally developed by
+                <a href="https://github.com/Tkd-Alex" target="_blank" rel="noopener noreferrer">Tkd-Alex</a>.</span>
         </footer>
     </div>
 
@@ -379,6 +395,7 @@
     var daysAgo = parseInt("{{ daysAgo }}");
     var logPollInterval = parseInt("{{ logPollInterval }}");
     var dateFormat = {{ dateFormat | tojson }};
+    var updateDismissalCookie = {{ updateDismissalCookie | tojson }};
 </script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js', v=assetVersion)}}"></script>
 <script>
