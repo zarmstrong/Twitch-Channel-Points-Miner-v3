@@ -1,5 +1,21 @@
 # Changelog
 
+## [3.7.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.1...3.7.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **auth:** remove unused Twitch passwords ([dd8feb6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd8feb65d4f4311e32470c56cb449b60f291d86e))
+* **config:** sanitize interrupted migration backups ([dd8feb6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd8feb65d4f4311e32470c56cb449b60f291d86e))
+* **docker:** seed config on fresh installs ([dd8feb6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd8feb65d4f4311e32470c56cb449b60f291d86e))
+* **docker:** seed config on fresh installs ([#36](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/36)) ([dd8feb6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd8feb65d4f4311e32470c56cb449b60f291d86e))
+
+
+### Documentation
+
+* **config:** refine example logging defaults ([dd8feb6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd8feb65d4f4311e32470c56cb449b60f291d86e))
+* **docker:** clarify restart policy during first config seed ([dd8feb6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd8feb65d4f4311e32470c56cb449b60f291d86e))
+
 ## [3.7.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.0...3.7.1) (2026-07-22)
 
 
