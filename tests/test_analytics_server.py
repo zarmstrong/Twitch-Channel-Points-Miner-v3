@@ -270,6 +270,20 @@ def test_dark_theme_keeps_config_panel_headings_readable():
     )[0]
 
 
+def test_successful_config_message_fades_after_ten_seconds():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+    show_message = script.split("function showConfigMessage", 1)[1].split(
+        "function loadWebConfig", 1
+    )[0]
+
+    assert "if (!isError)" in show_message
+    assert "clearTimeout(configMessageTimeout);" in show_message
+    assert "$('#config-message').fadeOut(250);" in show_message
+    assert "}, 10000);" in show_message
+
+
 def test_web_config_adds_streamer_and_category_without_losing_comments(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(

@@ -105,6 +105,7 @@ var analyticsDeleteInProgress = false;
 var pointsLoaded = false;
 var dropsLoaded = false;
 var configLoaded = false;
+var configMessageTimeout = null;
 
 function showAnalyticsLoadError(message, details) {
     console.error(`[analytics] ${message}`, details || '');
@@ -1126,11 +1127,22 @@ function renderWebConfig(config) {
 }
 
 function showConfigMessage(message, isError) {
+    if (configMessageTimeout !== null) {
+        clearTimeout(configMessageTimeout);
+        configMessageTimeout = null;
+    }
     $('#config-message')
+        .stop(true, true)
         .toggleClass('is-danger', isError)
         .toggleClass('is-success', !isError)
         .text(message)
         .show();
+    if (!isError) {
+        configMessageTimeout = setTimeout(function () {
+            $('#config-message').fadeOut(250);
+            configMessageTimeout = null;
+        }, 10000);
+    }
 }
 
 function loadWebConfig() {
