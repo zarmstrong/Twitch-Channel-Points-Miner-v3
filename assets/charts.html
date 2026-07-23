@@ -231,7 +231,7 @@
                                 autocomplete="off" placeholder="Twitch username" required>
                             <button class="button is-link" type="submit">Add streamer</button>
                         </form>
-                        <div id="configured-streamers" class="config-tags"></div>
+                        <div id="configured-streamers" class="config-items"></div>
                     </div>
                 </div>
                 <div class="column">
@@ -239,15 +239,76 @@
                         <h3 class="title is-5">Configured categories</h3>
                         <form id="add-category-form" class="config-add-form">
                             <input id="new-category" class="input" type="text" autocomplete="off"
-                                placeholder="Category slug, e.g. warframe" required>
+                                placeholder="Category name, slug, or Twitch URL" required>
                             <button class="button is-link" type="submit">Add category</button>
                         </form>
-                        <div id="configured-categories" class="config-tags"></div>
+                        <div id="configured-categories" class="config-items"></div>
+                        <hr>
+                        <form id="category-settings-form" class="config-settings-grid">
+                            <label class="label">Channel limit
+                                <input id="category-limit" class="input" type="number" min="1" max="100" required>
+                            </label>
+                            <label class="label">Sort order
+                                <span class="select is-fullwidth"><select id="category-sort">
+                                    <option>ORDER</option><option>VIEWERS_DESC</option><option>VIEWERS_ASC</option>
+                                    <option>STARTED_AT_DESC</option><option>STARTED_AT_ASC</option><option>RANDOM</option>
+                                </select></span>
+                            </label>
+                            <label class="label">Refresh interval (hours)
+                                <input id="category-refresh" class="input" type="number" min="0" max="168" step="0.1" required>
+                            </label>
+                            <label class="checkbox config-checkbox">
+                                <input id="category-drops-enabled" type="checkbox"> Drops-only channels
+                            </label>
+                            <button class="button is-link" type="submit">Save category settings</button>
+                        </form>
                     </div>
                 </div>
             </div>
+            <div class="columns">
+                <div class="column">
+                    <div class="box config-box">
+                        <h3 class="title is-5">Stream sources</h3>
+                        <p class="config-help">Choose which discovery sources are active after restart.</p>
+                        <form id="source-settings-form" class="config-toggle-grid">
+                            <label class="checkbox"><input data-source="streamers" type="checkbox"> Explicit streamers</label>
+                            <label class="checkbox"><input data-source="followers" type="checkbox"> Followed channels</label>
+                            <label class="checkbox"><input data-source="categories" type="checkbox"> Categories</label>
+                            <label class="checkbox"><input data-source="badges" type="checkbox"> Badge campaigns</label>
+                            <button class="button is-link" type="submit">Save sources</button>
+                        </form>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="box config-box">
+                        <h3 class="title is-5">Logging and daily reports</h3>
+                        <form id="logging-settings-form" class="config-settings-grid">
+                            <label class="label">Console level
+                                <span class="select is-fullwidth"><select id="console-log-level">
+                                    <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
+                                </select></span>
+                            </label>
+                            <label class="label">File level
+                                <span class="select is-fullwidth"><select id="file-log-level">
+                                    <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
+                                </select></span>
+                            </label>
+                            <label class="checkbox config-checkbox"><input id="daily-report-enabled" type="checkbox"> Daily report</label>
+                            <label class="label">Report time
+                                <input id="daily-report-time" class="input" type="time" required>
+                            </label>
+                            <button class="button is-link" type="submit">Save logging</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="box config-box">
+                <h3 class="title is-5">Notifications</h3>
+                <p class="config-help">Credentials are write-only. Saved credentials are shown only as “configured” and are never sent to the browser. Notification changes require a restart.</p>
+                <div id="notification-settings" class="notification-settings"></div>
+            </div>
             <div id="config-message" class="notification" role="status" style="display: none;"></div>
-            <p class="config-reload-note">New streamers and categories are saved to config.py and picked up by the running miner automatically.</p>
+            <p class="config-reload-note">Streamer additions/removals and category list changes reload automatically. Other settings are saved in the configuration directory and take effect after restart.</p>
         </div>
         <div class="columns">
             <div class="column is-12">

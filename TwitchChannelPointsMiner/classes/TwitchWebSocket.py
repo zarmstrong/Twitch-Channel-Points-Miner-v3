@@ -46,6 +46,18 @@ class TwitchWebSocket(WebSocketApp):
         nonce = create_nonce()
         self.send({"type": "LISTEN", "nonce": nonce, "data": data})
 
+    def unlisten(self, topic, auth_token=None):
+        data = {"topics": [str(topic)]}
+        if topic.is_user_topic() and auth_token is not None:
+            data["auth_token"] = auth_token
+        self.send(
+            {
+                "type": "UNLISTEN",
+                "nonce": create_nonce(),
+                "data": data,
+            }
+        )
+
     def ping(self):
         self.send({"type": "PING"})
         self.last_ping = time.time()

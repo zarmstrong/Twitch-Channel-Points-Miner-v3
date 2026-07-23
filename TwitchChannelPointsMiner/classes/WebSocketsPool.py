@@ -50,6 +50,24 @@ class WebSocketsPool:
 
         self.__submit(-1, topic)
 
+    def remove_streamer_topics(self, streamer):
+        """Unsubscribe and forget every PubSub topic owned by a streamer."""
+        for websocket in self.ws:
+            removed = [
+                topic for topic in websocket.topics if topic.streamer is streamer
+            ]
+            websocket.topics[:] = [
+                topic for topic in websocket.topics if topic.streamer is not streamer
+            ]
+            websocket.pending_topics[:] = [
+                topic
+                for topic in websocket.pending_topics
+                if topic.streamer is not streamer
+            ]
+            if websocket.is_opened:
+                for topic in removed:
+                    websocket.unlisten(topic)
+
     def __submit(self, index, topic):
         # Topic in topics should never happen. Anyway prevent any types of duplicates
         if topic not in self.ws[index].topics:

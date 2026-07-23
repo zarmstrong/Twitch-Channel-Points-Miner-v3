@@ -106,6 +106,7 @@ var pointsLoaded = false;
 var dropsLoaded = false;
 var configLoaded = false;
 var configMessageTimeout = null;
+var webConfigState = null;
 
 function showAnalyticsLoadError(message, details) {
     console.error(`[analytics] ${message}`, details || '');
@@ -306,6 +307,9 @@ $(document).ready(function () {
         event.preventDefault();
         addWebConfigValue('categories', $('#new-category'));
     });
+    $('#category-settings-form').submit(saveCategorySettings);
+    $('#source-settings-form').submit(saveSourceSettings);
+    $('#logging-settings-form').submit(saveLoggingSettings);
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
     });
@@ -1112,18 +1116,103 @@ function escapeHtml(text) {
 }
 
 function renderWebConfig(config) {
-    function renderTags(selector, values, emptyText) {
-        var container = $(selector).empty();
-        if (!values.length) {
-            container.append($('<span>').addClass('config-empty').text(emptyText));
-            return;
-        }
-        values.forEach(function (value) {
-            container.append($('<span>').addClass('tag is-medium').text(value));
-        });
+    webConfigState = config;
+    renderConfiguredStreamers(config.streamers || []);
+    renderConfiguredCategories(config.categories || []);
+    $('#category-limit').val(config.category.limit);
+    $('#category-sort').val(config.category.sort);
+    $('#category-refresh').val(config.category.refresh_interval_hours);
+    $('#category-drops-enabled').prop('checked', config.category.drops_enabled);
+    Object.keys(config.sources || {}).forEach(function (source) {
+        $(`[data-source="${source}"]`).prop('checked', config.sources[source]);
+    });
+    $('#console-log-level').val(config.logging.console_level);
+    $('#file-log-level').val(config.logging.file_level);
+    $('#daily-report-enabled').prop('checked', config.logging.daily_report);
+    $('#daily-report-time').val(config.logging.daily_report_time);
+    renderNotificationSettings(config);
+}
+
+function renderConfiguredStreamers(streamers) {
+    var container = $('#configured-streamers').empty();
+    if (!streamers.length) {
+        container.append($('<span>').addClass('config-empty').text('No streamers configured.'));
+        return;
     }
-    renderTags('#configured-streamers', config.streamers || [], 'No streamers configured.');
-    renderTags('#configured-categories', config.categories || [], 'No categories configured.');
+    streamers.forEach(function (streamer) {
+        var settings = streamer.settings || {};
+        var item = $('<details>').addClass('config-item config-streamer').attr('data-username', streamer.username);
+        var summary = $('<summary>');
+        summary.append($('<strong>').text(streamer.username));
+        summary.append($('<span>').addClass('icon is-small').html('<i class="fas fa-cog" aria-hidden="true"></i>'));
+        item.append(summary);
+        var controls = $('<div>').addClass('streamer-settings config-settings-grid');
+        [
+            ['favorite', 'Favorite'],
+            ['make_predictions', 'Predictions'],
+            ['follow_raid', 'Follow raids'],
+            ['claim_drops', 'Claim Drops'],
+            ['claim_moments', 'Claim moments']
+        ].forEach(function (setting) {
+            var label = $('<label>').addClass('checkbox config-checkbox').text(` ${setting[1]}`);
+            label.prepend($('<input>').attr('type', 'checkbox').attr('data-setting', setting[0]).prop('checked', settings[setting[0]] === true));
+            controls.append(label);
+        });
+        var chat = $('<select>').attr('data-setting', 'chat');
+        ['ALWAYS', 'NEVER', 'ONLINE', 'OFFLINE'].forEach(function (value) {
+            chat.append($('<option>').val(value).text(value));
+        });
+        chat.val(settings.chat || 'ONLINE');
+        controls.append($('<label>').addClass('label').text('Chat presence').append($('<span>').addClass('select is-fullwidth').append(chat)));
+        controls.append($('<label>').addClass('label').text('Points limit').append(
+            $('<input>').addClass('input').attr({ type: 'number', min: 0, placeholder: 'No limit', 'data-setting': 'points_limit' }).val(settings.points_limit)
+        ));
+        var actions = $('<div>').addClass('config-item-actions');
+        actions.append($('<button>').addClass('button is-small is-link save-streamer-settings').attr('type', 'button').text('Save settings'));
+        actions.append($('<button>').addClass('button is-small is-danger remove-streamer').attr('type', 'button').text('Remove'));
+        controls.append(actions);
+        item.append(controls);
+        container.append(item);
+    });
+    $('.save-streamer-settings').off('click').on('click', saveStreamerSettings);
+    $('.remove-streamer').off('click').on('click', function () {
+        var username = $(this).closest('.config-streamer').data('username');
+        if (window.confirm(`Remove ${username} from the miner configuration?`)) {
+            updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
+        }
+    });
+}
+
+function renderConfiguredCategories(categories) {
+    var container = $('#configured-categories').empty();
+    if (!categories.length) {
+        container.append($('<span>').addClass('config-empty').text('No categories configured.'));
+        return;
+    }
+    categories.forEach(function (category, index) {
+        var row = $('<div>').addClass('config-item config-category');
+        row.append($('<span>').addClass('config-item-name').text(category));
+        var actions = $('<div>').addClass('config-item-actions');
+        actions.append($('<button>').addClass('button is-small move-category-up').attr({ type: 'button', disabled: index === 0, title: 'Move up' }).html('↑'));
+        actions.append($('<button>').addClass('button is-small move-category-down').attr({ type: 'button', disabled: index === categories.length - 1, title: 'Move down' }).html('↓'));
+        actions.append($('<button>').addClass('button is-small is-danger remove-category').attr('type', 'button').text('Remove'));
+        row.append(actions).attr('data-index', index);
+        container.append(row);
+    });
+    $('.move-category-up, .move-category-down').off('click').on('click', function () {
+        var index = Number($(this).closest('.config-category').data('index'));
+        var destination = index + ($(this).hasClass('move-category-up') ? -1 : 1);
+        var reordered = categories.slice();
+        [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
+        updateWebConfig({ action: 'reorder_categories', categories: reordered }, 'Category order was updated.');
+    });
+    $('.remove-category').off('click').on('click', function () {
+        var index = Number($(this).closest('.config-category').data('index'));
+        var category = categories[index];
+        if (window.confirm(`Remove ${category} from the miner configuration?`)) {
+            updateWebConfig({ action: 'remove', kind: 'categories', value: category }, `${category} was removed.`);
+        }
+    });
 }
 
 function showConfigMessage(message, isError) {
@@ -1163,7 +1252,7 @@ function addWebConfigValue(kind, input) {
         url: '/config',
         method: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ kind: kind, value: value })
+        data: JSON.stringify({ action: 'add', kind: kind, value: value })
     }).done(function (config) {
         renderWebConfig(config);
         input.val('');
@@ -1174,6 +1263,136 @@ function addWebConfigValue(kind, input) {
     }).always(function () {
         button.prop('disabled', false);
     });
+}
+
+function updateWebConfig(payload, successMessage, button) {
+    if (button) button.prop('disabled', true);
+    return $.ajax({
+        url: '/config',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(payload)
+    }).done(function (config) {
+        renderWebConfig(config);
+        showConfigMessage(successMessage, false);
+    }).fail(function (xhr) {
+        showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+            ? xhr.responseJSON.error : 'Unable to update configuration.', true);
+    }).always(function () {
+        if (button) button.prop('disabled', false);
+    });
+}
+
+function saveStreamerSettings() {
+    var button = $(this);
+    var item = button.closest('.config-streamer');
+    var pointsValue = item.find('[data-setting="points_limit"]').val();
+    var settings = { points_limit: pointsValue === '' ? null : Number(pointsValue) };
+    item.find('input[type="checkbox"][data-setting]').each(function () {
+        settings[$(this).data('setting')] = $(this).prop('checked');
+    });
+    settings.chat = item.find('[data-setting="chat"]').val();
+    var username = item.data('username');
+    updateWebConfig({ action: 'update_streamer', username: username, settings: settings }, `${username} settings were saved.`, button);
+}
+
+function saveCategorySettings(event) {
+    event.preventDefault();
+    var button = $(this).find('button[type="submit"]');
+    updateWebConfig({
+        action: 'update_category',
+        values: {
+            limit: Number($('#category-limit').val()),
+            sort: $('#category-sort').val(),
+            refresh_interval_hours: Number($('#category-refresh').val()),
+            drops_enabled: $('#category-drops-enabled').prop('checked')
+        }
+    }, 'Category settings were saved. Restart the miner to apply them.', button);
+}
+
+function saveSourceSettings(event) {
+    event.preventDefault();
+    var values = {};
+    $('[data-source]').each(function () { values[$(this).data('source')] = $(this).prop('checked'); });
+    var button = $(this).find('button[type="submit"]');
+    updateWebConfig({ action: 'update_sources', values: values }, 'Stream sources were saved. Restart the miner to apply them.', button);
+}
+
+function saveLoggingSettings(event) {
+    event.preventDefault();
+    var button = $(this).find('button[type="submit"]');
+    updateWebConfig({
+        action: 'update_logging',
+        values: {
+            console_level: $('#console-log-level').val(),
+            file_level: $('#file-log-level').val(),
+            daily_report: $('#daily-report-enabled').prop('checked'),
+            daily_report_time: $('#daily-report-time').val()
+        }
+    }, 'Logging settings were saved. Restart the miner to apply them.', button);
+}
+
+function renderNotificationSettings(config) {
+    var container = $('#notification-settings').empty();
+    Object.keys(config.notification_schemas || {}).forEach(function (provider) {
+        var schema = config.notification_schemas[provider];
+        var state = config.notifications[provider];
+        var card = $('<details>').addClass('notification-config config-item').attr('data-provider', provider);
+        var summary = $('<summary>').append($('<strong>').text(provider.charAt(0).toUpperCase() + provider.slice(1)));
+        summary.append($('<span>').addClass('tag').text(state.enabled ? 'Enabled' : 'Disabled'));
+        card.append(summary);
+        var fields = $('<div>').addClass('config-settings-grid notification-fields');
+        var enabled = $('<input>').attr({ type: 'checkbox', 'data-notification-enabled': true }).prop('checked', state.enabled);
+        fields.append($('<label>').addClass('checkbox config-checkbox').append(enabled).append(' Enabled'));
+        schema.fields.forEach(function (name) {
+            fields.append(buildNotificationField(name, state.fields[name], false, false));
+        });
+        schema.secrets.forEach(function (name) {
+            fields.append(buildNotificationField(name, '', true, state.secrets[name] === true));
+        });
+        fields.append($('<button>').addClass('button is-small is-link save-notification').attr('type', 'button').text('Save notification'));
+        card.append(fields);
+        container.append(card);
+    });
+    $('.save-notification').off('click').on('click', saveNotificationSettings);
+}
+
+function buildNotificationField(name, value, secret, configured) {
+    var label = $('<label>').addClass('label').text(name.replace(/_/g, ' '));
+    var booleanFields = ['disable_notification', 'use_ssl', 'starttls'];
+    var arrayFields = ['events', 'recipients'];
+    var numberFields = ['chat_id', 'port', 'priority'];
+    var input;
+    if (booleanFields.indexOf(name) !== -1) {
+        input = $('<input>').attr({ type: 'checkbox', 'data-field': name }).prop('checked', value === true);
+        return $('<label>').addClass('checkbox config-checkbox').append(input).append(` ${name.replace(/_/g, ' ')}`);
+    }
+    input = $('<input>').addClass('input').attr({
+        type: secret ? 'password' : (numberFields.indexOf(name) !== -1 ? 'number' : 'text'),
+        'data-field': name,
+        'data-secret': secret ? 'true' : 'false',
+        'data-array': arrayFields.indexOf(name) !== -1 ? 'true' : 'false',
+        autocomplete: secret ? 'new-password' : 'off',
+        placeholder: secret && configured ? 'Configured — leave blank to keep' : ''
+    }).val(arrayFields.indexOf(name) !== -1 && Array.isArray(value) ? value.join(', ') : (value == null ? '' : value));
+    return label.append(input);
+}
+
+function saveNotificationSettings() {
+    var button = $(this);
+    var card = button.closest('.notification-config');
+    var values = { enabled: card.find('[data-notification-enabled]').prop('checked') };
+    card.find('[data-field]').each(function () {
+        var input = $(this);
+        var name = input.data('field');
+        var value = input.attr('type') === 'checkbox' ? input.prop('checked') : input.val().trim();
+        if (input.data('secret') && value === '') return;
+        if (input.data('array')) value = value ? value.split(',').map(item => item.trim()).filter(Boolean) : [];
+        if (input.attr('type') === 'number' && value !== '') value = Number(value);
+        values[name] = value;
+    });
+    var provider = card.data('provider');
+    updateWebConfig({ action: 'update_notification', provider: provider, values: values }, `${provider} notification settings were saved. Restart the miner to apply them.`, button);
 }
 
 $('.dropdown').click(() => {

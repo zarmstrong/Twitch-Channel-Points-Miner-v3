@@ -12,8 +12,8 @@ from werkzeug.serving import WSGIRequestHandler
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
-    add_web_config_value,
-    read_web_config,
+    read_managed_web_config,
+    update_managed_web_config,
 )
 
 cli.show_server_banner = lambda *_: None
@@ -365,19 +365,22 @@ def web_config():
     config_file = Path(Settings.config_path) / "config.py"
     try:
         if request.method == "GET":
-            data = read_web_config(config_file)
+            data = read_managed_web_config(config_file)
         else:
             payload = request.get_json(silent=True) or {}
-            data = add_web_config_value(
-                config_file, payload.get("kind", ""), payload.get("value", "")
-            )
+            if "action" not in payload and {"kind", "value"} <= set(payload):
+                payload["action"] = "add"
+            data = update_managed_web_config(config_file, payload)
     except (ConfigEditError, OSError, TypeError, AttributeError) as error:
         logger.warning("Unable to update configuration from dashboard: %s", error)
         return Response(
             json.dumps({"error": str(error)}), status=400, mimetype="application/json"
         )
     if request.method == "POST":
-        logger.info("Updated %s configuration from dashboard", request.json.get("kind"))
+        logger.info(
+            "Applied %s configuration action from dashboard",
+            request.json.get("action"),
+        )
     return Response(json.dumps(data), status=200, mimetype="application/json")
 
 

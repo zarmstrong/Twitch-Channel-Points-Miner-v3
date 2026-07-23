@@ -51,8 +51,19 @@ a:hover {
 }
 
 #config-panel .config-empty,
-#config-panel .config-reload-note {
+#config-panel .config-reload-note,
+#config-panel .config-help {
     color: rgba(255, 255, 255, 0.72);
+}
+
+#config-panel .config-item {
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+#config-panel .label,
+#config-panel summary,
+#config-panel .checkbox {
+    color: #fff;
 }
 
 body .drop-row {

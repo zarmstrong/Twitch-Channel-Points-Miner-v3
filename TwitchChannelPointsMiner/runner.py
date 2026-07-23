@@ -13,6 +13,10 @@ import time
 import types
 from pathlib import Path
 
+from TwitchChannelPointsMiner.config_editor import (
+    WEB_CONFIG_FILENAME,
+    apply_web_overrides,
+)
 from TwitchChannelPointsMiner.config_migration import (
     ConfigMigrationError,
     convert_runner,
@@ -70,7 +74,7 @@ def _load_config(path):
             "Removed obsolete Twitch password from MINER_CONFIG; "
             "authentication uses the TV activation flow."
         )
-    return module
+    return apply_web_overrides(module, path)
 
 
 def _streamer_username(streamer):
@@ -79,7 +83,11 @@ def _streamer_username(streamer):
 
 
 def _config_digest(path):
-    return hashlib.sha256(path.read_bytes()).digest()
+    digest = hashlib.sha256(path.read_bytes())
+    web_config_path = path.with_name(WEB_CONFIG_FILENAME)
+    if web_config_path.is_file():
+        digest.update(web_config_path.read_bytes())
+    return digest.digest()
 
 
 def _freeze(value):
@@ -110,6 +118,10 @@ def _watch_config(path, miner, initial_config, interval):
     digest = _config_digest(path)
     known_streamers = {
         _streamer_username(streamer) for streamer in initial_config.STREAMERS
+    }
+    streamer_snapshot = {
+        _streamer_username(streamer): _freeze(streamer)
+        for streamer in initial_config.STREAMERS
     }
     live_categories = initial_config.MINE_CONFIG.setdefault("categories", [])
     restart_snapshot = {
@@ -145,7 +157,19 @@ def _watch_config(path, miner, initial_config, interval):
             ]
             if additions:
                 miner.add_streamers(additions)
-                known_streamers.update(updated_streamers)
+            removals = set(known_streamers) - set(updated_streamers)
+            if removals:
+                miner.remove_streamers(removals)
+            known_streamers = set(updated_streamers)
+            updated_streamer_snapshot = {
+                username: _freeze(streamer)
+                for username, streamer in updated_streamers.items()
+            }
+            changed_streamer_settings = any(
+                username in streamer_snapshot
+                and updated_streamer_snapshot[username] != streamer_snapshot[username]
+                for username in updated_streamer_snapshot
+            )
 
             updated_categories = list(updated.MINE_CONFIG.get("categories", []))
             if updated_categories != live_categories:
@@ -163,10 +187,14 @@ def _watch_config(path, miner, initial_config, interval):
                     }
                 ),
             }
-            if updated_restart_snapshot != restart_snapshot:
+            if (
+                updated_restart_snapshot != restart_snapshot
+                or changed_streamer_settings
+            ):
                 logger.warning(
-                    "Configuration reloaded, but constructor, analytics, and "
-                    "non-category mining changes require a restart.",
+                    "Configuration reloaded, but constructor, analytics, "
+                    "per-streamer, and non-category mining changes require "
+                    "a restart.",
                     extra={"event": Events.CONFIGURATION},
                 )
             digest = current_digest
