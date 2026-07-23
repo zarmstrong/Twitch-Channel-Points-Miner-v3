@@ -8,6 +8,7 @@ from flask import Flask
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.Matrix import Matrix
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     test_web_notification as send_web_notification_test,
     web_config,
@@ -17,6 +18,7 @@ from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
+    _notification_constructor_kwargs,
     apply_web_overrides,
     load_web_overrides,
     read_managed_web_config,
@@ -294,20 +296,59 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
     retained = Streamer("retained")
     target_topic = SimpleNamespace(streamer=target)
     retained_topic = SimpleNamespace(streamer=retained)
+
+    class RecordingLock:
+        active = False
+
+        def __enter__(self):
+            self.active = True
+
+        def __exit__(self, *_args):
+            self.active = False
+
+    topic_lock = RecordingLock()
+    removed = []
+
+    def unlisten(topic):
+        assert topic_lock.active is False
+        removed.append(topic)
+
     websocket = SimpleNamespace(
         topics=[target_topic, retained_topic],
         pending_topics=[target_topic],
         is_opened=True,
-        removed=[],
+        removed=removed,
     )
-    websocket.unlisten = websocket.removed.append
-    pool = SimpleNamespace(ws=[websocket])
+    websocket.unlisten = unlisten
+    pool = SimpleNamespace(ws=[websocket], topic_lock=topic_lock)
 
     WebSocketsPool.remove_streamer_topics(pool, target)
 
     assert websocket.topics == [retained_topic]
     assert websocket.pending_topics == []
     assert websocket.removed == [target_topic]
+
+
+def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):
+    existing = SimpleNamespace(
+        homeserver="matrix.example",
+        room_id="%21room%3Amatrix.example",
+        events=[],
+    )
+    kwargs = _notification_constructor_kwargs(
+        "matrix",
+        existing,
+        {"username": "miner", "homeserver": "matrix.example", "events": []},
+        {"password": "secret"},
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Matrix.requests.post",
+        lambda **_kwargs: SimpleNamespace(json=lambda: {"access_token": "token"}),
+    )
+
+    notification = Matrix(**kwargs)
+
+    assert notification.room_id == "%21room%3Amatrix.example"
 
 
 def test_config_endpoint_never_returns_notification_secrets(tmp_path, monkeypatch):

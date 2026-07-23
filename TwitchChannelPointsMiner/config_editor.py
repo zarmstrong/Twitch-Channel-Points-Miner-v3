@@ -10,7 +10,7 @@ import re
 import tempfile
 import threading
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 CONFIG_FILE_MUTEX = threading.Lock()
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
@@ -780,11 +780,14 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
             "starttls": fields.get("starttls", current("starttls", True)),
         }
     if provider == "matrix":
+        room_id = fields.get("room_id")
+        if room_id is None:
+            room_id = unquote(current("room_id"))
         return {
             "username": fields.get("username"),
             "password": secrets.get("password"),
             "homeserver": fields.get("homeserver", current("homeserver")),
-            "room_id": fields.get("room_id", current("room_id")),
+            "room_id": room_id,
             "events": events,
         }
     raise ConfigEditError("Unsupported notification provider.")

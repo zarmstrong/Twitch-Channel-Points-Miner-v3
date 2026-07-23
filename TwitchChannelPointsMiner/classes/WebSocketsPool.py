@@ -4,7 +4,7 @@ import random
 import time
 
 # import os
-from threading import Thread, Timer
+from threading import RLock, Thread, Timer
 
 from dateutil import parser
 
@@ -27,13 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketsPool:
-    __slots__ = ["ws", "twitch", "streamers", "events_predictions"]
+    __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
 
     def __init__(self, twitch, streamers, events_predictions):
         self.ws = []
         self.twitch = twitch
         self.streamers = streamers
         self.events_predictions = events_predictions
+        self.topic_lock = RLock()
 
     """
     API Limits
@@ -43,40 +44,48 @@ class WebSocketsPool:
     """
 
     def submit(self, topic):
-        # Check if we need to create a new WebSocket instance
-        if self.ws == [] or len(self.ws[-1].topics) >= 50:
-            self.ws.append(self.__new(len(self.ws)))
-            self.__start(-1)
+        with self.topic_lock:
+            # Check if we need to create a new WebSocket instance
+            if self.ws == [] or len(self.ws[-1].topics) >= 50:
+                self.ws.append(self.__new(len(self.ws)))
+                self.__start(-1)
 
-        self.__submit(-1, topic)
+            self.__submit(-1, topic)
 
     def remove_streamer_topics(self, streamer):
         """Unsubscribe and forget every PubSub topic owned by a streamer."""
-        for websocket in self.ws:
-            removed = [
-                topic for topic in websocket.topics if topic.streamer is streamer
-            ]
-            websocket.topics[:] = [
-                topic for topic in websocket.topics if topic.streamer is not streamer
-            ]
-            websocket.pending_topics[:] = [
-                topic
-                for topic in websocket.pending_topics
-                if topic.streamer is not streamer
-            ]
+        with self.topic_lock:
+            removals = []
+            for websocket in self.ws:
+                removed = [
+                    topic for topic in websocket.topics if topic.streamer is streamer
+                ]
+                websocket.topics[:] = [
+                    topic
+                    for topic in websocket.topics
+                    if topic.streamer is not streamer
+                ]
+                websocket.pending_topics[:] = [
+                    topic
+                    for topic in websocket.pending_topics
+                    if topic.streamer is not streamer
+                ]
+                removals.append((websocket, removed))
+        for websocket, removed in removals:
             if websocket.is_opened:
                 for topic in removed:
                     websocket.unlisten(topic)
 
     def __submit(self, index, topic):
-        # Topic in topics should never happen. Anyway prevent any types of duplicates
-        if topic not in self.ws[index].topics:
-            self.ws[index].topics.append(topic)
+        with self.topic_lock:
+            # Topic in topics should never happen. Anyway prevent any types of duplicates
+            if topic not in self.ws[index].topics:
+                self.ws[index].topics.append(topic)
 
-        if self.ws[index].is_opened is False:
-            self.ws[index].pending_topics.append(topic)
-        else:
-            self.ws[index].listen(topic, self.twitch.twitch_login.get_auth_token())
+            if self.ws[index].is_opened is False:
+                self.ws[index].pending_topics.append(topic)
+            else:
+                self.ws[index].listen(topic, self.twitch.twitch_login.get_auth_token())
 
     def __new(self, index):
         return TwitchWebSocket(
@@ -117,8 +126,9 @@ class WebSocketsPool:
             ws.is_opened = True
             ws.ping()
 
-            for topic in ws.pending_topics:
-                ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
+            with ws.parent_pool.topic_lock:
+                for topic in ws.pending_topics:
+                    ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
 
             while ws.is_closed is False:
                 # Else: the ws is currently in reconnecting phase, you can't do ping or other operation.
@@ -183,8 +193,9 @@ class WebSocketsPool:
                 self.__start(ws.index)  # Start a new thread.
                 time.sleep(30)
 
-                for topic in ws.topics:
-                    self.__submit(ws.index, topic)
+                with self.topic_lock:
+                    for topic in ws.topics:
+                        self.__submit(ws.index, topic)
 
     @staticmethod
     def on_message(ws, message):
