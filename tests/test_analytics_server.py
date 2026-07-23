@@ -19,9 +19,10 @@ def test_bounded_log_start_caps_legacy_request_without_tail_bytes():
     assert bounded_log_start(file_size, 0) == file_size - MAX_LOG_TAIL_BYTES
 
 
-def test_config_writes_require_analytics_authentication():
+def test_config_endpoints_require_analytics_authentication():
     server = AnalyticsServer(password=None)
 
+    read_response = server.app.test_client().get("/config")
     response = server.app.test_client().post(
         "/config", json={"action": "add", "kind": "streamers", "value": "one"}
     )
@@ -29,9 +30,10 @@ def test_config_writes_require_analytics_authentication():
         "/config/notifications/discord/test"
     )
 
+    assert read_response.status_code == 403
     assert response.status_code == 403
     assert notification_response.status_code == 403
-    assert "analytics username and password" in response.get_json()["error"]
+    assert "analytics username and password" in read_response.get_json()["error"]
 
 
 def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):

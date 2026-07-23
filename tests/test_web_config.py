@@ -202,6 +202,40 @@ def test_notification_secrets_are_write_only_and_blank_values_are_not_saved(tmp_
     assert "secret.example" not in json.dumps(result)
 
 
+def test_blank_notification_text_fields_preserve_existing_values(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "matrix",
+            "values": {
+                "enabled": False,
+                "username": "miner",
+                "homeserver": "matrix.example",
+                "room_id": "!room:matrix.example",
+            },
+        },
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "matrix",
+            "values": {"username": "", "homeserver": "", "room_id": ""},
+        },
+    )
+
+    saved = json.loads((tmp_path / "web-config.json").read_text(encoding="utf-8"))
+    assert saved["notifications"]["matrix"]["fields"] == {
+        "username": "miner",
+        "homeserver": "matrix.example",
+        "room_id": "!room:matrix.example",
+    }
+
+
 def test_enabling_new_notification_requires_credentials(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
@@ -388,6 +422,62 @@ def test_websocket_pool_listens_after_releasing_topic_lock():
 
     pool.submit(topic)
 
+    assert listened == [(topic, "oauth-token")]
+
+
+def test_websocket_on_open_drains_pending_topics_outside_lock(monkeypatch):
+    class RecordingLock:
+        depth = 0
+
+        def __enter__(self):
+            self.depth += 1
+
+        def __exit__(self, *_args):
+            self.depth -= 1
+
+    class ImmediateThread:
+        daemon = False
+
+        def __init__(self, target):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    topic_lock = RecordingLock()
+    topic = SimpleNamespace(streamer=Streamer("target"))
+    listened = []
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+        ),
+        [],
+        {},
+    )
+    pool.topic_lock = topic_lock
+
+    def listen(opened_topic, token):
+        assert topic_lock.depth == 0
+        listened.append((opened_topic, token))
+
+    websocket = SimpleNamespace(
+        parent_pool=pool,
+        topics=[topic],
+        pending_topics=[topic],
+        is_opened=False,
+        is_closed=True,
+        ping=lambda: None,
+        listen=listen,
+        unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
+    )
+    pool.ws = [websocket]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.WebSocketsPool.Thread", ImmediateThread
+    )
+
+    WebSocketsPool.on_open(websocket)
+
+    assert websocket.pending_topics == []
     assert listened == [(topic, "oauth-token")]
 
 

@@ -89,6 +89,11 @@ class WebSocketsPool:
                 return
 
         auth_token = self.twitch.twitch_login.get_auth_token()
+        self.__listen(websocket, topic, auth_token)
+
+    def __listen(self, websocket, topic, auth_token=None):
+        if auth_token is None:
+            auth_token = self.twitch.twitch_login.get_auth_token()
         websocket.listen(topic, auth_token)
         with self.topic_lock:
             still_configured = websocket in self.ws and topic in websocket.topics
@@ -135,8 +140,10 @@ class WebSocketsPool:
             ws.ping()
 
             with ws.parent_pool.topic_lock:
-                for topic in ws.pending_topics:
-                    ws.listen(topic, ws.twitch.twitch_login.get_auth_token())
+                pending_topics = list(ws.pending_topics)
+                ws.pending_topics.clear()
+            for topic in pending_topics:
+                ws.parent_pool.__listen(ws, topic)
 
             while ws.is_closed is False:
                 # Else: the ws is currently in reconnecting phase, you can't do ping or other operation.

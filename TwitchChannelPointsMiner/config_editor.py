@@ -551,6 +551,9 @@ def _update_managed_web_config(config_path, payload):
         for text_name in text_fields | set(schema["secrets"]):
             if text_name in values and not isinstance(values[text_name], str):
                 raise ConfigEditError(f"{text_name} must be a string.")
+        for text_name in text_fields:
+            if values.get(text_name) == "":
+                values.pop(text_name)
         if "method" in values and values["method"].upper() not in {"GET", "POST"}:
             raise ConfigEditError("Webhook method must be GET or POST.")
         if values.get("use_ssl") is True and values.get("starttls") is True:

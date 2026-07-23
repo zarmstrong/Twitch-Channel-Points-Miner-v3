@@ -581,13 +581,13 @@ class AnalyticsServer(Thread):
         @self.app.before_request
         def require_authentication():
             if self.password is None:
-                if request.method == "POST" and request.path.startswith("/config"):
+                if request.path.startswith("/config"):
                     return Response(
                         json.dumps(
                             {
                                 "error": (
                                     "Configure an analytics username and password "
-                                    "before modifying configuration."
+                                    "before accessing configuration."
                                 )
                             }
                         ),
