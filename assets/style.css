@@ -441,6 +441,26 @@ body.header-hidden .top-controls-row {
     gap: 10px;
 }
 
+.notification-config {
+    min-width: 0;
+}
+
+.notification-fields {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.notification-fields > *,
+.notification-fields .label,
+.notification-fields .input {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.notification-fields .input {
+    width: 100%;
+    box-sizing: border-box;
+}
+
 .notification-config summary .tag {
     margin-left: auto;
 }

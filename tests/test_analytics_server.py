@@ -305,3 +305,17 @@ def test_config_ui_exposes_requested_management_controls():
     assert "remove-streamer" in script
     assert "data-secret" in script
     assert "Configured — leave blank to keep" in script
+
+
+def test_notification_forms_do_not_nest_two_column_grids():
+    stylesheet = (
+        Path(__file__).resolve().parents[1] / "assets" / "style.css"
+    ).read_text(encoding="utf-8")
+    notification_fields = stylesheet.split(".notification-fields {", 1)[1].split(
+        "}", 1
+    )[0]
+
+    assert "grid-template-columns: minmax(0, 1fr);" in notification_fields
+    assert ".notification-config" in stylesheet
+    assert ".notification-fields .input" in stylesheet
+    assert "min-width: 0;" in stylesheet
