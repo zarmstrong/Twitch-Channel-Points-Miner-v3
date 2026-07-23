@@ -47,6 +47,66 @@ def test_daily_report_emits_event_and_advances_baseline():
     save.assert_called_once()
 
 
+def test_daily_report_omits_unchanged_streamers_and_includes_drop_context():
+    miner = _miner()
+    miner.streamers[1].channel_points = 550
+    miner.daily_report_drop_progress = {
+        "drop": {
+            "category": "Warframe",
+            "campaign": "TennoCon 2026",
+            "item_name": "Cool Cat",
+            "current_minutes_watched": 10,
+            "status": "in_progress",
+        }
+    }
+    miner.twitch.drop_report_snapshot.return_value = {
+        "drop": {
+            "category": "Warframe",
+            "campaign": "TennoCon 2026",
+            "item_name": "Cool Cat",
+            "current_minutes_watched": 66,
+            "status": "in_progress",
+        }
+    }
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+
+    logger_path = "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.info"
+    save_path = (
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner._save_daily_report_state"
+    )
+    with patch(logger_path) as info, patch(save_path):
+        miner._TwitchChannelPointsMiner__send_daily_report_if_due(
+            datetime(2026, 7, 21, 9, 1)
+        )
+
+    message = info.call_args.args[0]
+    assert "alice: +250 channel points" in message
+    assert "bob:" not in message
+    assert (
+        "- Warframe — TennoCon 2026 — Cool Cat: +56m, in progress" in message
+    )
+
+
+def test_daily_report_suppresses_report_when_nothing_changed():
+    miner = _miner()
+    miner.streamers[0].channel_points = 1000
+    miner.streamers[1].channel_points = 550
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+
+    logger_path = "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.info"
+    save_path = (
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner._save_daily_report_state"
+    )
+    with patch(logger_path) as info, patch(save_path) as save:
+        miner._TwitchChannelPointsMiner__send_daily_report_if_due(
+            datetime(2026, 7, 21, 9, 1)
+        )
+
+    info.assert_not_called()
+    assert miner.daily_report_date == date(2026, 7, 21)
+    save.assert_called_once()
+
+
 def test_daily_report_waits_until_scheduled_time():
     miner = _miner()
     Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")

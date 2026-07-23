@@ -974,13 +974,16 @@ class TwitchChannelPointsMiner:
         if now.time() < scheduled or self.daily_report_date == now.date():
             return
 
-        lines = [f"Daily report for {now.date().isoformat()}"]
+        activity_lines = []
         for streamer in self.streamers:
             baseline = self.daily_report_streamers.get(
                 streamer.username, streamer.channel_points
             )
             gained = streamer.channel_points - baseline
-            lines.append(f"{streamer.username}: {gained:+,} channel points")
+            if gained != 0:
+                activity_lines.append(
+                    f"{streamer.username}: {gained:+,} channel points"
+                )
 
         drop_progress = self.twitch.drop_report_snapshot()
         drop_entries = _drop_progress_report_entries(
@@ -988,20 +991,25 @@ class TwitchChannelPointsMiner:
             drop_progress,
         )
         if drop_entries:
-            lines.append(f"Drop progress updated for {len(drop_entries)} reward(s):")
+            activity_lines.append(
+                f"Drop progress updated for {len(drop_entries)} reward(s):"
+            )
             for entry in drop_entries:
-                lines.append(
-                    f"- {entry.get('item_name') or 'Unknown reward'}: "
+                category = entry.get("category") or "Unknown game"
+                campaign = entry.get("campaign") or "Unknown campaign"
+                activity_lines.append(
+                    f"- {category} — {campaign} — "
+                    f"{entry.get('item_name') or 'Unknown reward'}: "
                     f"+{entry.get('minutes_gained', 0) or 0}m, "
                     f"{str(entry.get('status') or 'in_progress').replace('_', ' ')}"
                 )
-        else:
-            lines.append("No Drop progress changes recorded.")
 
-        logger.info(
-            "\n".join(lines),
-            extra={"emoji": ":bar_chart:", "event": Events.DAILY_REPORT},
-        )
+        if activity_lines:
+            lines = [f"Daily report for {now.date().isoformat()}", *activity_lines]
+            logger.info(
+                "\n".join(lines),
+                extra={"emoji": ":bar_chart:", "event": Events.DAILY_REPORT},
+            )
         self.daily_report_date = now.date()
         self.daily_report_streamers = {
             streamer.username: streamer.channel_points for streamer in self.streamers
