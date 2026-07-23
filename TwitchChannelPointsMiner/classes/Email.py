@@ -1,4 +1,5 @@
 import smtplib
+import socket
 import ssl
 from email.message import EmailMessage
 
@@ -69,7 +70,39 @@ class Email(object):
             return True, None
         except smtplib.SMTPAuthenticationError:
             return False, "SMTP authentication failed. Check the username and password."
-        except (smtplib.SMTPConnectError, TimeoutError, ConnectionError, OSError):
-            return False, "Unable to connect to the SMTP server."
+        except socket.gaierror:
+            return False, f"Could not resolve SMTP host '{self.host}'."
+        except (TimeoutError, socket.timeout):
+            return False, f"SMTP connection to {self.host}:{self.port} timed out."
+        except ConnectionRefusedError:
+            return False, f"SMTP server {self.host}:{self.port} refused the connection."
+        except ssl.SSLError:
+            return (
+                False,
+                "SMTP TLS negotiation failed. Check the SSL and STARTTLS settings.",
+            )
+        except smtplib.SMTPRecipientsRefused:
+            return False, "The SMTP server rejected every recipient address."
+        except smtplib.SMTPSenderRefused:
+            return False, "The SMTP server rejected the configured sender address."
+        except smtplib.SMTPConnectError as error:
+            return False, _smtp_status_error("SMTP connection failed", error)
+        except smtplib.SMTPDataError as error:
+            return False, _smtp_status_error("SMTP message was rejected", error)
+        except smtplib.SMTPServerDisconnected:
+            return False, "The SMTP server disconnected before delivery completed."
+        except (ConnectionError, OSError):
+            return False, f"Unable to reach SMTP server {self.host}:{self.port}."
         except smtplib.SMTPException:
             return False, "The SMTP server rejected the test message."
+
+
+def _smtp_status_error(prefix, error):
+    code = getattr(error, "smtp_code", None)
+    response = getattr(error, "smtp_error", b"")
+    if isinstance(response, bytes):
+        response = response.decode("utf-8", errors="replace")
+    response = " ".join(str(response).split())[:200]
+    status = f" (SMTP {code})" if code is not None else ""
+    detail = f": {response}" if response else ""
+    return f"{prefix}{status}{detail}."
