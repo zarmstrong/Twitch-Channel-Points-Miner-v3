@@ -260,6 +260,9 @@ def test_dark_theme_keeps_config_panel_headings_readable():
     assert "color: #fff;" in stylesheet.split("#config-panel .title", 1)[1].split(
         "}", 1
     )[0]
+    assert "#config-panel .config-item-name" in stylesheet
+    assert "#config-panel .config-item strong" in stylesheet
+    assert "#config-panel .input::placeholder" in stylesheet
 
 
 def test_successful_config_message_fades_after_ten_seconds():

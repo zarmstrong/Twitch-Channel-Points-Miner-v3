@@ -66,6 +66,16 @@ a:hover {
     color: #fff;
 }
 
+#config-panel .config-item-name,
+#config-panel .config-item strong {
+    color: #fff;
+}
+
+#config-panel .input::placeholder {
+    color: rgba(255, 255, 255, 0.58);
+    opacity: 1;
+}
+
 body .drop-row {
     background: rgba(52, 62, 89, 0.35);
 }
