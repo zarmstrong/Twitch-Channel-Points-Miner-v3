@@ -3,7 +3,7 @@
 <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases"><img alt="Latest Version" src="https://badgen.net/github/release/zarmstrong/Twitch-Channel-Points-Miner-v3?icon=github&iconColor=fff&color=white"></a>
 <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers"><img alt="GitHub Repo stars" src="https://badgen.net/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3?icon=github&iconColor=fff&color=32CD32"></a>
 <a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/LICENSE"><img alt="License" src="https://img.shields.io/github/license/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=black&logo=unlicense&logoColor=white"></a>
-<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"><img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3?style=flat&color=lightyellow&logo=github&logoColor=white"></a>
+<a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"><img alt="GitHub last commit" src="https://badgen.net/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3?icon=github&iconColor=fff&color=FFFFE0"></a>
 </p>
 
 <p align="center">
