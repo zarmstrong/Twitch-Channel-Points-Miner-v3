@@ -73,8 +73,9 @@ class WebSocketsPool:
                 removals.append((websocket, removed))
         for websocket, removed in removals:
             if websocket.is_opened:
+                auth_token = self.twitch.twitch_login.get_auth_token()
                 for topic in removed:
-                    websocket.unlisten(topic)
+                    websocket.unlisten(topic, auth_token)
 
     def __submit(self, index, topic):
         with self.topic_lock:

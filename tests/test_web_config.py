@@ -167,6 +167,22 @@ def test_invalid_category_error_uses_supported_value_terminology(tmp_path):
         )
 
 
+@pytest.mark.parametrize("kind", ["streamers", "categories"])
+@pytest.mark.parametrize("action", ["add", "remove"])
+@pytest.mark.parametrize("value", [None, 123, True, [], {}])
+def test_add_remove_rejects_non_string_values(tmp_path, action, kind, value):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(
+        ConfigEditError, match="Invalid streamer username or category value"
+    ):
+        update_managed_web_config(
+            config,
+            {"action": action, "kind": kind, "value": value},
+        )
+
+
 def test_notification_secrets_are_write_only_and_blank_values_are_not_saved(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
@@ -309,9 +325,9 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
     topic_lock = RecordingLock()
     removed = []
 
-    def unlisten(topic):
+    def unlisten(topic, auth_token):
         assert topic_lock.active is False
-        removed.append(topic)
+        removed.append((topic, auth_token))
 
     websocket = SimpleNamespace(
         topics=[target_topic, retained_topic],
@@ -320,13 +336,19 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
         removed=removed,
     )
     websocket.unlisten = unlisten
-    pool = SimpleNamespace(ws=[websocket], topic_lock=topic_lock)
+    pool = SimpleNamespace(
+        ws=[websocket],
+        topic_lock=topic_lock,
+        twitch=SimpleNamespace(
+            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+        ),
+    )
 
     WebSocketsPool.remove_streamer_topics(pool, target)
 
     assert websocket.topics == [retained_topic]
     assert websocket.pending_topics == []
-    assert websocket.removed == [target_topic]
+    assert websocket.removed == [(target_topic, "oauth-token")]
 
 
 def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):

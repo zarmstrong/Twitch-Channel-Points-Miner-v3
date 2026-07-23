@@ -408,7 +408,8 @@ def _update_managed_web_config(config_path, payload):
 
     if action in {"add", "remove"}:
         kind = payload.get("kind")
-        value = str(payload.get("value", "")).strip()
+        raw_value = payload.get("value")
+        value = raw_value.strip() if isinstance(raw_value, str) else ""
         valid = (
             STREAMER_RE.fullmatch(value) is not None
             if kind == "streamers"
