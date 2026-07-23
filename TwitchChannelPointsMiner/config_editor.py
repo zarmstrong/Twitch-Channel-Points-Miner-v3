@@ -753,6 +753,7 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
             "endpoint": secrets.get("endpoint", current("endpoint")),
             "method": fields.get("method", current("method", "POST")),
             "events": events,
+            "timeout": current("timeout", 10),
         }
     if provider == "gotify":
         return {
@@ -779,6 +780,7 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
             "events": events,
             "use_ssl": fields.get("use_ssl", current("use_ssl", False)),
             "starttls": fields.get("starttls", current("starttls", True)),
+            "timeout": current("timeout", 15),
         }
     if provider == "matrix":
         room_id = fields.get("room_id")

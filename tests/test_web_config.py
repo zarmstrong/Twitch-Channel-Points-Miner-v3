@@ -478,6 +478,37 @@ def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):
     assert notification.room_id == "%21room%3Amatrix.example"
 
 
+def test_notification_reconstruction_preserves_custom_timeouts():
+    webhook = SimpleNamespace(
+        endpoint="https://old.example/hook",
+        method="POST",
+        events=[],
+        timeout=37,
+    )
+    email = SimpleNamespace(
+        host="smtp.example",
+        port=587,
+        username="miner",
+        password="old-password",
+        sender="miner@example.com",
+        recipients=["alerts@example.com"],
+        events=[],
+        use_ssl=False,
+        starttls=True,
+        timeout=41,
+    )
+
+    webhook_kwargs = _notification_constructor_kwargs(
+        "webhook", webhook, {}, {"endpoint": "https://new.example/hook"}
+    )
+    email_kwargs = _notification_constructor_kwargs(
+        "email", email, {}, {"password": "new-password"}
+    )
+
+    assert webhook_kwargs["timeout"] == 37
+    assert email_kwargs["timeout"] == 41
+
+
 def test_config_endpoint_never_returns_notification_secrets(tmp_path, monkeypatch):
     config = tmp_path / "config.py"
     write_config(config)
