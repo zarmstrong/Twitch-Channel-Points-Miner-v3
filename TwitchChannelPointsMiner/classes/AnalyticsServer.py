@@ -11,6 +11,7 @@ from werkzeug.serving import WSGIRequestHandler
 
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
 from TwitchChannelPointsMiner.config_editor import (
+    NOTIFICATION_SCHEMAS,
     ConfigEditError,
     read_managed_web_config,
     update_managed_web_config,
@@ -392,6 +393,55 @@ def web_config():
     return Response(json.dumps(data), status=200, mimetype="application/json")
 
 
+def test_web_notification(provider):
+    if provider not in NOTIFICATION_SCHEMAS:
+        return Response(
+            json.dumps({"error": "Unknown notification provider."}),
+            status=404,
+            mimetype="application/json",
+        )
+    try:
+        from TwitchChannelPointsMiner.classes.Settings import Events
+        from TwitchChannelPointsMiner.runner import _load_config
+
+        config_file = Path(Settings.config_path) / "config.py"
+        config = _load_config(config_file)
+        logger_settings = config.MINER_CONFIG.get("logger_settings")
+        notification = (
+            getattr(logger_settings, provider, None)
+            if logger_settings is not None
+            else None
+        )
+        managed = read_managed_web_config(config_file)["notifications"][provider]
+        if notification is None or managed["test_available"] is not True:
+            return Response(
+                json.dumps({"error": "Configure and enable this notification first."}),
+                status=409,
+                mimetype="application/json",
+            )
+        event_name = str(Events.CONFIGURATION)
+        if event_name not in notification.events:
+            notification.events.append(event_name)
+        notification.send(
+            "This is a test notification from Twitch Channel Points Miner.",
+            Events.CONFIGURATION,
+        )
+    except (ConfigEditError, OSError, TypeError, AttributeError, ValueError):
+        logger.exception("Unable to send %s test notification", provider)
+        return Response(
+            json.dumps({"error": "Unable to send test notification."}),
+            status=500,
+            mimetype="application/json",
+        )
+
+    logger.info("Sent %s test notification from dashboard", provider)
+    return Response(
+        json.dumps({"message": "Test notification sent."}),
+        status=200,
+        mimetype="application/json",
+    )
+
+
 def check_assets():
     required_files = [
         "banner.png",
@@ -559,6 +609,12 @@ class AnalyticsServer(Thread):
         self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
         self.app.add_url_rule(
             "/config", "web_config", web_config, methods=["GET", "POST"]
+        )
+        self.app.add_url_rule(
+            "/config/notifications/<string:provider>/test",
+            "test_web_notification",
+            test_web_notification,
+            methods=["POST"],
         )
 
     def run(self):

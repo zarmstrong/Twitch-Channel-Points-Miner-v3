@@ -1350,11 +1350,19 @@ function renderNotificationSettings(config) {
         schema.secrets.forEach(function (name) {
             fields.append(buildNotificationField(name, '', true, state.secrets[name] === true));
         });
-        fields.append($('<button>').addClass('button is-small is-link save-notification').attr('type', 'button').text('Save notification'));
+        var actions = $('<div>').addClass('config-item-actions notification-actions');
+        actions.append($('<button>').addClass('button is-small is-link save-notification').attr('type', 'button').text('Save notification'));
+        actions.append($('<button>')
+            .addClass('button is-small test-notification')
+            .attr('type', 'button')
+            .prop('disabled', state.test_available !== true)
+            .text('Send test'));
+        fields.append(actions);
         card.append(fields);
         container.append(card);
     });
     $('.save-notification').off('click').on('click', saveNotificationSettings);
+    $('.test-notification').off('click').on('click', sendTestNotification);
 }
 
 function buildNotificationField(name, value, secret, configured) {
@@ -1393,6 +1401,22 @@ function saveNotificationSettings() {
     });
     var provider = card.data('provider');
     updateWebConfig({ action: 'update_notification', provider: provider, values: values }, `${provider} notification settings were saved. Restart the miner to apply them.`, button);
+}
+
+function sendTestNotification() {
+    var button = $(this).prop('disabled', true);
+    var provider = button.closest('.notification-config').data('provider');
+    $.ajax({
+        url: `/config/notifications/${encodeURIComponent(provider)}/test`,
+        method: 'POST'
+    }).done(function (response) {
+        showConfigMessage(response.message || 'Test notification sent.', false);
+    }).fail(function (xhr) {
+        showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+            ? xhr.responseJSON.error : 'Unable to send test notification.', true);
+    }).always(function () {
+        button.prop('disabled', false);
+    });
 }
 
 $('.dropdown').click(() => {

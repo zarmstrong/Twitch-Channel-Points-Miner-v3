@@ -318,6 +318,18 @@ def _merge_web_config(base, overrides):
         result["notifications"][provider]["fields"].update(update.get("fields", {}))
         for secret in update.get("secrets", {}):
             result["notifications"][provider]["secrets"][secret] = True
+    for provider, state in result["notifications"].items():
+        available = {
+            name
+            for name, value in state["fields"].items()
+            if value not in (None, "", [])
+        }
+        available.update(
+            name for name, configured in state["secrets"].items() if configured
+        )
+        state["test_available"] = state["enabled"] and NOTIFICATION_REQUIRED[
+            provider
+        ].issubset(available)
     return result
 
 

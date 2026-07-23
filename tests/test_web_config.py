@@ -8,7 +8,10 @@ from flask import Flask
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.AnalyticsServer import web_config
+from TwitchChannelPointsMiner.classes.AnalyticsServer import (
+    test_web_notification as send_web_notification_test,
+    web_config,
+)
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
@@ -68,11 +71,12 @@ def test_managed_web_config_masks_credentials_and_reads_effective_settings(tmp_p
     assert [item["username"] for item in result["streamers"]] == ["one", "two"]
     assert result["streamers"][0]["settings"]["favorite"] is True
     assert result["streamers"][1]["settings"]["chat"] == "ONLINE"
-    assert result["notifications"]["discord"] == {
-        "enabled": True,
-        "fields": {"events": []},
-        "secrets": {"webhook_api": True},
+    assert result["notifications"]["discord"]["enabled"] is True
+    assert result["notifications"]["discord"]["fields"] == {"events": []}
+    assert result["notifications"]["discord"]["secrets"] == {
+        "webhook_api": True
     }
+    assert result["notifications"]["discord"]["test_available"] is True
     assert "secret.example" not in json.dumps(result)
 
 
@@ -325,6 +329,59 @@ def test_config_endpoint_does_not_expose_filesystem_errors(tmp_path, monkeypatch
     assert response.status_code == 500
     assert response.get_json() == {"error": "Unable to access configuration."}
     assert b"/private/config/path" not in response.data
+
+
+def test_notification_test_endpoint_uses_saved_provider(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    write_config(config)
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    sent = []
+    notification = SimpleNamespace(events=[])
+    notification.send = lambda message, event: sent.append((message, event))
+    loaded = SimpleNamespace(
+        MINER_CONFIG={
+            "logger_settings": SimpleNamespace(discord=notification)
+        }
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.runner._load_config", lambda _path: loaded
+    )
+    app = Flask(__name__)
+
+    with app.test_request_context(
+        "/config/notifications/discord/test", method="POST"
+    ):
+        response = send_web_notification_test("discord")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"message": "Test notification sent."}
+    assert len(sent) == 1
+    assert "test notification" in sent[0][0].lower()
+
+
+def test_notification_test_endpoint_requires_complete_enabled_provider(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    loaded = SimpleNamespace(
+        MINER_CONFIG={"logger_settings": SimpleNamespace(telegram=None)}
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.runner._load_config", lambda _path: loaded
+    )
+    app = Flask(__name__)
+
+    with app.test_request_context(
+        "/config/notifications/telegram/test", method="POST"
+    ):
+        response = send_web_notification_test("telegram")
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": "Configure and enable this notification first."
+    }
 
 
 def test_runner_loads_and_digests_dashboard_overrides(tmp_path):

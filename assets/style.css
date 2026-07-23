@@ -456,6 +456,10 @@ body.header-hidden .top-controls-row {
     max-width: 100%;
 }
 
+.notification-actions {
+    justify-content: flex-start;
+}
+
 .notification-fields .input {
     width: 100%;
     box-sizing: border-box;
