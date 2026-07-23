@@ -10,6 +10,11 @@ from flask import Flask, Response, cli, render_template, request
 from werkzeug.serving import WSGIRequestHandler
 
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
+from TwitchChannelPointsMiner.config_editor import (
+    ConfigEditError,
+    add_web_config_value,
+    read_web_config,
+)
 
 cli.show_server_banner = lambda *_: None
 logger = logging.getLogger(__name__)
@@ -356,6 +361,26 @@ def delete_streamer_analytics(streamer):
     return Response(status=204)
 
 
+def web_config():
+    config_file = Path(Settings.config_path) / "config.py"
+    try:
+        if request.method == "GET":
+            data = read_web_config(config_file)
+        else:
+            payload = request.get_json(silent=True) or {}
+            data = add_web_config_value(
+                config_file, payload.get("kind", ""), payload.get("value", "")
+            )
+    except (ConfigEditError, OSError, TypeError, AttributeError) as error:
+        logger.warning("Unable to update configuration from dashboard: %s", error)
+        return Response(
+            json.dumps({"error": str(error)}), status=400, mimetype="application/json"
+        )
+    if request.method == "POST":
+        logger.info("Updated %s configuration from dashboard", request.json.get("kind"))
+    return Response(json.dumps(data), status=200, mimetype="application/json")
+
+
 def check_assets():
     required_files = [
         "banner.png",
@@ -521,6 +546,9 @@ class AnalyticsServer(Thread):
             methods=["GET"],
         )
         self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
+        self.app.add_url_rule(
+            "/config", "web_config", web_config, methods=["GET", "POST"]
+        )
 
     def run(self):
         logger.info(

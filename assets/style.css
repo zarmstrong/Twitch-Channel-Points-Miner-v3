@@ -363,6 +363,38 @@ body.header-hidden .top-controls-row {
     color: rgba(255, 255, 255, 0.72);
 }
 
+.config-box {
+    height: 100%;
+    text-align: left;
+}
+
+.config-add-form {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 18px;
+}
+
+.config-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.config-empty,
+.config-reload-note {
+    color: #687080;
+}
+
+.config-reload-note {
+    margin-bottom: 20px;
+}
+
+@media (max-width: 600px) {
+    .config-add-form {
+        flex-direction: column;
+    }
+}
+
 .drops-pagination {
     margin-top: 10px;
     display: flex;

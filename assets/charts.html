@@ -89,6 +89,7 @@
                 <div id="dashboard-tabs" class="view-tabs">
                     <button id="tab-points" class="button is-small is-link" type="button" onclick="switchDashboardTab('points')">Points</button>
                     <button id="tab-drops" class="button is-small" type="button" onclick="switchDashboardTab('drops')">Drops</button>
+                    <button id="tab-config" class="button is-small" type="button" onclick="switchDashboardTab('config')">Config</button>
                 </div>
             </div>
             <div class="column has-text-right top-controls" style="margin: auto">
@@ -218,6 +219,35 @@
                 </div>
             </div>
         </div>
+        </div>
+
+        <div id="config-panel" style="display: none;">
+            <div class="columns">
+                <div class="column">
+                    <div class="box config-box">
+                        <h3 class="title is-5">Configured streamers</h3>
+                        <form id="add-streamer-form" class="config-add-form">
+                            <input id="new-streamer" class="input" type="text" maxlength="25"
+                                autocomplete="off" placeholder="Twitch username" required>
+                            <button class="button is-link" type="submit">Add streamer</button>
+                        </form>
+                        <div id="configured-streamers" class="config-tags"></div>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="box config-box">
+                        <h3 class="title is-5">Configured categories</h3>
+                        <form id="add-category-form" class="config-add-form">
+                            <input id="new-category" class="input" type="text" autocomplete="off"
+                                placeholder="Category slug, e.g. warframe" required>
+                            <button class="button is-link" type="submit">Add category</button>
+                        </form>
+                        <div id="configured-categories" class="config-tags"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="config-message" class="notification" role="status" style="display: none;"></div>
+            <p class="config-reload-note">New streamers and categories are saved to config.py and picked up by the running miner automatically.</p>
         </div>
         <div class="columns">
             <div class="column is-12">

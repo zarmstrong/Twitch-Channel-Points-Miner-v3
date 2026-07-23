@@ -104,6 +104,7 @@ var pendingDeleteStreamers = [];
 var analyticsDeleteInProgress = false;
 var pointsLoaded = false;
 var dropsLoaded = false;
+var configLoaded = false;
 
 function showAnalyticsLoadError(message, details) {
     console.error(`[analytics] ${message}`, details || '');
@@ -117,14 +118,20 @@ function clearAnalyticsLoadError() {
 }
 
 function switchDashboardTab(tabName) {
-    var isPoints = tabName !== 'drops';
+    var isPoints = tabName === 'points';
+    var isDrops = tabName === 'drops';
+    var isConfig = tabName === 'config';
     $('#points-panel').toggle(isPoints);
-    $('#drops-panel').toggle(!isPoints);
+    $('#drops-panel').toggle(isDrops);
+    $('#config-panel').toggle(isConfig);
 
     $('#tab-points').toggleClass('is-link', isPoints);
-    $('#tab-drops').toggleClass('is-link', !isPoints);
+    $('#tab-drops').toggleClass('is-link', isDrops);
+    $('#tab-config').toggleClass('is-link', isConfig);
 
-    localStorage.setItem('dashboardTab', isPoints ? 'points' : 'drops');
+    localStorage.setItem('dashboardTab', tabName);
+
+    if (isConfig && !configLoaded) loadWebConfig();
 
     // ApexCharts cannot reliably place annotations while its panel is hidden.
     // Reapply them after Points becomes visible, including when the page was
@@ -281,6 +288,14 @@ $(document).ready(function () {
     $('#analytics-delete-modal-confirm').click(confirmStreamerAnalyticsDeletion);
     $('#analytics-delete-modal').click(function (event) {
         if (event.target === this) closeAnalyticsDeleteModal();
+    });
+    $('#add-streamer-form').submit(function (event) {
+        event.preventDefault();
+        addWebConfigValue('streamers', $('#new-streamer'));
+    });
+    $('#add-category-form').submit(function (event) {
+        event.preventDefault();
+        addWebConfigValue('categories', $('#new-category'));
     });
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
@@ -1113,6 +1128,60 @@ function escapeHtml(text) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+function renderWebConfig(config) {
+    function renderTags(selector, values, emptyText) {
+        var container = $(selector).empty();
+        if (!values.length) {
+            container.append($('<span>').addClass('config-empty').text(emptyText));
+            return;
+        }
+        values.forEach(function (value) {
+            container.append($('<span>').addClass('tag is-medium').text(value));
+        });
+    }
+    renderTags('#configured-streamers', config.streamers || [], 'No streamers configured.');
+    renderTags('#configured-categories', config.categories || [], 'No categories configured.');
+}
+
+function showConfigMessage(message, isError) {
+    $('#config-message')
+        .toggleClass('is-danger', isError)
+        .toggleClass('is-success', !isError)
+        .text(message)
+        .show();
+}
+
+function loadWebConfig() {
+    $.getJSON('/config').done(function (config) {
+        configLoaded = true;
+        renderWebConfig(config);
+    }).fail(function (xhr) {
+        showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+            ? xhr.responseJSON.error : 'Unable to load configuration.', true);
+    });
+}
+
+function addWebConfigValue(kind, input) {
+    var value = input.val().trim();
+    if (!value) return;
+    var button = input.closest('form').find('button').prop('disabled', true);
+    $.ajax({
+        url: '/config',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ kind: kind, value: value })
+    }).done(function (config) {
+        renderWebConfig(config);
+        input.val('');
+        showConfigMessage(`${value} was added. The miner will reload it shortly.`, false);
+    }).fail(function (xhr) {
+        showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+            ? xhr.responseJSON.error : 'Unable to update configuration.', true);
+    }).always(function () {
+        button.prop('disabled', false);
+    });
 }
 
 $('.dropdown').click(() => {

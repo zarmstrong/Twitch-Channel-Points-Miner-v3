@@ -1,6 +1,9 @@
+import ast
 import re
 from io import BytesIO
 from pathlib import Path
+
+import pytest
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     MAX_LOG_TAIL_BYTES,
@@ -10,6 +13,11 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     seek_log_start,
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.config_editor import (
+    ConfigEditError,
+    add_web_config_value,
+    read_web_config,
+)
 
 
 def test_bounded_log_start_caps_legacy_request_without_tail_bytes():
@@ -236,3 +244,65 @@ def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
 
     assert blank_links
     assert all('rel="noopener noreferrer"' in link for link in blank_links)
+
+
+def test_web_config_adds_streamer_and_category_without_losing_comments(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'STREAMERS = [\n    Streamer("existing", settings=custom), # keep me\n]\n'
+        'MINE_CONFIG = {"categories": [\n    "warframe", # keep this too\n]}\n',
+        encoding="utf-8",
+    )
+
+    add_web_config_value(config, "streamers", "new_streamer")
+    result = add_web_config_value(config, "categories", "arc-raiders")
+
+    assert result == {
+        "streamers": ["existing", "new_streamer"],
+        "categories": ["warframe", "arc-raiders"],
+    }
+    updated = config.read_text(encoding="utf-8")
+    assert "settings=custom" in updated
+    assert "# keep me" in updated
+    assert "# keep this too" in updated
+    ast.parse(updated)
+
+
+def test_web_config_supports_empty_inline_lists(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "STREAMERS = []\nMINE_CONFIG = {'categories': []}\n", encoding="utf-8"
+    )
+
+    add_web_config_value(config, "streamers", "example")
+    add_web_config_value(config, "categories", "just-chatting")
+
+    assert read_web_config(config) == {
+        "streamers": ["example"],
+        "categories": ["just-chatting"],
+    }
+
+
+def test_web_config_supports_inline_list_with_trailing_comma(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'STREAMERS = ["one",]\nMINE_CONFIG = {"categories": []}\n',
+        encoding="utf-8",
+    )
+
+    add_web_config_value(config, "streamers", "two")
+
+    assert read_web_config(config)["streamers"] == ["one", "two"]
+
+
+def test_web_config_rejects_duplicates_and_invalid_values(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'STREAMERS = ["Example"]\nMINE_CONFIG = {"categories": []}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigEditError, match="already configured"):
+        add_web_config_value(config, "streamers", "example")
+    with pytest.raises(ConfigEditError, match="Invalid streamer"):
+        add_web_config_value(config, "streamers", "../bad")
