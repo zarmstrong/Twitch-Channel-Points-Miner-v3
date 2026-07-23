@@ -7,6 +7,7 @@ import pytest
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
+    _is_running_in_container,
     _normalize_update_check_interval,
 )
 from TwitchChannelPointsMiner import utils
@@ -49,6 +50,16 @@ def test_check_versions_reads_latest_github_release(monkeypatch):
     assert latest == "3.8.0"
 
 
+def test_container_detection_supports_docker_and_container_engines(monkeypatch):
+    monkeypatch.setattr(
+        miner_module.Path,
+        "exists",
+        lambda path: str(path) == "/run/.containerenv",
+    )
+
+    assert _is_running_in_container() is True
+
+
 def _miner_for_update_check(interval_hours=3):
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
     miner.update_check_enabled = True
@@ -60,6 +71,7 @@ def _miner_for_update_check(interval_hours=3):
 def test_available_update_forces_alert_and_throttles_to_daily(monkeypatch, caplog):
     miner = _miner_for_update_check()
     monkeypatch.setattr(miner_module, "check_versions", lambda: ("3.7.3", "3.8.0"))
+    monkeypatch.setattr(miner_module, "_is_running_in_container", lambda: False)
 
     with caplog.at_level(logging.INFO):
         assert miner._TwitchChannelPointsMiner__check_for_update(now=100) is True
@@ -68,7 +80,22 @@ def test_available_update_forces_alert_and_throttles_to_daily(monkeypatch, caplo
     assert record.levelno == logging.INFO
     assert record.event is Events.UPDATE_AVAILABLE
     assert record.force_alert is True
+    assert "/releases/latest" in record.msg
     assert miner.next_update_check_at == 100 + (24 * 60 * 60)
+
+
+def test_available_update_gives_docker_latest_image_instructions(monkeypatch, caplog):
+    miner = _miner_for_update_check()
+    monkeypatch.setattr(miner_module, "check_versions", lambda: ("3.7.3", "3.8.0"))
+    monkeypatch.setattr(miner_module, "_is_running_in_container", lambda: True)
+
+    with caplog.at_level(logging.INFO):
+        assert miner._TwitchChannelPointsMiner__check_for_update(now=100) is True
+
+    record = next(record for record in caplog.records if "Update available" in record.msg)
+    assert "zacharmstrong/twitch-channel-points-miner:latest" in record.msg
+    assert "docker compose pull && docker compose up -d" in record.msg
+    assert "/releases/latest" not in record.msg
 
 
 def test_no_update_keeps_configured_interval(monkeypatch):

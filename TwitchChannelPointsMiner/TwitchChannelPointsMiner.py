@@ -133,6 +133,10 @@ def _normalize_update_check_interval(interval):
     return int(interval)
 
 
+def _is_running_in_container():
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
 def _unique_streamer_names(streamer_names):
     return list(dict.fromkeys(streamer_names))
 
@@ -997,10 +1001,20 @@ class TwitchChannelPointsMiner:
         interval = self.update_check_interval_seconds
         if update_available:
             interval = max(interval, 24 * 60 * 60)
+            if _is_running_in_container():
+                update_instructions = (
+                    "Docker deployment detected. On the Docker host, pull "
+                    "zacharmstrong/twitch-channel-points-miner:latest and recreate "
+                    "the container. Docker Compose: docker compose pull && "
+                    "docker compose up -d"
+                )
+            else:
+                update_instructions = (
+                    f"Download it from {GITHUB_REPOSITORY_URL}/releases/latest"
+                )
             logger.info(
                 f"Update available: Twitch Channel Points Miner {github_version} "
-                f"(running {current_version}). Download it from "
-                f"{GITHUB_REPOSITORY_URL}/releases/latest",
+                f"(running {current_version}). {update_instructions}",
                 extra={
                     "emoji": ":arrow_up:",
                     "event": Events.UPDATE_AVAILABLE,
