@@ -439,11 +439,23 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
         removed=removed,
     )
     websocket.unlisten = unlisten
+    untouched_websocket = SimpleNamespace(
+        topics=[retained_topic],
+        pending_topics=[],
+        is_opened=True,
+        unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
+    )
+    token_requests = []
+
+    def get_auth_token():
+        token_requests.append(True)
+        return "oauth-token"
+
     pool = SimpleNamespace(
-        ws=[websocket],
+        ws=[websocket, untouched_websocket],
         topic_lock=topic_lock,
         twitch=SimpleNamespace(
-            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+            twitch_login=SimpleNamespace(get_auth_token=get_auth_token)
         ),
     )
 
@@ -452,6 +464,7 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
     assert websocket.topics == [retained_topic]
     assert websocket.pending_topics == []
     assert websocket.removed == [(target_topic, "oauth-token")]
+    assert token_requests == [True]
 
 
 def test_websocket_pool_listens_after_releasing_topic_lock():
@@ -993,4 +1006,50 @@ def test_malformed_managed_categories_fail_cleanly(tmp_path, categories):
     )
 
     with pytest.raises(ConfigEditError, match="Managed categories"):
+        apply_web_overrides(module, config)
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [None, [], {"followers": "yes"}, {"unknown_source": True}],
+)
+def test_malformed_managed_sources_fail_cleanly(tmp_path, sources):
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"sources": sources}), encoding="utf-8"
+    )
+    module = SimpleNamespace(
+        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": None}
+    )
+
+    with pytest.raises(ConfigEditError, match="Managed stream sources"):
+        apply_web_overrides(module, config)
+
+
+@pytest.mark.parametrize(
+    "notifications",
+    [
+        None,
+        [],
+        {"discord": None},
+        {"unknown": {}},
+        {"discord": {"enabled": "yes"}},
+        {"discord": {"fields": []}},
+        {"discord": {"secrets": []}},
+    ],
+)
+def test_malformed_managed_notifications_fail_cleanly(tmp_path, notifications):
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"notifications": notifications}), encoding="utf-8"
+    )
+    module = SimpleNamespace(
+        STREAMERS=[],
+        MINE_CONFIG={},
+        MINER_CONFIG={"logger_settings": LoggerSettings()},
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)notification"):
         apply_web_overrides(module, config)

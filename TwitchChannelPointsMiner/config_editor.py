@@ -679,6 +679,12 @@ def apply_web_overrides(config, config_path):
             raise ConfigEditError("Managed categories must be a list of valid values.")
 
     sources = overrides.get("sources", {})
+    if (
+        not isinstance(sources, dict)
+        or set(sources) - SOURCE_NAMES
+        or any(not isinstance(value, bool) for value in sources.values())
+    ):
+        raise ConfigEditError("Managed stream sources must be Boolean values.")
     if sources.get("streamers") is False:
         config.STREAMERS = []
     if "followers" in sources:
@@ -724,7 +730,20 @@ def apply_web_overrides(config, config_path):
             "pushover": Pushover,
             "gotify": Gotify,
         }
-        for provider, update in overrides.get("notifications", {}).items():
+        notification_overrides = overrides.get("notifications", {})
+        if not isinstance(notification_overrides, dict):
+            raise ConfigEditError("Managed notifications must be an object.")
+        for provider, update in notification_overrides.items():
+            if provider not in constructors or not isinstance(update, dict):
+                raise ConfigEditError("Invalid managed notification provider.")
+            if "enabled" in update and not isinstance(update["enabled"], bool):
+                raise ConfigEditError("Notification enabled state must be Boolean.")
+            if not isinstance(update.get("fields", {}), dict) or not isinstance(
+                update.get("secrets", {}), dict
+            ):
+                raise ConfigEditError(
+                    "Managed notification fields and secrets must be objects."
+                )
             existing_notification = getattr(logger_settings, provider, None)
             enabled = update.get("enabled", existing_notification is not None)
             if enabled is False:
