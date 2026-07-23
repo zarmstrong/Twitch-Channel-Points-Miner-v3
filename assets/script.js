@@ -161,11 +161,17 @@ $(document).ready(function () {
     dropsFilter = localStorage.getItem('dropsFilter') || 'active';
     $('#drops-filter').val(dropsFilter);
 
-    // Variable to keep track of whether log checkbox is checked
-    if (!localStorage.getItem('log-enabled')) localStorage.setItem('log-enabled', true);
-    var isLogCheckboxChecked = localStorage.getItem('log-enabled') === 'true';
+    // Keep one preference for both the checkbox and panel. New users start with
+    // the log hidden; retain the old key only as a one-time migration path.
+    var savedLogPreference = localStorage.getItem('logCheckboxState');
+    if (savedLogPreference === null) {
+        savedLogPreference = localStorage.getItem('log-enabled') || 'false';
+        localStorage.setItem('logCheckboxState', savedLogPreference);
+    }
+    var isLogCheckboxChecked = savedLogPreference === 'true';
     $('#log').prop('checked', isLogCheckboxChecked);
     $('#log-box').toggle(isLogCheckboxChecked);
+    $('#auto-update-log').toggle(isLogCheckboxChecked);
 
     // Variable to keep track of whether auto-update log is active
     var autoUpdateLog = true;
@@ -185,11 +191,13 @@ $(document).ready(function () {
 
     $('#log').change(function () {
         isLogCheckboxChecked = $(this).prop('checked');
-        localStorage.setItem('log-enabled', isLogCheckboxChecked);
+        localStorage.setItem('logCheckboxState', isLogCheckboxChecked);
         $('#log-box').toggle(isLogCheckboxChecked);
+        $('#auto-update-log').toggle(isLogCheckboxChecked);
 
         if (isLogCheckboxChecked) {
             getLog();
+            $('html, body').scrollTop($(document).height());
         }
     });
 
@@ -312,34 +320,6 @@ $(document).ready(function () {
     updateAnnotations();
     toggleDarkMode();
 
-    // Retrieve log checkbox state from localStorage and update UI accordingly
-    var logCheckboxState = localStorage.getItem('logCheckboxState');
-    $('#log').prop('checked', logCheckboxState === 'true');
-    if (logCheckboxState === 'true') {
-        isLogCheckboxChecked = true;
-        $('#auto-update-log').show();
-        $('#log-box').show();
-        // Start continuously updating the log content
-        getLog();
-    }
-
-    // Handle the log checkbox change event
-    $('#log').change(function () {
-        isLogCheckboxChecked = $(this).prop('checked');
-        localStorage.setItem('logCheckboxState', isLogCheckboxChecked);
-
-        if (isLogCheckboxChecked) {
-            $('#log-box').show();
-            $('#auto-update-log').show();
-            getLog();
-            $('html, body').scrollTop($(document).height());
-        } else {
-            $('#log-box').hide();
-            $('#auto-update-log').hide();
-            // Clear log content when checkbox is unchecked
-            // $("#log-content").text('');
-        }
-    });
 });
 
 function formatDate(date) {

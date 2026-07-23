@@ -246,6 +246,19 @@ def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
     assert all('rel="noopener noreferrer"' in link for link in blank_links)
 
 
+def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+
+    assert script.count("$('#log').change(function ()") == 1
+    assert "localStorage.getItem('logCheckboxState')" in script
+    assert "localStorage.getItem('log-enabled') || 'false'" in script
+    assert "var isLogCheckboxChecked = savedLogPreference === 'true';" in script
+    assert "$('#log-box').toggle(isLogCheckboxChecked);" in script
+    assert "$('#auto-update-log').toggle(isLogCheckboxChecked);" in script
+
+
 def test_web_config_adds_streamer_and_category_without_losing_comments(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
