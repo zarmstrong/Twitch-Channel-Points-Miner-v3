@@ -279,6 +279,33 @@ ANALYTICS_CONFIG = None
     assert raised.value.__cause__.__class__.__name__ == "ConfigEditError"
 
 
+def test_load_config_sanitizes_dashboard_override_io_errors(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+''',
+        encoding="utf-8",
+    )
+
+    def fail_overrides(_module, _path):
+        raise OSError("permission denied: /private/config/web-config.json")
+
+    monkeypatch.setattr(runner, "apply_web_overrides", fail_overrides)
+
+    with pytest.raises(
+        RuntimeError, match="Unable to access dashboard-managed configuration"
+    ) as raised:
+        _load_config(config)
+
+    assert "/private/config" not in str(raised.value)
+    assert raised.value.__cause__.__class__.__name__ == "OSError"
+
+
 def test_cli_reports_runtime_errors_without_traceback(monkeypatch, capsys):
     def fail(argv):
         raise RuntimeError("configuration migration failed")

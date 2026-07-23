@@ -391,6 +391,71 @@ def test_websocket_pool_listens_after_releasing_topic_lock():
     assert listened == [(topic, "oauth-token")]
 
 
+def test_websocket_reconnection_replays_topics_after_releasing_lock(monkeypatch):
+    class RecordingLock:
+        depth = 0
+
+        def __enter__(self):
+            self.depth += 1
+
+        def __exit__(self, *_args):
+            self.depth -= 1
+
+    topic_lock = RecordingLock()
+    topic = SimpleNamespace(streamer=Streamer("target"))
+    listened = []
+
+    def listen(replayed_topic, token):
+        assert topic_lock.depth == 0
+        listened.append((replayed_topic, token))
+
+    new_websocket = SimpleNamespace(
+        topics=[],
+        pending_topics=[],
+        is_opened=True,
+        listen=listen,
+        unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+        ),
+        [],
+        {},
+    )
+    pool.topic_lock = topic_lock
+    old_websocket = SimpleNamespace(
+        index=0,
+        parent_pool=pool,
+        is_reconnecting=False,
+        forced_close=False,
+        topics=[topic],
+        is_closed=False,
+        keep_running=True,
+    )
+    pool.ws = [old_websocket]
+    monkeypatch.setattr(
+        WebSocketsPool,
+        "_WebSocketsPool__new",
+        lambda _self, _index: new_websocket,
+    )
+    monkeypatch.setattr(
+        WebSocketsPool, "_WebSocketsPool__start", lambda _self, _index: None
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.WebSocketsPool.time.sleep",
+        lambda _seconds: None,
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.WebSocketsPool.internet_connection_available",
+        lambda: True,
+    )
+
+    WebSocketsPool.handle_reconnection(old_websocket)
+
+    assert listened == [(topic, "oauth-token")]
+
+
 def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):
     existing = SimpleNamespace(
         homeserver="matrix.example",

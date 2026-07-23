@@ -202,8 +202,9 @@ class WebSocketsPool:
                 time.sleep(30)
 
                 with self.topic_lock:
-                    for topic in ws.topics:
-                        self.__submit(ws.index, topic)
+                    topics = list(ws.topics)
+                for topic in topics:
+                    self.__submit(ws.index, topic)
 
     @staticmethod
     def on_message(ws, message):

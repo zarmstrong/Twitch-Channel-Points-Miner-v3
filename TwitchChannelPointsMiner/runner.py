@@ -77,9 +77,13 @@ def _load_config(path):
         )
     try:
         return apply_web_overrides(module, path)
-    except (ConfigEditError, OSError) as error:
+    except ConfigEditError as error:
         raise RuntimeError(
             f"Unable to apply dashboard-managed configuration: {error}"
+        ) from error
+    except OSError as error:
+        raise RuntimeError(
+            "Unable to access dashboard-managed configuration."
         ) from error
 
 
