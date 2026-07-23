@@ -599,7 +599,10 @@ def test_websocket_on_open_drains_pending_topics_outside_lock(monkeypatch):
     assert listened == [(topic, "oauth-token")]
 
 
-def test_websocket_reconnection_replays_topics_after_releasing_lock(monkeypatch):
+@pytest.mark.parametrize("replacement_opened", [True, False])
+def test_websocket_reconnection_replays_topics_after_releasing_lock(
+    monkeypatch, replacement_opened
+):
     class RecordingLock:
         depth = 0
 
@@ -620,7 +623,7 @@ def test_websocket_reconnection_replays_topics_after_releasing_lock(monkeypatch)
     new_websocket = SimpleNamespace(
         topics=[],
         pending_topics=[],
-        is_opened=True,
+        is_opened=replacement_opened,
         listen=listen,
         unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
     )
@@ -664,7 +667,12 @@ def test_websocket_reconnection_replays_topics_after_releasing_lock(monkeypatch)
     WebSocketsPool.handle_reconnection(old_websocket)
 
     assert new_websocket.topics == [topic]
-    assert listened == [(topic, "oauth-token")]
+    if replacement_opened:
+        assert new_websocket.pending_topics == []
+        assert listened == [(topic, "oauth-token")]
+    else:
+        assert new_websocket.pending_topics == [topic]
+        assert listened == []
 
 
 def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):
@@ -1024,6 +1032,34 @@ def test_malformed_managed_sources_fail_cleanly(tmp_path, sources):
     )
 
     with pytest.raises(ConfigEditError, match="Managed stream sources"):
+        apply_web_overrides(module, config)
+
+
+@pytest.mark.parametrize(
+    "logging_overrides",
+    [
+        None,
+        [],
+        {"unknown": True},
+        {"console_level": None},
+        {"file_level": "VERBOSE"},
+        {"daily_report": "yes"},
+        {"daily_report_time": "25:00"},
+    ],
+)
+def test_malformed_managed_logging_fails_cleanly(tmp_path, logging_overrides):
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"logging": logging_overrides}), encoding="utf-8"
+    )
+    module = SimpleNamespace(
+        STREAMERS=[],
+        MINE_CONFIG={},
+        MINER_CONFIG={"logger_settings": LoggerSettings()},
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)managed.*log|daily report"):
         apply_web_overrides(module, config)
 
 

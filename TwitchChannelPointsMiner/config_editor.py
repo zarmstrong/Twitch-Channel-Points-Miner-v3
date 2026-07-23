@@ -709,6 +709,31 @@ def apply_web_overrides(config, config_path):
 
     logger_settings = config.MINER_CONFIG.get("logger_settings")
     logging_overrides = overrides.get("logging", {})
+    if not isinstance(logging_overrides, dict) or set(logging_overrides) - {
+        "console_level",
+        "file_level",
+        "daily_report",
+        "daily_report_time",
+    }:
+        raise ConfigEditError("Invalid managed logging settings.")
+    for name in ("console_level", "file_level"):
+        if name in logging_overrides and (
+            not isinstance(logging_overrides[name], str)
+            or logging_overrides[name] not in LOG_LEVELS
+        ):
+            raise ConfigEditError("Managed logging levels are invalid.")
+    if "daily_report" in logging_overrides and not isinstance(
+        logging_overrides["daily_report"], bool
+    ):
+        raise ConfigEditError("Managed daily report setting must be Boolean.")
+    if "daily_report_time" in logging_overrides and (
+        not isinstance(logging_overrides["daily_report_time"], str)
+        or not re.fullmatch(
+            r"(?:[01]\d|2[0-3]):[0-5]\d",
+            logging_overrides["daily_report_time"],
+        )
+    ):
+        raise ConfigEditError("Managed daily report time must use HH:MM.")
     if logger_settings is not None:
         for name in ("console_level", "file_level"):
             if name in logging_overrides:

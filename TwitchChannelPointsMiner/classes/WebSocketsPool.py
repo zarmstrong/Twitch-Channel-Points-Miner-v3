@@ -219,7 +219,7 @@ class WebSocketsPool:
                 time.sleep(30)
 
                 for topic in topics:
-                    self.__listen(replacement, topic)
+                    self.__submit(ws.index, topic)
 
     @staticmethod
     def on_message(ws, message):
