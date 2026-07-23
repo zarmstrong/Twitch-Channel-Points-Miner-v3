@@ -384,6 +384,40 @@ def test_notification_test_endpoint_requires_complete_enabled_provider(
     }
 
 
+def test_notification_test_endpoint_returns_sanitized_delivery_failure(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    notification = SimpleNamespace(
+        events=[],
+        send=lambda _message, _event: (
+            False,
+            "SMTP authentication failed. Check the username and password.",
+        ),
+    )
+    loaded = SimpleNamespace(
+        MINER_CONFIG={
+            "logger_settings": SimpleNamespace(discord=notification)
+        }
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.runner._load_config", lambda _path: loaded
+    )
+    app = Flask(__name__)
+
+    with app.test_request_context(
+        "/config/notifications/discord/test", method="POST"
+    ):
+        response = send_web_notification_test("discord")
+
+    assert response.status_code == 502
+    assert response.get_json() == {
+        "error": "SMTP authentication failed. Check the username and password."
+    }
+
+
 def test_runner_loads_and_digests_dashboard_overrides(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)

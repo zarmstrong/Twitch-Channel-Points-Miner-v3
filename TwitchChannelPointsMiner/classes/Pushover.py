@@ -15,10 +15,10 @@ class Pushover(object):
         self.sound = sound
         self.events = [str(e) for e in events]
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             try:
-                requests.post(
+                response = requests.post(
                     url="https://api.pushover.net/1/messages.json",
                     data={
                         "user": self.userkey,
@@ -30,5 +30,12 @@ class Pushover(object):
                     },
                     timeout=(5, 15),
                 )
+                response.raise_for_status()
+                return True, None
+            except requests.HTTPError as error:
+                status = getattr(error.response, "status_code", None)
+                detail = f" (HTTP {status})" if status is not None else ""
+                return False, f"Pushover rejected the test notification{detail}."
             except requests.RequestException:
-                return
+                return False, "Unable to connect to Pushover."
+        return False, "This event is not enabled for Pushover."

@@ -47,9 +47,9 @@ class Email(object):
         self.starttls = starttls
         self.timeout = timeout
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) not in self.events:
-            return
+            return False, "This event is not enabled for email."
 
         email = EmailMessage()
         event_name = event.name.replace("_", " ").title()
@@ -66,5 +66,10 @@ class Email(object):
                 if self.username:
                     smtp.login(self.username, self.password or "")
                 smtp.send_message(email)
-        except (OSError, smtplib.SMTPException):
-            return
+            return True, None
+        except smtplib.SMTPAuthenticationError:
+            return False, "SMTP authentication failed. Check the username and password."
+        except (smtplib.SMTPConnectError, TimeoutError, ConnectionError, OSError):
+            return False, "Unable to connect to the SMTP server."
+        except smtplib.SMTPException:
+            return False, "The SMTP server rejected the test message."

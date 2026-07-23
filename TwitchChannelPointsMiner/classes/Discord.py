@@ -12,7 +12,7 @@ class Discord(object):
         self.webhook_api = webhook_api
         self.events = [str(e) for e in events]
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             try:
                 message = dedent(message).strip()
@@ -33,7 +33,7 @@ class Discord(object):
                     content = f"{fence} {message} {fence}"
                 else:
                     content = f"`{message}`"
-                requests.post(
+                response = requests.post(
                     url=self.webhook_api,
                     data={
                         "content": content,
@@ -42,5 +42,12 @@ class Discord(object):
                     },
                     timeout=(5, 15),
                 )
+                response.raise_for_status()
+                return True, None
+            except requests.HTTPError as error:
+                status = getattr(error.response, "status_code", None)
+                detail = f" (HTTP {status})" if status is not None else ""
+                return False, f"Discord rejected the test notification{detail}."
             except requests.RequestException:
-                return
+                return False, "Unable to connect to Discord."
+        return False, "This event is not enabled for Discord."

@@ -1,3 +1,4 @@
+import smtplib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -45,6 +46,33 @@ def test_email_ignores_events_not_selected():
     with patch("TwitchChannelPointsMiner.classes.Email.smtplib.SMTP") as smtp:
         notifier.send("online", Events.STREAMER_ONLINE)
     smtp.assert_not_called()
+
+
+def test_email_reports_authentication_failure():
+    notifier = Email(
+        host="smtp.example.com",
+        port=587,
+        username="user",
+        password="wrong-password",
+        sender="miner@example.com",
+        recipients=["you@example.com"],
+        events=[Events.CONFIGURATION],
+    )
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    smtp.login.side_effect = smtplib.SMTPAuthenticationError(
+        535, b"Authentication failed"
+    )
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.Email.smtplib.SMTP", return_value=smtp
+    ):
+        result = notifier.send("test", Events.CONFIGURATION)
+
+    assert result == (
+        False,
+        "SMTP authentication failed. Check the username and password.",
+    )
 
 
 def test_email_rejects_two_tls_modes():

@@ -37,10 +37,12 @@ class Matrix(object):
                 "Matrix authentication failed. Notifications will not be sent."
             )
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
+            if not self.access_token:
+                return False, "Matrix authentication failed. Check the credentials."
             try:
-                requests.post(
+                response = requests.post(
                     url=f"https://{self.homeserver}/_matrix/client/r0/rooms/{self.room_id}/send/m.room.message",
                     headers={"Authorization": f"Bearer {self.access_token}"},
                     json={
@@ -49,5 +51,12 @@ class Matrix(object):
                     },
                     timeout=(5, 15),
                 )
+                response.raise_for_status()
+                return True, None
+            except requests.HTTPError as error:
+                status = getattr(error.response, "status_code", None)
+                detail = f" (HTTP {status})" if status is not None else ""
+                return False, f"Matrix rejected the test notification{detail}."
             except requests.RequestException:
-                return
+                return False, "Unable to connect to Matrix."
+        return False, "This event is not enabled for Matrix."

@@ -16,10 +16,10 @@ class Telegram(object):
         self.events = [str(e) for e in events]
         self.disable_notification = disable_notification
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             try:
-                requests.post(
+                response = requests.post(
                     url=self.telegram_api,
                     data={
                         "chat_id": self.chat_id,
@@ -29,5 +29,12 @@ class Telegram(object):
                     },
                     timeout=(5, 15),
                 )
+                response.raise_for_status()
+                return True, None
+            except requests.HTTPError as error:
+                status = getattr(error.response, "status_code", None)
+                detail = f" (HTTP {status})" if status is not None else ""
+                return False, f"Telegram rejected the test notification{detail}."
             except requests.RequestException:
-                return
+                return False, "Unable to connect to Telegram."
+        return False, "This event is not enabled for Telegram."

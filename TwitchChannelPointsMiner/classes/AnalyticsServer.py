@@ -422,10 +422,22 @@ def test_web_notification(provider):
         event_name = str(Events.CONFIGURATION)
         if event_name not in notification.events:
             notification.events.append(event_name)
-        notification.send(
+        result = notification.send(
             "This is a test notification from Twitch Channel Points Miner.",
             Events.CONFIGURATION,
         )
+        if isinstance(result, tuple) and result[0] is False:
+            return Response(
+                json.dumps({"error": result[1]}),
+                status=502,
+                mimetype="application/json",
+            )
+        if result is False:
+            return Response(
+                json.dumps({"error": "The notification service rejected the test."}),
+                status=502,
+                mimetype="application/json",
+            )
     except (ConfigEditError, OSError, TypeError, AttributeError, ValueError):
         logger.exception("Unable to send %s test notification", provider)
         return Response(
