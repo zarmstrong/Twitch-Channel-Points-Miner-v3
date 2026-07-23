@@ -586,8 +586,11 @@ Maintainers building or publishing images from source should follow the
 The image reads `/usr/src/app/config/config.py`. Create and mount a host `config`
 directory. When that directory is empty on first launch, the container copies
 the bundled [config.example.py](config.example.py) to `config/config.py` and
-exits. Customize the new file, then start the container again. The container
-entrypoint starts the stable runner on subsequent launches.
+exits. Customize the new file, then start the container again. If you normally
+use restart policies like `restart: unless-stopped` or `--restart unless-stopped`,
+run the initial seed launch with restarts disabled (`restart: "no"` or
+`--restart no`) so the container stays stopped while you edit `config/config.py`.
+The container entrypoint starts the stable runner on subsequent launches.
 
 Persist these directories on the host:
 
