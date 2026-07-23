@@ -202,7 +202,10 @@ def check_versions():
     try:
         response = requests.get(
             GITHUB_LATEST_RELEASE_API,
-            headers={"Accept": "application/vnd.github+json"},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"Twitch-Channel-Points-Miner/{current_version}",
+            },
             timeout=(5, 15),
         )
         response.raise_for_status()

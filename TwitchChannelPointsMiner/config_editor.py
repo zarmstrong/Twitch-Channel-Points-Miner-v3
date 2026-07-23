@@ -828,10 +828,14 @@ def _validate_update_settings(values):
     for name in ("enabled", "startup_only"):
         if name in values and not isinstance(values[name], bool):
             raise ConfigEditError(f"{name} must be true or false.")
-    if "interval_hours" in values and (
-        not isinstance(values["interval_hours"], int)
-        or isinstance(values["interval_hours"], bool)
-        or values["interval_hours"] < 3
+    if (
+        values.get("startup_only") is not True
+        and "interval_hours" in values
+        and (
+            not isinstance(values["interval_hours"], int)
+            or isinstance(values["interval_hours"], bool)
+            or values["interval_hours"] < 3
+        )
     ):
         raise ConfigEditError(
             "Update-check interval must be a whole number of at least 3 hours."

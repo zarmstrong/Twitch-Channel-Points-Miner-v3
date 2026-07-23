@@ -156,6 +156,25 @@ def test_managed_web_config_rejects_invalid_release_check_settings(
         )
 
 
+def test_managed_web_config_ignores_interval_when_checking_only_at_startup(
+    tmp_path,
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_updates",
+            "values": {"interval_hours": 0, "startup_only": True},
+        },
+    )
+
+    assert result["updates"]["startup_only"] is True
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["update_check_interval_hours"] == math.inf
+
+
 def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)

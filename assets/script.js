@@ -1357,12 +1357,13 @@ function toggleUpdateInterval() {
 function saveUpdateSettings(event) {
     event.preventDefault();
     var button = $(this).find('button[type="submit"]');
+    var startupOnly = $('#update-check-startup-only').prop('checked');
     updateWebConfig({
         action: 'update_updates',
         values: {
             enabled: $('#update-check-enabled').prop('checked'),
-            interval_hours: Number($('#update-check-interval').val()),
-            startup_only: $('#update-check-startup-only').prop('checked')
+            interval_hours: startupOnly ? undefined : Number($('#update-check-interval').val()),
+            startup_only: startupOnly
         }
     }, 'Update-check settings were saved. Restart the miner to apply them.', button);
 }

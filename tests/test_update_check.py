@@ -41,6 +41,8 @@ def test_update_check_interval_rejects_out_of_range_values(hours):
 
 
 def test_check_versions_reads_latest_github_release(monkeypatch):
+    requests = []
+
     class Response:
         def raise_for_status(self):
             return None
@@ -48,12 +50,19 @@ def test_check_versions_reads_latest_github_release(monkeypatch):
         def json(self):
             return {"tag_name": "3.8.0"}
 
-    monkeypatch.setattr(utils.requests, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(
+        utils.requests,
+        "get",
+        lambda *args, **kwargs: requests.append((args, kwargs)) or Response(),
+    )
 
     current, latest = utils.check_versions()
 
     assert current != "0.0.0"
     assert latest == "3.8.0"
+    assert requests[0][1]["headers"]["User-Agent"] == (
+        f"Twitch-Channel-Points-Miner/{current}"
+    )
 
 
 @pytest.mark.parametrize("tag_name", [None, "", "latest", "3.8"])
