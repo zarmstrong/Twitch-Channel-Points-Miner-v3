@@ -363,6 +363,7 @@ def delete_streamer_analytics(streamer):
 
 def web_config():
     config_file = Path(Settings.config_path) / "config.py"
+    payload = {}
     try:
         if request.method == "GET":
             data = read_managed_web_config(config_file)
@@ -371,15 +372,22 @@ def web_config():
             if "action" not in payload and {"kind", "value"} <= set(payload):
                 payload["action"] = "add"
             data = update_managed_web_config(config_file, payload)
-    except (ConfigEditError, OSError, TypeError, AttributeError) as error:
+    except ConfigEditError as error:
         logger.warning("Unable to update configuration from dashboard: %s", error)
         return Response(
             json.dumps({"error": str(error)}), status=400, mimetype="application/json"
         )
+    except (OSError, TypeError, AttributeError):
+        logger.exception("Unable to access dashboard-managed configuration")
+        return Response(
+            json.dumps({"error": "Unable to access configuration."}),
+            status=500,
+            mimetype="application/json",
+        )
     if request.method == "POST":
         logger.info(
             "Applied %s configuration action from dashboard",
-            request.json.get("action"),
+            payload.get("action"),
         )
     return Response(json.dumps(data), status=200, mimetype="application/json")
 

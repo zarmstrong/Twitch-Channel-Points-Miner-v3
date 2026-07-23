@@ -308,6 +308,25 @@ def test_config_endpoint_never_returns_notification_secrets(tmp_path, monkeypatc
     }
 
 
+def test_config_endpoint_does_not_expose_filesystem_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+
+    def fail_read(_path):
+        raise OSError("/private/config/path: permission denied")
+
+    monkeypatch.setitem(
+        web_config.__globals__, "read_managed_web_config", fail_read
+    )
+    app = Flask(__name__)
+
+    with app.test_request_context("/config", method="GET"):
+        response = web_config()
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "Unable to access configuration."}
+    assert b"/private/config/path" not in response.data
+
+
 def test_runner_loads_and_digests_dashboard_overrides(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
