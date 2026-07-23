@@ -50,8 +50,10 @@ class WebSocketsPool:
                 self.ws.append(self.__new(len(self.ws)))
                 self.__start(-1)
             index = len(self.ws) - 1
+            websocket, should_listen = self.__register(index, topic)
 
-        self.__submit(index, topic)
+        if should_listen:
+            self.__listen(websocket, topic)
 
     def remove_streamer_topics(self, streamer):
         """Unsubscribe and forget every PubSub topic owned by a streamer."""
@@ -80,17 +82,21 @@ class WebSocketsPool:
 
     def __submit(self, index, topic):
         with self.topic_lock:
-            websocket = self.ws[index]
-            # Topic in topics should never happen. Anyway prevent any types of duplicates
-            if topic not in websocket.topics:
-                websocket.topics.append(topic)
+            websocket, should_listen = self.__register(index, topic)
 
-            if websocket.is_opened is False:
+        if should_listen:
+            self.__listen(websocket, topic)
+
+    def __register(self, index, topic):
+        websocket = self.ws[index]
+        # Topic in topics should never happen. Anyway prevent any types of duplicates
+        if topic not in websocket.topics:
+            websocket.topics.append(topic)
+        if websocket.is_opened is False:
+            if topic not in websocket.pending_topics:
                 websocket.pending_topics.append(topic)
-                return
-
-        auth_token = self.twitch.twitch_login.get_auth_token()
-        self.__listen(websocket, topic, auth_token)
+            return websocket, False
+        return websocket, True
 
     def __listen(self, websocket, topic, auth_token=None):
         if auth_token is None:

@@ -313,6 +313,42 @@ def test_new_notification_secret_is_applied_but_never_returned(tmp_path):
     assert "super-secret-token" not in json.dumps(result)
 
 
+def test_secret_only_update_does_not_enable_disabled_notification(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "gotify",
+            "values": {"endpoint": "https://gotify.example/message?token=secret"},
+        },
+    )
+
+    loaded = _load_config(config)
+
+    assert loaded.MINER_CONFIG["logger_settings"].gotify is None
+
+
+def test_secret_only_update_keeps_enabled_notification_enabled(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"webhook_api": "https://new.example/hook"},
+        },
+    )
+
+    loaded = _load_config(config)
+
+    assert loaded.MINER_CONFIG["logger_settings"].discord.webhook_api == (
+        "https://new.example/hook"
+    )
+
+
 def test_apply_web_overrides_builds_effective_runtime_config(tmp_path):
     config_path = tmp_path / "config.py"
     write_config(config_path)
@@ -456,6 +492,42 @@ def test_websocket_pool_listens_after_releasing_topic_lock():
     pool.submit(topic)
 
     assert listened == [(topic, "oauth-token")]
+
+
+def test_websocket_selection_and_registration_share_one_lock_scope():
+    class RecordingLock:
+        depth = 0
+        max_depth = 0
+
+        def __enter__(self):
+            self.depth += 1
+            self.max_depth = max(self.max_depth, self.depth)
+
+        def __exit__(self, *_args):
+            self.depth -= 1
+
+    topic_lock = RecordingLock()
+    websocket = SimpleNamespace(
+        topics=[object() for _index in range(49)],
+        pending_topics=[],
+        is_opened=False,
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+        ),
+        [],
+        {},
+    )
+    pool.ws = [websocket]
+    pool.topic_lock = topic_lock
+    topic = SimpleNamespace(streamer=Streamer("target"))
+
+    pool.submit(topic)
+
+    assert topic_lock.max_depth == 1
+    assert len(websocket.topics) == 50
+    assert websocket.pending_topics == [topic]
 
 
 def test_websocket_on_open_drains_pending_topics_outside_lock(monkeypatch):

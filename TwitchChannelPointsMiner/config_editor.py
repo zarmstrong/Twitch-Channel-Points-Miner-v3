@@ -726,7 +726,8 @@ def apply_web_overrides(config, config_path):
         }
         for provider, update in overrides.get("notifications", {}).items():
             existing_notification = getattr(logger_settings, provider, None)
-            if update.get("enabled") is False:
+            enabled = update.get("enabled", existing_notification is not None)
+            if enabled is False:
                 setattr(logger_settings, provider, None)
                 continue
             fields = dict(update.get("fields", {}))
@@ -740,7 +741,7 @@ def apply_web_overrides(config, config_path):
                     if hasattr(existing_notification, name):
                         setattr(existing_notification, name, value)
                 continue
-            if update.get("enabled") is not True and not secrets:
+            if enabled is not True:
                 continue
             kwargs = _notification_constructor_kwargs(
                 provider, existing_notification, fields, secrets
