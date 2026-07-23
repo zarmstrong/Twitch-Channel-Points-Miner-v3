@@ -49,8 +49,9 @@ class WebSocketsPool:
             if self.ws == [] or len(self.ws[-1].topics) >= 50:
                 self.ws.append(self.__new(len(self.ws)))
                 self.__start(-1)
+            index = len(self.ws) - 1
 
-            self.__submit(-1, topic)
+        self.__submit(index, topic)
 
     def remove_streamer_topics(self, streamer):
         """Unsubscribe and forget every PubSub topic owned by a streamer."""

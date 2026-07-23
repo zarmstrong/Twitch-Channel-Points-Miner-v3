@@ -387,19 +387,19 @@ def test_websocket_pool_removes_and_unlistens_streamer_topics():
 
 def test_websocket_pool_listens_after_releasing_topic_lock():
     class RecordingLock:
-        active = False
+        depth = 0
 
         def __enter__(self):
-            self.active = True
+            self.depth += 1
 
         def __exit__(self, *_args):
-            self.active = False
+            self.depth -= 1
 
     topic_lock = RecordingLock()
     listened = []
 
     def listen(topic, token):
-        assert topic_lock.active is False
+        assert topic_lock.depth == 0
         listened.append((topic, token))
 
     websocket = SimpleNamespace(
