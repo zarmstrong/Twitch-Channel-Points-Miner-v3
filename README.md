@@ -581,9 +581,11 @@ supported.
 Maintainers building or publishing images from source should follow the
 [Docker image build guide](BUILD.md#docker-images).
 
-The image reads `/usr/src/app/config/config.py`. Create a host `config` directory,
-copy [config.example.py](config.example.py) to `config/config.py`, customize it,
-and mount the directory. The container entrypoint starts the stable runner.
+The image reads `/usr/src/app/config/config.py`. Create and mount a host `config`
+directory. When that directory is empty on first launch, the container copies
+the bundled [config.example.py](config.example.py) to `config/config.py` and
+exits. Customize the new file, then start the container again. The container
+entrypoint starts the stable runner on subsequent launches.
 
 Persist these directories on the host:
 

@@ -11,6 +11,68 @@ from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
 from TwitchChannelPointsMiner.runner import _load_config
 
 
+def test_main_creates_default_config_for_fresh_install(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    template = tmp_path / "config.example.py"
+    template.write_text("# default configuration\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "DEFAULT_CONFIG_TEMPLATE", template)
+
+    result = runner.main(
+        [
+            "--config-dir",
+            str(config_dir),
+            "--legacy-runner",
+            str(tmp_path / "run.py"),
+        ]
+    )
+
+    assert result == 0
+    assert (config_dir / "config.py").read_text(encoding="utf-8") == (
+        "# default configuration\n"
+    )
+    assert (config_dir / "config.py").stat().st_mode & 0o777 == 0o600
+    output = capsys.readouterr().out
+    assert "Created default configuration" in output
+    assert "restart the container" in output
+
+
+def test_main_still_converts_existing_legacy_runner(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text("legacy", encoding="utf-8")
+    converted = object()
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "convert_runner",
+        lambda source, destination: calls.append((source, destination)),
+    )
+    monkeypatch.setattr(runner, "_load_config", lambda path: converted)
+    monkeypatch.setattr(
+        runner,
+        "run_config",
+        lambda config, path: calls.append((config, path)),
+    )
+
+    result = runner.main(
+        [
+            "--config-dir",
+            str(config_dir),
+            "--legacy-runner",
+            str(legacy_runner),
+        ]
+    )
+
+    config_path = config_dir / "config.py"
+    assert result == 0
+    assert calls == [
+        (legacy_runner, config_path),
+        (converted, config_path),
+    ]
+
+
 def test_load_config_reports_missing_import(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(

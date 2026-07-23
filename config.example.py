@@ -52,10 +52,12 @@ MINER_CONFIG = {
         auto_clear=True,                        # Create a file rotation handler with interval = 1D and backupCount = 7 if True (default)
         time_zone="",                           # Set a specific time zone for console and file loggers. Use tz database names. Example: "America/Denver"
         date_format="dd/mm/yy",                 # Date format in logs and analytics. Supported tokens: dd, mm, yy, yyyy
-        file_level=logging.DEBUG,               # Level of logs - If you think the log file it's too big, use logging.INFO
+        file_level=logging.INFO,                # Level of logs - If you think the log file it's too big, use logging.INFO
         emoji=True,                             # On Windows, we have a problem printing emoji. Set to false if you have a problem
         less=False,                             # If you think that the logs are too verbose, set this to True
         colored=True,                           # If you want to print colored text
+        daily_report=True,                      # Send a daily point/Drop activity summary through notifiers subscribed to DAILY_REPORT
+        daily_report_time="00:00",              # Local time in 24-hour HH:MM format
         color_palette=ColorPalette(             # You can also create a custom palette color (for the common message).
             STREAMER_online="GREEN",            # Don't worry about lower/upper case. The script will parse all the values.
             streamer_offline="red",             # Read more in README.md
@@ -89,8 +91,6 @@ MINER_CONFIG = {
             events=[Events.DAILY_REPORT, Events.CONFIGURATION],
             starttls=True,                                                              # Use use_ssl=True and starttls=False for implicit TLS (usually port 465)
         ),
-        daily_report=True,                                                              # Send a daily point/Drop activity summary through notifiers subscribed to DAILY_REPORT
-        daily_report_time="00:00",                                                     # Local time in 24-hour HH:MM format
         matrix=Matrix(
             username="twitch_miner",                                                   # Matrix username (without homeserver)
             password="...",                                                            # Matrix password
