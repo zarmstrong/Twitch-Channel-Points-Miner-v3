@@ -2,6 +2,7 @@ from textwrap import dedent
 
 import requests
 
+from TwitchChannelPointsMiner.classes.NotificationError import format_request_failure
 from TwitchChannelPointsMiner.classes.Settings import Events
 
 
@@ -16,10 +17,10 @@ class Telegram(object):
         self.events = [str(e) for e in events]
         self.disable_notification = disable_notification
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             try:
-                requests.post(
+                response = requests.post(
                     url=self.telegram_api,
                     data={
                         "chat_id": self.chat_id,
@@ -29,5 +30,8 @@ class Telegram(object):
                     },
                     timeout=(5, 15),
                 )
-            except requests.RequestException:
-                return
+                response.raise_for_status()
+                return True, None
+            except requests.RequestException as error:
+                return False, format_request_failure("Telegram", error)
+        return False, "This event is not enabled for Telegram."

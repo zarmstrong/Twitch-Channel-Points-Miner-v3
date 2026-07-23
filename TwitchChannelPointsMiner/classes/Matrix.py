@@ -4,6 +4,7 @@ from urllib.parse import quote
 
 import requests
 
+from TwitchChannelPointsMiner.classes.NotificationError import format_request_failure
 from TwitchChannelPointsMiner.classes.Settings import Events
 
 
@@ -37,10 +38,12 @@ class Matrix(object):
                 "Matrix authentication failed. Notifications will not be sent."
             )
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
+            if not self.access_token:
+                return False, "Matrix authentication failed. Check the credentials."
             try:
-                requests.post(
+                response = requests.post(
                     url=f"https://{self.homeserver}/_matrix/client/r0/rooms/{self.room_id}/send/m.room.message",
                     headers={"Authorization": f"Bearer {self.access_token}"},
                     json={
@@ -49,5 +52,8 @@ class Matrix(object):
                     },
                     timeout=(5, 15),
                 )
-            except requests.RequestException:
-                return
+                response.raise_for_status()
+                return True, None
+            except requests.RequestException as error:
+                return False, format_request_failure("Matrix", error)
+        return False, "This event is not enabled for Matrix."

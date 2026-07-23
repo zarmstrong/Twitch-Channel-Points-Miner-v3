@@ -1,3 +1,6 @@
+import smtplib
+import socket
+import ssl
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -45,6 +48,116 @@ def test_email_ignores_events_not_selected():
     with patch("TwitchChannelPointsMiner.classes.Email.smtplib.SMTP") as smtp:
         notifier.send("online", Events.STREAMER_ONLINE)
     smtp.assert_not_called()
+
+
+def test_email_reports_authentication_failure():
+    notifier = Email(
+        host="smtp.example.com",
+        port=587,
+        username="user",
+        password="wrong-password",
+        sender="miner@example.com",
+        recipients=["you@example.com"],
+        events=[Events.CONFIGURATION],
+    )
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    smtp.login.side_effect = smtplib.SMTPAuthenticationError(
+        535, b"Authentication failed"
+    )
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.Email.smtplib.SMTP", return_value=smtp
+    ):
+        result = notifier.send("test", Events.CONFIGURATION)
+
+    assert result == (
+        False,
+        "SMTP authentication failed. Check the username and password.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            socket.gaierror(),
+            "Could not resolve SMTP host 'mail.example.com'.",
+        ),
+        (
+            TimeoutError(),
+            "SMTP connection to mail.example.com:587 timed out.",
+        ),
+        (
+            ConnectionRefusedError(),
+            "SMTP server mail.example.com:587 refused the connection.",
+        ),
+    ],
+)
+def test_email_reports_specific_connection_failures(error, expected):
+    notifier = Email(
+        "mail.example.com",
+        587,
+        "miner@example.com",
+        "you@example.com",
+        [Events.CONFIGURATION],
+    )
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.Email.smtplib.SMTP", side_effect=error
+    ):
+        result = notifier.send("test", Events.CONFIGURATION)
+
+    assert result == (False, expected)
+
+
+def test_email_reports_tls_negotiation_failure():
+    notifier = Email(
+        "mail.example.com",
+        587,
+        "miner@example.com",
+        "you@example.com",
+        [Events.CONFIGURATION],
+    )
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    smtp.starttls.side_effect = ssl.SSLError("certificate verify failed")
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.Email.smtplib.SMTP", return_value=smtp
+    ):
+        result = notifier.send("test", Events.CONFIGURATION)
+
+    assert result == (
+        False,
+        "SMTP TLS negotiation failed. Check the SSL and STARTTLS settings.",
+    )
+
+
+def test_email_reports_sanitized_smtp_status_response():
+    notifier = Email(
+        "mail.example.com",
+        587,
+        "miner@example.com",
+        "you@example.com",
+        [Events.CONFIGURATION],
+        starttls=False,
+    )
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    smtp.send_message.side_effect = smtplib.SMTPDataError(
+        554, b"Transaction failed"
+    )
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.Email.smtplib.SMTP", return_value=smtp
+    ):
+        result = notifier.send("test", Events.CONFIGURATION)
+
+    assert result == (
+        False,
+        "SMTP message was rejected (SMTP 554): Transaction failed.",
+    )
 
 
 def test_email_rejects_two_tls_modes():

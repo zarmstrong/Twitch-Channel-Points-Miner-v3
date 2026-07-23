@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _capture_drop_progress_baseline,
@@ -7,6 +8,7 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 
 from TwitchChannelPointsMiner import runner
 from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
 from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
 from TwitchChannelPointsMiner.runner import _load_config
 
@@ -35,6 +37,82 @@ def test_main_creates_default_config_for_fresh_install(tmp_path, monkeypatch, ca
     output = capsys.readouterr().out
     assert "Created default configuration" in output
     assert "restart the container" in output
+
+
+def test_streamer_settings_snapshot_ignores_volatile_runtime_state():
+    first = Streamer("one", settings=StreamerSettings(favorite=True))
+    second = Streamer("one", settings=StreamerSettings(favorite=True))
+
+    assert runner._streamer_settings_snapshot(
+        first
+    ) == runner._streamer_settings_snapshot(second)
+
+
+def test_config_digest_tolerates_temporarily_unreadable_overrides(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    override = tmp_path / "web-config.json"
+    config.write_text("configuration", encoding="utf-8")
+    override.write_text("{}", encoding="utf-8")
+    original_read_bytes = type(config).read_bytes
+
+    def read_bytes(path):
+        if path == override:
+            raise OSError("temporarily unavailable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(type(config), "read_bytes", read_bytes)
+
+    unavailable_digest = runner._config_digest(config)
+    monkeypatch.setattr(type(config), "read_bytes", original_read_bytes)
+
+    assert runner._config_digest(config) != unavailable_digest
+
+
+def test_config_watcher_refreshes_restart_snapshots(monkeypatch, caplog):
+    initial = SimpleNamespace(
+        STREAMERS=[Streamer("one", settings=StreamerSettings(favorite=False))],
+        MINER_CONFIG={"setting": "before"},
+        ANALYTICS_CONFIG=None,
+        MINE_CONFIG={"categories": []},
+    )
+    updated = SimpleNamespace(
+        STREAMERS=[Streamer("one", settings=StreamerSettings(favorite=False))],
+        MINER_CONFIG={"setting": "after"},
+        ANALYTICS_CONFIG=None,
+        MINE_CONFIG={"categories": []},
+    )
+    miner = SimpleNamespace(
+        running=True,
+        ws_pool=object(),
+        add_streamers=lambda _items: None,
+        remove_streamers=lambda _items: None,
+        refresh_categories=lambda _config: None,
+    )
+    digests = iter((b"initial", b"first-update", b"second-update"))
+    loads = []
+
+    monkeypatch.setattr(runner, "_config_digest", lambda _path: next(digests))
+    monkeypatch.setattr(runner.time, "sleep", lambda _interval: None)
+
+    def load(_path):
+        loads.append(True)
+        if len(loads) == 2:
+            miner.running = False
+        return updated
+
+    monkeypatch.setattr(runner, "_load_config", load)
+
+    with caplog.at_level("WARNING", logger=runner.logger.name):
+        runner._watch_config("config.py", miner, initial, 1)
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "require a restart" in record.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 def test_main_still_converts_existing_legacy_runner(tmp_path, monkeypatch):
@@ -177,6 +255,55 @@ ANALYTICS_CONFIG = None
         _load_config(config)
 
     assert raised.value.__cause__.__class__.__name__ == "ConfigMigrationError"
+
+
+def test_load_config_wraps_dashboard_override_errors(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+''',
+        encoding="utf-8",
+    )
+    (tmp_path / "web-config.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError, match="Unable to apply dashboard-managed configuration"
+    ) as raised:
+        _load_config(config)
+
+    assert raised.value.__cause__.__class__.__name__ == "ConfigEditError"
+
+
+def test_load_config_sanitizes_dashboard_override_io_errors(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+''',
+        encoding="utf-8",
+    )
+
+    def fail_overrides(_module, _path):
+        raise OSError("permission denied: /private/config/web-config.json")
+
+    monkeypatch.setattr(runner, "apply_web_overrides", fail_overrides)
+
+    with pytest.raises(
+        RuntimeError, match="Unable to access dashboard-managed configuration"
+    ) as raised:
+        _load_config(config)
+
+    assert "/private/config" not in str(raised.value)
+    assert raised.value.__cause__.__class__.__name__ == "OSError"
 
 
 def test_cli_reports_runtime_errors_without_traceback(monkeypatch, capsys):

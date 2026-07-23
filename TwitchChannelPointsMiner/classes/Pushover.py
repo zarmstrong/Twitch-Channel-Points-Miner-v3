@@ -2,6 +2,7 @@ from textwrap import dedent
 
 import requests
 
+from TwitchChannelPointsMiner.classes.NotificationError import format_request_failure
 from TwitchChannelPointsMiner.classes.Settings import Events
 
 
@@ -15,10 +16,10 @@ class Pushover(object):
         self.sound = sound
         self.events = [str(e) for e in events]
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             try:
-                requests.post(
+                response = requests.post(
                     url="https://api.pushover.net/1/messages.json",
                     data={
                         "user": self.userkey,
@@ -30,5 +31,8 @@ class Pushover(object):
                     },
                     timeout=(5, 15),
                 )
-            except requests.RequestException:
-                return
+                response.raise_for_status()
+                return True, None
+            except requests.RequestException as error:
+                return False, format_request_failure("Pushover", error)
+        return False, "This event is not enabled for Pushover."

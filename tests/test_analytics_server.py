@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
+    AnalyticsServer,
     MAX_LOG_TAIL_BYTES,
     bounded_log_start,
     filter_datas,
@@ -16,6 +17,43 @@ def test_bounded_log_start_caps_legacy_request_without_tail_bytes():
     file_size = MAX_LOG_TAIL_BYTES * 10
 
     assert bounded_log_start(file_size, 0) == file_size - MAX_LOG_TAIL_BYTES
+
+
+def test_config_endpoints_require_analytics_authentication():
+    server = AnalyticsServer(password=None)
+
+    read_response = server.app.test_client().get("/config")
+    response = server.app.test_client().post(
+        "/config", json={"action": "add", "kind": "streamers", "value": "one"}
+    )
+    notification_response = server.app.test_client().post(
+        "/config/notifications/discord/test"
+    )
+
+    assert read_response.status_code == 403
+    assert response.status_code == 403
+    assert notification_response.status_code == 403
+    assert "analytics username and password" in read_response.get_json()["error"]
+
+
+def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    monkeypatch.setitem(
+        __import__(
+            "TwitchChannelPointsMiner.classes.AnalyticsServer", fromlist=["web_config"]
+        ).web_config.__globals__,
+        "update_managed_web_config",
+        lambda _path, _payload: {"streamers": []},
+    )
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().post(
+        "/config",
+        json={"action": "add", "kind": "streamers", "value": "one"},
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 200
 
 
 def test_bounded_log_start_honors_smaller_initial_tail():
@@ -236,3 +274,103 @@ def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
 
     assert blank_links
     assert all('rel="noopener noreferrer"' in link for link in blank_links)
+
+
+def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+
+    assert script.count("$('#log').change(function ()") == 1
+    assert "localStorage.getItem('logCheckboxState')" in script
+    assert "localStorage.getItem('log-enabled') || 'false'" in script
+    assert "var isLogCheckboxChecked = savedLogPreference === 'true';" in script
+    assert "$('#log-box').toggle(isLogCheckboxChecked);" in script
+    assert "$('#auto-update-log').toggle(isLogCheckboxChecked);" in script
+
+
+def test_dark_theme_keeps_config_panel_headings_readable():
+    stylesheet = (
+        Path(__file__).resolve().parents[1] / "assets" / "dark-theme.css"
+    ).read_text(encoding="utf-8")
+
+    assert "#config-panel .title" in stylesheet
+    assert "color: #fff;" in stylesheet.split("#config-panel .title", 1)[1].split(
+        "}", 1
+    )[0]
+    assert "#config-panel .config-item-name" in stylesheet
+    assert "#config-panel .config-item strong" in stylesheet
+    assert "#config-panel .input::placeholder" in stylesheet
+
+
+def test_successful_config_message_fades_after_ten_seconds():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+    show_message = script.split("function showConfigMessage", 1)[1].split(
+        "function loadWebConfig", 1
+    )[0]
+
+    assert "if (!isError)" in show_message
+    assert "clearTimeout(configMessageTimeout);" in show_message
+    assert "$('#config-message').fadeOut(250);" in show_message
+    assert "}, 10000);" in show_message
+
+
+def test_config_ui_exposes_requested_management_controls():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+
+    for selector in (
+        "category-settings-form",
+        "source-settings-form",
+        "logging-settings-form",
+        "notification-settings",
+    ):
+        assert f'id="{selector}"' in template
+    for setting in (
+        "favorite",
+        "make_predictions",
+        "follow_raid",
+        "claim_drops",
+        "claim_moments",
+        "chat",
+        "points_limit",
+    ):
+        assert setting in script
+    assert "reorder_categories" in script
+    assert "remove-streamer" in script
+    assert "data-secret" in script
+    assert "Configured — leave blank to keep" in script
+    assert "test-notification" in script
+    assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
+    assert "'aria-label': `Move ${category} up`" in script
+    assert "'aria-label': `Move ${category} down`" in script
+
+
+def test_notification_forms_do_not_nest_two_column_grids():
+    stylesheet = (
+        Path(__file__).resolve().parents[1] / "assets" / "style.css"
+    ).read_text(encoding="utf-8")
+    notification_fields = stylesheet.split(".notification-fields {", 1)[1].split(
+        "}", 1
+    )[0]
+
+    assert "grid-template-columns: minmax(0, 1fr);" in notification_fields
+    assert ".notification-config" in stylesheet
+    assert ".notification-fields .input" in stylesheet
+    assert "min-width: 0;" in stylesheet
+
+
+def test_notification_events_use_clickable_capsules():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+    stylesheet = (root / "assets" / "style.css").read_text(encoding="utf-8")
+
+    assert "config.notification_event_options" in script
+    assert "event-capsules" in script
+    assert "event-capsule" in script
+    assert "aria-pressed" in script
+    assert ".event-capsule[aria-pressed=\"true\"]" in script
+    assert ".event-capsules" in stylesheet

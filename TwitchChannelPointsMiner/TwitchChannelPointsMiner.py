@@ -1197,6 +1197,7 @@ class TwitchChannelPointsMiner:
                     self.twitch.load_channel_points_context(streamer)
                     self.twitch.check_streamer_online(streamer)
                     self.streamers.append(streamer)
+                    self.original_streamers.append(streamer.channel_points)
                     existing_usernames.add(username)
                     added += 1
 
@@ -1321,6 +1322,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.load_channel_points_context(streamer)
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
+                self.original_streamers.append(streamer.channel_points)
                 existing_usernames.add(username)
                 added += 1
 
@@ -1368,6 +1370,44 @@ class TwitchChannelPointsMiner:
         with self.config_reload_lock:
             self._add_streamers(streamers)
 
+    def remove_streamers(self, usernames):
+        """Remove explicit streamers from a running miner safely."""
+        if not self.running or self.ws_pool is None:
+            raise RuntimeError("The miner is not ready for live configuration changes")
+        requested = {str(username).lower().strip() for username in usernames}
+        with self.config_reload_lock:
+            retained = []
+            retained_baselines = []
+            for index, streamer in enumerate(self.streamers):
+                baseline = (
+                    self.original_streamers[index]
+                    if index < len(self.original_streamers)
+                    else streamer.channel_points
+                )
+                if streamer.username not in requested:
+                    retained.append(streamer)
+                    retained_baselines.append(baseline)
+                    continue
+                streamer.explicitly_configured = False
+                if (
+                    streamer.from_followers
+                    or streamer.from_category
+                    or streamer.from_badge_campaign
+                ):
+                    retained.append(streamer)
+                    retained_baselines.append(baseline)
+                    continue
+                self.ws_pool.remove_streamer_topics(streamer)
+                if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
+                    streamer.irc_chat.stop()
+                    streamer.irc_chat.join(timeout=5)
+                logger.info(
+                    f"Removed {streamer.username} from the reloaded configuration",
+                    extra={"emoji": ":heavy_minus_sign:"},
+                )
+            self.streamers[:] = retained
+            self.original_streamers[:] = retained_baselines
+
     def _add_streamers(self, streamers):
         existing = {streamer.username for streamer in self.streamers}
         for configured in streamers:
@@ -1401,6 +1441,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.load_channel_points_context(streamer)
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
+                self.original_streamers.append(streamer.channel_points)
                 existing.add(username)
                 self.ws_pool.submit(
                     PubsubTopic("video-playback-by-id", streamer=streamer)

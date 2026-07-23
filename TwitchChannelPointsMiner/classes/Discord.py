@@ -2,6 +2,7 @@ from textwrap import dedent
 
 import requests
 
+from TwitchChannelPointsMiner.classes.NotificationError import format_request_failure
 from TwitchChannelPointsMiner.classes.Settings import Events
 
 
@@ -12,7 +13,7 @@ class Discord(object):
         self.webhook_api = webhook_api
         self.events = [str(e) for e in events]
 
-    def send(self, message: str, event: Events) -> None:
+    def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             try:
                 message = dedent(message).strip()
@@ -33,7 +34,7 @@ class Discord(object):
                     content = f"{fence} {message} {fence}"
                 else:
                     content = f"`{message}`"
-                requests.post(
+                response = requests.post(
                     url=self.webhook_api,
                     data={
                         "content": content,
@@ -42,5 +43,8 @@ class Discord(object):
                     },
                     timeout=(5, 15),
                 )
-            except requests.RequestException:
-                return
+                response.raise_for_status()
+                return True, None
+            except requests.RequestException as error:
+                return False, format_request_failure("Discord", error)
+        return False, "This event is not enabled for Discord."

@@ -46,6 +46,46 @@ a:hover {
     color: rgba(255, 255, 255, 0.82);
 }
 
+#config-panel .title {
+    color: #fff;
+}
+
+#config-panel .config-empty,
+#config-panel .config-reload-note,
+#config-panel .config-help {
+    color: rgba(255, 255, 255, 0.72);
+}
+
+#config-panel .config-item {
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+#config-panel .label,
+#config-panel summary,
+#config-panel .checkbox {
+    color: #fff;
+}
+
+#config-panel .config-item-name,
+#config-panel .config-item strong {
+    color: #fff;
+}
+
+#config-panel .input::placeholder {
+    color: rgba(255, 255, 255, 0.58);
+    opacity: 1;
+}
+
+#config-panel .event-capsule:not(.is-link) {
+    border-color: rgba(255, 255, 255, 0.28);
+    color: rgba(255, 255, 255, 0.82);
+    background: rgba(52, 62, 89, 0.72);
+}
+
+#config-panel .event-capsules {
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
 body .drop-row {
     background: rgba(52, 62, 89, 0.35);
 }
