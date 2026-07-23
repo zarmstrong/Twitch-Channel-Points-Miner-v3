@@ -259,6 +259,17 @@ def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
     assert "$('#auto-update-log').toggle(isLogCheckboxChecked);" in script
 
 
+def test_dark_theme_keeps_config_panel_headings_readable():
+    stylesheet = (
+        Path(__file__).resolve().parents[1] / "assets" / "dark-theme.css"
+    ).read_text(encoding="utf-8")
+
+    assert "#config-panel .title" in stylesheet
+    assert "color: #fff;" in stylesheet.split("#config-panel .title", 1)[1].split(
+        "}", 1
+    )[0]
+
+
 def test_web_config_adds_streamer_and_category_without_losing_comments(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(

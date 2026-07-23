@@ -46,6 +46,15 @@ a:hover {
     color: rgba(255, 255, 255, 0.82);
 }
 
+#config-panel .title {
+    color: #fff;
+}
+
+#config-panel .config-empty,
+#config-panel .config-reload-note {
+    color: rgba(255, 255, 255, 0.72);
+}
+
 body .drop-row {
     background: rgba(52, 62, 89, 0.35);
 }
