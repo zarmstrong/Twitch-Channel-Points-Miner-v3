@@ -251,6 +251,39 @@ def test_enabling_new_notification_requires_credentials(tmp_path):
         )
 
 
+def test_notification_events_are_validated_and_normalized_for_runtime(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"enabled": True, "events": ["DROP_CLAIM"]},
+        },
+    )
+
+    loaded = _load_config(config)
+
+    assert loaded.MINER_CONFIG["logger_settings"].discord.events == ["DROP_CLAIM"]
+    reconstructed = _notification_constructor_kwargs(
+        "discord",
+        loaded.MINER_CONFIG["logger_settings"].discord,
+        {"events": ["DROP_CLAIM"]},
+        {"webhook_api": "https://new.example/hook"},
+    )
+    assert reconstructed["events"] == ["DROP_CLAIM"]
+    with pytest.raises(ConfigEditError, match="Unknown notification event"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "discord",
+                "values": {"events": ["NOT_A_REAL_EVENT"]},
+            },
+        )
+
+
 def test_new_notification_secret_is_applied_but_never_returned(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
@@ -524,10 +557,12 @@ def test_websocket_reconnection_replays_topics_after_releasing_lock(monkeypatch)
         keep_running=True,
     )
     pool.ws = [old_websocket]
+    def new_websocket_while_locked(_self, _index):
+        assert topic_lock.depth > 0
+        return new_websocket
+
     monkeypatch.setattr(
-        WebSocketsPool,
-        "_WebSocketsPool__new",
-        lambda _self, _index: new_websocket,
+        WebSocketsPool, "_WebSocketsPool__new", new_websocket_while_locked
     )
     monkeypatch.setattr(
         WebSocketsPool, "_WebSocketsPool__start", lambda _self, _index: None
@@ -543,6 +578,7 @@ def test_websocket_reconnection_replays_topics_after_releasing_lock(monkeypatch)
 
     WebSocketsPool.handle_reconnection(old_websocket)
 
+    assert new_websocket.topics == [topic]
     assert listened == [(topic, "oauth-token")]
 
 

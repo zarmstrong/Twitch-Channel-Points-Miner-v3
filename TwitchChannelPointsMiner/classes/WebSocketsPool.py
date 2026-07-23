@@ -203,16 +203,17 @@ class WebSocketsPool:
 
                 # Why not create a new ws on the same array index? Let's try.
                 self = ws.parent_pool
-                # Create a new connection.
-                self.ws[ws.index] = self.__new(ws.index)
+                with self.topic_lock:
+                    topics = list(ws.topics)
+                    replacement = self.__new(ws.index)
+                    replacement.topics.extend(topics)
+                    self.ws[ws.index] = replacement
 
                 self.__start(ws.index)  # Start a new thread.
                 time.sleep(30)
 
-                with self.topic_lock:
-                    topics = list(ws.topics)
                 for topic in topics:
-                    self.__submit(ws.index, topic)
+                    self.__listen(replacement, topic)
 
     @staticmethod
     def on_message(ws, message):

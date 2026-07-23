@@ -394,6 +394,26 @@ def _valid_managed_category(value):
     )
 
 
+def _runtime_notification_events(values):
+    from TwitchChannelPointsMiner.classes.Settings import Events
+
+    if not isinstance(values, (list, tuple)):
+        raise ConfigEditError("events must be a list of valid event names.")
+    normalized = []
+    for value in values:
+        if isinstance(value, Events):
+            normalized.append(str(value))
+            continue
+        if not isinstance(value, str):
+            raise ConfigEditError("events must be a list of valid event names.")
+        name = value.removeprefix("Events.")
+        try:
+            normalized.append(str(Events[name]))
+        except KeyError as error:
+            raise ConfigEditError(f"Unknown notification event: {value}.") from error
+    return normalized
+
+
 def update_managed_web_config(config_path, payload):
     with CONFIG_FILE_MUTEX:
         return _update_managed_web_config(config_path, payload)
@@ -532,6 +552,8 @@ def _update_managed_web_config(config_path, payload):
                 or any(not isinstance(item, str) for item in values[list_name])
             ):
                 raise ConfigEditError(f"{list_name} must be a list of strings.")
+        if "events" in values:
+            _runtime_notification_events(values["events"])
         for number_name in ("chat_id", "port", "priority"):
             if values.get(number_name) == "":
                 values.pop(number_name)
@@ -712,7 +734,7 @@ def apply_web_overrides(config, config_path):
             if existing_notification is not None and not secrets:
                 for name, value in fields.items():
                     if name == "events":
-                        value = [str(event) for event in value]
+                        value = _runtime_notification_events(value)
                     if provider == "matrix" and name == "room_id":
                         value = quote(value)
                     if hasattr(existing_notification, name):
@@ -731,7 +753,7 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
     def current(name, default=None):
         return getattr(existing, name, default) if existing is not None else default
 
-    events = fields.get("events", current("events", []))
+    events = _runtime_notification_events(fields.get("events", current("events", [])))
     if provider == "telegram":
         token = secrets.get("token")
         if token is None and existing is not None:
