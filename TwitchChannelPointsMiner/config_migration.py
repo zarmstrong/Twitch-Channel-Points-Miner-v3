@@ -696,7 +696,10 @@ def migrate_config(config_path):
             if not backup.is_file():
                 raise ConfigMigrationError(f"Backup path is not a file: {backup}")
             sanitized_source = _without_miner_password(current_source, path.name)
-            if backup.read_text(encoding="utf-8") != sanitized_source:
+            backup_source = backup.read_text(encoding="utf-8")
+            if backup_source == current_source and backup_source != sanitized_source:
+                backup.write_text(sanitized_source, encoding="utf-8")
+            elif backup_source != sanitized_source:
                 raise ConfigMigrationError(
                     f"Refusing to overwrite existing {backup}: its contents do "
                     "not match the current configuration"

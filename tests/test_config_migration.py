@@ -546,6 +546,24 @@ ANALYTICS_CONFIG = {{"password": "analytics-secret"}}
     assert migrate_config(config) is False
 
 
+def test_migrate_config_sanitizes_matching_interrupted_backup(tmp_path):
+    config = tmp_path / "config.py"
+    source = f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{"username": "alice", "password": "twitch-secret"}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+'''
+    backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
+    config.write_text(source, encoding="utf-8")
+    backup.write_text(source, encoding="utf-8")
+
+    assert migrate_config(config) is True
+    assert "twitch-secret" not in config.read_text(encoding="utf-8")
+    assert "twitch-secret" not in backup.read_text(encoding="utf-8")
+
+
 def test_migrate_config_reuses_matching_backup_from_interrupted_migration(tmp_path):
     config = tmp_path / "config.py"
     source = "CONFIG_VERSION = 3\n" + CONFIG
