@@ -113,6 +113,24 @@ ANALYTICS_CONFIG = None
     assert loaded.MINE_CONFIG["category_sort"].name == "VIEWERS_DESC"
 
 
+def test_load_config_discards_dynamically_assembled_twitch_password(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{"username": "alice", **{{"password": "secret"}}}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+''',
+        encoding="utf-8",
+    )
+
+    loaded = _load_config(config)
+
+    assert loaded.MINER_CONFIG == {"username": "alice"}
+
+
 def test_load_config_migrates_existing_config_before_execution(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(

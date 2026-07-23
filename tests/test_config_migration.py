@@ -307,7 +307,7 @@ ANALYTICS_CONFIG = None
 
     assert old_version == 4
     assert new_version == CONFIG_VERSION
-    assert namespace["CONFIG_VERSION"] == 5
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
     assert namespace["LOGGER"].daily_report is False
     assert namespace["LOGGER"].daily_report_time == "00:00"
     assert "# email=Email(" in migrated
@@ -498,10 +498,8 @@ ANALYTICS_CONFIG = {PORT: 6000}
     namespace = {}
     exec(migrated, namespace)
 
-    assert namespace["MINER_CONFIG"] == {
-        "username": "alice",
-        "password": "secret",
-    }
+    assert namespace["MINER_CONFIG"] == {"username": "alice"}
+    assert "secret" not in migrated
     assert namespace["MINE_CONFIG"] == {"blacklist": ["blocked"]}
     assert namespace["ANALYTICS_CONFIG"] == {"port": 6000}
 
@@ -517,6 +515,34 @@ def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
     assert backup.read_text(encoding="utf-8") == CONFIG
     assert stat.S_IMODE(config.stat().st_mode) == 0o640
     assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+    assert migrate_config(config) is False
+
+
+def test_migrate_current_config_wipes_twitch_password_from_file_and_backup(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'''\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{
+    "username": "alice",
+    "password": "twitch-secret",
+}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = {{"password": "analytics-secret"}}
+''',
+        encoding="utf-8",
+    )
+
+    assert migrate_config(config) is True
+
+    migrated = config.read_text(encoding="utf-8")
+    backup = (tmp_path / f"config.py.v{CONFIG_VERSION}.bak").read_text(
+        encoding="utf-8"
+    )
+    assert "twitch-secret" not in migrated
+    assert "twitch-secret" not in backup
+    assert '"password": "analytics-secret"' in migrated
     assert migrate_config(config) is False
 
 

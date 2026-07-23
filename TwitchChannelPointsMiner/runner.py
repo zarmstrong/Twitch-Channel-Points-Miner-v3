@@ -62,6 +62,14 @@ def _load_config(path):
     missing = [name for name in required if not hasattr(module, name)]
     if missing:
         raise RuntimeError(f"Configuration is missing: {', '.join(missing)}")
+    # Schema migration removes conventional password entries from disk. Keep
+    # the runtime guard for dynamically assembled dictionaries that cannot be
+    # rewritten safely without executing user configuration first.
+    if module.MINER_CONFIG.pop("password", None) is not None:
+        logger.warning(
+            "Removed obsolete Twitch password from MINER_CONFIG; "
+            "authentication uses the TV activation flow."
+        )
     return module
 
 

@@ -267,7 +267,6 @@ class TwitchChannelPointsMiner:
     def __init__(
         self,
         username: str,
-        password: str = None,
         claim_drops_startup: bool = False,
         enable_analytics: bool = False,
         disable_ssl_cert_verification: bool = False,
@@ -362,9 +361,7 @@ class TwitchChannelPointsMiner:
             gql_factory = gql
         else:
             raise ValueError("gql must be None, AttemptStrategy, or GQLFactory")
-        self.twitch = Twitch(
-            self.username, user_agent, password, gql_factory=gql_factory
-        )
+        self.twitch = Twitch(self.username, user_agent, gql_factory=gql_factory)
 
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]

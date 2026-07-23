@@ -11,7 +11,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -77,7 +77,6 @@ CONFIG_STREAMER_SOURCE_ADDITIONS = (
     "StreamerSource.BADGES",
 )
 MINER_CONFIG_DEFAULTS = (
-    ("password", "None"),
     ("claim_drops_startup", "False"),
     ("enable_analytics", "False"),
     ("disable_ssl_cert_verification", "False"),
@@ -152,6 +151,13 @@ def _dict_names(node):
         for key in node.keys
         if isinstance(key, ast.Constant) and isinstance(key.value, str)
     }
+
+
+def _dict_key_value(tree, key):
+    resolved = _resolve_value(tree, key)
+    if isinstance(resolved, ast.Constant) and isinstance(resolved.value, str):
+        return resolved.value
+    return None
 
 
 def _dict_has_literal_string_keys(node):
@@ -314,6 +320,65 @@ def _source_offset(line_offsets, lineno, col_offset):
     return line_offsets[lineno - 1] + col_offset
 
 
+def _dict_entry_removal(source, line_offsets, tree, node, name):
+    """Return a source edit removing a statically resolvable dictionary entry."""
+    index = next(
+        (
+            index
+            for index, key in enumerate(node.keys)
+            if _dict_key_value(tree, key) == name
+        ),
+        None,
+    )
+    if index is None:
+        return None
+
+    key = node.keys[index]
+    value = node.values[index]
+    start = _source_offset(line_offsets, key.lineno, key.col_offset)
+    if index + 1 < len(node.keys):
+        next_key = node.keys[index + 1]
+        end = _source_offset(line_offsets, next_key.lineno, next_key.col_offset)
+        return start, end, ""
+
+    end = _source_offset(line_offsets, value.end_lineno, value.end_col_offset)
+    closing = _source_offset(line_offsets, node.end_lineno, node.end_col_offset - 1)
+    trailing = source[end:closing]
+    comma = trailing.find(",")
+    if comma >= 0:
+        return start, end + comma + 1, ""
+    if index:
+        previous = node.values[index - 1]
+        previous_end = _source_offset(
+            line_offsets, previous.end_lineno, previous.end_col_offset
+        )
+        separator = source[previous_end:start].rfind(",")
+        if separator >= 0:
+            start = previous_end + separator
+    return start, end, ""
+
+
+def _apply_edits(source, edits):
+    migrated = source
+    normalized = [
+        edit if len(edit) == 3 else (edit[0], edit[0], edit[1]) for edit in edits
+    ]
+    for start, end, replacement in sorted(normalized, reverse=True):
+        migrated = migrated[:start] + replacement + migrated[end:]
+    return migrated
+
+
+def _without_miner_password(source, source_name="config.py"):
+    tree = ast.parse(source, filename=source_name)
+    config = _config_dict(tree)
+    if config is None:
+        return source
+    edit = _dict_entry_removal(
+        source, _line_start_offsets(source), tree, config, "password"
+    )
+    return _apply_edits(source, [edit]) if edit else source
+
+
 def _closing_line_insertion(source, line_offsets, node, lines):
     closing_offset = _source_offset(
         line_offsets, node.end_lineno, node.end_col_offset - 1
@@ -376,15 +441,20 @@ def migrate_config_source(source, source_name="config.py"):
             f"{source_name} uses unsupported CONFIG_VERSION {version}; "
             f"this release supports up to {CONFIG_VERSION}"
         )
-    if version == CONFIG_VERSION:
-        return source, version, version
-
     config = _config_dict(tree)
     if config is None:
         raise ConfigMigrationError("MINER_CONFIG must be a dictionary")
 
     line_offsets = _line_start_offsets(source)
     edits = []
+    password_removal = _dict_entry_removal(
+        source, line_offsets, tree, config, "password"
+    )
+    if password_removal:
+        edits.append(password_removal)
+    if version == CONFIG_VERSION:
+        migrated = _apply_edits(source, edits)
+        return migrated, version, version
     config_names = _dict_names(config)
     safe_config = _dict_has_literal_string_keys(config)
     missing_miner_options = (
@@ -580,12 +650,7 @@ def migrate_config_source(source, source_name="config.py"):
         )
         edits.append((start, end, str(CONFIG_VERSION)))
 
-    migrated = source
-    normalized_edits = [
-        edit if len(edit) == 3 else (edit[0], edit[0], edit[1]) for edit in edits
-    ]
-    for start, end, replacement in sorted(normalized_edits, reverse=True):
-        migrated = migrated[:start] + replacement + migrated[end:]
+    migrated = _apply_edits(source, edits)
     try:
         ast.parse(migrated, filename=source_name)
     except SyntaxError as error:
@@ -630,7 +695,8 @@ def migrate_config(config_path):
         if backup.exists():
             if not backup.is_file():
                 raise ConfigMigrationError(f"Backup path is not a file: {backup}")
-            if backup.read_text(encoding="utf-8") != current_source:
+            sanitized_source = _without_miner_password(current_source, path.name)
+            if backup.read_text(encoding="utf-8") != sanitized_source:
                 raise ConfigMigrationError(
                     f"Refusing to overwrite existing {backup}: its contents do "
                     "not match the current configuration"
@@ -639,7 +705,9 @@ def migrate_config(config_path):
 
     backup_created = False
     if recovery_backup is None and not reuse_backup:
-        shutil.copy2(path, backup)
+        sanitized_source = _without_miner_password(current_source, path.name)
+        backup.write_text(sanitized_source, encoding="utf-8")
+        shutil.copystat(path, backup)
         backup_created = True
     mode = stat.S_IMODE(path.stat().st_mode)
     descriptor = None
@@ -662,7 +730,7 @@ def migrate_config(config_path):
         if backup_created:
             backup.unlink(missing_ok=True)
         raise
-    return recovery_backup is not None or old_version != new_version
+    return True
 
 
 def _call_name(node):

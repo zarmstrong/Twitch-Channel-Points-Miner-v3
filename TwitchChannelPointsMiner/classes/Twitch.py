@@ -100,7 +100,7 @@ class Twitch(object):
         "gql",
     ]
 
-    def __init__(self, username, user_agent, password=None, gql_factory=None):
+    def __init__(self, username, user_agent, gql_factory=None):
         if (
             not isinstance(username, str)
             or re.fullmatch(r"[A-Za-z0-9_]{1,25}", username) is None
@@ -114,7 +114,7 @@ class Twitch(object):
             choice(string.ascii_letters + string.digits) for _ in range(32)
         )
         self.twitch_login = TwitchLogin(
-            CLIENT_ID, self.device_id, username, self.user_agent, password=password
+            CLIENT_ID, self.device_id, username, self.user_agent
         )
         self.running = True
         # self.integrity = None

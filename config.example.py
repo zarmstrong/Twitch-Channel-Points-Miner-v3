@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 import logging
 from colorama import Fore
@@ -27,7 +27,6 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, Streame
 
 MINER_CONFIG = {
     'username': "your-twitch-username",
-    'password': "",
     'claim_drops_startup': False,
     'priority': [                               # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers

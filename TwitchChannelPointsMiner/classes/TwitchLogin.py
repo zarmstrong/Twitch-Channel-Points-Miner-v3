@@ -68,14 +68,13 @@ class TwitchLogin(object):
         "session",
         "session",
         "username",
-        "password",
         "user_id",
         "email",
         "cookies",
         "shared_cookies",
     ]
 
-    def __init__(self, client_id, device_id, username, user_agent, password=None):
+    def __init__(self, client_id, device_id, username, user_agent):
         self.client_id = client_id
         self.device_id = device_id
         self.token = None
@@ -89,7 +88,6 @@ class TwitchLogin(object):
             }
         )
         self.username = username
-        self.password = password
         self.user_id = None
         self.email = None
 
@@ -193,7 +191,6 @@ class TwitchLogin(object):
                 break
 
         if use_backup_flow:
-            # self.set_token(self.login_flow_backup(password))
             self.set_token(self.login_flow_backup())
             return self.check_login()
 
@@ -233,7 +230,7 @@ class TwitchLogin(object):
         )
         return response
 
-    def login_flow_backup(self, password=None):
+    def login_flow_backup(self):
         import browser_cookie3
 
         """Backup OAuth Selenium login
@@ -266,7 +263,6 @@ class TwitchLogin(object):
         driver.get('https://www.twitch.tv/login')
 
         driver.find_element(By.ID, 'login-username').send_keys(self.username)
-        driver.find_element(By.ID, 'password-input').send_keys(password)
         sleep(0.3)
         driver.execute_script(
             'document.querySelector("#root > div > div.scrollable-area > div.simplebar-scroll-content > div > div > div > div.Layout-sc-nxg1ff-0.gZaqky > form > div > div:nth-child(3) > button > div > div").click()'
