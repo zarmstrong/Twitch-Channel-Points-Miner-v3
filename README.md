@@ -590,7 +590,9 @@ exits. Customize the new file, then start the container again. If you normally
 use restart policies like `restart: unless-stopped` or `--restart unless-stopped`,
 run the initial seed launch with restarts disabled (`restart: "no"` or
 `--restart no`) so the container stays stopped while you edit `config/config.py`.
-The container entrypoint starts the stable runner on subsequent launches.
+After editing, restore your preferred restart policy before launching the
+container again. The container entrypoint starts the stable runner on
+subsequent launches.
 
 Persist these directories on the host:
 
