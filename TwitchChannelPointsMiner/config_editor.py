@@ -323,7 +323,8 @@ def _merge_web_config(base, overrides):
             "enabled", result["notifications"][provider]["enabled"]
         )
         result["notifications"][provider]["fields"].update(update.get("fields", {}))
-        for secret in update.get("secrets", {}):
+        known_secrets = set(NOTIFICATION_SCHEMAS[provider]["secrets"])
+        for secret in set(update.get("secrets", {})) & known_secrets:
             result["notifications"][provider]["secrets"][secret] = True
     for provider, state in result["notifications"].items():
         available = {
@@ -416,7 +417,7 @@ def _update_managed_web_config(config_path, payload):
             else False
         )
         if not valid:
-            raise ConfigEditError("Invalid streamer username or category slug.")
+            raise ConfigEditError("Invalid streamer username or category value.")
         items = list(current[kind])
         names = [item["username"] if kind == "streamers" else item for item in items]
         matching = {name.lower() for name in names}
@@ -644,6 +645,13 @@ def apply_web_overrides(config, config_path):
             configured.append(streamer)
         config.STREAMERS = configured
 
+    if "categories" in overrides:
+        categories = overrides["categories"]
+        if not isinstance(categories, list) or any(
+            not _valid_managed_category(category) for category in categories
+        ):
+            raise ConfigEditError("Managed categories must be a list of valid values.")
+
     sources = overrides.get("sources", {})
     if sources.get("streamers") is False:
         config.STREAMERS = []
@@ -652,7 +660,7 @@ def apply_web_overrides(config, config_path):
     if sources.get("categories") is False:
         config.MINE_CONFIG["categories"] = []
     elif "categories" in overrides:
-        config.MINE_CONFIG["categories"] = list(overrides["categories"])
+        config.MINE_CONFIG["categories"] = list(categories)
     if "badges" in sources:
         config.MINE_CONFIG["auto_mine_badge_drops"] = sources["badges"]
 

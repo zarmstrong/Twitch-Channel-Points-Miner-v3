@@ -154,6 +154,17 @@ def test_managed_categories_support_display_names_urls_and_forced_streamers(tmp_
     assert result["categories"] == categories
 
 
+def test_invalid_category_error_uses_supported_value_terminology(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match="category value"):
+        update_managed_web_config(
+            config,
+            {"action": "add", "kind": "categories", "value": "bad\ncategory"},
+        )
+
+
 def test_notification_secrets_are_write_only_and_blank_values_are_not_saved(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
@@ -467,6 +478,31 @@ def test_invalid_web_override_json_returns_sanitized_error(tmp_path):
     assert str(tmp_path) not in str(raised.value)
 
 
+def test_unknown_notification_secrets_are_not_exposed(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps(
+            {
+                "notifications": {
+                    "gotify": {
+                        "secrets": {
+                            "endpoint": "https://example.invalid",
+                            "unexpected_secret": "do-not-expose",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = read_managed_web_config(config)
+
+    assert result["notifications"]["gotify"]["secrets"] == {"endpoint": True}
+    assert "unexpected_secret" not in json.dumps(result)
+
+
 def test_empty_notification_number_is_treated_as_unset(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
@@ -524,4 +560,19 @@ def test_malformed_managed_streamers_fail_cleanly(tmp_path, streamers):
     )
 
     with pytest.raises(ConfigEditError, match="(?i)managed streamer"):
+        apply_web_overrides(module, config)
+
+
+@pytest.mark.parametrize("categories", ["alpha", {"alpha": True}, [None]])
+def test_malformed_managed_categories_fail_cleanly(tmp_path, categories):
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"categories": categories}), encoding="utf-8"
+    )
+    module = SimpleNamespace(
+        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": None}
+    )
+
+    with pytest.raises(ConfigEditError, match="Managed categories"):
         apply_web_overrides(module, config)

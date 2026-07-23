@@ -86,7 +86,12 @@ def _config_digest(path):
     digest = hashlib.sha256(path.read_bytes())
     web_config_path = path.with_name(WEB_CONFIG_FILENAME)
     if web_config_path.is_file():
-        digest.update(web_config_path.read_bytes())
+        try:
+            digest.update(web_config_path.read_bytes())
+        except OSError:
+            # Keep watching the main config. A recovery of the override file
+            # changes the digest and triggers another reload attempt.
+            digest.update(b"web-config-unreadable")
     return digest.digest()
 
 

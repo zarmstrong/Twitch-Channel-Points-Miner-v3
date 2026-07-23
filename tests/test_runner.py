@@ -48,6 +48,28 @@ def test_streamer_settings_snapshot_ignores_volatile_runtime_state():
     ) == runner._streamer_settings_snapshot(second)
 
 
+def test_config_digest_tolerates_temporarily_unreadable_overrides(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    override = tmp_path / "web-config.json"
+    config.write_text("configuration", encoding="utf-8")
+    override.write_text("{}", encoding="utf-8")
+    original_read_bytes = type(config).read_bytes
+
+    def read_bytes(path):
+        if path == override:
+            raise OSError("temporarily unavailable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(type(config), "read_bytes", read_bytes)
+
+    unavailable_digest = runner._config_digest(config)
+    monkeypatch.setattr(type(config), "read_bytes", original_read_bytes)
+
+    assert runner._config_digest(config) != unavailable_digest
+
+
 def test_config_watcher_refreshes_restart_snapshots(monkeypatch, caplog):
     initial = SimpleNamespace(
         STREAMERS=[Streamer("one", settings=StreamerSettings(favorite=False))],
