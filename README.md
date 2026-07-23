@@ -155,7 +155,6 @@ from TwitchChannelPointsMiner.classes.Settings import FollowersOrder
 
 MINER_CONFIG = {
     "username": "your-twitch-username",
-    # Omit "password" to enter it interactively when authentication is needed.
     "enable_analytics": False,
 }
 
@@ -189,8 +188,8 @@ categories, and analytics.
 #### MINER_CONFIG
 
 `MINER_CONFIG` contains account-wide and constructor settings. At minimum, set
-`username`. This is also where you configure the optional password, mining
-priority, analytics storage, SSL behavior, logging and notification integrations,
+`username`. This is also where you configure mining priority, analytics storage,
+SSL behavior, logging and notification integrations,
 the number of concurrent streams watched, and the default `StreamerSettings`
 inherited by channels without overrides. `streams_watched` accepts `1` or `2`
 and defaults to `2`. This option allows Twitch Turbo users to limit the miner to
@@ -550,7 +549,10 @@ At startup, the runner checks `CONFIG_VERSION`. Unversioned configurations are
 backed up as `config.py.v0.bak` and upgraded in place. The migration adds missing
 global `StreamerSettings` fields with their defaults and appends newly introduced
 priority values to the existing priority list without reordering it. A config
-created by a newer unsupported release is rejected rather than rewritten.
+created by a newer unsupported release is rejected rather than rewritten. The
+obsolete Twitch `MINER_CONFIG["password"]` field is removed from both the active
+configuration and any migration backup; Twitch authentication uses the TV
+activation flow instead.
 Generated Python is parsed before replacement. If an earlier migration left an
 invalid file and a versioned backup exists, startup rebuilds the config from that
 backup without overwriting it.
@@ -581,9 +583,16 @@ supported.
 Maintainers building or publishing images from source should follow the
 [Docker image build guide](BUILD.md#docker-images).
 
-The image reads `/usr/src/app/config/config.py`. Create a host `config` directory,
-copy [config.example.py](config.example.py) to `config/config.py`, customize it,
-and mount the directory. The container entrypoint starts the stable runner.
+The image reads `/usr/src/app/config/config.py`. Create and mount a host `config`
+directory. When that directory is empty on first launch, the container copies
+the bundled [config.example.py](config.example.py) to `config/config.py` and
+exits. Customize the new file, then start the container again. If you normally
+use restart policies like `restart: unless-stopped` or `--restart unless-stopped`,
+run the initial seed launch with restarts disabled (`restart: "no"` or
+`--restart no`) so the container stays stopped while you edit `config/config.py`.
+After editing, restore your preferred restart policy before launching the
+container again. The container entrypoint starts the stable runner on
+subsequent launches.
 
 Persist these directories on the host:
 
@@ -1309,17 +1318,14 @@ delete it instead.
 2. Right-click `config.py`, select **Open with**, and choose **Notepad**. Keep the
    `.py` filename; do not rename it to `.txt`.
 3. Find `your-twitch-username` and replace it with your Twitch login name.
-4. On the next line, either replace `write-your-secure-psw` with your Twitch
-   password or delete that entire password line to enter it in the miner window
-   only when authentication is needed.
-5. Find the `STREAMERS = [` section near the middle of the file. Replace the
+4. Find the `STREAMERS = [` section near the middle of the file. Replace the
    example streamer names with the channels you want to watch. Use login names
    from their Twitch URLs, without `https://twitch.tv/` or the `@` symbol.
-6. Review the other settings and comments in the file. In particular, remove or
+5. Review the other settings and comments in the file. In particular, remove or
    disable example notification services that you do not use. The
    [configuration guide](#configuration-file) explains every section and links
    to the complete examples.
-7. In Notepad, select **File > Save**, then close Notepad.
+6. In Notepad, select **File > Save**, then close Notepad.
 
 The generated file is the full configuration template. You can return to it
 later to enable followed channels, Drops categories, predictions,

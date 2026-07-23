@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ from TwitchChannelPointsMiner.config_migration import (
 
 DEFAULT_CONFIG_DIR = Path("/usr/src/app/config")
 DEFAULT_LEGACY_RUNNER = Path("/usr/src/app/run.py")
+DEFAULT_CONFIG_TEMPLATE = Path("/usr/src/app/config.example.py")
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +62,14 @@ def _load_config(path):
     missing = [name for name in required if not hasattr(module, name)]
     if missing:
         raise RuntimeError(f"Configuration is missing: {', '.join(missing)}")
+    # Schema migration removes conventional password entries from disk. Keep
+    # the runtime guard for dynamically assembled dictionaries that cannot be
+    # rewritten safely without executing user configuration first.
+    if module.MINER_CONFIG.pop("password", None) is not None:
+        logger.warning(
+            "Removed obsolete Twitch password from MINER_CONFIG; "
+            "authentication uses the TV activation flow."
+        )
     return module
 
 
@@ -220,6 +230,17 @@ def _run_legacy(runner, reason):
     )
 
 
+def _create_default_config(config_path, template=None):
+    """Seed a user-owned configuration from the bundled template."""
+    template = DEFAULT_CONFIG_TEMPLATE if template is None else template
+    shutil.copyfile(template, config_path)
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        # Some mounted filesystems do not support POSIX permissions.
+        pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -239,6 +260,20 @@ def main(argv=None):
         return _run_legacy(args.legacy_runner, "The config directory is not mounted.")
 
     if not config_path.is_file():
+        if not args.legacy_runner.is_file():
+            try:
+                _create_default_config(config_path)
+            except OSError as error:
+                raise RuntimeError(
+                    f"Unable to create default configuration {config_path}: {error}"
+                ) from error
+            print(f"Created default configuration at {config_path}.", flush=True)
+            print(
+                "Edit it with your Twitch account and mining settings, then "
+                "restart the container.",
+                flush=True,
+            )
+            return 0
         if os.environ.get("TCPM_DISABLE_AUTO_CONVERSION") == "1":
             return _run_legacy(args.legacy_runner, "Automatic conversion is disabled.")
         try:

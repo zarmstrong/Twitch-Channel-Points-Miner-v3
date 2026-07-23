@@ -63,7 +63,6 @@ logging.getLogger("chardet.charsetprober").setLevel(logging.ERROR)
 logging.getLogger("requests").setLevel(logging.ERROR)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logging.getLogger("irc.client").setLevel(logging.ERROR)
-logging.getLogger("seleniumwire").setLevel(logging.ERROR)
 logging.getLogger("websocket").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
@@ -267,12 +266,11 @@ class TwitchChannelPointsMiner:
     def __init__(
         self,
         username: str,
-        password: str = None,
         claim_drops_startup: bool = False,
         enable_analytics: bool = False,
         disable_ssl_cert_verification: bool = False,
         disable_at_in_nickname: bool = False,
-        # Settings for logging and selenium as you can see.
+        # Global logging settings.
         priority: list = [Priority.STREAK, Priority.DROPS, Priority.ORDER],
         # This settings will be global shared trought Settings class
         logger_settings: LoggerSettings = LoggerSettings(),
@@ -362,9 +360,7 @@ class TwitchChannelPointsMiner:
             gql_factory = gql
         else:
             raise ValueError("gql must be None, AttemptStrategy, or GQLFactory")
-        self.twitch = Twitch(
-            self.username, user_agent, password, gql_factory=gql_factory
-        )
+        self.twitch = Twitch(self.username, user_agent, gql_factory=gql_factory)
 
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]

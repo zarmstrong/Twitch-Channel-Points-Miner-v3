@@ -18,10 +18,6 @@ import requests
 from TwitchChannelPointsMiner.classes.Exceptions import WrongCookiesException
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS, GQLOperations
 
-# import webbrowser
-# import browser_cookie3
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -45,20 +41,6 @@ def _validate_cookies(cookies):
     return cookies
 
 
-"""def interceptor(request) -> str:
-    if (
-        request.method == 'POST'
-        and request.url == 'https://passport.twitch.tv/protected_login'
-    ):
-        import json
-        body = request.body.decode('utf-8')
-        data = json.loads(body)
-        data['client_id'] = CLIENT_ID
-        request.body = json.dumps(data).encode('utf-8')
-        del request.headers['Content-Length']
-        request.headers['Content-Length'] = str(len(request.body))"""
-
-
 class TwitchLogin(object):
     __slots__ = [
         "client_id",
@@ -68,14 +50,12 @@ class TwitchLogin(object):
         "session",
         "session",
         "username",
-        "password",
         "user_id",
         "email",
         "cookies",
-        "shared_cookies",
     ]
 
-    def __init__(self, client_id, device_id, username, user_agent, password=None):
+    def __init__(self, client_id, device_id, username, user_agent):
         self.client_id = client_id
         self.device_id = device_id
         self.token = None
@@ -89,12 +69,10 @@ class TwitchLogin(object):
             }
         )
         self.username = username
-        self.password = password
         self.user_id = None
         self.email = None
 
         self.cookies = []
-        self.shared_cookies = []
 
     def login_flow(self):
         logger.info("You'll have to login to Twitch!")
@@ -106,9 +84,6 @@ class TwitchLogin(object):
                 "user_blocks_read user_follows_edit user_read"
             ),
         }
-        # login-fix
-        use_backup_flow = False
-        # use_backup_flow = True
         while True:
             logger.info("Trying the TV login method..")
 
@@ -189,14 +164,6 @@ class TwitchLogin(object):
                             f"Unknown TwitchAPI error code: {err_code}"
                         )
 
-            if use_backup_flow:
-                break
-
-        if use_backup_flow:
-            # self.set_token(self.login_flow_backup(password))
-            self.set_token(self.login_flow_backup())
-            return self.check_login()
-
         return False
 
     def set_token(self, new_token):
@@ -233,91 +200,6 @@ class TwitchLogin(object):
         )
         return response
 
-    def login_flow_backup(self, password=None):
-        import browser_cookie3
-
-        """Backup OAuth Selenium login
-        from undetected_chromedriver import ChromeOptions
-        import seleniumwire.undetected_chromedriver.v2 as uc
-        from selenium.webdriver.common.by import By
-        from time import sleep
-
-        HEADLESS = False
-
-        options = uc.ChromeOptions()
-        if HEADLESS is True:
-            options.add_argument('--headless')
-        options.add_argument('--log-level=3')
-        options.add_argument('--disable-web-security')
-        options.add_argument('--allow-running-insecure-content')
-        options.add_argument('--lang=en')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-gpu')
-        # options.add_argument("--user-agent=\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\"")
-        # options.add_argument("--window-size=1920,1080")
-        # options.set_capability("detach", True)
-
-        logger.info(
-            'Now a browser window will open, it will login with your data.')
-        driver = uc.Chrome(
-            options=options, use_subprocess=True  # , executable_path=EXECUTABLE_PATH
-        )
-        driver.request_interceptor = interceptor
-        driver.get('https://www.twitch.tv/login')
-
-        driver.find_element(By.ID, 'login-username').send_keys(self.username)
-        driver.find_element(By.ID, 'password-input').send_keys(password)
-        sleep(0.3)
-        driver.execute_script(
-            'document.querySelector("#root > div > div.scrollable-area > div.simplebar-scroll-content > div > div > div > div.Layout-sc-nxg1ff-0.gZaqky > form > div > div:nth-child(3) > button > div > div").click()'
-        )
-
-        logger.info(
-            'Enter your verification code in the browser and wait for the Twitch website to load, then press Enter here.'
-        )
-        input()
-
-        logger.info("Extracting cookies...")
-        self.cookies = driver.get_cookies()
-        # print(self.cookies)
-        # driver.close()
-        driver.quit()
-        self.username = self.get_cookie_value("login")
-        # print(f"self.username: {self.username}")
-
-        if not self.username:
-            logger.error("Couldn't extract login, probably bad cookies.")
-            return False
-
-        return self.get_cookie_value("auth-token")"""
-
-        # logger.error("Backup login flow is not available. Use a VPN or wait a while to avoid the CAPTCHA.")
-        # return False
-
-        """Backup OAuth login flow in case manual captcha solving is required"""
-        browser = input(
-            "What browser do you use? Chrome (1), Firefox (2), Other (3): "
-        ).strip()
-        if browser not in ("1", "2"):
-            logger.info("Your browser is unsupported, sorry.")
-            return None
-
-        input(
-            "Please login inside your browser of choice (NOT incognito mode) and press Enter..."
-        )
-        logger.info("Loading cookies saved on your computer...")
-        twitch_domain = ".twitch.tv"
-        if browser == "1":  # chrome
-            cookie_jar = browser_cookie3.chrome(domain_name=twitch_domain)
-        else:
-            cookie_jar = browser_cookie3.firefox(domain_name=twitch_domain)
-        # logger.info(f"cookie_jar: {cookie_jar}")
-        cookies_dict = requests.utils.dict_from_cookiejar(cookie_jar)
-        # logger.info(f"cookies_dict: {cookies_dict}")
-        self.username = cookies_dict.get("login")
-        self.shared_cookies = cookies_dict
-        return cookies_dict.get("auth-token")
-
     def check_login(self):
         if self.login_check_result:
             return self.login_check_result
@@ -337,7 +219,6 @@ class TwitchLogin(object):
 
         # old way saves only 'auth-token' and 'persistent'
         self.cookies = []
-        # cookies_dict = self.shared_cookies
         # print(f"cookies_dict2pickle: {cookies_dict}")
         for cookie_name, value in cookies_dict.items():
             self.cookies.append({"name": cookie_name, "value": value})

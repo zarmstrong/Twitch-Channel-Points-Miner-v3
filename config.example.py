@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 import logging
 from colorama import Fore
@@ -27,9 +27,8 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, Streame
 
 MINER_CONFIG = {
     'username': "your-twitch-username",
-    'password': "write-your-secure-psw",
     'claim_drops_startup': False,
-    'priority': [                                  # Custom priority in this case for example:
+    'priority': [                               # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
         Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
         Priority.ORDER,                         # - When we have all of the drops claimed and no watch-streak available, use the order priority (POINTS_ASCENDING, POINTS_DESCENDING)
@@ -52,10 +51,12 @@ MINER_CONFIG = {
         auto_clear=True,                        # Create a file rotation handler with interval = 1D and backupCount = 7 if True (default)
         time_zone="",                           # Set a specific time zone for console and file loggers. Use tz database names. Example: "America/Denver"
         date_format="dd/mm/yy",                 # Date format in logs and analytics. Supported tokens: dd, mm, yy, yyyy
-        file_level=logging.DEBUG,               # Level of logs - If you think the log file it's too big, use logging.INFO
+        file_level=logging.INFO,                # Level of logs - If you think the log file it's too big, use logging.INFO
         emoji=True,                             # On Windows, we have a problem printing emoji. Set to false if you have a problem
         less=False,                             # If you think that the logs are too verbose, set this to True
         colored=True,                           # If you want to print colored text
+        daily_report=True,                      # Send a daily point/Drop activity summary through notifiers subscribed to DAILY_REPORT
+        daily_report_time="00:00",              # Local time in 24-hour HH:MM format
         color_palette=ColorPalette(             # You can also create a custom palette color (for the common message).
             STREAMER_online="GREEN",            # Don't worry about lower/upper case. The script will parse all the values.
             streamer_offline="red",             # Read more in README.md
@@ -89,8 +90,6 @@ MINER_CONFIG = {
             events=[Events.DAILY_REPORT, Events.CONFIGURATION],
             starttls=True,                                                              # Use use_ssl=True and starttls=False for implicit TLS (usually port 465)
         ),
-        daily_report=True,                                                              # Send a daily point/Drop activity summary through notifiers subscribed to DAILY_REPORT
-        daily_report_time="00:00",                                                     # Local time in 24-hour HH:MM format
         matrix=Matrix(
             username="twitch_miner",                                                   # Matrix username (without homeserver)
             password="...",                                                            # Matrix password
