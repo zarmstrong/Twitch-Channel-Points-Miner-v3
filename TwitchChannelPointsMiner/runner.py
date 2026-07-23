@@ -112,6 +112,10 @@ def _freeze(value):
     return repr(value)
 
 
+def _streamer_settings_snapshot(streamer):
+    return _freeze(getattr(streamer, "settings", None))
+
+
 def _watch_config(path, miner, initial_config, interval):
     from TwitchChannelPointsMiner.classes.Settings import Events
 
@@ -120,7 +124,7 @@ def _watch_config(path, miner, initial_config, interval):
         _streamer_username(streamer) for streamer in initial_config.STREAMERS
     }
     streamer_snapshot = {
-        _streamer_username(streamer): _freeze(streamer)
+        _streamer_username(streamer): _streamer_settings_snapshot(streamer)
         for streamer in initial_config.STREAMERS
     }
     live_categories = initial_config.MINE_CONFIG.setdefault("categories", [])
@@ -162,7 +166,7 @@ def _watch_config(path, miner, initial_config, interval):
                 miner.remove_streamers(removals)
             known_streamers = set(updated_streamers)
             updated_streamer_snapshot = {
-                username: _freeze(streamer)
+                username: _streamer_settings_snapshot(streamer)
                 for username, streamer in updated_streamers.items()
             }
             changed_streamer_settings = any(
@@ -197,6 +201,8 @@ def _watch_config(path, miner, initial_config, interval):
                     "a restart.",
                     extra={"event": Events.CONFIGURATION},
                 )
+            streamer_snapshot = updated_streamer_snapshot
+            restart_snapshot = updated_restart_snapshot
             digest = current_digest
             logger.info(
                 "Configuration reloaded from %s", path, extra={"emoji": ":repeat:"}

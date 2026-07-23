@@ -1197,6 +1197,7 @@ class TwitchChannelPointsMiner:
                     self.twitch.load_channel_points_context(streamer)
                     self.twitch.check_streamer_online(streamer)
                     self.streamers.append(streamer)
+                    self.original_streamers.append(streamer.channel_points)
                     existing_usernames.add(username)
                     added += 1
 
@@ -1321,6 +1322,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.load_channel_points_context(streamer)
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
+                self.original_streamers.append(streamer.channel_points)
                 existing_usernames.add(username)
                 added += 1
 

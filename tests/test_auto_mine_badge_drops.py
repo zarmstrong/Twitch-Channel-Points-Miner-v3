@@ -1,3 +1,4 @@
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -50,6 +51,9 @@ class FakeTwitch:
             return ["allowedchannel"]
         return ["allchannel", "blacklisted"]
 
+    def filter_categories_with_active_drops(self, categories, **_kwargs):
+        return categories
+
     def get_channel_id(self, username):
         return f"id-{username}"
 
@@ -78,6 +82,7 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
     miner.username = "testuser"
     miner.twitch = FakeTwitch()
     miner.streamers = []
+    miner.original_streamers = []
     miner.ws_pool = FakeWebSocketsPool()
     miner.drop_badge_catalog = FakeCatalog()
     miner.badge_drop_streamer_limit = 2
@@ -95,6 +100,7 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
     ]
     assert all(streamer.settings.claim_drops is True for streamer in miner.streamers)
     assert all(streamer.from_badge_campaign is True for streamer in miner.streamers)
+    assert miner.original_streamers == [0, 0]
     assert miner.twitch.selectors == [
         (
             "all-channel-game",
@@ -121,3 +127,36 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
             },
         ),
     ]
+
+
+def test_category_discovery_keeps_point_baselines_aligned():
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.username = "testuser"
+    miner.twitch = FakeTwitch()
+    miner.streamers = []
+    miner.original_streamers = []
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+    )
+
+    assert [streamer.username for streamer in miner.streamers] == [
+        "allchannel",
+        "blacklisted",
+    ]
+    assert miner.original_streamers == [0, 0]

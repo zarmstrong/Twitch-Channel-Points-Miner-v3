@@ -293,10 +293,14 @@ def load_web_overrides(config_path):
     if not path.is_file():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as error:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        raise
+    try:
+        data = json.loads(source)
+    except json.JSONDecodeError as error:
         raise ConfigEditError(
-            f"Unable to read {WEB_CONFIG_FILENAME}: {error}"
+            f"{WEB_CONFIG_FILENAME} contains invalid JSON."
         ) from error
     if not isinstance(data, dict):
         raise ConfigEditError(f"{WEB_CONFIG_FILENAME} must contain a JSON object.")
@@ -514,6 +518,7 @@ def _update_managed_web_config(config_path, payload):
         values = payload.get("values") or {}
         if schema is None or not isinstance(values, dict):
             raise ConfigEditError("Invalid notification provider.")
+        values = dict(values)
         allowed = {"enabled", *schema["fields"], *schema["secrets"]}
         if set(values) - allowed or (
             "enabled" in values and not isinstance(values["enabled"], bool)
@@ -526,6 +531,9 @@ def _update_managed_web_config(config_path, payload):
             ):
                 raise ConfigEditError(f"{list_name} must be a list of strings.")
         for number_name in ("chat_id", "port", "priority"):
+            if values.get(number_name) == "":
+                values.pop(number_name)
+                continue
             if number_name in values and (
                 not isinstance(values[number_name], int)
                 or isinstance(values[number_name], bool)
@@ -534,7 +542,14 @@ def _update_managed_web_config(config_path, payload):
         for bool_name in ("disable_notification", "use_ssl", "starttls"):
             if bool_name in values and not isinstance(values[bool_name], bool):
                 raise ConfigEditError(f"{bool_name} must be true or false.")
-        if values.get("method", "POST").upper() not in {"GET", "POST"}:
+        list_fields = {"events", "recipients"}
+        number_fields = {"chat_id", "port", "priority"}
+        bool_fields = {"disable_notification", "use_ssl", "starttls"}
+        text_fields = set(schema["fields"]) - list_fields - number_fields - bool_fields
+        for text_name in text_fields | set(schema["secrets"]):
+            if text_name in values and not isinstance(values[text_name], str):
+                raise ConfigEditError(f"{text_name} must be a string.")
+        if "method" in values and values["method"].upper() not in {"GET", "POST"}:
             raise ConfigEditError("Webhook method must be GET or POST.")
         if values.get("use_ssl") is True and values.get("starttls") is True:
             raise ConfigEditError("Email SSL and STARTTLS cannot both be enabled.")
@@ -602,13 +617,26 @@ def apply_web_overrides(config, config_path):
             for item in config.STREAMERS
         }
         configured = []
-        for record in overrides["streamers"]:
-            username = record["username"].lower().strip()
+        records = overrides["streamers"]
+        if not isinstance(records, list):
+            raise ConfigEditError("Managed streamers must be a list.")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ConfigEditError("Each managed streamer must be an object.")
+            username_value = record.get("username")
+            settings_value = record.get("settings", {})
+            if (
+                not isinstance(username_value, str)
+                or STREAMER_RE.fullmatch(username_value.strip()) is None
+            ):
+                raise ConfigEditError("Each managed streamer needs a valid username.")
+            _validate_streamer_settings(settings_value)
+            username = username_value.lower().strip()
             streamer = existing.get(username)
             if not isinstance(streamer, Streamer):
                 streamer = Streamer(username)
             settings = streamer.settings or StreamerSettings()
-            for name, value in record.get("settings", {}).items():
+            for name, value in settings_value.items():
                 if name == "chat":
                     value = ChatPresence[value]
                 setattr(settings, name, value)

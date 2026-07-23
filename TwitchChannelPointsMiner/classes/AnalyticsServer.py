@@ -574,6 +574,19 @@ class AnalyticsServer(Thread):
         @self.app.before_request
         def require_authentication():
             if self.password is None:
+                if request.method == "POST" and request.path.startswith("/config"):
+                    return Response(
+                        json.dumps(
+                            {
+                                "error": (
+                                    "Configure an analytics username and password "
+                                    "before modifying configuration."
+                                )
+                            }
+                        ),
+                        status=403,
+                        mimetype="application/json",
+                    )
                 return None
             authorization = request.authorization
             valid_username = authorization is not None and secrets.compare_digest(

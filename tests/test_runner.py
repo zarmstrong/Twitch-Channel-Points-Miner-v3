@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _capture_drop_progress_baseline,
@@ -7,6 +8,7 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 
 from TwitchChannelPointsMiner import runner
 from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
 from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
 from TwitchChannelPointsMiner.runner import _load_config
 
@@ -35,6 +37,60 @@ def test_main_creates_default_config_for_fresh_install(tmp_path, monkeypatch, ca
     output = capsys.readouterr().out
     assert "Created default configuration" in output
     assert "restart the container" in output
+
+
+def test_streamer_settings_snapshot_ignores_volatile_runtime_state():
+    first = Streamer("one", settings=StreamerSettings(favorite=True))
+    second = Streamer("one", settings=StreamerSettings(favorite=True))
+
+    assert runner._streamer_settings_snapshot(
+        first
+    ) == runner._streamer_settings_snapshot(second)
+
+
+def test_config_watcher_refreshes_restart_snapshots(monkeypatch, caplog):
+    initial = SimpleNamespace(
+        STREAMERS=[Streamer("one", settings=StreamerSettings(favorite=False))],
+        MINER_CONFIG={"setting": "before"},
+        ANALYTICS_CONFIG=None,
+        MINE_CONFIG={"categories": []},
+    )
+    updated = SimpleNamespace(
+        STREAMERS=[Streamer("one", settings=StreamerSettings(favorite=False))],
+        MINER_CONFIG={"setting": "after"},
+        ANALYTICS_CONFIG=None,
+        MINE_CONFIG={"categories": []},
+    )
+    miner = SimpleNamespace(
+        running=True,
+        ws_pool=object(),
+        add_streamers=lambda _items: None,
+        remove_streamers=lambda _items: None,
+        refresh_categories=lambda _config: None,
+    )
+    digests = iter((b"initial", b"first-update", b"second-update"))
+    loads = []
+
+    monkeypatch.setattr(runner, "_config_digest", lambda _path: next(digests))
+    monkeypatch.setattr(runner.time, "sleep", lambda _interval: None)
+
+    def load(_path):
+        loads.append(True)
+        if len(loads) == 2:
+            miner.running = False
+        return updated
+
+    monkeypatch.setattr(runner, "_load_config", load)
+
+    with caplog.at_level("WARNING", logger=runner.logger.name):
+        runner._watch_config("config.py", miner, initial, 1)
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "require a restart" in record.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 def test_main_still_converts_existing_legacy_runner(tmp_path, monkeypatch):

@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
+    AnalyticsServer,
     MAX_LOG_TAIL_BYTES,
     bounded_log_start,
     filter_datas,
@@ -16,6 +17,41 @@ def test_bounded_log_start_caps_legacy_request_without_tail_bytes():
     file_size = MAX_LOG_TAIL_BYTES * 10
 
     assert bounded_log_start(file_size, 0) == file_size - MAX_LOG_TAIL_BYTES
+
+
+def test_config_writes_require_analytics_authentication():
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post(
+        "/config", json={"action": "add", "kind": "streamers", "value": "one"}
+    )
+    notification_response = server.app.test_client().post(
+        "/config/notifications/discord/test"
+    )
+
+    assert response.status_code == 403
+    assert notification_response.status_code == 403
+    assert "analytics username and password" in response.get_json()["error"]
+
+
+def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    monkeypatch.setitem(
+        __import__(
+            "TwitchChannelPointsMiner.classes.AnalyticsServer", fromlist=["web_config"]
+        ).web_config.__globals__,
+        "update_managed_web_config",
+        lambda _path, _payload: {"streamers": []},
+    )
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().post(
+        "/config",
+        json={"action": "add", "kind": "streamers", "value": "one"},
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 200
 
 
 def test_bounded_log_start_honors_smaller_initial_tail():

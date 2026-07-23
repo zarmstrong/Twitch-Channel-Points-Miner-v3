@@ -18,6 +18,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
     apply_web_overrides,
+    load_web_overrides,
     read_managed_web_config,
     update_managed_web_config,
 )
@@ -433,3 +434,94 @@ def test_runner_loads_and_digests_dashboard_overrides(tmp_path):
 
     assert [streamer.username for streamer in loaded.STREAMERS] == ["one"]
     assert _config_digest(config) != original_digest
+
+
+def test_web_override_read_errors_do_not_expose_paths(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    override = tmp_path / "web-config.json"
+    override.write_text("{}", encoding="utf-8")
+    original_read_text = type(override).read_text
+
+    def fail_override_read(path, *args, **kwargs):
+        if path == override:
+            raise OSError(f"permission denied: {override}")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(override), "read_text", fail_override_read)
+
+    with pytest.raises(OSError) as raised:
+        load_web_overrides(config)
+
+    assert str(override) in str(raised.value)
+
+
+def test_invalid_web_override_json_returns_sanitized_error(tmp_path):
+    config = tmp_path / "config.py"
+    (tmp_path / "web-config.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(
+        ConfigEditError, match=r"web-config\.json contains invalid JSON"
+    ) as raised:
+        load_web_overrides(config)
+
+    assert str(tmp_path) not in str(raised.value)
+
+
+def test_empty_notification_number_is_treated_as_unset(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "email",
+            "values": {"enabled": False, "port": ""},
+        },
+    )
+
+    saved = json.loads((tmp_path / "web-config.json").read_text(encoding="utf-8"))
+    assert "port" not in saved["notifications"]["email"].get("fields", {})
+
+
+@pytest.mark.parametrize(
+    ("provider", "values", "message"),
+    [
+        ("webhook", {"method": None}, "method must be a string"),
+        ("matrix", {"room_id": None}, "room_id must be a string"),
+        ("discord", {"webhook_api": 123}, "webhook_api must be a string"),
+    ],
+)
+def test_notification_text_fields_require_strings(
+    tmp_path, provider, values, message
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match=message):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": provider,
+                "values": values,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "streamers",
+    [None, [None], [{}], [{"username": None}], [{"username": "bad name"}]],
+)
+def test_malformed_managed_streamers_fail_cleanly(tmp_path, streamers):
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"streamers": streamers}), encoding="utf-8"
+    )
+    module = SimpleNamespace(
+        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": None}
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)managed streamer"):
+        apply_web_overrides(module, config)
