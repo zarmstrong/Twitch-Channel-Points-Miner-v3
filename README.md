@@ -10,8 +10,8 @@
 <a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Version" src="https://img.shields.io/docker/v/zacharmstrong/twitch-channel-points-miner?style=flat&color=white&logo=docker&logoColor=white&label=release"></a>
 <a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Stars" src="https://img.shields.io/docker/stars/zacharmstrong/twitch-channel-points-miner?style=flat&color=limegreen&logo=docker&logoColor=white&label=stars"></a>
 <a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/zacharmstrong/twitch-channel-points-miner?style=flat&color=blue&logo=docker&logoColor=white&label=pulls"></a>
-<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size AMD64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=amd64&label=AMD64 image size&style=flat&color=purple&logo=amd&logoColor=white"></a>
-<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size ARM64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=arm64&label=ARM64 image size&style=flat&color=black&logo=arm&logoColor=white"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size AMD64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=amd64&amp;label=AMD64%20image%20size&amp;style=flat&amp;color=purple&amp;logo=amd&amp;logoColor=white"></a>
+<a href="https://hub.docker.com/r/zacharmstrong/twitch-channel-points-miner"><img alt="Docker Images Size ARM64" src="https://img.shields.io/docker/image-size/zacharmstrong/twitch-channel-points-miner/latest?arch=arm64&amp;label=ARM64%20image%20size&amp;style=flat&amp;color=black&amp;logo=arm&amp;logoColor=white"></a>
 </p>
 
 
