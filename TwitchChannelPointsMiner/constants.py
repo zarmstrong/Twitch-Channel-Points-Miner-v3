@@ -30,11 +30,8 @@ USER_AGENTS = {
     },
 }
 
-BRANCH = "master"
-GITHUB_url = (
-    "https://raw.githubusercontent.com/rdavydov/Twitch-Channel-Points-Miner-v2/"
-    + BRANCH
-)
+GITHUB_REPOSITORY_URL = "https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"
+GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/latest"
 
 
 class GQLOperations:

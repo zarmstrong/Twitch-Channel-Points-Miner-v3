@@ -11,7 +11,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-CONFIG_VERSION = 6
+CONFIG_VERSION = 7
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -81,6 +81,8 @@ MINER_CONFIG_DEFAULTS = (
     ("enable_analytics", "False"),
     ("disable_ssl_cert_verification", "False"),
     ("disable_at_in_nickname", "False"),
+    ("update_check", "True"),
+    ("update_check_interval_hours", "24"),
     ("streams_watched", "2"),
 )
 MINE_CONFIG_DEFAULTS = (
