@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.9.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.8.1...3.9.0) (2026-07-24)
+
+
+### Features
+
+* close linked issues after release ([#55](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/55)) ([6681260](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/668126060a8b6038ba1e293dcab1e04a604bb94e)), closes [#51](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/51)
+
 ## [3.8.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.8.0...3.8.1) (2026-07-24)
 
 
