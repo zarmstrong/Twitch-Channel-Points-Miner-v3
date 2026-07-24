@@ -7,7 +7,7 @@ from TwitchChannelPointsMiner import __version__, utils
 
 @pytest.mark.parametrize(
     ("value", "total", "expected"),
-    [(0, 10, 0), (1, 4, 25), (2, 3, 66), (10, 10, 100)],
+    [(0, 10, 0), (1, 0, 0), (1, 4, 25), (2, 3, 66), (10, 10, 100)],
 )
 def test_percentage(value, total, expected):
     assert utils.percentage(value, total) == expected
