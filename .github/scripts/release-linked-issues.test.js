@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  closeReleasedIssues,
   commitsBetween,
   isReleasePleasePullRequest,
   markIssuesAwaitingRelease,
@@ -123,4 +124,77 @@ test('previous release selection uses publication time and fails safely', async 
   };
   assert.equal((await previousPublishedRelease(github, 'o', 'r', '2')).tag_name, '1');
   assert.equal(await previousPublishedRelease(github, 'o', 'r', 'missing'), null);
+});
+
+test('release orchestration comments, closes, and tolerates an already removed label', async () => {
+  const calls = [];
+  const listReleases = () => {};
+  const listPullRequestsAssociatedWithCommit = () => {};
+  const listComments = () => {};
+  const github = {
+    graphql: async () => ({ repository: { pullRequest: {
+      closingIssuesReferences: {
+        nodes: [{
+          number: 42,
+          state: 'OPEN',
+          labels: { nodes: [{ name: 'awaiting-release' }] },
+        }],
+        pageInfo: { hasNextPage: false },
+      },
+    } } }),
+    paginate: async (method) => {
+      if (method === listReleases) {
+        return [
+          { tag_name: '2', draft: false, published_at: '2026-02-01T00:00:00Z' },
+          { tag_name: '1', draft: false, published_at: '2026-01-01T00:00:00Z' },
+        ];
+      }
+      if (method === listPullRequestsAssociatedWithCommit) {
+        return [{
+          number: 9,
+          merged_at: '2026-01-15T00:00:00Z',
+          merge_commit_sha: 'abc',
+          labels: [],
+        }];
+      }
+      if (method === listComments) return [];
+      throw new Error('Unexpected paginated method');
+    },
+    rest: {
+      repos: {
+        listReleases,
+        listPullRequestsAssociatedWithCommit,
+        compareCommitsWithBasehead: async () => ({ data: {
+          status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
+        } }),
+      },
+      issues: {
+        listComments,
+        createComment: async (input) => calls.push(['comment', input]),
+        update: async (input) => calls.push(['update', input]),
+        removeLabel: async (input) => {
+          calls.push(['remove', input]);
+          const error = new Error('Label does not exist');
+          error.status = 404;
+          throw error;
+        },
+      },
+    },
+  };
+  const info = [];
+  await closeReleasedIssues({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' } },
+    core: { info: (message) => info.push(message) },
+    tag: '2',
+  });
+
+  assert.equal(calls[0][0], 'comment');
+  assert.equal(calls[0][1].body, 'Released in 2.');
+  assert.deepEqual(
+    { state: calls[1][1].state, reason: calls[1][1].state_reason },
+    { state: 'closed', reason: 'completed' },
+  );
+  assert.equal(calls[2][0], 'remove');
+  assert.match(info.at(-1), /no longer has awaiting-release/);
 });

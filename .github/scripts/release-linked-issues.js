@@ -167,9 +167,14 @@ async function closeReleasedIssues({ github, context, core, tag }) {
         owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',
       });
     }
-    await github.rest.issues.removeLabel({
-      owner, repo, issue_number: issue.number, name: AWAITING_LABEL,
-    });
+    try {
+      await github.rest.issues.removeLabel({
+        owner, repo, issue_number: issue.number, name: AWAITING_LABEL,
+      });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      core.info(`Issue #${issue.number} no longer has ${AWAITING_LABEL}`);
+    }
   }
 }
 
