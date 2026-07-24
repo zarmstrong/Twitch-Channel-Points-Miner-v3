@@ -1,5 +1,32 @@
 # Changelog
 
+## [3.8.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.5...3.8.0) (2026-07-24)
+
+
+### Features
+
+* **config:** add masterslate as the default support streamer ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* **notifications:** add event selectors and test-notification controls ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* notify when a newer release is available ([#43](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/43)) ([9cc00b1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9cc00b12cffb46f5d2d203636f5de0c917b3d26c))
+* **web:** add config editor ([#40](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/40)) ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* **web:** configure release update checks ([9cc00b1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9cc00b12cffb46f5d2d203636f5de0c917b3d26c))
+* **web:** show dismissible update banner and version footer ([9cc00b1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9cc00b12cffb46f5d2d203636f5de0c917b3d26c))
+
+
+### Bug Fixes
+
+* **config:** migrate directly bind-mounted files ([#48](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/48)) ([f41bb47](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f41bb47f5d6c2eb4818d9d9039eeb996abebf74e))
+* **config:** validate managed overrides and preserve notification settings ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* **docs:** replace broken last commit badge ([#46](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/46)) ([78d3e43](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/78d3e433a1270e7ae51726eaa829daee39302f0b))
+* **miner:** support live streamer removal and PubSub cleanup ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* **notifications:** report detailed delivery failures and improve form layout ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* **tests:** pin running version in update checks ([#49](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/49)) ([a08cc83](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a08cc83e1b020817e25be42a2a79d5ccad323f4b))
+* **update:** handle startup-only intervals and send GitHub API headers ([9cc00b1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9cc00b12cffb46f5d2d203636f5de0c917b3d26c))
+* **update:** validate release metadata and use the running package version ([9cc00b1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9cc00b12cffb46f5d2d203636f5de0c917b3d26c))
+* **web:** improve dark-mode contrast and auto-dismiss status messages ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+* **web:** recognize math.inf as a startup-only interval ([9cc00b1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9cc00b12cffb46f5d2d203636f5de0c917b3d26c))
+* **websocket:** synchronize topic updates and prevent duplicate subscriptions ([79ec46c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79ec46c86118126c0ccaa5fa5fd69cf82b4c3845))
+
 ## [3.7.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.4...3.7.5) (2026-07-23)
 
 
