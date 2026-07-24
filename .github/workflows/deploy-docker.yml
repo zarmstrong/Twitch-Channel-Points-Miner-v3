@@ -7,6 +7,15 @@ on:
         description: Git tag or commit to publish
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git tag or commit to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 env:
   DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'zacharmstrong' }}
