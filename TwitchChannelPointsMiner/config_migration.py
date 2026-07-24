@@ -4,6 +4,7 @@
 
 import ast
 import builtins
+import errno
 import hashlib
 import os
 import shutil
@@ -726,7 +727,23 @@ def migrate_config(config_path):
             descriptor = None
             handle.write(migrated)
         os.chmod(temporary, mode)
-        os.replace(temporary, path)
+        try:
+            os.replace(temporary, path)
+        except OSError as error:
+            # Docker and Podman reject replacing a directly bind-mounted file
+            # with EBUSY. The file itself can still be writable, so fall back
+            # to updating that mount in place. Directory mounts continue to
+            # use the atomic replacement above.
+            if error.errno != errno.EBUSY:
+                raise
+            with path.open("r+", encoding="utf-8") as handle:
+                handle.seek(0)
+                handle.write(migrated)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.unlink()
+            temporary = None
     except Exception:
         if descriptor is not None:
             os.close(descriptor)
