@@ -114,6 +114,7 @@ def _miner_for_update_check(interval_hours=3):
 
 def test_available_update_forces_alert_and_throttles_to_daily(monkeypatch, caplog):
     miner = _miner_for_update_check()
+    monkeypatch.setattr(miner_module, "__version__", "3.7.3")
     monkeypatch.setattr(miner_module, "check_versions", lambda: ("3.7.3", "3.8.0"))
     monkeypatch.setattr(miner_module, "_is_running_in_container", lambda: False)
 
@@ -132,6 +133,7 @@ def test_available_update_forces_alert_and_throttles_to_daily(monkeypatch, caplo
 
 def test_available_update_gives_docker_latest_image_instructions(monkeypatch, caplog):
     miner = _miner_for_update_check()
+    monkeypatch.setattr(miner_module, "__version__", "3.7.3")
     monkeypatch.setattr(miner_module, "check_versions", lambda: ("3.7.3", "3.8.0"))
     monkeypatch.setattr(miner_module, "_is_running_in_container", lambda: True)
 
@@ -146,6 +148,7 @@ def test_available_update_gives_docker_latest_image_instructions(monkeypatch, ca
 
 def test_no_update_keeps_configured_interval(monkeypatch):
     miner = _miner_for_update_check()
+    monkeypatch.setattr(miner_module, "__version__", "3.7.3")
     monkeypatch.setattr(miner_module, "check_versions", lambda: ("3.7.3", "3.7.3"))
 
     assert miner._TwitchChannelPointsMiner__check_for_update(now=100) is False
