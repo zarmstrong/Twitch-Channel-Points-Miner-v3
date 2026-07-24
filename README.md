@@ -1083,14 +1083,15 @@ Gotify(
 
 ##### Email / SMTP
 
-Email uses Python's built-in SMTP support and accepts one recipient or a list.
+Email uses Python's built-in SMTP support and accepts one recipient or a list or
+tuple of recipients.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `host` | str | Required | SMTP server hostname. |
 | `port` | int | Required | SMTP server port. |
 | `sender` | str | Required | Address placed in the `From` header. |
-| `recipients` | str or list | Required | One recipient or a list/tuple of recipients. |
+| `recipients` | str, list, or tuple | Required | One recipient or a list/tuple of recipients. |
 | `events` | list | Required | Events to send. |
 | `username` | str or None | `None` | SMTP login username. |
 | `password` | str or None | `None` | SMTP login password. |
