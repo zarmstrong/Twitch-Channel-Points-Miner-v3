@@ -85,6 +85,12 @@ Labels can help you find an issue you'd like to help with.
 ## Opening a pull request
 You can use the GitHub user interface :pencil2: for minor changes, like fixing a typo or updating a readme. You can also fork the repo and then clone it locally to view changes and run your tests on your machine.
 
+Link issues from an ordinary pull request description with `Fixes #N`,
+`Closes #N`, or `Resolves #N`. Repository settings leave linked issues open
+when the pull request merges. Automation then adds the `awaiting-release` label
+and closes the issue only after a release containing that pull request is
+published.
+
 Before submitting code changes, run the checks described in the
 [testing guide](tests/README.md). Add or update tests whenever practical:
 bug fixes should include a regression test, and new behavior should include

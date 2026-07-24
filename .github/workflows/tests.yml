@@ -10,6 +10,21 @@ permissions:
   contents: read
 
 jobs:
+  release_issue_automation:
+    name: Release issue automation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Run release issue automation tests
+        run: node .github/scripts/release-linked-issues.test.js
+
   pytest:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest

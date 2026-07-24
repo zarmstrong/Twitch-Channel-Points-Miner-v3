@@ -2,7 +2,11 @@
 
 Please include a summary of the change and which issue is fixed. Please also include relevant motivation and context. List any dependencies that are required for this change.
 
-Fixes # (issue)
+Use `Fixes #N`, `Closes #N`, or `Resolves #N` to link an issue. GitHub will
+leave it open when this PR merges; automation will label it `awaiting-release`
+and close it only after a release containing this PR is published.
+
+Fixes #51
 
 ## Type of change
 
