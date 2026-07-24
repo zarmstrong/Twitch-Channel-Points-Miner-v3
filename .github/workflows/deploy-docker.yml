@@ -4,9 +4,18 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: Git tag or commit to publish
+        description: Bare SemVer release tag to publish (for example, 3.9.0)
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Bare SemVer release tag to publish (for example, 3.9.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 env:
   DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'zacharmstrong' }}
@@ -16,6 +25,17 @@ jobs:
     name: Deploy Docker Hub
     runs-on: ubuntu-latest
     steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${RELEASE_TAG}" =~ ${semver} ]]; then
+            echo "::error::ref must be a bare SemVer release tag such as 3.9.0"
+            exit 1
+          fi
+
       - name: Checkout source
         uses: actions/checkout@v6
         with:
