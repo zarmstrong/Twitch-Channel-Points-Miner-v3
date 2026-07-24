@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -15,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import DropBadgeCatalog
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
@@ -34,6 +36,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+from TwitchChannelPointsMiner.constants import GITHUB_REPOSITORY_URL
 from TwitchChannelPointsMiner.data_migration import (
     DataMigrationError,
     migrate_analytics_directory,
@@ -116,6 +119,22 @@ def _normalize_badge_drop_streamer_limit(limit):
         "badge_drop_streamer_limit must be either 1 or 2; using the default value 1"
     )
     return 1
+
+
+def _normalize_update_check_interval(interval):
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+        raise TypeError("update_check_interval_hours must be a whole number of hours")
+    if math.isinf(interval) and interval > 0:
+        return math.inf
+    if not math.isfinite(interval) or interval < 3 or int(interval) != interval:
+        raise ValueError(
+            "update_check_interval_hours must be a whole number from 3 to infinity"
+        )
+    return int(interval)
+
+
+def _is_running_in_container():
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 
 def _unique_streamer_names(streamer_names):
@@ -261,6 +280,9 @@ class TwitchChannelPointsMiner:
         "daily_report_streamers",
         "daily_report_drop_progress",
         "daily_report_state_path",
+        "update_check_enabled",
+        "update_check_interval_seconds",
+        "next_update_check_at",
     ]
 
     def __init__(
@@ -285,6 +307,8 @@ class TwitchChannelPointsMiner:
             StreamerSource.CATEGORIES,
             StreamerSource.BADGES,
         ),
+        update_check: bool = True,
+        update_check_interval_hours: int | float = 24,
     ):
 
         # Fixes TypeError: 'NoneType' object is not subscriptable
@@ -310,6 +334,16 @@ class TwitchChannelPointsMiner:
         self.streamer_source_priority = _normalize_streamer_source_priority(
             streamer_source_priority
         )
+        if not isinstance(update_check, bool):
+            raise TypeError("update_check must be a boolean")
+        update_check_interval_hours = _normalize_update_check_interval(
+            update_check_interval_hours
+        )
+        self.update_check_enabled = update_check
+        self.update_check_interval_seconds = update_check_interval_hours * 60 * 60
+        self.next_update_check_at = None
+        Settings.latest_release_version = None
+        Settings.update_instructions = None
 
         import socket
 
@@ -436,19 +470,9 @@ class TwitchChannelPointsMiner:
                 },
             )
 
-        # Check for the latest version of the script
-        current_version, github_version = check_versions()
-
-        logger.info(f"Twitch Channel Points Miner - {current_version}")
-        logger.info("https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2")
-
-        if github_version == "0.0.0":
-            logger.error(
-                "Unable to detect if you have the latest version of this script"
-            )
-        elif is_newer_version(github_version, current_version):
-            logger.info(f"You are running version {current_version} of this script")
-            logger.info(f"The latest version on GitHub is {github_version}")
+        logger.info(f"Twitch Channel Points Miner - {__version__}")
+        logger.info(GITHUB_REPOSITORY_URL)
+        self.__check_for_update()
 
         for sign in [signal.SIGINT, signal.SIGSEGV, signal.SIGTERM]:
             signal.signal(sign, self.end)
@@ -905,6 +929,7 @@ class TwitchChannelPointsMiner:
                 if self.twitch.restart_requested.wait(random.uniform(20, 60)):
                     break
                 self.__send_daily_report_if_due()
+                self.__check_for_update()
                 # Do an external control for WebSocket. Check if the thread is running
                 # Check if is not None because maybe we have already created a new connection on array+1 and now index is None
                 for index in range(0, len(self.ws_pool.ws)):
@@ -965,6 +990,50 @@ class TwitchChannelPointsMiner:
                             )
                             + 5,
                         )
+
+    def __check_for_update(self, now=None):
+        if not self.update_check_enabled:
+            return False
+        now = time.time() if now is None else now
+        if self.next_update_check_at is not None and now < self.next_update_check_at:
+            return False
+
+        _, github_version = check_versions()
+        current_version = __version__
+        update_available = is_newer_version(github_version, current_version)
+        interval = self.update_check_interval_seconds
+        if update_available:
+            interval = max(interval, 24 * 60 * 60)
+            if _is_running_in_container():
+                update_instructions = (
+                    "Docker deployment detected. On the Docker host, pull "
+                    "zacharmstrong/twitch-channel-points-miner:latest and recreate "
+                    "the container. Docker Compose: docker compose pull && "
+                    "docker compose up -d"
+                )
+            else:
+                update_instructions = (
+                    f"Download it from {GITHUB_REPOSITORY_URL}/releases/latest"
+                )
+            Settings.latest_release_version = github_version
+            Settings.update_instructions = update_instructions
+            logger.info(
+                f"Update available: Twitch Channel Points Miner {github_version} "
+                f"(running {current_version}). {update_instructions}",
+                extra={
+                    "emoji": ":arrow_up:",
+                    "event": Events.UPDATE_AVAILABLE,
+                    "force_alert": True,
+                },
+            )
+        elif github_version != "0.0.0":
+            Settings.latest_release_version = None
+            Settings.update_instructions = None
+        elif github_version == "0.0.0":
+            logger.warning("Unable to check GitHub for a newer release")
+
+        self.next_update_check_at = now + interval
+        return update_available
 
     def __send_daily_report_if_due(self, now=None):
         if Settings.logger.daily_report is not True or not self.streamers:

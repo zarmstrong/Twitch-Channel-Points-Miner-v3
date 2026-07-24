@@ -129,6 +129,24 @@ a {
     opacity: 0.75;
 }
 
+.analytics-footer > span {
+    display: inline-block;
+    margin: 0 4px;
+}
+
+.footer-update-available a {
+    font-weight: 600;
+}
+
+.update-banner {
+    margin: 0 0 16px;
+    text-align: left;
+}
+
+.update-banner > span {
+    margin: 0 6px;
+}
+
 .top-controls {
     display: flex;
     justify-content: flex-end;

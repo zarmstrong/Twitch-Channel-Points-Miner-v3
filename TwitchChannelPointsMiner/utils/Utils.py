@@ -9,7 +9,7 @@ from random import randrange
 import requests
 from millify import millify as package_millify
 
-from TwitchChannelPointsMiner.constants import USER_AGENTS, GITHUB_url
+from TwitchChannelPointsMiner.constants import GITHUB_LATEST_RELEASE_API, USER_AGENTS
 
 
 def millify(input, precision=2):
@@ -200,19 +200,19 @@ def check_versions():
     except Exception:
         current_version = "0.0.0"
     try:
-        r = requests.get(
-            "/".join(
-                [
-                    s.strip("/")
-                    for s in [GITHUB_url, "TwitchChannelPointsMiner", "__init__.py"]
-                ]
-            ),
+        response = requests.get(
+            GITHUB_LATEST_RELEASE_API,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"Twitch-Channel-Points-Miner/{current_version}",
+            },
             timeout=(5, 15),
         )
-        github_version = init2dict(r.text)
-        github_version = (
-            github_version["version"] if "version" in github_version else "0.0.0"
-        )
+        response.raise_for_status()
+        tag_name = response.json().get("tag_name")
+        github_version = tag_name.removeprefix("v") if isinstance(tag_name, str) else ""
+        if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].*)?", github_version) is None:
+            github_version = "0.0.0"
     except Exception:
         github_version = "0.0.0"
     return current_version, github_version

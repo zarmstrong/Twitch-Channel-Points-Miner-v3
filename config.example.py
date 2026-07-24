@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 6
+CONFIG_VERSION = 7
 
 import logging
 from colorama import Fore
@@ -37,6 +37,8 @@ MINER_CONFIG = {
     'enable_analytics': False,
     'disable_ssl_cert_verification': False,
     'disable_at_in_nickname': False,
+    'update_check': True,                       # Check GitHub Releases for newer versions and alert through all configured notifiers
+    'update_check_interval_hours': 24,          # Whole hours from 3 upward; use float("inf") to check only at startup
     'streams_watched': 2,                       # Watch 1 stream to reduce concurrent sessions (which may help Twitch Turbo users avoid ads), or 2 for the default maximum
     'streamer_source_priority': [
         StreamerSource.STREAMERS,

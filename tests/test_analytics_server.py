@@ -1,10 +1,12 @@
 import re
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     AnalyticsServer,
     MAX_LOG_TAIL_BYTES,
+    UPDATE_DISMISSAL_COOKIE,
     bounded_log_start,
     filter_datas,
     get_streamer_summary,
@@ -34,6 +36,43 @@ def test_config_endpoints_require_analytics_authentication():
     assert response.status_code == 403
     assert notification_response.status_code == 403
     assert "analytics username and password" in read_response.get_json()["error"]
+
+
+def test_dashboard_shows_version_update_banner_and_footer(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.setattr(Settings, "latest_release_version", "3.8.0", raising=False)
+    monkeypatch.setattr(
+        Settings,
+        "update_instructions",
+        "Pull the latest image and recreate the container.",
+        raising=False,
+    )
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/")
+    page = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert 'id="update-available-banner"' in page
+    assert "Version 3.8.0 is available." in page
+    assert "Pull the latest image and recreate the container." in page
+    assert "Running version" in page
+    assert "Upgrade available: 3.8.0" in page
+    assert "Tkd-Alex" in page
+
+
+def test_dashboard_hides_banner_for_dismissed_version_but_keeps_footer(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.setattr(Settings, "latest_release_version", "3.8.0", raising=False)
+    monkeypatch.setattr(Settings, "update_instructions", "Upgrade now.", raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+    client.set_cookie(UPDATE_DISMISSAL_COOKIE, "3.8.0")
+
+    page = client.get("/").get_data(as_text=True)
+
+    assert 'id="update-available-banner"' not in page
+    assert "Upgrade available: 3.8.0" in page
 
 
 def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
@@ -326,6 +365,7 @@ def test_config_ui_exposes_requested_management_controls():
         "category-settings-form",
         "source-settings-form",
         "logging-settings-form",
+        "update-settings-form",
         "notification-settings",
     ):
         assert f'id="{selector}"' in template
@@ -344,6 +384,9 @@ def test_config_ui_exposes_requested_management_controls():
     assert "data-secret" in script
     assert "Configured — leave blank to keep" in script
     assert "test-notification" in script
+    assert "update_check" in template.lower().replace("-", "_")
+    assert "update_updates" in script
+    assert "interval_hours: startupOnly ? undefined" in script
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "'aria-label': `Move ${category} up`" in script
     assert "'aria-label': `Move ${category} down`" in script
