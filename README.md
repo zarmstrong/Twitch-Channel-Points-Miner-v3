@@ -36,6 +36,8 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
 3. 🧐 [How to use](#how-to-use)
     - [Install and start](#install-and-start)
         - [Docker quick start](#docker-quick-start)
+            - [Docker Compose](#docker-compose)
+            - [Docker CLI](#docker-cli)
         - [Windows quick start](#windows-quick-start)
         - [Source checkout quick start](#source-checkout-quick-start)
     - [Configuration file](#configuration-file)
@@ -146,6 +148,12 @@ installation through the first launch without requiring another section.
 #### Docker quick start
 
 Docker is the best fit for servers, NAS devices, and unattended operation.
+Choose either Docker Compose or the plain Docker CLI. Both examples persist the
+configuration, authentication cookies, logs, and analytics in the current
+directory.
+
+##### Docker Compose
+
 Create an empty working directory containing this `compose.yml`:
 
 ```yaml
@@ -174,8 +182,50 @@ streamers, disable unused notification providers, and change `restart: "no"` to
 `restart: unless-stopped`. Run `docker compose up` interactively to complete the
 first Twitch sign-in, then use `docker compose up -d` for later starts.
 
-The later [Docker reference](#docker) covers `docker run`, multiple accounts,
-Portainer, persistent data, time zones, and graceful shutdowns.
+##### Docker CLI
+
+Create the persistent directories, then run a temporary container once to seed
+the configuration:
+
+```sh
+mkdir -p analytics cookies logs config
+docker run --rm -it \
+    -e TERM=xterm-256color \
+    -e TZ=America/Denver \
+    -v "$(pwd)/analytics:/usr/src/app/analytics" \
+    -v "$(pwd)/cookies:/usr/src/app/cookies" \
+    -v "$(pwd)/logs:/usr/src/app/logs" \
+    -v "$(pwd)/config:/usr/src/app/config" \
+    -p 5000:5000 \
+    zacharmstrong/twitch-channel-points-miner:latest
+```
+
+The container creates `config/config.py` and exits. Edit that file, replace the
+example account and streamers, and disable unused notification providers. Then
+create the persistent miner container and complete Twitch authentication in its
+interactive terminal:
+
+```sh
+docker run --name twitch-miner -it \
+    --restart unless-stopped \
+    --stop-timeout 60 \
+    -e TERM=xterm-256color \
+    -e TZ=America/Denver \
+    -v "$(pwd)/analytics:/usr/src/app/analytics" \
+    -v "$(pwd)/cookies:/usr/src/app/cookies" \
+    -v "$(pwd)/logs:/usr/src/app/logs" \
+    -v "$(pwd)/config:/usr/src/app/config" \
+    -p 5000:5000 \
+    zacharmstrong/twitch-channel-points-miner:latest
+```
+
+After the initial login, manage the existing container with
+`docker stop twitch-miner` and `docker start twitch-miner`; do not run the
+creation command again. On Windows, replace each `$(pwd)` expression with an
+absolute host path, such as `C:\TwitchMiner\config`.
+
+The later [Docker reference](#docker) covers multiple accounts, Portainer, time
+zones, and graceful shutdown behavior in more detail.
 
 #### Windows quick start
 
