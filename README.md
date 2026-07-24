@@ -34,7 +34,10 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
 1. 🤝 [Community](#community)
 2. 🚀 [Features](#features)
 3. 🧐 [How to use](#how-to-use)
-    - [Choose how to run the miner](#choose-how-to-run-the-miner)
+    - [Install and start](#install-and-start)
+        - [Docker quick start](#docker-quick-start)
+        - [Windows quick start](#windows-quick-start)
+        - [Source checkout quick start](#source-checkout-quick-start)
     - [Configuration file](#configuration-file)
     - [Configuration sections](#configuration-sections)
         - [MINER_CONFIG](#miner_config)
@@ -51,7 +54,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
             - [Category examples](#category-examples)
             - [Category troubleshooting](#category-troubleshooting)
         - [ANALYTICS_CONFIG](#analytics_config)
-    - [Run from a source checkout](#run-from-a-source-checkout)
+    - [Runner behavior](#runner-behavior)
         - [Configuration reload limitations](#configuration-reload-limitations)
     - [Docker](#docker)
         - [Docker Hub](#docker-hub)
@@ -135,43 +138,94 @@ If you have any issues or you want to contribute, you are welcome! But please re
 
 ## How to use
 
-All supported run methods use the same persistent Python configuration file at
-`config/config.py`. Choose a run method first, then use the shared
-[configuration reference](#configuration-file).
+Choose one of the three supported paths below. Each quick start takes you from
+installation through the first launch without requiring another section.
 
-### Choose how to run the miner
+### Install and start
 
-| Method | Best for | What you run | Setup guide |
-|---|---|---|---|
-| Docker image | Servers, NAS devices, and unattended operation | The published container; its entrypoint runs the stable application runner | [Docker](#docker) |
-| Windows executable | Windows users who do not want to install Python or Git | `TwitchChannelPointsMiner.exe` | [Windows](#windows) |
-| Source checkout | Developers and users who want to inspect or modify the code | `python -m TwitchChannelPointsMiner.runner --config-dir ./config` | [Run from a source checkout](#run-from-a-source-checkout) |
+#### Docker quick start
 
-Portainer is a Docker deployment and has its own [deployment guide](#portainer).
-The [Termux](#termux) instructions are retained for reference but are outdated
-and unsupported, and there is currently no maintained [Replit](#replit)
-deployment.
+Docker is the best fit for servers, NAS devices, and unattended operation.
+Create an empty working directory containing this `compose.yml`:
 
-The stable runner loads the configuration, starts analytics when configured,
-watches supported settings for changes, and starts mining. Directly creating a
-`TwitchChannelPointsMiner` object and calling `.mine(...)` was the old `run.py`
-workflow. Existing installations can [migrate from run.py](#migrating-from-runpy),
-but new installations should use one of the methods above so configuration
-migration and supported live reloads are available.
+```yaml
+services:
+  miner:
+    image: zacharmstrong/twitch-channel-points-miner:latest
+    restart: "no"
+    stop_grace_period: 60s
+    stdin_open: true
+    tty: true
+    environment:
+      - TERM=xterm-256color
+      - TZ=America/Denver
+    volumes:
+      - ./analytics:/usr/src/app/analytics
+      - ./cookies:/usr/src/app/cookies
+      - ./logs:/usr/src/app/logs
+      - ./config:/usr/src/app/config
+    ports:
+      - "5000:5000"
+```
 
-Start with the maintained template:
+Run `docker compose up`. On the first run, the container creates
+`config/config.py` and exits. Edit that file, replace the example account and
+streamers, disable unused notification providers, and change `restart: "no"` to
+`restart: unless-stopped`. Run `docker compose up` interactively to complete the
+first Twitch sign-in, then use `docker compose up -d` for later starts.
+
+The later [Docker reference](#docker) covers `docker run`, multiple accounts,
+Portainer, persistent data, time zones, and graceful shutdowns.
+
+#### Windows quick start
+
+The Windows executable does not require Python or Git.
+
+1. Download `TwitchChannelPointsMiner-<version>.zip` from the official
+   [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases).
+2. Extract the whole archive to a permanent private folder; do not run it from
+   inside the ZIP.
+3. Run `TwitchChannelPointsMiner.exe` once. It creates `config\config.py` and
+   closes.
+4. Open `config\config.py` in a text editor, replace the example account and
+   streamers, and disable unused notification providers.
+5. Run the executable again and follow the Twitch sign-in instructions.
+
+Keep the console open while mining. Stop with `Ctrl+C`. The later
+[Windows reference](#windows) covers updates and troubleshooting.
+
+#### Source checkout quick start
+
+Use a source checkout when you want to inspect, develop, or modify the project.
+Python 3.11 through 3.14 is supported.
 
 ```sh
+git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3
+cd Twitch-Channel-Points-Miner-v3
+python3 -m venv venv
+source venv/bin/activate  # Windows PowerShell: .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 mkdir -p config
 cp config.example.py config/config.py
 ```
 
-Edit `config/config.py` and replace all placeholder usernames, passwords, webhook
-URLs, and notification credentials. Remove or set optional integrations to
-`None` when you do not use them. Never commit the populated file or share it in
-logs or issue reports.
+Edit `config/config.py`, then start the stable runner:
+
+```sh
+python -m TwitchChannelPointsMiner.runner --config-dir ./config
+```
+
+For every method, keep the populated configuration private: never commit or
+share account names, passwords, webhook URLs, or notification credentials.
+Portainer is a Docker deployment. The [Termux](#termux) instructions are
+outdated and unsupported, and there is no maintained [Replit](#replit)
+deployment.
 
 ### Configuration file
+
+All run methods use `config/config.py`. Docker and source-checkout users edit the
+file created or copied during their quick start; the Windows executable creates
+the same file beside the executable.
 
 A minimal configuration looks like this:
 
@@ -536,34 +590,14 @@ provide the keyword arguments for `analytics(...)`, such as `host`, `port`,
 also requires `MINER_CONFIG["enable_analytics"] = True`. See [Analytics](#analytics)
 for configuration and security guidance.
 
-### Run from a source checkout
+### Runner behavior
 
-Clone the repository, create an isolated environment, install dependencies, and
-copy the configuration template. This method runs the project directly from its
-codebase and is intended for development or source-based installations. Python
-3.11 through 3.14 is supported.
-
-```sh
-git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3
-cd Twitch-Channel-Points-Miner-v3
-python3 -m venv venv
-source venv/bin/activate  # Windows PowerShell: .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-mkdir -p config
-cp config.example.py config/config.py
-```
-
-Edit `config/config.py`, then point the stable runner at the local configuration
-directory:
-
-```sh
-python -m TwitchChannelPointsMiner.runner --config-dir ./config
-```
-
-Docker images already use this runner and default to `/usr/src/app/config`, so no
-command override is needed. On first authentication the process may require an
-interactive terminal. Cookies, logs, and analytics data are stored separately
-from the configuration and should be persisted as described in [Docker](#docker).
+Docker, Windows, and source checkouts all use the stable application runner. It
+loads `config/config.py`, starts analytics when configured, applies supported
+configuration migrations, watches for supported live changes, and starts
+mining. Directly constructing `TwitchChannelPointsMiner` and calling `.mine(...)`
+is the legacy `run.py` workflow; existing installations can
+[migrate from run.py](#migrating-from-runpy).
 
 The runner checks `config/config.py` and dashboard-managed `web-config.json`
 every five seconds. Set
