@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.8.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.8.0...3.8.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **drops:** handle zero required watch time ([#51](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/51)) ([9648a31](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9648a31d7b45e973e048dc2a8a22e3f5fda3c4ee))
+
+
+### Documentation
+
+* **docker:** add Compose and Docker CLI setup instructions ([af87cb0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/af87cb0935cc34da4b4c77a1e3eeec4854b438b5))
+* expand notifications and usage guide ([#53](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/53)) ([af87cb0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/af87cb0935cc34da4b4c77a1e3eeec4854b438b5))
+* **notifications:** document all services and event types ([af87cb0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/af87cb0935cc34da4b4c77a1e3eeec4854b438b5))
+* **usage:** consolidate Docker, Windows, and source quick starts ([af87cb0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/af87cb0935cc34da4b4c77a1e3eeec4854b438b5))
+
 ## [3.8.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.7.5...3.8.0) (2026-07-24)
 
 
