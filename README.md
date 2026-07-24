@@ -34,6 +34,12 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
 1. 🤝 [Community](#community)
 2. 🚀 [Features](#features)
 3. 🧐 [How to use](#how-to-use)
+    - [Install and start](#install-and-start)
+        - [Docker quick start](#docker-quick-start)
+            - [Docker Compose](#docker-compose)
+            - [Docker CLI](#docker-cli)
+        - [Windows quick start](#windows-quick-start)
+        - [Source checkout quick start](#source-checkout-quick-start)
     - [Configuration file](#configuration-file)
     - [Configuration sections](#configuration-sections)
         - [MINER_CONFIG](#miner_config)
@@ -50,8 +56,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
             - [Category examples](#category-examples)
             - [Category troubleshooting](#category-troubleshooting)
         - [ANALYTICS_CONFIG](#analytics_config)
-    - [Local installation](#local-installation)
-    - [Starting the miner](#starting-the-miner)
+    - [Runner behavior](#runner-behavior)
         - [Configuration reload limitations](#configuration-reload-limitations)
     - [Docker](#docker)
         - [Docker Hub](#docker-hub)
@@ -62,9 +67,14 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
 4. 🔧 [Settings](#settings)
     - [LoggerSettings](#loggersettings)
         - [Color Palette](#color-palette)
-        - [Telegram](#telegram)
-        - [Discord](#discord)
-        - [Generic Webhook](#generic-webhook)
+        - [Notifications](#notifications)
+            - [Telegram](#telegram)
+            - [Discord](#discord)
+            - [Generic Webhook](#generic-webhook)
+            - [Matrix](#matrix)
+            - [Pushover](#pushover)
+            - [Gotify](#gotify)
+            - [Email / SMTP](#email--smtp)
         - [Events](#events)
     - [StreamerSettings](#streamersettings)
     - [BetSettings](#betsettings)
@@ -120,8 +130,8 @@ If you have any issues or you want to contribute, you are welcome! But please re
   spending limits, filters, and timing.
 - Supports per-streamer settings, follower imports, and blacklists.
 - Can join IRC chat and notify you when your username is mentioned.
-- Sends selected events through Telegram, Discord, Matrix, Pushover, Gotify, or a
-  generic webhook.
+- Sends selected events through Telegram, Discord, Matrix, Pushover, Gotify,
+  email, or a generic webhook.
 - Provides colorized console logs, rotating log files, compact logging, and a
   graceful-shutdown report.
 - Includes an optional analytics server for point history, Drops, and log viewing.
@@ -130,23 +140,142 @@ If you have any issues or you want to contribute, you are welcome! But please re
 
 ## How to use
 
-The miner uses a persistent Python configuration file at `config/config.py`.
-The stable application runner creates the miner, starts analytics when
-configured, watches the file for supported changes, and starts mining.
+Choose one of the three supported paths below. Each quick start takes you from
+installation through the first launch without requiring another section.
 
-Start with the maintained template:
+### Install and start
+
+#### Docker quick start
+
+Docker is the best fit for servers, NAS devices, and unattended operation.
+Choose either Docker Compose or the plain Docker CLI. Both examples persist the
+configuration, authentication cookies, logs, and analytics in the current
+directory.
+
+##### Docker Compose
+
+Create an empty working directory containing this `compose.yml`:
+
+```yaml
+services:
+  miner:
+    image: zacharmstrong/twitch-channel-points-miner:latest
+    restart: "no"
+    stop_grace_period: 60s
+    stdin_open: true
+    tty: true
+    environment:
+      - TERM=xterm-256color
+      - TZ=America/Denver
+    volumes:
+      - ./analytics:/usr/src/app/analytics
+      - ./cookies:/usr/src/app/cookies
+      - ./logs:/usr/src/app/logs
+      - ./config:/usr/src/app/config
+    ports:
+      - "5000:5000"
+```
+
+Run `docker compose up`. On the first run, the container creates
+`config/config.py` and exits. Edit that file, replace the example account and
+streamers, disable unused notification providers, and change `restart: "no"` to
+`restart: unless-stopped`. Run `docker compose up` interactively to complete the
+first Twitch sign-in, then use `docker compose up -d` for later starts.
+
+##### Docker CLI
+
+Create the persistent directories, then run a temporary container once to seed
+the configuration:
 
 ```sh
+mkdir -p analytics cookies logs config
+docker run --rm -it \
+    -e TERM=xterm-256color \
+    -e TZ=America/Denver \
+    -v "$(pwd)/analytics:/usr/src/app/analytics" \
+    -v "$(pwd)/cookies:/usr/src/app/cookies" \
+    -v "$(pwd)/logs:/usr/src/app/logs" \
+    -v "$(pwd)/config:/usr/src/app/config" \
+    -p 5000:5000 \
+    zacharmstrong/twitch-channel-points-miner:latest
+```
+
+The container creates `config/config.py` and exits. Edit that file, replace the
+example account and streamers, and disable unused notification providers. Then
+create the persistent miner container and complete Twitch authentication in its
+interactive terminal:
+
+```sh
+docker run --name twitch-miner -it \
+    --restart unless-stopped \
+    --stop-timeout 60 \
+    -e TERM=xterm-256color \
+    -e TZ=America/Denver \
+    -v "$(pwd)/analytics:/usr/src/app/analytics" \
+    -v "$(pwd)/cookies:/usr/src/app/cookies" \
+    -v "$(pwd)/logs:/usr/src/app/logs" \
+    -v "$(pwd)/config:/usr/src/app/config" \
+    -p 5000:5000 \
+    zacharmstrong/twitch-channel-points-miner:latest
+```
+
+After the initial login, manage the existing container with
+`docker stop twitch-miner` and `docker start twitch-miner`; do not run the
+creation command again. On Windows, replace each `$(pwd)` expression with an
+absolute host path, such as `C:\TwitchMiner\config`.
+
+The later [Docker reference](#docker) covers multiple accounts, Portainer, time
+zones, and graceful shutdown behavior in more detail.
+
+#### Windows quick start
+
+The Windows executable does not require Python or Git.
+
+1. Download `TwitchChannelPointsMiner-<version>.zip` from the official
+   [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases).
+2. Extract the whole archive to a permanent private folder; do not run it from
+   inside the ZIP.
+3. Run `TwitchChannelPointsMiner.exe` once. It creates `config\config.py` and
+   closes.
+4. Open `config\config.py` in a text editor, replace the example account and
+   streamers, and disable unused notification providers.
+5. Run the executable again and follow the Twitch sign-in instructions.
+
+Keep the console open while mining. Stop with `Ctrl+C`. The later
+[Windows reference](#windows) covers updates and troubleshooting.
+
+#### Source checkout quick start
+
+Use a source checkout when you want to inspect, develop, or modify the project.
+Python 3.11 through 3.14 is supported.
+
+```sh
+git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3
+cd Twitch-Channel-Points-Miner-v3
+python3 -m venv venv
+source venv/bin/activate  # Windows PowerShell: .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 mkdir -p config
 cp config.example.py config/config.py
 ```
 
-Edit `config/config.py` and replace all placeholder usernames, passwords, webhook
-URLs, and notification credentials. Remove or set optional integrations to
-`None` when you do not use them. Never commit the populated file or share it in
-logs or issue reports.
+Edit `config/config.py`, then start the stable runner:
+
+```sh
+python -m TwitchChannelPointsMiner.runner --config-dir ./config
+```
+
+For every method, keep the populated configuration private: never commit or
+share account names, passwords, webhook URLs, or notification credentials.
+Portainer is a Docker deployment. The [Termux](#termux) instructions are
+outdated and unsupported, and there is no maintained [Replit](#replit)
+deployment.
 
 ### Configuration file
+
+All run methods use `config/config.py`. Docker and source-checkout users edit the
+file created or copied during their quick start; the Windows executable creates
+the same file beside the executable.
 
 A minimal configuration looks like this:
 
@@ -511,36 +640,14 @@ provide the keyword arguments for `analytics(...)`, such as `host`, `port`,
 also requires `MINER_CONFIG["enable_analytics"] = True`. See [Analytics](#analytics)
 for configuration and security guidance.
 
-### Local installation
+### Runner behavior
 
-Clone the repository, create an isolated environment, install dependencies, and
-copy the configuration template. Python 3.11 through 3.14 is supported.
-
-```sh
-git clone https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3
-cd Twitch-Channel-Points-Miner-v3
-python3 -m venv venv
-source venv/bin/activate  # Windows PowerShell: .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-mkdir -p config
-cp config.example.py config/config.py
-```
-
-Edit `config/config.py`, then continue to [Starting the miner](#starting-the-miner).
-
-### Starting the miner
-
-When running a clone, point the stable runner at the local configuration
-directory:
-
-```sh
-python -m TwitchChannelPointsMiner.runner --config-dir ./config
-```
-
-Docker images already use this runner and default to `/usr/src/app/config`, so no
-command override is needed. On first authentication the process may require an
-interactive terminal. Cookies, logs, and analytics data are stored separately
-from the configuration and should be persisted as described in [Docker](#docker).
+Docker, Windows, and source checkouts all use the stable application runner. It
+loads `config/config.py`, starts analytics when configured, applies supported
+configuration migrations, watches for supported live changes, and starts
+mining. Directly constructing `TwitchChannelPointsMiner` and calling `.mine(...)`
+is the legacy `run.py` workflow; existing installations can
+[migrate from run.py](#migrating-from-runpy).
 
 The runner checks `config/config.py` and dashboard-managed `web-config.json`
 every five seconds. Set
@@ -786,35 +893,6 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 | `daily_report` | bool | `False` | Generate a daily channel-points and Drop activity report. |
 | `daily_report_time` | str | `"00:00"` | Local delivery time for the daily report, in 24-hour `HH:MM` format. |
 
-#### Email / SMTP
-
-Email uses Python's built-in SMTP support and adds no dependency. Subscribe the
-notifier to `Events.DAILY_REPORT` to receive daily summaries; other event types
-can be included in the same list for immediate email alerts.
-
-```python
-from TwitchChannelPointsMiner.classes.Email import Email
-from TwitchChannelPointsMiner.classes.Settings import Events
-
-Email(
-    host="smtp.example.com",
-    port=587,
-    username="miner@example.com",
-    password="YOUR_SMTP_PASSWORD",
-    sender="miner@example.com",
-    recipients=["you@example.com"],
-    events=[Events.DAILY_REPORT, Events.CONFIGURATION],
-    starttls=True,
-)
-```
-
-Use `use_ssl=True, starttls=False` for implicit TLS, commonly on port 465. SMTP
-failures are handled like the other alert transports and do not stop mining.
-Daily-report progress is saved per account under `logs/.state/`, so point and
-Drop baselines survive normal stops and restarts. If the scheduled delivery was
-missed while the miner was stopped, the overdue report is sent after startup
-finishes refreshing current streamer balances.
-
 #### Color Palette
 `ColorPalette` customizes console colors by event name. Unspecified events use
 `Fore.RESET`, while prediction wins and losses default to green and red. Values
@@ -838,40 +916,70 @@ ColorPalette(
 )
 ```
 
-#### Telegram
-To receive selected log events through Telegram, configure a `Telegram`
-instance; otherwise omit the option or set it to `None`.
-1. Create a bot with [@BotFather](https://t.me/botfather)
-2. Get your `chat_id` with [@getmyid_bot](https://t.me/getmyid_bot)
+#### Notifications
+
+Notifications are event-filtered copies of selected log messages. Add provider
+objects to `LoggerSettings`; leave unused providers as `None`. Every provider
+requires an `events` list, and the same event can be sent through several
+providers.
+
+```python
+from TwitchChannelPointsMiner.classes.Settings import Events
+from TwitchChannelPointsMiner.classes.Telegram import Telegram
+from TwitchChannelPointsMiner.logger import LoggerSettings
+
+logger_settings = LoggerSettings(
+    telegram=Telegram(
+        chat_id=123456789,
+        token="YOUR_BOT_TOKEN",
+        events=[Events.STREAMER_OFFLINE, Events.DROP_CLAIM],
+    ),
+)
+```
+
+Assign this object to `MINER_CONFIG["logger_settings"]`. The complete
+[configuration template](config.example.py) shows all providers together.
+Placeholder values are ignored; use real credentials and never commit them.
+
+| Provider | Destination | Class |
+|---|---|---|
+| Telegram | Bot chat | `Telegram` |
+| Discord | Channel webhook | `Discord` |
+| Generic webhook | HTTP endpoint | `Webhook` |
+| Matrix | Matrix room | `Matrix` |
+| Pushover | Pushover account or group | `Pushover` |
+| Gotify | Self-hosted Gotify application | `Gotify` |
+| Email | Addresses reached through SMTP | `Email` |
+
+Delivery failures are logged and do not stop mining. Enable
+`console_username` when several accounts share a destination. The analytics
+dashboard can send a test message for each enabled provider.
+
+##### Telegram
+
+Create a bot with [@BotFather](https://t.me/botfather), then obtain the numeric
+destination `chat_id` (for example with [@getmyid_bot](https://t.me/getmyid_bot)).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `chat_id` | int | Required | Numeric Telegram chat ID. |
 | `token` | str | Required | Bot token issued by BotFather. |
 | `events` | list | Required | Events to send. |
-| `disable_notification` | bool | `False` | Send without sound or vibration when enabled. |
+| `disable_notification` | bool | `False` | Send without sound or vibration. |
 
 ```python
 Telegram(
-    chat_id=123456789,  # Replace with your numeric chat ID.
+    chat_id=123456789,
     token="YOUR_BOT_TOKEN",
-    events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],
+    events=[Events.STREAMER_ONLINE, Events.CHAT_MENTION],
     disable_notification=True,
 )
 ```
 
-#### Discord
-To receive selected log events through Discord, configure a `Discord` instance;
-otherwise omit the option or set it to `None`.
-1. Go to the Server you want to receive updates
-2. Click "Edit Channel"
-3. Click "Integrations"
-4. Click "Webhooks"
-5. Click "New Webhook"
-6. Name it if you want
-7. Click on "Copy Webhook URL"
+##### Discord
 
+In the destination channel, open **Edit Channel > Integrations > Webhooks**,
+create a webhook, and copy its URL.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -880,14 +988,15 @@ otherwise omit the option or set it to `None`.
 
 ```python
 Discord(
-   webhook_api="https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-   events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],
+    webhook_api="https://discord.com/api/webhooks/ID/TOKEN",
+    events=[Events.STREAMER_OFFLINE, Events.BET_LOSE],
 )
 ```
 
-#### Generic Webhook
-Use `Webhook` to send selected events to an HTTP endpoint.
+##### Generic Webhook
+
+`Webhook` sends `event_name` and `message` as URL query parameters for `GET`, or
+as form fields in the request body for `POST`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -896,42 +1005,148 @@ Use `Webhook` to send selected events to an HTTP endpoint.
 | `events` | list | Required | Events to send. |
 | `timeout` | float | `10` | Request timeout in seconds. |
 
-`GET` requests send `event_name` and `message` as query parameters. `POST`
-requests send them as form fields in the request body.
-
 ```python
 Webhook(
-   endpoint="https://example.com/webhook",
-   method="GET",
-   events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
-                    Events.BET_LOSE, Events.CHAT_MENTION],
-   timeout=5,
+    endpoint="https://example.com/webhook",
+    method="POST",
+    events=[Events.DROP_CLAIM, Events.CONFIGURATION],
+    timeout=5,
 )
 ```
 
+##### Matrix
+
+Matrix logs in when configured, then sends plain-text messages to the room.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `username` | str | Required | Username accepted by the homeserver. |
+| `password` | str | Required | Matrix account password. |
+| `homeserver` | str | Required | Hostname without `https://`, such as `matrix.org`. |
+| `room_id` | str | Required | Destination room ID, such as `!roomid:matrix.org`. |
+| `events` | list | Required | Events to send. |
+
+```python
+Matrix(
+    username="twitch_miner",
+    password="YOUR_MATRIX_PASSWORD",
+    homeserver="matrix.org",
+    room_id="!roomid:matrix.org",
+    events=[Events.STREAMER_OFFLINE, Events.DROP_CLAIM],
+)
+```
+
+The account must already be able to post in the room. Authentication failure is
+logged at startup and disables Matrix delivery for that run.
+
+##### Pushover
+
+Create an application at [Pushover](https://pushover.net/), then use the account
+user key and application API token.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `userkey` | str | Required | Pushover user or group key. |
+| `token` | str | Required | Application API token. |
+| `priority` | int | Required | [Pushover message priority](https://pushover.net/api#priority). |
+| `sound` | str | Required | [Pushover sound name](https://pushover.net/api#sounds). |
+| `events` | list | Required | Events to send. |
+
+```python
+Pushover(
+    userkey="YOUR_USER_KEY",
+    token="YOUR_APPLICATION_TOKEN",
+    priority=0,
+    sound="pushover",
+    events=[Events.CHAT_MENTION, Events.DROP_CLAIM],
+)
+```
+
+##### Gotify
+
+Create an application in Gotify and use its message endpoint, including the
+application token.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `endpoint` | str | Required | Message URL, such as `https://gotify.example/message?token=TOKEN`. |
+| `priority` | int | Required | Priority passed to Gotify. |
+| `events` | list | Required | Events to send. |
+
+```python
+Gotify(
+    endpoint="https://gotify.example/message?token=YOUR_TOKEN",
+    priority=8,
+    events=[Events.STREAMER_OFFLINE, Events.BET_LOSE],
+)
+```
+
+##### Email / SMTP
+
+Email uses Python's built-in SMTP support and accepts one recipient or a list or
+tuple of recipients.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `host` | str | Required | SMTP server hostname. |
+| `port` | int | Required | SMTP server port. |
+| `sender` | str | Required | Address placed in the `From` header. |
+| `recipients` | str, list, or tuple | Required | One recipient or a list/tuple of recipients. |
+| `events` | list | Required | Events to send. |
+| `username` | str or None | `None` | SMTP login username. |
+| `password` | str or None | `None` | SMTP login password. |
+| `use_ssl` | bool | `False` | Use implicit TLS from connection start. |
+| `starttls` | bool | `True` | Upgrade a plain connection with STARTTLS. |
+| `timeout` | float | `15` | Connection timeout in seconds. |
+
+```python
+Email(
+    host="smtp.example.com",
+    port=587,
+    username="miner@example.com",
+    password="YOUR_SMTP_PASSWORD",
+    sender="miner@example.com",
+    recipients=["you@example.com"],
+    events=[Events.DAILY_REPORT, Events.CONFIGURATION],
+    starttls=True,
+)
+```
+
+`use_ssl` and `starttls` cannot both be enabled. Use `use_ssl=True,
+starttls=False` for implicit TLS, commonly on port 465. For scheduled summaries,
+subscribe to `DAILY_REPORT` and set `daily_report=True`. Report progress is saved
+per account under `logs/.state/`; an overdue report is sent after startup
+finishes refreshing streamer balances.
 
 #### Events
- - `DAILY_REPORT`
- - `STREAMER_ONLINE`
- - `STREAMER_OFFLINE`
- - `GAIN_FOR_RAID`
- - `GAIN_FOR_CLAIM`
- - `GAIN_FOR_WATCH`
- - `GAIN_FOR_WATCH_STREAK`
- - `BET_WIN`
- - `BET_LOSE`
- - `BET_REFUND`
- - `BET_FILTERS`
- - `BET_GENERAL`
- - `BET_FAILED`
- - `BET_START`
- - `BONUS_CLAIM`
- - `MOMENT_CLAIM`
- - `JOIN_RAID`
- - `DROP_CLAIM`
- - `DROP_STATUS`
- - `CHAT_MENTION`
- - `CONFIGURATION`
+
+Import `Events` from `TwitchChannelPointsMiner.classes.Settings` and select any
+of these values in each provider's `events` list.
+
+| Event | Sent when |
+|---|---|
+| `UPDATE_AVAILABLE` | The update checker finds a newer release. This alert is forced through every configured provider when update checking is enabled. |
+| `DAILY_REPORT` | The scheduled point and Drop activity summary is generated. Requires `daily_report=True`. |
+| `STREAMER_ONLINE` | A tracked streamer goes live. |
+| `STREAMER_OFFLINE` | A tracked streamer goes offline. |
+| `GAIN_FOR_RAID` | Channel points are earned for joining a raid. |
+| `GAIN_FOR_CLAIM` | Channel points are earned from a claimed bonus. |
+| `GAIN_FOR_WATCH` | Channel points are earned for watch time. |
+| `GAIN_FOR_WATCH_STREAK` | Channel points are earned from a watch-streak reward. |
+| `BET_WIN` | A prediction wins and its result is credited. |
+| `BET_LOSE` | A prediction loses. |
+| `BET_REFUND` | A prediction is canceled or refunded. |
+| `BET_FILTERS` | A prediction is skipped because a configured filter does not match. |
+| `BET_GENERAL` | General prediction decisions or status messages are produced. |
+| `BET_FAILED` | A prediction cannot be placed. |
+| `BET_START` | A prediction window opens. |
+| `BONUS_CLAIM` | The periodic channel-points bonus is claimed. |
+| `MOMENT_CLAIM` | A Twitch Moment is claimed. |
+| `JOIN_RAID` | The miner follows a raid to another channel. |
+| `DROP_CLAIM` | A completed Drop reward is claimed. |
+| `DROP_STATUS` | Drop discovery, eligibility, or progress status is reported. This can be verbose. |
+| `CHAT_MENTION` | The configured username is mentioned in joined chat. Chat presence must be enabled. |
+| `CONFIGURATION` | Startup, reload, authentication, or other configuration information requires attention. Critical authentication alerts may be forced through configured providers. |
 
 ### StreamerSettings
 
