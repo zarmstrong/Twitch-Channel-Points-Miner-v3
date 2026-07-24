@@ -1,6 +1,9 @@
+import errno
 import hashlib
 import inspect
+import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -631,6 +634,28 @@ def test_migrate_config_does_not_follow_predictable_temporary_symlink(tmp_path):
     assert migrate_config(config) is True
     assert external.read_text(encoding="utf-8") == "do not overwrite"
     assert predictable.is_symlink()
+
+
+def test_migrate_version_four_config_on_direct_bind_mount(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    source = "CONFIG_VERSION = 4\n" + CONFIG
+    config.write_text(source, encoding="utf-8")
+    real_replace = os.replace
+
+    def reject_replacing_bind_mount(source_path, destination_path):
+        if Path(destination_path) == config:
+            raise OSError(errno.EBUSY, "Device or resource busy")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.config_migration.os.replace",
+        reject_replacing_bind_mount,
+    )
+
+    assert migrate_config(config) is True
+    assert f"CONFIG_VERSION = {CONFIG_VERSION}" in config.read_text(encoding="utf-8")
+    assert (tmp_path / "config.py.v4.bak").read_text(encoding="utf-8") == source
+    assert not list(tmp_path.glob(".config.py.*.migrating"))
 
 
 def test_migrate_config_rejects_future_version():
