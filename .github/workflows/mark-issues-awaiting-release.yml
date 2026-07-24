@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout automation
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Mark linked issues awaiting release
         uses: actions/github-script@v8

@@ -6,7 +6,7 @@ Use `Fixes #N`, `Closes #N`, or `Resolves #N` to link an issue. GitHub will
 leave it open when this PR merges; automation will label it `awaiting-release`
 and close it only after a release containing this PR is published.
 
-Fixes #51
+Fixes #N
 
 ## Type of change
 
