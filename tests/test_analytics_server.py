@@ -381,6 +381,8 @@ def test_config_ui_exposes_requested_management_controls():
         assert setting in script
     assert "reorder_categories" in script
     assert "remove-streamer" in script
+    assert "web-config.json" in template
+    assert "Category list changes are written to <code>config.py</code>" in template
     assert "data-secret" in script
     assert "Configured — leave blank to keep" in script
     assert "test-notification" in script

@@ -1,5 +1,7 @@
+import errno
 import json
 import math
+import os
 import stat
 import threading
 from types import SimpleNamespace
@@ -200,6 +202,7 @@ def test_managed_web_config_ignores_interval_when_checking_only_at_startup(
 def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
+    config.chmod(0o640)
     original_source = config.read_text(encoding="utf-8")
 
     update_managed_web_config(
@@ -232,7 +235,82 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     override = tmp_path / "web-config.json"
     assert stat.S_IMODE(override.stat().st_mode) == 0o600
     assert "https://secret.example/hook" not in override.read_text(encoding="utf-8")
-    assert config.read_text(encoding="utf-8") == original_source
+    assert config.read_text(encoding="utf-8") != original_source
+    assert "categories" not in json.loads(override.read_text(encoding="utf-8"))
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
+    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+
+
+def test_managed_web_config_updates_categories_when_replace_is_ebusy(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    real_replace = os.replace
+
+    def maybe_busy(source, destination):
+        if destination == config:
+            raise OSError(errno.EBUSY, "Device or resource busy")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("TwitchChannelPointsMiner.config_editor.os.replace", maybe_busy)
+
+    result = update_managed_web_config(
+        config,
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    )
+
+    assert result["categories"] == ["beta", "alpha"]
+    monkeypatch.undo()
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
+
+
+def test_managed_web_config_updates_categories_after_non_ascii_source(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8").replace(
+        "MINE_CONFIG = {", "# Pokémon\nMINE_CONFIG = {"
+    )
+    config.write_text(source, encoding="utf-8")
+
+    update_managed_web_config(
+        config,
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    )
+
+    assert "# Pokémon" in config.read_text(encoding="utf-8")
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
+
+
+def test_managed_web_config_updates_categories_when_chmod_is_unsupported(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+    real_chmod = os.chmod
+
+    def unsupported_chmod(path, *args, **kwargs):
+        if str(path).startswith(str(tmp_path / ".config.py.")):
+            raise OSError("unsupported")
+        return real_chmod(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.config_editor.os.chmod", unsupported_chmod
+    )
+
+    result = update_managed_web_config(
+        config,
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    )
+
+    assert result["categories"] == ["beta", "alpha"]
+    monkeypatch.undo()
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
 
 
 def test_managed_categories_support_display_names_urls_and_forced_streamers(tmp_path):

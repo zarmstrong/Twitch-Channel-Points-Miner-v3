@@ -3,11 +3,13 @@
 """Small, source-preserving edits for dashboard-managed configuration lists."""
 
 import ast
+import errno
 import json
 import logging
 import math
 import os
 import re
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -381,6 +383,68 @@ def _write_web_overrides(config_path, data):
             os.unlink(temporary_name)
 
 
+def _write_config_categories(config_path, categories):
+    path = Path(config_path)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    source = path.read_text(encoding="utf-8")
+    _tree, _streamers, category_node = _config_lists(source)
+    lines = source.splitlines(keepends=True)
+    line_start = sum(
+        len(line.encode("utf-8")) for line in lines[: category_node.lineno - 1]
+    )
+    end_line_start = sum(
+        len(line.encode("utf-8")) for line in lines[: category_node.end_lineno - 1]
+    )
+    start = line_start + category_node.col_offset
+    end = end_line_start + category_node.end_col_offset
+    indentation = lines[category_node.lineno - 1][
+        : len(lines[category_node.lineno - 1])
+        - len(lines[category_node.lineno - 1].lstrip())
+    ]
+    if categories:
+        rendered = (
+            "[\n"
+            + "".join(f"{indentation}    {category!r},\n" for category in categories)
+            + f"{indentation}]"
+        )
+    else:
+        rendered = "[]"
+    encoded = source.encode("utf-8")
+    updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent), text=False
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            temporary.write(updated)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        try:
+            os.chmod(temporary_name, mode)
+        except OSError:
+            # Some mounted and Windows filesystems do not expose POSIX modes.
+            pass
+        try:
+            os.replace(temporary_name, path)
+        except OSError as error:
+            # Docker and Podman reject replacing a directly bind-mounted file
+            # with EBUSY. The file itself can still be writable, so fall back
+            # to updating that mount in place. Directory mounts continue to
+            # use the atomic replacement above.
+            if error.errno != errno.EBUSY:
+                raise
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(updated)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def _validate_streamer_settings(settings):
     if not isinstance(settings, dict) or set(settings) - STREAMER_SETTING_NAMES:
         raise ConfigEditError("Unsupported per-streamer setting.")
@@ -474,7 +538,11 @@ def _update_managed_web_config(config_path, payload):
                 if (item["username"] if kind == "streamers" else item).lower()
                 != value.lower()
             ]
-        overrides[kind] = items
+        if kind == "categories":
+            _write_config_categories(config_path, items)
+            overrides.pop("categories", None)
+        else:
+            overrides[kind] = items
     elif action == "reorder_categories":
         categories = payload.get("categories")
         if not isinstance(categories, list) or any(
@@ -487,7 +555,8 @@ def _update_managed_web_config(config_path, payload):
             raise ConfigEditError(
                 "Category order must contain every configured category."
             )
-        overrides["categories"] = categories
+        _write_config_categories(config_path, categories)
+        overrides.pop("categories", None)
     elif action == "update_streamer":
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")
