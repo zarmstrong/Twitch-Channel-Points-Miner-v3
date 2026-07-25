@@ -56,6 +56,8 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 
 - When an agent fixes an actionable Copilot review item, verify the change and resolve the corresponding review thread. Do not resolve comments that remain unfixed or unverified.
 - After pushing new commits to a branch with an open pull request, request a fresh Copilot review so the latest changes are reviewed. Do not request another review when one is already pending for the current head commit.
+- Request a Copilot review by selecting the `Copilot` reviewer in the GitHub PR **Reviewers** control or with `gh api repos/OWNER/REPO/pulls/PR/requested_reviewers -X POST -f 'reviewers[]=Copilot'`. Confirm that GitHub records a `review_requested` event for the `Copilot` pull-request reviewer.
+- Never request a review by mentioning `@copilot` in a PR comment. An `@copilot` mention invokes the write-capable Copilot SWE agent, which may modify and commit to the branch instead of submitting a read-only review.
 
 ## Implementation notes
 
