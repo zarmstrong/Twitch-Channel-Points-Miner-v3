@@ -1072,10 +1072,12 @@ class TwitchChannelPointsMiner:
             for entry in drop_entries:
                 category = entry.get("category") or "Unknown game"
                 campaign = entry.get("campaign") or "Unknown campaign"
+                minutes_required = entry.get("minutes_required", 0) or 0
                 activity_lines.append(
                     f"- {category} — {campaign} — "
                     f"{entry.get('item_name') or 'Unknown reward'}: "
-                    f"+{entry.get('minutes_gained', 0) or 0}m, "
+                    f"+{entry.get('minutes_gained', 0) or 0}m"
+                    f"{f' of {minutes_required}m' if minutes_required > 0 else ''}, "
                     f"{str(entry.get('status') or 'in_progress').replace('_', ' ')}"
                 )
 
