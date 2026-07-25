@@ -381,6 +381,50 @@ def _write_web_overrides(config_path, data):
             os.unlink(temporary_name)
 
 
+def _write_config_categories(config_path, categories):
+    path = Path(config_path)
+    mode = path.stat().st_mode
+    source = path.read_text(encoding="utf-8")
+    _tree, _streamers, category_node = _config_lists(source)
+    lines = source.splitlines(keepends=True)
+    line_start = sum(
+        len(line.encode("utf-8")) for line in lines[: category_node.lineno - 1]
+    )
+    end_line_start = sum(
+        len(line.encode("utf-8")) for line in lines[: category_node.end_lineno - 1]
+    )
+    start = line_start + category_node.col_offset
+    end = end_line_start + category_node.end_col_offset
+    indentation = lines[category_node.lineno - 1][
+        : len(lines[category_node.lineno - 1])
+        - len(lines[category_node.lineno - 1].lstrip())
+    ]
+    if categories:
+        rendered = (
+            "[\n"
+            + "".join(f"{indentation}    {category!r},\n" for category in categories)
+            + f"{indentation}]"
+        )
+    else:
+        rendered = "[]"
+    encoded = source.encode("utf-8")
+    updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent), text=False
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            temporary.write(updated)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def _validate_streamer_settings(settings):
     if not isinstance(settings, dict) or set(settings) - STREAMER_SETTING_NAMES:
         raise ConfigEditError("Unsupported per-streamer setting.")
@@ -474,7 +518,11 @@ def _update_managed_web_config(config_path, payload):
                 if (item["username"] if kind == "streamers" else item).lower()
                 != value.lower()
             ]
-        overrides[kind] = items
+        if kind == "categories":
+            _write_config_categories(config_path, items)
+            overrides.pop("categories", None)
+        else:
+            overrides[kind] = items
     elif action == "reorder_categories":
         categories = payload.get("categories")
         if not isinstance(categories, list) or any(
@@ -487,7 +535,8 @@ def _update_managed_web_config(config_path, payload):
             raise ConfigEditError(
                 "Category order must contain every configured category."
             )
-        overrides["categories"] = categories
+        _write_config_categories(config_path, categories)
+        overrides.pop("categories", None)
     elif action == "update_streamer":
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")

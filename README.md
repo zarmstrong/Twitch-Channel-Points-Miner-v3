@@ -1276,10 +1276,11 @@ reports, and notification providers. Streamer additions/removals and category
 list changes are detected by the running miner; controls marked in the page as
 restart-required take effect on the next start.
 
-Dashboard changes are stored in `web-config.json` beside `config.py`, leaving
-hand-written Python settings and comments intact; managed values in that file
-take precedence over their `config.py` counterparts. The file is created with
-owner-only permissions where the filesystem supports them. Notification
+Category additions, removals, and ordering changes are written to the literal
+`MINE_CONFIG["categories"]` list in `config.py`. Other dashboard changes are
+stored in `web-config.json` beside `config.py`; managed values in that file take
+precedence over their `config.py` counterparts. The override file is created
+with owner-only permissions where the filesystem supports them. Notification
 credentials are write-only in the browser: existing values are reported only
 as configured, never returned by the API, and blank credential fields retain
 the saved value. Protect the Config tab with the same analytics authentication

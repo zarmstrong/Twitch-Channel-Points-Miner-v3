@@ -200,6 +200,7 @@ def test_managed_web_config_ignores_interval_when_checking_only_at_startup(
 def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)
+    config.chmod(0o640)
     original_source = config.read_text(encoding="utf-8")
 
     update_managed_web_config(
@@ -232,7 +233,11 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     override = tmp_path / "web-config.json"
     assert stat.S_IMODE(override.stat().st_mode) == 0o600
     assert "https://secret.example/hook" not in override.read_text(encoding="utf-8")
-    assert config.read_text(encoding="utf-8") == original_source
+    assert config.read_text(encoding="utf-8") != original_source
+    assert "categories" not in json.loads(override.read_text(encoding="utf-8"))
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
+    assert stat.S_IMODE(config.stat().st_mode) == 0o640
 
 
 def test_managed_categories_support_display_names_urls_and_forced_streamers(tmp_path):
