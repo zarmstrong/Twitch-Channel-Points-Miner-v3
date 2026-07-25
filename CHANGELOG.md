@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.10.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.9.1...3.10.0) (2026-07-25)
+
+
+### Features
+
+* **reports:** improve Drop progress details ([#60](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/60)) ([d076e03](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d076e03f207ee0536b08e84159e14ad9cd768f6a))
+
+
+### Bug Fixes
+
+* **reports:** ignore zero-watch captured drops ([d076e03](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d076e03f207ee0536b08e84159e14ad9cd768f6a))
+* **web:** handle EBUSY for bind-mounted config files ([3b3ee6c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3b3ee6cc6e13712c877bb5ec1a44c280edbc9948))
+* **web:** persist category edits to config.py ([#59](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/59)) ([3b3ee6c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3b3ee6cc6e13712c877bb5ec1a44c280edbc9948))
+
 ## [3.9.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.9.0...3.9.1) (2026-07-24)
 
 
