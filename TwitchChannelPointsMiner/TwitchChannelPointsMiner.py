@@ -154,6 +154,12 @@ def _drop_progress_report_entries(original, current):
         previous_status = previous.get("status") or "in_progress"
         if current_minutes == previous_minutes and current_status == previous_status:
             continue
+        if (
+            current_status == "captured"
+            and current_minutes == 0
+            and previous_minutes == 0
+        ):
+            continue
 
         entry = payload.copy()
         entry["minutes_gained"] = max(current_minutes - previous_minutes, 0)

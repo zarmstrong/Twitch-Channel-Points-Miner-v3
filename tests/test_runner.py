@@ -434,6 +434,24 @@ def test_drop_progress_report_entries_includes_status_only_change():
     assert _drop_progress_report_entries(original, current)[0]["minutes_gained"] == 0
 
 
+def test_drop_progress_report_entries_ignores_zero_watch_capture():
+    original = {
+        "drop": {
+            "current_minutes_watched": 0,
+            "status": "in_progress",
+        }
+    }
+    current = {
+        "drop": {
+            "item_name": "Subscriber Reward",
+            "current_minutes_watched": 0,
+            "status": "captured",
+        }
+    }
+
+    assert _drop_progress_report_entries(original, current) == []
+
+
 def test_drop_progress_report_entries_ignores_new_zero_progress_reward():
     current = {
         "drop": {
