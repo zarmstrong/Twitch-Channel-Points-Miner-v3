@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -384,7 +385,7 @@ def _write_web_overrides(config_path, data):
 
 def _write_config_categories(config_path, categories):
     path = Path(config_path)
-    mode = path.stat().st_mode
+    mode = stat.S_IMODE(path.stat().st_mode)
     source = path.read_text(encoding="utf-8")
     _tree, _streamers, category_node = _config_lists(source)
     lines = source.splitlines(keepends=True)
@@ -419,7 +420,11 @@ def _write_config_categories(config_path, categories):
             temporary.write(updated)
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.chmod(temporary_name, mode)
+        try:
+            os.chmod(temporary_name, mode)
+        except OSError:
+            # Some mounted and Windows filesystems do not expose POSIX modes.
+            pass
         try:
             os.replace(temporary_name, path)
         except OSError as error:

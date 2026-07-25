@@ -263,6 +263,52 @@ def test_managed_web_config_updates_categories_when_replace_is_ebusy(
     )
 
     assert result["categories"] == ["beta", "alpha"]
+    monkeypatch.undo()
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
+
+
+def test_managed_web_config_updates_categories_after_non_ascii_source(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8").replace(
+        "MINE_CONFIG = {", "# Pokémon\nMINE_CONFIG = {"
+    )
+    config.write_text(source, encoding="utf-8")
+
+    update_managed_web_config(
+        config,
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    )
+
+    assert "# Pokémon" in config.read_text(encoding="utf-8")
+    loaded = _load_config(config)
+    assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
+
+
+def test_managed_web_config_updates_categories_when_chmod_is_unsupported(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+    real_chmod = os.chmod
+
+    def unsupported_chmod(path, *args, **kwargs):
+        if str(path).startswith(str(tmp_path / ".config.py.")):
+            raise OSError("unsupported")
+        return real_chmod(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.config_editor.os.chmod", unsupported_chmod
+    )
+
+    result = update_managed_web_config(
+        config,
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    )
+
+    assert result["categories"] == ["beta", "alpha"]
+    monkeypatch.undo()
     loaded = _load_config(config)
     assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
 
