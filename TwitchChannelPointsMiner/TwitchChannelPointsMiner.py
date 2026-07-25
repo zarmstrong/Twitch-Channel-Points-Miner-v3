@@ -154,6 +154,12 @@ def _drop_progress_report_entries(original, current):
         previous_status = previous.get("status") or "in_progress"
         if current_minutes == previous_minutes and current_status == previous_status:
             continue
+        if (
+            current_status == "captured"
+            and current_minutes == 0
+            and previous_minutes == 0
+        ):
+            continue
 
         entry = payload.copy()
         entry["minutes_gained"] = max(current_minutes - previous_minutes, 0)
@@ -1066,10 +1072,12 @@ class TwitchChannelPointsMiner:
             for entry in drop_entries:
                 category = entry.get("category") or "Unknown game"
                 campaign = entry.get("campaign") or "Unknown campaign"
+                minutes_required = entry.get("minutes_required", 0) or 0
                 activity_lines.append(
                     f"- {category} — {campaign} — "
                     f"{entry.get('item_name') or 'Unknown reward'}: "
-                    f"+{entry.get('minutes_gained', 0) or 0}m, "
+                    f"+{entry.get('minutes_gained', 0) or 0}m"
+                    f"{f' of {minutes_required}m' if minutes_required > 0 else ''}, "
                     f"{str(entry.get('status') or 'in_progress').replace('_', ' ')}"
                 )
 
