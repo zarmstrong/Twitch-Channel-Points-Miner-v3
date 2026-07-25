@@ -3,6 +3,7 @@
 """Small, source-preserving edits for dashboard-managed configuration lists."""
 
 import ast
+import errno
 import json
 import logging
 import math
@@ -419,7 +420,21 @@ def _write_config_categories(config_path, categories):
             temporary.flush()
             os.fsync(temporary.fileno())
         os.chmod(temporary_name, mode)
-        os.replace(temporary_name, path)
+        try:
+            os.replace(temporary_name, path)
+        except OSError as error:
+            # Docker and Podman reject replacing a directly bind-mounted file
+            # with EBUSY. The file itself can still be writable, so fall back
+            # to updating that mount in place. Directory mounts continue to
+            # use the atomic replacement above.
+            if error.errno != errno.EBUSY:
+                raise
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(updated)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
     finally:
         if os.path.exists(temporary_name):
             os.unlink(temporary_name)
