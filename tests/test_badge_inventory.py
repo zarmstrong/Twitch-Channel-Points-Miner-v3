@@ -356,3 +356,24 @@ def test_unrelated_prefixed_badge_name_does_not_match_campaign_benefit():
         {"unrelated android triangle"},
         "Detroit: Become Human",
     )
+
+
+def test_campaign_qualified_final_fantasy_badges_match_rewards():
+    matcher = Twitch._Twitch__reward_name_is_owned
+    badges = {
+        "final fantasy xiv fan festival 2026 eu - content unlock quest chat",
+        "final fantasy xiv fan festival 2026 eu - moogle chat",
+    }
+
+    assert matcher("content unlock chat", badges, "Final Fantasy XIV Online")
+    assert matcher("moogle chat", badges, "Final Fantasy XIV Online")
+
+
+def test_campaign_qualified_unrelated_badge_does_not_match_reward():
+    matcher = Twitch._Twitch__reward_name_is_owned
+
+    assert not matcher(
+        "Moogle Chat",
+        {"unrelated fan festival 2026 eu - moogle chat"},
+        "Final Fantasy XIV Online",
+    )
