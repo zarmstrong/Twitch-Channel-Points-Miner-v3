@@ -279,6 +279,17 @@ def test_points_tab_reapplies_annotations_after_becoming_visible():
     assert "pointSeries = response[\"series\"] || [];" in script
 
 
+def test_points_chart_translates_logger_month_token_for_apexcharts():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+
+    assert "function toApexDateFormat(format)" in script
+    assert "return format.replace(/mm/g, 'MM');" in script
+    assert "format: chartDateFormat" in script
+    assert "format: `${chartDateFormat} HH:mm:ss`" in script
+
+
 def test_analytics_error_clears_only_after_both_endpoints_recover():
     script = (
         Path(__file__).resolve().parents[1] / "assets" / "script.js"
