@@ -1,3 +1,10 @@
+// ApexCharts uses "MM" for months; the logger date format uses "mm".
+function toApexDateFormat(format) {
+    return format.replace(/mm/g, 'MM');
+}
+
+var chartDateFormat = toApexDateFormat(dateFormat);
+
 // https://apexcharts.com/javascript-chart-demos/line-charts/zoomable-timeseries/
 var options = {
     series: [],
@@ -46,7 +53,7 @@ var options = {
         type: 'datetime',
         labels: {
             datetimeUTC: false,
-            format: dateFormat
+            format: chartDateFormat
         }
     },
     tooltip: {
@@ -54,7 +61,7 @@ var options = {
         shared: false,
         x: {
             show: true,
-            format: `${dateFormat} HH:mm:ss`,
+            format: `${chartDateFormat} HH:mm:ss`,
         },
         custom: ({
             series,
