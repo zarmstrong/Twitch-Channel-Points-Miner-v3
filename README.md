@@ -649,8 +649,7 @@ mining. Directly constructing `TwitchChannelPointsMiner` and calling `.mine(...)
 is the legacy `run.py` workflow; existing installations can
 [migrate from run.py](#migrating-from-runpy).
 
-The runner checks `config/config.py` and dashboard-managed `web-config.json`
-every five seconds. Set
+The runner checks `config/config.py` every five seconds. Set
 `TCPM_CONFIG_RELOAD_SECONDS` to change the interval; the minimum is one second.
 
 At startup, the runner checks `CONFIG_VERSION`. Unversioned configurations are
@@ -1276,11 +1275,10 @@ reports, and notification providers. Streamer additions/removals and category
 list changes are detected by the running miner; controls marked in the page as
 restart-required take effect on the next start.
 
-Category additions, removals, and ordering changes are written to the literal
-`MINE_CONFIG["categories"]` list in `config.py`. Other dashboard changes are
-stored in `web-config.json` beside `config.py`; managed values in that file take
-precedence over their `config.py` counterparts. The override file is created
-with owner-only permissions where the filesystem supports them. Notification
+Dashboard changes are written directly to their canonical `STREAMERS`,
+`MINER_CONFIG`, and `MINE_CONFIG` values in `config.py`; unrelated source and
+comments are preserved. An existing `web-config.json` is imported automatically
+and renamed to `.web-config.json.migrated.bak`. Notification
 credentials are write-only in the browser: existing values are reported only
 as configured, never returned by the API, and blank credential fields retain
 the saved value. Protect the Config tab with the same analytics authentication

@@ -157,9 +157,7 @@ def test_get_streamer_summary_handles_invalid_file(tmp_path, monkeypatch):
 
 def test_get_streamer_summary_handles_non_list_series(tmp_path, monkeypatch):
     monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
-    (tmp_path / "broken-series.json").write_text(
-        '{"series": 123}', encoding="utf-8"
-    )
+    (tmp_path / "broken-series.json").write_text('{"series": 123}', encoding="utf-8")
 
     assert get_streamer_summary("broken-series.json") == {
         "points": 0,
@@ -167,9 +165,7 @@ def test_get_streamer_summary_handles_non_list_series(tmp_path, monkeypatch):
     }
 
 
-def test_get_streamer_summary_ignores_non_numeric_timestamps(
-    tmp_path, monkeypatch
-):
+def test_get_streamer_summary_ignores_non_numeric_timestamps(tmp_path, monkeypatch):
     monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
     (tmp_path / "malformed-series.json").write_text(
         '{"series": [{"x": "later", "y": 999}, {"x": 10, "y": "bad"}]}',
@@ -276,13 +272,13 @@ def test_points_tab_reapplies_annotations_after_becoming_visible():
     assert "chart.render().then" in script
     assert "switchDashboardTab(savedDashboardTab);" in script
     assert "!chartRendered || $('#points-panel').is(':hidden')" in script
-    assert "pointSeries = response[\"series\"] || [];" in script
+    assert 'pointSeries = response["series"] || [];' in script
 
 
 def test_points_chart_translates_logger_month_token_for_apexcharts():
-    script = (
-        Path(__file__).resolve().parents[1] / "assets" / "script.js"
-    ).read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
 
     assert "function toApexDateFormat(format)" in script
     assert "return format.replace(/mm/g, 'MM');" in script
@@ -291,9 +287,9 @@ def test_points_chart_translates_logger_month_token_for_apexcharts():
 
 
 def test_analytics_error_clears_only_after_both_endpoints_recover():
-    script = (
-        Path(__file__).resolve().parents[1] / "assets" / "script.js"
-    ).read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
 
     assert "var pointsLoaded = false;" in script
     assert "var dropsLoaded = false;" in script
@@ -327,9 +323,9 @@ def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
 
 
 def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
-    script = (
-        Path(__file__).resolve().parents[1] / "assets" / "script.js"
-    ).read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
 
     assert script.count("$('#log').change(function ()") == 1
     assert "localStorage.getItem('logCheckboxState')" in script
@@ -345,18 +341,19 @@ def test_dark_theme_keeps_config_panel_headings_readable():
     ).read_text(encoding="utf-8")
 
     assert "#config-panel .title" in stylesheet
-    assert "color: #fff;" in stylesheet.split("#config-panel .title", 1)[1].split(
-        "}", 1
-    )[0]
+    assert (
+        "color: #fff;"
+        in stylesheet.split("#config-panel .title", 1)[1].split("}", 1)[0]
+    )
     assert "#config-panel .config-item-name" in stylesheet
     assert "#config-panel .config-item strong" in stylesheet
     assert "#config-panel .input::placeholder" in stylesheet
 
 
 def test_successful_config_message_fades_after_ten_seconds():
-    script = (
-        Path(__file__).resolve().parents[1] / "assets" / "script.js"
-    ).read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
     show_message = script.split("function showConfigMessage", 1)[1].split(
         "function loadWebConfig", 1
     )[0]
@@ -392,8 +389,10 @@ def test_config_ui_exposes_requested_management_controls():
         assert setting in script
     assert "reorder_categories" in script
     assert "remove-streamer" in script
-    assert "web-config.json" in template
-    assert "Category list changes are written to <code>config.py</code>" in template
+    assert "web-config.json" not in template
+    assert (
+        "Dashboard changes are written directly to <code>config.py</code>" in template
+    )
     assert "data-secret" in script
     assert "Configured — leave blank to keep" in script
     assert "test-notification" in script
@@ -428,5 +427,5 @@ def test_notification_events_use_clickable_capsules():
     assert "event-capsules" in script
     assert "event-capsule" in script
     assert "aria-pressed" in script
-    assert ".event-capsule[aria-pressed=\"true\"]" in script
+    assert '.event-capsule[aria-pressed="true"]' in script
     assert ".event-capsules" in stylesheet
