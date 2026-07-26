@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
 
-"""Small, source-preserving edits for dashboard-managed configuration lists."""
+"""Source-preserving edits for dashboard-managed Python configuration."""
 
 import ast
 import errno
 import json
-import logging
-import math
 import os
 import re
 import stat
 import tempfile
 import threading
 from pathlib import Path
-from urllib.parse import quote, unquote
 
 CONFIG_FILE_MUTEX = threading.Lock()
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
@@ -261,11 +258,16 @@ def _base_web_config(config_path):
         for node in category_nodes.elts
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     ]
+    source_priority = miner.get("streamer_source_priority") or list(
+        ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES")
+    )
     sources = {
-        "streamers": True,
-        "followers": bool(mine.get("followers", False)),
-        "categories": bool(categories),
-        "badges": bool(mine.get("auto_mine_badge_drops", False)),
+        "streamers": "STREAMERS" in source_priority,
+        "followers": "FOLLOWERS" in source_priority
+        and bool(mine.get("followers", False)),
+        "categories": "CATEGORIES" in source_priority and bool(categories),
+        "badges": "BADGES" in source_priority
+        and bool(mine.get("auto_mine_badge_drops", False)),
     }
     notifications = {}
     for provider, schema in NOTIFICATION_SCHEMAS.items():
@@ -289,6 +291,17 @@ def _base_web_config(config_path):
             "fields": fields,
             "secrets": {name: bool(configured.get(name)) for name in schema["secrets"]},
         }
+        available = {
+            name for name, value in fields.items() if value not in (None, "", [])
+        }
+        available.update(
+            name
+            for name, present in notifications[provider]["secrets"].items()
+            if present
+        )
+        notifications[provider]["test_available"] = bool(configured) and (
+            NOTIFICATION_REQUIRED[provider].issubset(available)
+        )
 
     return {
         "streamers": streamers,
@@ -341,44 +354,91 @@ def load_web_overrides(config_path):
     return data
 
 
-def _merge_web_config(base, overrides):
-    result = json.loads(json.dumps(base))
-    for name in ("streamers", "categories"):
-        if name in overrides:
-            result[name] = overrides[name]
-    for name in ("category", "sources", "logging", "updates"):
-        result[name].update(overrides.get(name, {}))
-    if "categories" not in overrides.get("sources", {}):
-        result["sources"]["categories"] = bool(result["categories"])
-    for provider, update in overrides.get("notifications", {}).items():
-        if provider not in result["notifications"]:
-            continue
-        result["notifications"][provider]["enabled"] = update.get(
-            "enabled", result["notifications"][provider]["enabled"]
-        )
-        result["notifications"][provider]["fields"].update(update.get("fields", {}))
-        known_secrets = set(NOTIFICATION_SCHEMAS[provider]["secrets"])
-        for secret in set(update.get("secrets", {})) & known_secrets:
-            result["notifications"][provider]["secrets"][secret] = True
-    for provider, state in result["notifications"].items():
-        available = {
-            name
-            for name, value in state["fields"].items()
-            if value not in (None, "", [])
-        }
-        available.update(
-            name for name, configured in state["secrets"].items() if configured
-        )
-        state["test_available"] = state["enabled"] and NOTIFICATION_REQUIRED[
-            provider
-        ].issubset(available)
-    return result
-
-
 def read_managed_web_config(config_path):
-    return _merge_web_config(
-        _base_web_config(config_path), load_web_overrides(config_path)
-    )
+    return _base_web_config(config_path)
+
+
+def migrate_web_config(config_path):
+    path = _overrides_path(config_path)
+    if not path.is_file():
+        return False
+    overrides = load_web_overrides(config_path)
+    if "streamers" in overrides:
+        records = overrides["streamers"]
+        if not isinstance(records, list):
+            raise ConfigEditError("Managed streamers must be a list.")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ConfigEditError("Each managed streamer must be an object.")
+            username = record.get("username")
+            if not isinstance(username, str) or STREAMER_RE.fullmatch(username) is None:
+                raise ConfigEditError("Each managed streamer needs a valid username.")
+            _validate_streamer_settings(record.get("settings", {}))
+        _write_streamers(config_path, records)
+        for record in records:
+            _write_streamers(
+                config_path,
+                records,
+                str(record.get("username", "")).lower(),
+            )
+    if "categories" in overrides:
+        categories = overrides["categories"]
+        if not isinstance(categories, list) or any(
+            not _valid_managed_category(category) for category in categories
+        ):
+            raise ConfigEditError("Managed categories must be a list of valid values.")
+        _write_config_categories(config_path, categories)
+    actions = {
+        "category": "update_category",
+        "sources": "update_sources",
+        "logging": "update_logging",
+        "updates": "update_updates",
+    }
+    for name, action in actions.items():
+        if name in overrides:
+            if not isinstance(overrides[name], dict):
+                messages = {
+                    "category": "Invalid managed category settings.",
+                    "sources": "Managed stream sources must be Boolean values.",
+                    "logging": "Invalid managed logging settings.",
+                    "updates": "Invalid managed update settings.",
+                }
+                raise ConfigEditError(messages[name])
+            _update_managed_web_config(
+                config_path, {"action": action, "values": overrides[name]}
+            )
+    notifications = overrides.get("notifications", {})
+    if not isinstance(notifications, dict):
+        raise ConfigEditError("Managed notifications must be an object.")
+    for provider, update in notifications.items():
+        if provider not in NOTIFICATION_SCHEMAS or not isinstance(update, dict):
+            raise ConfigEditError("Invalid managed notification provider.")
+        if not isinstance(update.get("fields", {}), dict) or not isinstance(
+            update.get("secrets", {}), dict
+        ):
+            raise ConfigEditError(
+                "Managed notification fields and secrets must be objects."
+            )
+        values = dict(update.get("fields", {}))
+        values.update(
+            {
+                name: value
+                for name, value in update.get("secrets", {}).items()
+                if name in NOTIFICATION_SCHEMAS.get(provider, {}).get("secrets", ())
+            }
+        )
+        if "enabled" in update:
+            values["enabled"] = update["enabled"]
+        _update_managed_web_config(
+            config_path,
+            {
+                "action": "update_notification",
+                "provider": provider,
+                "values": values,
+            },
+        )
+    os.replace(path, path.with_name(f".{WEB_CONFIG_FILENAME}.migrated.bak"))
+    return True
 
 
 def _write_web_overrides(config_path, data):
@@ -465,6 +525,282 @@ def _write_config_categories(config_path, categories):
             os.unlink(temporary_name)
 
 
+def _replace_config_node(config_path, node, rendered):
+    path = Path(config_path)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    start = sum(len(line.encode("utf-8")) for line in lines[: node.lineno - 1])
+    start += node.col_offset
+    end = sum(len(line.encode("utf-8")) for line in lines[: node.end_lineno - 1])
+    end += node.end_col_offset
+    encoded = source.encode("utf-8")
+    updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
+    _replace_config_bytes(path, updated, mode)
+
+
+def _replace_config_bytes(path, updated, mode):
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent), text=False
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            temporary.write(updated)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        try:
+            os.chmod(temporary_name, mode)
+        except OSError:
+            pass
+        try:
+            os.replace(temporary_name, path)
+        except OSError as error:
+            if error.errno != errno.EBUSY:
+                raise
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(updated)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def _expression(source):
+    return ast.parse(source, mode="eval").body
+
+
+def _set_dict_items(config_path, assignment_name, values):
+    for name, rendered in values.items():
+        source = Path(config_path).read_text(encoding="utf-8")
+        dictionary = _assignment(ast.parse(source), assignment_name)
+        if not isinstance(dictionary, ast.Dict):
+            raise ConfigEditError(f"{assignment_name} must be a literal dictionary.")
+        existing = {
+            key.value: index
+            for index, key in enumerate(dictionary.keys)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if name in existing:
+            _replace_config_node(
+                config_path, dictionary.values[existing[name]], rendered
+            )
+        else:
+            _insert_config_item(config_path, dictionary, f"{name!r}: {rendered}")
+
+
+def _insert_config_item(config_path, container, rendered):
+    path = Path(config_path)
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    end = (
+        sum(len(line.encode("utf-8")) for line in lines[: container.end_lineno - 1])
+        + container.end_col_offset
+    )
+    encoded = source.encode("utf-8")
+    closing = end - 1
+    body = encoded[:closing].rstrip()
+    comma = b"" if body.endswith((b"{", b"(", b"[", b",")) else b","
+    base_indent = lines[container.lineno - 1][
+        : len(lines[container.lineno - 1]) - len(lines[container.lineno - 1].lstrip())
+    ]
+    indentation = base_indent + "    "
+    insertion = comma + f"\n{indentation}{rendered},\n{base_indent}".encode("utf-8")
+    updated = encoded[:closing] + insertion + encoded[closing:]
+    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+
+
+def _call_keyword(call, name):
+    return next((item for item in call.keywords if item.arg == name), None)
+
+
+def _set_call_keywords(call, values):
+    for name, rendered in values.items():
+        keyword = _call_keyword(call, name)
+        if rendered is None:
+            if keyword is not None:
+                call.keywords.remove(keyword)
+            continue
+        value = _expression(rendered)
+        if keyword is None:
+            call.keywords.append(ast.keyword(arg=name, value=value))
+        else:
+            keyword.value = value
+
+
+def _write_call_keywords(config_path, find_call, values):
+    for name, rendered in values.items():
+        source = Path(config_path).read_text(encoding="utf-8")
+        call = find_call(ast.parse(source))
+        if not isinstance(call, ast.Call):
+            raise ConfigEditError("Expected a constructor call in config.py.")
+        keyword = _call_keyword(call, name)
+        if keyword is not None:
+            _replace_config_node(config_path, keyword.value, rendered)
+        else:
+            _insert_config_item(config_path, call, f"{name}={rendered}")
+
+
+def _write_streamers(config_path, records, updated_username=None):
+    source = Path(config_path).read_text(encoding="utf-8")
+    tree, streamers, _categories = _config_lists(source)
+    existing = {
+        _streamer_value(node).lower(): node
+        for node in streamers.elts
+        if _streamer_value(node) is not None
+    }
+    rendered_nodes = []
+    for record in records:
+        username = record["username"]
+        node = existing.get(username.lower(), ast.Constant(username))
+        if updated_username == username.lower():
+            if isinstance(node, ast.Constant):
+                node = _expression(f"Streamer({username!r})")
+            settings_keyword = _call_keyword(node, "settings")
+            if settings_keyword is None or not isinstance(
+                settings_keyword.value, ast.Call
+            ):
+                settings = _expression("StreamerSettings()")
+                if settings_keyword is None:
+                    node.keywords.append(ast.keyword(arg="settings", value=settings))
+                else:
+                    settings_keyword.value = settings
+            else:
+                settings = settings_keyword.value
+            _set_call_keywords(
+                settings,
+                {
+                    name: (f"ChatPresence.{value}" if name == "chat" else repr(value))
+                    for name, value in record["settings"].items()
+                },
+            )
+        rendered_nodes.append(node)
+    streamers.elts = rendered_nodes
+    ast.fix_missing_locations(streamers)
+    _replace_config_node(
+        config_path, _assignment(ast.parse(source), "STREAMERS"), ast.unparse(streamers)
+    )
+
+
+def _write_logger_settings(config_path, values):
+    rendered = {
+        name: (
+            f"logging.{value}"
+            if name in {"console_level", "file_level"}
+            else repr(value)
+        )
+        for name, value in values.items()
+    }
+    _write_call_keywords(
+        config_path,
+        lambda tree: _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
+        rendered,
+    )
+
+
+def _notification_expression(provider, values, existing):
+    constructors = {
+        "telegram": "Telegram",
+        "discord": "Discord",
+        "webhook": "Webhook",
+        "email": "Email",
+        "matrix": "Matrix",
+        "pushover": "Pushover",
+        "gotify": "Gotify",
+        "ntfy": "Ntfy",
+    }
+    call = (
+        existing
+        if isinstance(existing, ast.Call)
+        else _expression(f"{constructors[provider]}()")
+    )
+    rendered = {}
+    for name, value in values.items():
+        if name == "enabled" or value == "":
+            continue
+        if name == "events":
+            rendered[name] = repr(_runtime_notification_events(value))
+        else:
+            rendered[name] = repr(value)
+    _set_call_keywords(call, rendered)
+    return call
+
+
+def _write_notification(config_path, provider, values):
+    source = Path(config_path).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    logger_settings = _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings")
+    if not isinstance(logger_settings, ast.Call):
+        raise ConfigEditError(
+            "MINER_CONFIG['logger_settings'] must be LoggerSettings(...)."
+        )
+    keyword = _call_keyword(logger_settings, provider)
+    existing = keyword.value if keyword is not None else None
+    if not isinstance(existing, ast.Call) and values.get("enabled") is not True:
+        return
+    if values.get("enabled") is False:
+        _write_call_keywords(
+            config_path,
+            lambda tree: _dict_item(
+                _assignment(tree, "MINER_CONFIG"), "logger_settings"
+            ),
+            {provider: "None"},
+        )
+        return
+    else:
+        if not isinstance(existing, ast.Call):
+            constructor = provider.title()
+            _ensure_config_import(
+                config_path,
+                f"from TwitchChannelPointsMiner.classes.{constructor} import {constructor}",
+            )
+            rendered = ast.unparse(_notification_expression(provider, values, None))
+            _write_call_keywords(
+                config_path,
+                lambda tree: _dict_item(
+                    _assignment(tree, "MINER_CONFIG"), "logger_settings"
+                ),
+                {provider: rendered},
+            )
+            return
+    rendered_values = {}
+    for name, value in values.items():
+        if name == "enabled" or value == "":
+            continue
+        rendered_values[name] = (
+            repr(_runtime_notification_events(value))
+            if name == "events"
+            else repr(value)
+        )
+    _write_call_keywords(
+        config_path,
+        lambda tree: (
+            _call_keyword(
+                _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
+                provider,
+            ).value
+        ),
+        rendered_values,
+    )
+
+
+def _ensure_config_import(config_path, statement):
+    path = Path(config_path)
+    source = path.read_text(encoding="utf-8")
+    if statement in source:
+        return
+    lines = source.splitlines(keepends=True)
+    insertion = 1 if lines and "coding" in lines[0] else 0
+    lines.insert(insertion, statement + "\n")
+    _replace_config_bytes(
+        path,
+        "".join(lines).encode("utf-8"),
+        stat.S_IMODE(path.stat().st_mode),
+    )
+
+
 def _validate_streamer_settings(settings):
     if not isinstance(settings, dict) or set(settings) - STREAMER_SETTING_NAMES:
         raise ConfigEditError("Unsupported per-streamer setting.")
@@ -512,6 +848,7 @@ def _runtime_notification_events(values):
 
 def update_managed_web_config(config_path, payload):
     with CONFIG_FILE_MUTEX:
+        migrate_web_config(config_path)
         return _update_managed_web_config(config_path, payload)
 
 
@@ -520,7 +857,6 @@ def _update_managed_web_config(config_path, payload):
         raise ConfigEditError("The configuration update must be a JSON object.")
     action = payload.get("action")
     current = read_managed_web_config(config_path)
-    overrides = load_web_overrides(config_path)
 
     if action in {"add", "remove"}:
         kind = payload.get("kind")
@@ -560,9 +896,8 @@ def _update_managed_web_config(config_path, payload):
             ]
         if kind == "categories":
             _write_config_categories(config_path, items)
-            overrides.pop("categories", None)
         else:
-            overrides[kind] = items
+            _write_streamers(config_path, items)
     elif action == "reorder_categories":
         categories = payload.get("categories")
         if not isinstance(categories, list) or any(
@@ -576,7 +911,6 @@ def _update_managed_web_config(config_path, payload):
                 "Category order must contain every configured category."
             )
         _write_config_categories(config_path, categories)
-        overrides.pop("categories", None)
     elif action == "update_streamer":
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")
@@ -588,7 +922,7 @@ def _update_managed_web_config(config_path, payload):
                 break
         else:
             raise ConfigEditError("Streamer is not configured.")
-        overrides["streamers"] = streamers
+        _write_streamers(config_path, streamers, username)
     elif action == "update_category":
         values = payload.get("values") or {}
         allowed = {"limit", "sort", "refresh_interval_hours", "drops_enabled"}
@@ -610,7 +944,17 @@ def _update_managed_web_config(config_path, payload):
             raise ConfigEditError("Refresh interval must be between 0 and 168 hours.")
         if "drops_enabled" in values and not isinstance(values["drops_enabled"], bool):
             raise ConfigEditError("Drops-only behavior must be true or false.")
-        overrides.setdefault("category", {}).update(values)
+        mapping = {
+            "limit": "category_limit",
+            "sort": "category_sort",
+            "refresh_interval_hours": "category_refresh_interval_hours",
+            "drops_enabled": "category_drops_enabled",
+        }
+        rendered = {
+            mapping[name]: (f"CategorySort.{value}" if name == "sort" else repr(value))
+            for name, value in values.items()
+        }
+        _set_dict_items(config_path, "MINE_CONFIG", rendered)
     elif action == "update_sources":
         values = payload.get("values") or {}
         if (
@@ -619,7 +963,40 @@ def _update_managed_web_config(config_path, payload):
             or any(not isinstance(value, bool) for value in values.values())
         ):
             raise ConfigEditError("Invalid stream source controls.")
-        overrides.setdefault("sources", {}).update(values)
+        source_names = {
+            "streamers": "STREAMERS",
+            "followers": "FOLLOWERS",
+            "categories": "CATEGORIES",
+            "badges": "BADGES",
+        }
+        source = Path(config_path).read_text(encoding="utf-8")
+        miner = _simple_value(_assignment(ast.parse(source), "MINER_CONFIG")) or {}
+        priority = list(
+            miner.get("streamer_source_priority")
+            or ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES")
+        )
+        for name, enabled in values.items():
+            member = source_names[name]
+            if enabled and member not in priority:
+                priority.append(member)
+            elif not enabled and member in priority:
+                priority.remove(member)
+        _set_dict_items(
+            config_path,
+            "MINER_CONFIG",
+            {
+                "streamer_source_priority": "["
+                + ", ".join(f"StreamerSource.{name}" for name in priority)
+                + "]"
+            },
+        )
+        mine_values = {}
+        if "followers" in values:
+            mine_values["followers"] = repr(values["followers"])
+        if "badges" in values:
+            mine_values["auto_mine_badge_drops"] = repr(values["badges"])
+        if mine_values:
+            _set_dict_items(config_path, "MINE_CONFIG", mine_values)
     elif action == "update_logging":
         values = payload.get("values") or {}
         allowed = {"console_level", "file_level", "daily_report", "daily_report_time"}
@@ -634,11 +1011,18 @@ def _update_managed_web_config(config_path, payload):
             r"(?:[01]\d|2[0-3]):[0-5]\d", str(values["daily_report_time"])
         ):
             raise ConfigEditError("Daily report time must use HH:MM.")
-        overrides.setdefault("logging", {}).update(values)
+        _write_logger_settings(config_path, values)
     elif action == "update_updates":
         values = payload.get("values") or {}
         _validate_update_settings(values)
-        overrides.setdefault("updates", {}).update(values)
+        miner_values = {}
+        if "enabled" in values:
+            miner_values["update_check"] = repr(values["enabled"])
+        if values.get("startup_only") is True:
+            miner_values["update_check_interval_hours"] = 'float("inf")'
+        elif "interval_hours" in values:
+            miner_values["update_check_interval_hours"] = repr(values["interval_hours"])
+        _set_dict_items(config_path, "MINER_CONFIG", miner_values)
     elif action == "update_notification":
         provider = payload.get("provider")
         schema = NOTIFICATION_SCHEMAS.get(provider)
@@ -708,213 +1092,11 @@ def _update_managed_web_config(config_path, payload):
             missing = sorted(NOTIFICATION_REQUIRED[provider] - available)
             if missing:
                 raise ConfigEditError(f"{provider} requires: {', '.join(missing)}.")
-        update = overrides.setdefault("notifications", {}).setdefault(provider, {})
-        if "enabled" in values:
-            update["enabled"] = values.pop("enabled")
-        fields = {name: values[name] for name in schema["fields"] if name in values}
-        secrets = {
-            name: values[name]
-            for name in schema["secrets"]
-            if isinstance(values.get(name), str) and values[name]
-        }
-        if secrets:
-            for name, value in current["notifications"][provider]["fields"].items():
-                fields.setdefault(name, value)
-        update.setdefault("fields", {}).update(fields)
-        update.setdefault("secrets", {}).update(secrets)
+        _write_notification(config_path, provider, values)
     else:
         raise ConfigEditError("Unsupported configuration action.")
 
-    _write_web_overrides(config_path, overrides)
     return read_managed_web_config(config_path)
-
-
-def apply_web_overrides(config, config_path):
-    """Apply dashboard overrides to an executed configuration module."""
-    overrides = load_web_overrides(config_path)
-    if not overrides:
-        return config
-
-    from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-    from TwitchChannelPointsMiner.classes.Discord import Discord
-    from TwitchChannelPointsMiner.classes.Email import Email
-    from TwitchChannelPointsMiner.classes.entities.Streamer import (
-        Streamer,
-        StreamerSettings,
-    )
-    from TwitchChannelPointsMiner.classes.Gotify import Gotify
-    from TwitchChannelPointsMiner.classes.Matrix import Matrix
-    from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
-    from TwitchChannelPointsMiner.classes.Pushover import Pushover
-    from TwitchChannelPointsMiner.classes.Telegram import Telegram
-    from TwitchChannelPointsMiner.classes.Webhook import Webhook
-
-    if "streamers" in overrides:
-        existing = {
-            str(getattr(item, "username", item)).lower().strip(): item
-            for item in config.STREAMERS
-        }
-        configured = []
-        records = overrides["streamers"]
-        if not isinstance(records, list):
-            raise ConfigEditError("Managed streamers must be a list.")
-        for record in records:
-            if not isinstance(record, dict):
-                raise ConfigEditError("Each managed streamer must be an object.")
-            username_value = record.get("username")
-            settings_value = record.get("settings", {})
-            if (
-                not isinstance(username_value, str)
-                or STREAMER_RE.fullmatch(username_value.strip()) is None
-            ):
-                raise ConfigEditError("Each managed streamer needs a valid username.")
-            _validate_streamer_settings(settings_value)
-            username = username_value.lower().strip()
-            streamer = existing.get(username)
-            if not isinstance(streamer, Streamer):
-                streamer = Streamer(username)
-            settings = streamer.settings or StreamerSettings()
-            for name, value in settings_value.items():
-                if name == "chat":
-                    value = ChatPresence[value]
-                setattr(settings, name, value)
-            streamer.settings = settings
-            configured.append(streamer)
-        config.STREAMERS = configured
-
-    if "categories" in overrides:
-        categories = overrides["categories"]
-        if not isinstance(categories, list) or any(
-            not _valid_managed_category(category) for category in categories
-        ):
-            raise ConfigEditError("Managed categories must be a list of valid values.")
-
-    sources = overrides.get("sources", {})
-    if (
-        not isinstance(sources, dict)
-        or set(sources) - SOURCE_NAMES
-        or any(not isinstance(value, bool) for value in sources.values())
-    ):
-        raise ConfigEditError("Managed stream sources must be Boolean values.")
-    if sources.get("streamers") is False:
-        config.STREAMERS = []
-    if "followers" in sources:
-        config.MINE_CONFIG["followers"] = sources["followers"]
-    if sources.get("categories") is False:
-        config.MINE_CONFIG["categories"] = []
-    elif "categories" in overrides:
-        config.MINE_CONFIG["categories"] = list(categories)
-    if "badges" in sources:
-        config.MINE_CONFIG["auto_mine_badge_drops"] = sources["badges"]
-
-    category = overrides.get("category", {})
-    category_mapping = {
-        "limit": "category_limit",
-        "sort": "category_sort",
-        "refresh_interval_hours": "category_refresh_interval_hours",
-        "drops_enabled": "category_drops_enabled",
-    }
-    for source_name, target_name in category_mapping.items():
-        if source_name in category:
-            config.MINE_CONFIG[target_name] = category[source_name]
-
-    update_overrides = overrides.get("updates", {})
-    _validate_update_settings(update_overrides)
-    if "enabled" in update_overrides:
-        config.MINER_CONFIG["update_check"] = update_overrides["enabled"]
-    if update_overrides.get("startup_only") is True:
-        config.MINER_CONFIG["update_check_interval_hours"] = math.inf
-    elif "interval_hours" in update_overrides:
-        config.MINER_CONFIG["update_check_interval_hours"] = update_overrides[
-            "interval_hours"
-        ]
-
-    logger_settings = config.MINER_CONFIG.get("logger_settings")
-    logging_overrides = overrides.get("logging", {})
-    if not isinstance(logging_overrides, dict) or set(logging_overrides) - {
-        "console_level",
-        "file_level",
-        "daily_report",
-        "daily_report_time",
-    }:
-        raise ConfigEditError("Invalid managed logging settings.")
-    for name in ("console_level", "file_level"):
-        if name in logging_overrides and (
-            not isinstance(logging_overrides[name], str)
-            or logging_overrides[name] not in LOG_LEVELS
-        ):
-            raise ConfigEditError("Managed logging levels are invalid.")
-    if "daily_report" in logging_overrides and not isinstance(
-        logging_overrides["daily_report"], bool
-    ):
-        raise ConfigEditError("Managed daily report setting must be Boolean.")
-    if "daily_report_time" in logging_overrides and (
-        not isinstance(logging_overrides["daily_report_time"], str)
-        or not re.fullmatch(
-            r"(?:[01]\d|2[0-3]):[0-5]\d",
-            logging_overrides["daily_report_time"],
-        )
-    ):
-        raise ConfigEditError("Managed daily report time must use HH:MM.")
-    if logger_settings is not None:
-        for name in ("console_level", "file_level"):
-            if name in logging_overrides:
-                setattr(
-                    logger_settings,
-                    name,
-                    getattr(logging, logging_overrides[name]),
-                )
-        for name in ("daily_report", "daily_report_time"):
-            if name in logging_overrides:
-                setattr(logger_settings, name, logging_overrides[name])
-
-        constructors = {
-            "telegram": Telegram,
-            "discord": Discord,
-            "webhook": Webhook,
-            "email": Email,
-            "matrix": Matrix,
-            "pushover": Pushover,
-            "gotify": Gotify,
-            "ntfy": Ntfy,
-        }
-        notification_overrides = overrides.get("notifications", {})
-        if not isinstance(notification_overrides, dict):
-            raise ConfigEditError("Managed notifications must be an object.")
-        for provider, update in notification_overrides.items():
-            if provider not in constructors or not isinstance(update, dict):
-                raise ConfigEditError("Invalid managed notification provider.")
-            if "enabled" in update and not isinstance(update["enabled"], bool):
-                raise ConfigEditError("Notification enabled state must be Boolean.")
-            if not isinstance(update.get("fields", {}), dict) or not isinstance(
-                update.get("secrets", {}), dict
-            ):
-                raise ConfigEditError(
-                    "Managed notification fields and secrets must be objects."
-                )
-            existing_notification = getattr(logger_settings, provider, None)
-            enabled = update.get("enabled", existing_notification is not None)
-            if enabled is False:
-                setattr(logger_settings, provider, None)
-                continue
-            fields = dict(update.get("fields", {}))
-            secrets = dict(update.get("secrets", {}))
-            if existing_notification is not None and not secrets:
-                for name, value in fields.items():
-                    if name == "events":
-                        value = _runtime_notification_events(value)
-                    if provider == "matrix" and name == "room_id":
-                        value = quote(value)
-                    if hasattr(existing_notification, name):
-                        setattr(existing_notification, name, value)
-                continue
-            if enabled is not True:
-                continue
-            kwargs = _notification_constructor_kwargs(
-                provider, existing_notification, fields, secrets
-            )
-            setattr(logger_settings, provider, constructors[provider](**kwargs))
-    return config
 
 
 def _validate_update_settings(values):
@@ -936,90 +1118,3 @@ def _validate_update_settings(values):
         raise ConfigEditError(
             "Update-check interval must be a whole number of at least 3 hours."
         )
-
-
-def _notification_constructor_kwargs(provider, existing, fields, secrets):
-    def current(name, default=None):
-        return getattr(existing, name, default) if existing is not None else default
-
-    events = _runtime_notification_events(fields.get("events", current("events", [])))
-    if provider == "telegram":
-        token = secrets.get("token")
-        if token is None and existing is not None:
-            token = existing.telegram_api.split("/bot", 1)[-1].rsplit(
-                "/sendMessage", 1
-            )[0]
-        return {
-            "chat_id": fields.get("chat_id", current("chat_id")),
-            "token": token,
-            "events": events,
-            "disable_notification": fields.get(
-                "disable_notification", current("disable_notification", False)
-            ),
-            "message_thread_id": fields.get(
-                "message_thread_id", current("message_thread_id")
-            ),
-        }
-    if provider == "discord":
-        return {
-            "webhook_api": secrets.get("webhook_api", current("webhook_api")),
-            "events": events,
-        }
-    if provider == "webhook":
-        return {
-            "endpoint": secrets.get("endpoint", current("endpoint")),
-            "method": fields.get("method", current("method", "POST")),
-            "events": events,
-            "timeout": current("timeout", 10),
-        }
-    if provider == "gotify":
-        return {
-            "endpoint": secrets.get("endpoint", current("endpoint")),
-            "priority": fields.get("priority", current("priority", 0)),
-            "events": events,
-        }
-    if provider == "ntfy":
-        return {
-            "topic": secrets.get("topic", current("topic")),
-            "events": events,
-            "server_url": fields.get(
-                "server_url", current("server_url", "https://ntfy.sh")
-            ),
-            "token": secrets.get("token", current("token")),
-            "priority": fields.get("priority", current("priority")),
-            "tags": fields.get("tags", current("tags", [])),
-            "timeout": current("timeout", 10),
-        }
-    if provider == "pushover":
-        return {
-            "userkey": secrets.get("userkey", current("userkey")),
-            "token": secrets.get("token", current("token")),
-            "priority": fields.get("priority", current("priority", 0)),
-            "sound": fields.get("sound", current("sound", "pushover")),
-            "events": events,
-        }
-    if provider == "email":
-        return {
-            "host": fields.get("host", current("host")),
-            "port": fields.get("port", current("port", 587)),
-            "username": fields.get("username", current("username")),
-            "password": secrets.get("password", current("password")),
-            "sender": fields.get("sender", current("sender")),
-            "recipients": fields.get("recipients", current("recipients", [])),
-            "events": events,
-            "use_ssl": fields.get("use_ssl", current("use_ssl", False)),
-            "starttls": fields.get("starttls", current("starttls", True)),
-            "timeout": current("timeout", 15),
-        }
-    if provider == "matrix":
-        room_id = fields.get("room_id")
-        if room_id is None:
-            room_id = unquote(current("room_id"))
-        return {
-            "username": fields.get("username"),
-            "password": secrets.get("password"),
-            "homeserver": fields.get("homeserver", current("homeserver")),
-            "room_id": room_id,
-            "events": events,
-        }
-    raise ConfigEditError("Unsupported notification provider.")

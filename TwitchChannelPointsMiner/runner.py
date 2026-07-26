@@ -13,11 +13,7 @@ import time
 import types
 from pathlib import Path
 
-from TwitchChannelPointsMiner.config_editor import (
-    WEB_CONFIG_FILENAME,
-    ConfigEditError,
-    apply_web_overrides,
-)
+from TwitchChannelPointsMiner.config_editor import ConfigEditError, migrate_web_config
 from TwitchChannelPointsMiner.config_migration import (
     ConfigMigrationError,
     convert_runner,
@@ -39,6 +35,19 @@ def _load_config(path):
         ) from error
     if migrated:
         logger.info("Migrated configuration schema in %s", path)
+    try:
+        migrated_dashboard = migrate_web_config(path)
+    except (ConfigEditError, OSError) as error:
+        message = (
+            str(error)
+            if isinstance(error, ConfigEditError)
+            else "legacy configuration could not be accessed"
+        )
+        raise RuntimeError(
+            f"Unable to migrate dashboard configuration: {message}"
+        ) from error
+    if migrated_dashboard:
+        logger.info("Migrated dashboard configuration into %s", path)
     source = path.read_text(encoding="utf-8")
     module = types.ModuleType("twitch_miner_user_config")
     module.__file__ = str(path)
@@ -75,16 +84,7 @@ def _load_config(path):
             "Removed obsolete Twitch password from MINER_CONFIG; "
             "authentication uses the TV activation flow."
         )
-    try:
-        return apply_web_overrides(module, path)
-    except ConfigEditError as error:
-        raise RuntimeError(
-            f"Unable to apply dashboard-managed configuration: {error}"
-        ) from error
-    except OSError as error:
-        raise RuntimeError(
-            "Unable to access dashboard-managed configuration."
-        ) from error
+    return module
 
 
 def _streamer_username(streamer):
@@ -93,16 +93,7 @@ def _streamer_username(streamer):
 
 
 def _config_digest(path):
-    digest = hashlib.sha256(path.read_bytes())
-    web_config_path = path.with_name(WEB_CONFIG_FILENAME)
-    if web_config_path.is_file():
-        try:
-            digest.update(web_config_path.read_bytes())
-        except OSError:
-            # Keep watching the main config. A recovery of the override file
-            # changes the digest and triggers another reload attempt.
-            digest.update(b"web-config-unreadable")
-    return digest.digest()
+    return hashlib.sha256(path.read_bytes()).digest()
 
 
 def _freeze(value):

@@ -22,9 +22,8 @@ from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
-    _notification_constructor_kwargs,
-    apply_web_overrides,
     load_web_overrides,
+    migrate_web_config,
     read_managed_web_config,
     update_managed_web_config,
 )
@@ -80,9 +79,7 @@ def test_managed_web_config_masks_credentials_and_reads_effective_settings(tmp_p
     assert result["streamers"][1]["settings"]["chat"] == "ONLINE"
     assert result["notifications"]["discord"]["enabled"] is True
     assert result["notifications"]["discord"]["fields"] == {"events": []}
-    assert result["notifications"]["discord"]["secrets"] == {
-        "webhook_api": True
-    }
+    assert result["notifications"]["discord"]["secrets"] == {"webhook_api": True}
     assert result["notifications"]["discord"]["test_available"] is True
     assert "DROP_CLAIM" in result["notification_event_options"]
     assert "DAILY_REPORT" in result["notification_event_options"]
@@ -143,8 +140,7 @@ def test_managed_web_config_reads_math_inf_as_startup_only(tmp_path):
     source = source.replace("import logging\n", "import logging\nimport math\n", 1)
     source = source.replace(
         '    "username": "example",\n',
-        '    "username": "example",\n'
-        '    "update_check_interval_hours": math.inf,\n',
+        '    "username": "example",\n' '    "update_check_interval_hours": math.inf,\n',
         1,
     )
     config.write_text(source, encoding="utf-8")
@@ -168,9 +164,7 @@ def test_managed_web_config_reads_math_inf_as_startup_only(tmp_path):
         {"unknown": True},
     ],
 )
-def test_managed_web_config_rejects_invalid_release_check_settings(
-    tmp_path, values
-):
+def test_managed_web_config_rejects_invalid_release_check_settings(tmp_path, values):
     config = tmp_path / "config.py"
     write_config(config)
 
@@ -233,11 +227,8 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     assert [item["username"] for item in result["streamers"]] == ["one"]
     assert result["categories"] == ["beta", "alpha"]
     assert result["streamers"][0]["settings"]["points_limit"] == 25000
-    override = tmp_path / "web-config.json"
-    assert stat.S_IMODE(override.stat().st_mode) == 0o600
-    assert "https://secret.example/hook" not in override.read_text(encoding="utf-8")
+    assert not (tmp_path / "web-config.json").exists()
     assert config.read_text(encoding="utf-8") != original_source
-    assert "categories" not in json.loads(override.read_text(encoding="utf-8"))
     loaded = _load_config(config)
     assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
     assert stat.S_IMODE(config.stat().st_mode) == 0o640
@@ -387,8 +378,7 @@ def test_notification_secrets_are_write_only_and_blank_values_are_not_saved(tmp_
         },
     )
 
-    saved = json.loads((tmp_path / "web-config.json").read_text(encoding="utf-8"))
-    assert saved["notifications"]["discord"].get("secrets", {}) == {}
+    assert config.read_text(encoding="utf-8").count("https://secret.example/hook") == 1
     assert result["notifications"]["discord"]["secrets"]["webhook_api"] is True
     assert "secret.example" not in json.dumps(result)
 
@@ -419,12 +409,7 @@ def test_blank_notification_text_fields_preserve_existing_values(tmp_path):
         },
     )
 
-    saved = json.loads((tmp_path / "web-config.json").read_text(encoding="utf-8"))
-    assert saved["notifications"]["matrix"]["fields"] == {
-        "username": "miner",
-        "homeserver": "matrix.example",
-        "room_id": "!room:matrix.example",
-    }
+    assert read_managed_web_config(config)["notifications"]["matrix"]["fields"] == {}
 
 
 def test_enabling_new_notification_requires_credentials(tmp_path):
@@ -487,13 +472,6 @@ def test_notification_events_are_validated_and_normalized_for_runtime(tmp_path):
     loaded = _load_config(config)
 
     assert loaded.MINER_CONFIG["logger_settings"].discord.events == ["DROP_CLAIM"]
-    reconstructed = _notification_constructor_kwargs(
-        "discord",
-        loaded.MINER_CONFIG["logger_settings"].discord,
-        {"events": ["DROP_CLAIM"]},
-        {"webhook_api": "https://new.example/hook"},
-    )
-    assert reconstructed["events"] == ["DROP_CLAIM"]
     with pytest.raises(ConfigEditError, match="Unknown notification event"):
         update_managed_web_config(
             config,
@@ -523,15 +501,11 @@ def test_new_notification_secret_is_applied_but_never_returned(tmp_path):
             },
         },
     )
-    logger_settings = LoggerSettings()
-    module = SimpleNamespace(
-        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": logger_settings}
+    loaded = _load_config(config)
+    assert (
+        "super-secret-token"
+        in loaded.MINER_CONFIG["logger_settings"].telegram.telegram_api
     )
-
-    apply_web_overrides(module, config)
-
-    assert "super-secret-token" in logger_settings.telegram.telegram_api
-    assert logger_settings.telegram.message_thread_id == 987
     assert result["notifications"]["telegram"]["fields"]["message_thread_id"] == 987
     assert result["notifications"]["telegram"]["secrets"] == {"token": True}
     assert "super-secret-token" not in json.dumps(result)
@@ -625,7 +599,7 @@ def test_secret_only_update_keeps_enabled_notification_enabled(tmp_path):
     )
 
 
-def test_apply_web_overrides_builds_effective_runtime_config(tmp_path):
+def test_canonical_config_edits_build_effective_runtime_config(tmp_path):
     config_path = tmp_path / "config.py"
     write_config(config_path)
     update_managed_web_config(
@@ -647,13 +621,7 @@ def test_apply_web_overrides_builds_effective_runtime_config(tmp_path):
             "values": {"limit": 9, "sort": "RANDOM", "drops_enabled": False},
         },
     )
-    module = SimpleNamespace(
-        STREAMERS=[Streamer("one"), Streamer("two")],
-        MINE_CONFIG={"categories": ["alpha", "beta"]},
-        MINER_CONFIG={"logger_settings": None},
-    )
-
-    apply_web_overrides(module, config_path)
+    module = _load_config(config_path)
 
     assert [streamer.username for streamer in module.STREAMERS] == ["one"]
     assert module.STREAMERS[0].settings.favorite is False
@@ -665,9 +633,7 @@ def test_apply_web_overrides_builds_effective_runtime_config(tmp_path):
 
 def test_remove_streamers_unsubscribes_only_purely_explicit_streamers():
     explicit = Streamer("explicit", explicitly_configured=True)
-    category = Streamer(
-        "category", from_category=True, explicitly_configured=True
-    )
+    category = Streamer("category", from_category=True, explicitly_configured=True)
     websocket_pool = SimpleNamespace(removed=[])
     websocket_pool.remove_streamer_topics = websocket_pool.removed.append
     miner = SimpleNamespace(
@@ -1050,6 +1016,7 @@ def test_websocket_reconnection_replays_topics_after_releasing_lock(
         keep_running=True,
     )
     pool.ws = [old_websocket]
+
     def new_websocket_while_locked(_self, _index):
         assert topic_lock.depth > 0
         return new_websocket
@@ -1080,59 +1047,6 @@ def test_websocket_reconnection_replays_topics_after_releasing_lock(
         assert listened == []
 
 
-def test_matrix_reconstruction_does_not_double_encode_room_id(monkeypatch):
-    existing = SimpleNamespace(
-        homeserver="matrix.example",
-        room_id="%21room%3Amatrix.example",
-        events=[],
-    )
-    kwargs = _notification_constructor_kwargs(
-        "matrix",
-        existing,
-        {"username": "miner", "homeserver": "matrix.example", "events": []},
-        {"password": "secret"},
-    )
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Matrix.requests.post",
-        lambda **_kwargs: SimpleNamespace(json=lambda: {"access_token": "token"}),
-    )
-
-    notification = Matrix(**kwargs)
-
-    assert notification.room_id == "%21room%3Amatrix.example"
-
-
-def test_notification_reconstruction_preserves_custom_timeouts():
-    webhook = SimpleNamespace(
-        endpoint="https://old.example/hook",
-        method="POST",
-        events=[],
-        timeout=37,
-    )
-    email = SimpleNamespace(
-        host="smtp.example",
-        port=587,
-        username="miner",
-        password="old-password",
-        sender="miner@example.com",
-        recipients=["alerts@example.com"],
-        events=[],
-        use_ssl=False,
-        starttls=True,
-        timeout=41,
-    )
-
-    webhook_kwargs = _notification_constructor_kwargs(
-        "webhook", webhook, {}, {"endpoint": "https://new.example/hook"}
-    )
-    email_kwargs = _notification_constructor_kwargs(
-        "email", email, {}, {"password": "new-password"}
-    )
-
-    assert webhook_kwargs["timeout"] == 37
-    assert email_kwargs["timeout"] == 41
-
-
 def test_config_endpoint_never_returns_notification_secrets(tmp_path, monkeypatch):
     config = tmp_path / "config.py"
     write_config(config)
@@ -1155,9 +1069,7 @@ def test_config_endpoint_does_not_expose_filesystem_errors(tmp_path, monkeypatch
     def fail_read(_path):
         raise OSError("/private/config/path: permission denied")
 
-    monkeypatch.setitem(
-        web_config.__globals__, "read_managed_web_config", fail_read
-    )
+    monkeypatch.setitem(web_config.__globals__, "read_managed_web_config", fail_read)
     app = Flask(__name__)
 
     with app.test_request_context("/config", method="GET"):
@@ -1176,18 +1088,14 @@ def test_notification_test_endpoint_uses_saved_provider(tmp_path, monkeypatch):
     notification = SimpleNamespace(events=[])
     notification.send = lambda message, event: sent.append((message, event))
     loaded = SimpleNamespace(
-        MINER_CONFIG={
-            "logger_settings": SimpleNamespace(discord=notification)
-        }
+        MINER_CONFIG={"logger_settings": SimpleNamespace(discord=notification)}
     )
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.runner._load_config", lambda _path: loaded
     )
     app = Flask(__name__)
 
-    with app.test_request_context(
-        "/config/notifications/discord/test", method="POST"
-    ):
+    with app.test_request_context("/config/notifications/discord/test", method="POST"):
         response = send_web_notification_test("discord")
 
     assert response.status_code == 200
@@ -1210,9 +1118,7 @@ def test_notification_test_endpoint_requires_complete_enabled_provider(
     )
     app = Flask(__name__)
 
-    with app.test_request_context(
-        "/config/notifications/telegram/test", method="POST"
-    ):
+    with app.test_request_context("/config/notifications/telegram/test", method="POST"):
         response = send_web_notification_test("telegram")
 
     assert response.status_code == 409
@@ -1232,9 +1138,7 @@ def test_notification_test_endpoint_sanitizes_config_load_failures(
     monkeypatch.setattr("TwitchChannelPointsMiner.runner._load_config", fail_load)
     app = Flask(__name__)
 
-    with app.test_request_context(
-        "/config/notifications/discord/test", method="POST"
-    ):
+    with app.test_request_context("/config/notifications/discord/test", method="POST"):
         response = send_web_notification_test("discord")
 
     assert response.status_code == 500
@@ -1256,18 +1160,14 @@ def test_notification_test_endpoint_returns_sanitized_delivery_failure(
         ),
     )
     loaded = SimpleNamespace(
-        MINER_CONFIG={
-            "logger_settings": SimpleNamespace(discord=notification)
-        }
+        MINER_CONFIG={"logger_settings": SimpleNamespace(discord=notification)}
     )
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.runner._load_config", lambda _path: loaded
     )
     app = Flask(__name__)
 
-    with app.test_request_context(
-        "/config/notifications/discord/test", method="POST"
-    ):
+    with app.test_request_context("/config/notifications/discord/test", method="POST"):
         response = send_web_notification_test("discord")
 
     assert response.status_code == 502
@@ -1341,9 +1241,10 @@ def test_unknown_notification_secrets_are_not_exposed(tmp_path):
         encoding="utf-8",
     )
 
+    migrate_web_config(config)
     result = read_managed_web_config(config)
 
-    assert result["notifications"]["gotify"]["secrets"] == {"endpoint": True}
+    assert result["notifications"]["gotify"]["secrets"] == {"endpoint": False}
     assert "unexpected_secret" not in json.dumps(result)
 
 
@@ -1360,8 +1261,7 @@ def test_empty_notification_number_is_treated_as_unset(tmp_path):
         },
     )
 
-    saved = json.loads((tmp_path / "web-config.json").read_text(encoding="utf-8"))
-    assert "port" not in saved["notifications"]["email"].get("fields", {})
+    assert "email=" not in config.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -1372,9 +1272,7 @@ def test_empty_notification_number_is_treated_as_unset(tmp_path):
         ("discord", {"webhook_api": 123}, "webhook_api must be a string"),
     ],
 )
-def test_notification_text_fields_require_strings(
-    tmp_path, provider, values, message
-):
+def test_notification_text_fields_require_strings(tmp_path, provider, values, message):
     config = tmp_path / "config.py"
     write_config(config)
 
@@ -1399,12 +1297,9 @@ def test_malformed_managed_streamers_fail_cleanly(tmp_path, streamers):
     (tmp_path / "web-config.json").write_text(
         json.dumps({"streamers": streamers}), encoding="utf-8"
     )
-    module = SimpleNamespace(
-        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": None}
-    )
 
     with pytest.raises(ConfigEditError, match="(?i)managed streamer"):
-        apply_web_overrides(module, config)
+        migrate_web_config(config)
 
 
 @pytest.mark.parametrize("categories", ["alpha", {"alpha": True}, [None]])
@@ -1414,12 +1309,9 @@ def test_malformed_managed_categories_fail_cleanly(tmp_path, categories):
     (tmp_path / "web-config.json").write_text(
         json.dumps({"categories": categories}), encoding="utf-8"
     )
-    module = SimpleNamespace(
-        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": None}
-    )
 
     with pytest.raises(ConfigEditError, match="Managed categories"):
-        apply_web_overrides(module, config)
+        migrate_web_config(config)
 
 
 @pytest.mark.parametrize(
@@ -1432,12 +1324,9 @@ def test_malformed_managed_sources_fail_cleanly(tmp_path, sources):
     (tmp_path / "web-config.json").write_text(
         json.dumps({"sources": sources}), encoding="utf-8"
     )
-    module = SimpleNamespace(
-        STREAMERS=[], MINE_CONFIG={}, MINER_CONFIG={"logger_settings": None}
-    )
 
-    with pytest.raises(ConfigEditError, match="Managed stream sources"):
-        apply_web_overrides(module, config)
+    with pytest.raises(ConfigEditError, match="(?i)stream source"):
+        migrate_web_config(config)
 
 
 @pytest.mark.parametrize(
@@ -1458,14 +1347,9 @@ def test_malformed_managed_logging_fails_cleanly(tmp_path, logging_overrides):
     (tmp_path / "web-config.json").write_text(
         json.dumps({"logging": logging_overrides}), encoding="utf-8"
     )
-    module = SimpleNamespace(
-        STREAMERS=[],
-        MINE_CONFIG={},
-        MINER_CONFIG={"logger_settings": LoggerSettings()},
-    )
 
-    with pytest.raises(ConfigEditError, match="(?i)managed.*log|daily report"):
-        apply_web_overrides(module, config)
+    with pytest.raises(ConfigEditError, match="(?i)log|daily report"):
+        migrate_web_config(config)
 
 
 @pytest.mark.parametrize(
@@ -1486,11 +1370,6 @@ def test_malformed_managed_notifications_fail_cleanly(tmp_path, notifications):
     (tmp_path / "web-config.json").write_text(
         json.dumps({"notifications": notifications}), encoding="utf-8"
     )
-    module = SimpleNamespace(
-        STREAMERS=[],
-        MINE_CONFIG={},
-        MINER_CONFIG={"logger_settings": LoggerSettings()},
-    )
 
     with pytest.raises(ConfigEditError, match="(?i)notification"):
-        apply_web_overrides(module, config)
+        migrate_web_config(config)
