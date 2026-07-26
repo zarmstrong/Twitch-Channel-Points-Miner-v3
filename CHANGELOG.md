@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.10.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.10.0...3.10.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* **analytics:** correct points chart month labels ([#62](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/62)) ([9248543](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9248543613566b354d20361975b99d90b5062ef5))
+
 ## [3.10.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.9.1...3.10.0) (2026-07-25)
 
 
