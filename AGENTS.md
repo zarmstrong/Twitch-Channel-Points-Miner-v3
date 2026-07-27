@@ -14,6 +14,7 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 - Preserve `__slots__` usage and existing enum-based settings patterns when touching classes.
 - Keep GraphQL and Twitch API logic in the existing modules under [TwitchChannelPointsMiner/classes/](TwitchChannelPointsMiner/classes/).
 - Use the current logging style from [TwitchChannelPointsMiner/logger.py](TwitchChannelPointsMiner/logger.py); logs are intentionally emoji-rich and colorized.
+- Treat every notification `skip_<provider>` logging extra as a Boolean value: use `getattr(record, "skip_<provider>", False)` and skip only when it is truthy. Keep this behavior consistent across all providers and add regression coverage when adding or changing notifier integrations.
 - Avoid adding new dependencies unless the existing stack cannot reasonably support the change.
 - Do not introduce secrets or real credentials into examples, docs, or code.
 

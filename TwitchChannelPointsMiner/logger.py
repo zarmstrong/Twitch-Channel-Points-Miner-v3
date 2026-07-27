@@ -251,64 +251,64 @@ class GlobalFormatter(logging.Formatter):
         return super().format(record)
 
     def telegram(self, record):
-        skip_telegram = False if hasattr(record, "skip_telegram") is False else True
+        skip_telegram = getattr(record, "skip_telegram", False)
 
         if (
             self.settings.telegram is not None
-            and skip_telegram is False
+            and not skip_telegram
             and self.settings.telegram.chat_id != 123456789
         ):
             self._send(self.settings.telegram, record)
 
     def discord(self, record):
-        skip_discord = False if hasattr(record, "skip_discord") is False else True
+        skip_discord = getattr(record, "skip_discord", False)
 
         if (
             self.settings.discord is not None
-            and skip_discord is False
+            and not skip_discord
             and self.settings.discord.webhook_api
             != "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J"
         ):
             self._send(self.settings.discord, record)
 
     def webhook(self, record):
-        skip_webhook = False if hasattr(record, "skip_webhook") is False else True
+        skip_webhook = getattr(record, "skip_webhook", False)
 
         if (
             self.settings.webhook is not None
-            and skip_webhook is False
+            and not skip_webhook
             and self.settings.webhook.endpoint != "https://example.com/webhook"
         ):
             self._send(self.settings.webhook, record)
 
     def matrix(self, record):
-        skip_matrix = False if hasattr(record, "skip_matrix") is False else True
+        skip_matrix = getattr(record, "skip_matrix", False)
 
         if (
             self.settings.matrix is not None
-            and skip_matrix is False
+            and not skip_matrix
             and self.settings.matrix.room_id != "..."
             and self.settings.matrix.access_token
         ):
             self._send(self.settings.matrix, record)
 
     def pushover(self, record):
-        skip_pushover = False if hasattr(record, "skip_pushover") is False else True
+        skip_pushover = getattr(record, "skip_pushover", False)
 
         if (
             self.settings.pushover is not None
-            and skip_pushover is False
+            and not skip_pushover
             and self.settings.pushover.userkey != "YOUR-ACCOUNT-TOKEN"
             and self.settings.pushover.token != "YOUR-APPLICATION-TOKEN"
         ):
             self._send(self.settings.pushover, record)
 
     def gotify(self, record):
-        skip_gotify = False if hasattr(record, "skip_gotify") is False else True
+        skip_gotify = getattr(record, "skip_gotify", False)
 
         if (
             self.settings.gotify is not None
-            and skip_gotify is False
+            and not skip_gotify
             and self.settings.gotify.endpoint
             != "https://example.com/message?token=TOKEN"
         ):
