@@ -441,6 +441,36 @@ def test_enabling_new_notification_requires_credentials(tmp_path):
         )
 
 
+def test_ntfy_dashboard_accepts_tags_and_uses_default_server(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "ntfy",
+            "values": {
+                "enabled": True,
+                "topic": "private-topic",
+                "tags": ["twitch", "gift"],
+                "events": ["DROP_CLAIM"],
+            },
+        },
+    )
+    loaded = _load_config(config)
+    ntfy = loaded.MINER_CONFIG["logger_settings"].ntfy
+
+    assert result["notifications"]["ntfy"]["test_available"] is True
+    assert result["notifications"]["ntfy"]["secrets"] == {
+        "topic": True,
+        "token": False,
+    }
+    assert ntfy.server_url == "https://ntfy.sh"
+    assert ntfy.tags == ["twitch", "gift"]
+    assert ntfy.events == ["DROP_CLAIM"]
+
+
 def test_notification_events_are_validated_and_normalized_for_runtime(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)

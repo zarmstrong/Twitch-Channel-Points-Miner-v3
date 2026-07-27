@@ -81,7 +81,7 @@ NOTIFICATION_REQUIRED = {
     "matrix": {"username", "password", "homeserver", "room_id"},
     "pushover": {"userkey", "token"},
     "gotify": {"endpoint"},
-    "ntfy": {"server_url", "topic"},
+    "ntfy": {"topic"},
 }
 NOTIFICATION_POSITIONAL_FIELDS = {
     "telegram": ("chat_id", "token", "events", "disable_notification"),
@@ -645,7 +645,7 @@ def _update_managed_web_config(config_path, payload):
             "enabled" in values and not isinstance(values["enabled"], bool)
         ):
             raise ConfigEditError("Unsupported notification setting.")
-        for list_name in ("events", "recipients"):
+        for list_name in ("events", "recipients", "tags"):
             if list_name in values and (
                 not isinstance(values[list_name], list)
                 or any(not isinstance(item, str) for item in values[list_name])
@@ -665,7 +665,7 @@ def _update_managed_web_config(config_path, payload):
         for bool_name in ("disable_notification", "use_ssl", "starttls"):
             if bool_name in values and not isinstance(values[bool_name], bool):
                 raise ConfigEditError(f"{bool_name} must be true or false.")
-        list_fields = {"events", "recipients"}
+        list_fields = {"events", "recipients", "tags"}
         number_fields = {"chat_id", "port", "priority"}
         bool_fields = {"disable_notification", "use_ssl", "starttls"}
         text_fields = set(schema["fields"]) - list_fields - number_fields - bool_fields
