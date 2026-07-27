@@ -2126,6 +2126,8 @@ class Twitch(object):
     def update_raid(self, streamer, raid):
         if streamer.raid != raid:
             streamer.raid = raid
+            if streamer.is_watching is not True:
+                return
             try:
                 self.gql.join_raid(raid.raid_id)
                 logger.info(
@@ -2517,6 +2519,10 @@ class Twitch(object):
                         continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
+
+                watched_indexes = set(streamers_watching)
+                for index, streamer in enumerate(streamers):
+                    streamer.is_watching = index in watched_indexes
 
                 self.__log_watched_streamers(streamers, streamers_watching)
 
