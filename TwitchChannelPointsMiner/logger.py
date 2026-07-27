@@ -315,19 +315,19 @@ class GlobalFormatter(logging.Formatter):
             self._send(self.settings.gotify, record)
 
     def email(self, record):
-        skip_email = hasattr(record, "skip_email")
+        skip_email = getattr(record, "skip_email", False)
         if (
             self.settings.email is not None
-            and skip_email is False
+            and not skip_email
             and self.settings.email.host != "smtp.example.com"
         ):
             self._send(self.settings.email, record)
 
     def ntfy(self, record):
-        skip_ntfy = hasattr(record, "skip_ntfy")
+        skip_ntfy = getattr(record, "skip_ntfy", False)
         if (
             self.settings.ntfy is not None
-            and skip_ntfy is False
+            and not skip_ntfy
             and self.settings.ntfy.topic != "YOUR_NTFY_TOPIC"
         ):
             self._send(self.settings.ntfy, record)

@@ -69,3 +69,17 @@ def test_logger_skips_placeholder_ntfy_topic():
         formatter.ntfy(SimpleNamespace())
 
     send.assert_not_called()
+
+
+def test_logger_ntfy_skip_flag_must_be_truthy():
+    notifier = Ntfy("private-topic", [Events.DROP_CLAIM])
+    formatter = GlobalFormatter.__new__(GlobalFormatter)
+    formatter.settings = MagicMock(ntfy=notifier)
+    included = SimpleNamespace(skip_ntfy=False)
+    skipped = SimpleNamespace(skip_ntfy=True)
+
+    with patch.object(formatter, "_send") as send:
+        formatter.ntfy(included)
+        formatter.ntfy(skipped)
+
+    send.assert_called_once_with(notifier, included)
