@@ -1039,7 +1039,7 @@ token.
 from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
 
 Ntfy(
-    topic="YOUR_PRIVATE_TOPIC",
+    topic="YOUR_NTFY_TOPIC",
     token="YOUR_ACCESS_TOKEN",
     priority=3,
     tags=["twitch"],

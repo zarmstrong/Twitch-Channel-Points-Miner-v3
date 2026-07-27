@@ -46,6 +46,16 @@ def test_ntfy_ignores_events_not_selected():
     post.assert_not_called()
 
 
+def test_ntfy_normalizes_server_url_after_dashboard_update():
+    ntfy = Ntfy("topic", [Events.DROP_CLAIM])
+    ntfy.server_url = "https://ntfy.example///"
+
+    with patch("TwitchChannelPointsMiner.classes.Ntfy.requests.post") as post:
+        ntfy.send("claimed", Events.DROP_CLAIM)
+
+    assert post.call_args.kwargs["url"] == "https://ntfy.example/topic"
+
+
 def test_ntfy_reports_sanitized_request_failure():
     ntfy = Ntfy("topic", [Events.DROP_CLAIM])
     error = requests.HTTPError(response=SimpleNamespace(status_code=401))

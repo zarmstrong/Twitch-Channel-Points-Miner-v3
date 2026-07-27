@@ -51,7 +51,7 @@ class Ntfy(object):
 
         try:
             response = requests.post(
-                url=f"{self.server_url}/{quote(self.topic, safe='')}",
+                url=f"{self.server_url.rstrip('/')}/{quote(self.topic, safe='')}",
                 data=dedent(message).encode("utf-8"),
                 headers=headers,
                 timeout=self.timeout,
