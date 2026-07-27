@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.11.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.10.1...3.11.0) (2026-07-27)
+
+
+### Features
+
+* add ntfy notification support ([#66](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/66)) ([c97301e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/c97301ee96e8839af70d4565a0921d13fca26b06))
+
+
+### Bug Fixes
+
+* **drops:** recognize campaign-qualified badge rewards ([#64](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/64)) ([21bf277](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/21bf277d61b5c5dff778ac94ee5c74d22fd3e0af))
+* follow raids only from watched streams ([#67](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/67)) ([298c830](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/298c830db77f400e3bc05991c20b14a478dbb0b0))
+* **logging:** honor boolean notification skip flags consistently ([c97301e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/c97301ee96e8839af70d4565a0921d13fca26b06))
+
 ## [3.10.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.10.0...3.10.1) (2026-07-26)
 
 
