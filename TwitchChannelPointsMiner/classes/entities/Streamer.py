@@ -91,6 +91,7 @@ class Streamer(object):
         "channel_id",
         "settings",
         "is_online",
+        "is_watching",
         "stream_up",
         "online_at",
         "offline_at",
@@ -126,6 +127,7 @@ class Streamer(object):
         self.channel_id: str = ""
         self.settings = settings
         self.is_online = False
+        self.is_watching = False
         self.stream_up = 0
         self.online_at = 0
         self.offline_at = 0

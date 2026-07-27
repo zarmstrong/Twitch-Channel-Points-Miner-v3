@@ -13,6 +13,8 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.Settings import Priority, StreamerSource
+from TwitchChannelPointsMiner.classes.entities.Raid import Raid
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
 
 def test_streams_watched_defaults_to_two():
@@ -81,6 +83,7 @@ def _watch_streamer(
     return SimpleNamespace(
         username=username,
         is_online=True,
+        is_watching=False,
         online_at=0,
         from_category=from_category,
         from_badge_campaign=from_badge_campaign,
@@ -212,6 +215,29 @@ def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
     )
 
     assert posted == ["https://spade.test/one", "https://spade.test/two"]
+
+
+def test_minute_watcher_marks_only_selected_streamers_as_watched(monkeypatch):
+    streamers = [_watch_streamer("selected"), _watch_streamer("waiting")]
+
+    _run_one_watch_iteration(monkeypatch, streamers, streams_watched=1)
+
+    assert streamers[0].is_watching is True
+    assert streamers[1].is_watching is False
+
+
+def test_raid_is_joined_only_from_watched_streamer():
+    joined_raids = []
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(join_raid=joined_raids.append)
+    watched = Streamer("watched")
+    watched.is_watching = True
+    waiting = Streamer("waiting")
+
+    twitch.update_raid(watched, Raid("watched-raid", "target-one"))
+    twitch.update_raid(waiting, Raid("waiting-raid", "target-two"))
+
+    assert joined_raids == ["watched-raid"]
 
 
 def test_minute_watcher_uses_second_slot_for_explicit_stream(monkeypatch):
