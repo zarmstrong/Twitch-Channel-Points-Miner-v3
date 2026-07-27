@@ -68,6 +68,10 @@ NOTIFICATION_SCHEMAS = {
         "secrets": ("userkey", "token"),
     },
     "gotify": {"fields": ("priority", "events"), "secrets": ("endpoint",)},
+    "ntfy": {
+        "fields": ("server_url", "priority", "tags", "events"),
+        "secrets": ("topic", "token"),
+    },
 }
 NOTIFICATION_REQUIRED = {
     "telegram": {"chat_id", "token"},
@@ -77,6 +81,7 @@ NOTIFICATION_REQUIRED = {
     "matrix": {"username", "password", "homeserver", "room_id"},
     "pushover": {"userkey", "token"},
     "gotify": {"endpoint"},
+    "ntfy": {"topic"},
 }
 NOTIFICATION_POSITIONAL_FIELDS = {
     "telegram": ("chat_id", "token", "events", "disable_notification"),
@@ -97,6 +102,15 @@ NOTIFICATION_POSITIONAL_FIELDS = {
     "matrix": ("username", "password", "homeserver", "room_id", "events"),
     "pushover": ("userkey", "token", "priority", "sound", "events"),
     "gotify": ("endpoint", "priority", "events"),
+    "ntfy": (
+        "topic",
+        "events",
+        "server_url",
+        "token",
+        "priority",
+        "tags",
+        "timeout",
+    ),
 }
 
 
@@ -631,7 +645,7 @@ def _update_managed_web_config(config_path, payload):
             "enabled" in values and not isinstance(values["enabled"], bool)
         ):
             raise ConfigEditError("Unsupported notification setting.")
-        for list_name in ("events", "recipients"):
+        for list_name in ("events", "recipients", "tags"):
             if list_name in values and (
                 not isinstance(values[list_name], list)
                 or any(not isinstance(item, str) for item in values[list_name])
@@ -651,7 +665,7 @@ def _update_managed_web_config(config_path, payload):
         for bool_name in ("disable_notification", "use_ssl", "starttls"):
             if bool_name in values and not isinstance(values[bool_name], bool):
                 raise ConfigEditError(f"{bool_name} must be true or false.")
-        list_fields = {"events", "recipients"}
+        list_fields = {"events", "recipients", "tags"}
         number_fields = {"chat_id", "port", "priority"}
         bool_fields = {"disable_notification", "use_ssl", "starttls"}
         text_fields = set(schema["fields"]) - list_fields - number_fields - bool_fields
@@ -719,6 +733,7 @@ def apply_web_overrides(config, config_path):
     )
     from TwitchChannelPointsMiner.classes.Gotify import Gotify
     from TwitchChannelPointsMiner.classes.Matrix import Matrix
+    from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
     from TwitchChannelPointsMiner.classes.Pushover import Pushover
     from TwitchChannelPointsMiner.classes.Telegram import Telegram
     from TwitchChannelPointsMiner.classes.Webhook import Webhook
@@ -850,6 +865,7 @@ def apply_web_overrides(config, config_path):
             "matrix": Matrix,
             "pushover": Pushover,
             "gotify": Gotify,
+            "ntfy": Ntfy,
         }
         notification_overrides = overrides.get("notifications", {})
         if not isinstance(notification_overrides, dict):
@@ -947,6 +963,18 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
             "endpoint": secrets.get("endpoint", current("endpoint")),
             "priority": fields.get("priority", current("priority", 0)),
             "events": events,
+        }
+    if provider == "ntfy":
+        return {
+            "topic": secrets.get("topic", current("topic")),
+            "events": events,
+            "server_url": fields.get(
+                "server_url", current("server_url", "https://ntfy.sh")
+            ),
+            "token": secrets.get("token", current("token")),
+            "priority": fields.get("priority", current("priority")),
+            "tags": fields.get("tags", current("tags", [])),
+            "timeout": current("timeout", 10),
         }
     if provider == "pushover":
         return {

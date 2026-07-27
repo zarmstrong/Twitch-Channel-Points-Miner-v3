@@ -1417,7 +1417,7 @@ function renderNotificationSettings(config) {
 function buildNotificationField(name, value, secret, configured, eventOptions) {
     var label = $('<label>').addClass('label').text(name.replace(/_/g, ' '));
     var booleanFields = ['disable_notification', 'use_ssl', 'starttls'];
-    var arrayFields = ['events', 'recipients'];
+    var arrayFields = ['events', 'recipients', 'tags'];
     var numberFields = ['chat_id', 'port', 'priority'];
     var input;
     if (name === 'events') {

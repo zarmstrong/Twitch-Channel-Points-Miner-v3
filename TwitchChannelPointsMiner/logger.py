@@ -15,6 +15,7 @@ from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
+from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.Telegram import Telegram
@@ -83,6 +84,7 @@ class LoggerSettings:
         "matrix",
         "pushover",
         "gotify",
+        "ntfy",
         "email",
         "daily_report",
         "daily_report_time",
@@ -108,6 +110,7 @@ class LoggerSettings:
         matrix: Matrix or None = None,
         pushover: Pushover or None = None,
         gotify: Gotify or None = None,
+        ntfy: Ntfy or None = None,
         email: Email or None = None,
         daily_report: bool = False,
         daily_report_time: str = "00:00",
@@ -141,6 +144,7 @@ class LoggerSettings:
         self.matrix = matrix
         self.pushover = pushover
         self.gotify = gotify
+        self.ntfy = ntfy
         self.email = email
         self.daily_report = daily_report
         try:
@@ -238,6 +242,7 @@ class GlobalFormatter(logging.Formatter):
             self.matrix(record)
             self.pushover(record)
             self.gotify(record)
+            self.ntfy(record)
             self.email(record)
 
             if self.settings.colored is True:
@@ -246,77 +251,86 @@ class GlobalFormatter(logging.Formatter):
         return super().format(record)
 
     def telegram(self, record):
-        skip_telegram = False if hasattr(record, "skip_telegram") is False else True
+        skip_telegram = getattr(record, "skip_telegram", False)
 
         if (
             self.settings.telegram is not None
-            and skip_telegram is False
+            and not skip_telegram
             and self.settings.telegram.chat_id != 123456789
         ):
             self._send(self.settings.telegram, record)
 
     def discord(self, record):
-        skip_discord = False if hasattr(record, "skip_discord") is False else True
+        skip_discord = getattr(record, "skip_discord", False)
 
         if (
             self.settings.discord is not None
-            and skip_discord is False
+            and not skip_discord
             and self.settings.discord.webhook_api
             != "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J"
         ):
             self._send(self.settings.discord, record)
 
     def webhook(self, record):
-        skip_webhook = False if hasattr(record, "skip_webhook") is False else True
+        skip_webhook = getattr(record, "skip_webhook", False)
 
         if (
             self.settings.webhook is not None
-            and skip_webhook is False
+            and not skip_webhook
             and self.settings.webhook.endpoint != "https://example.com/webhook"
         ):
             self._send(self.settings.webhook, record)
 
     def matrix(self, record):
-        skip_matrix = False if hasattr(record, "skip_matrix") is False else True
+        skip_matrix = getattr(record, "skip_matrix", False)
 
         if (
             self.settings.matrix is not None
-            and skip_matrix is False
+            and not skip_matrix
             and self.settings.matrix.room_id != "..."
             and self.settings.matrix.access_token
         ):
             self._send(self.settings.matrix, record)
 
     def pushover(self, record):
-        skip_pushover = False if hasattr(record, "skip_pushover") is False else True
+        skip_pushover = getattr(record, "skip_pushover", False)
 
         if (
             self.settings.pushover is not None
-            and skip_pushover is False
+            and not skip_pushover
             and self.settings.pushover.userkey != "YOUR-ACCOUNT-TOKEN"
             and self.settings.pushover.token != "YOUR-APPLICATION-TOKEN"
         ):
             self._send(self.settings.pushover, record)
 
     def gotify(self, record):
-        skip_gotify = False if hasattr(record, "skip_gotify") is False else True
+        skip_gotify = getattr(record, "skip_gotify", False)
 
         if (
             self.settings.gotify is not None
-            and skip_gotify is False
+            and not skip_gotify
             and self.settings.gotify.endpoint
             != "https://example.com/message?token=TOKEN"
         ):
             self._send(self.settings.gotify, record)
 
     def email(self, record):
-        skip_email = hasattr(record, "skip_email")
+        skip_email = getattr(record, "skip_email", False)
         if (
             self.settings.email is not None
-            and skip_email is False
+            and not skip_email
             and self.settings.email.host != "smtp.example.com"
         ):
             self._send(self.settings.email, record)
+
+    def ntfy(self, record):
+        skip_ntfy = getattr(record, "skip_ntfy", False)
+        if (
+            self.settings.ntfy is not None
+            and not skip_ntfy
+            and self.settings.ntfy.topic != "YOUR_NTFY_TOPIC"
+        ):
+            self._send(self.settings.ntfy, record)
 
     @staticmethod
     def _send(notifier, record):

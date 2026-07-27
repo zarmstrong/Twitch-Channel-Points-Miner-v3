@@ -189,3 +189,17 @@ def test_logger_skips_placeholder_email_host():
         formatter.email(record)
 
     send.assert_not_called()
+
+
+def test_logger_email_skip_flag_must_be_truthy():
+    notifier = MagicMock(host="smtp.valid.example")
+    formatter = GlobalFormatter.__new__(GlobalFormatter)
+    formatter.settings = MagicMock(email=notifier)
+    included = SimpleNamespace(skip_email=False)
+    skipped = SimpleNamespace(skip_email=True)
+
+    with patch.object(formatter, "_send") as send:
+        formatter.email(included)
+        formatter.email(skipped)
+
+    send.assert_called_once_with(notifier, included)

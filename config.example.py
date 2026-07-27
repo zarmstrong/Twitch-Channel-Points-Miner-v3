@@ -14,6 +14,7 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
+from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
 from TwitchChannelPointsMiner.classes.Settings import (
     Priority,
     Events,
@@ -111,6 +112,14 @@ MINER_CONFIG = {
             priority=8,
             events=[Events.STREAMER_ONLINE, Events.STREAMER_OFFLINE,
                     Events.BET_LOSE, Events.CHAT_MENTION],
+        ),
+        ntfy=Ntfy(
+            topic="YOUR_NTFY_TOPIC",                                                # Treat an unprotected topic name like a password
+            server_url="https://ntfy.sh",                                           # Replace with your self-hosted ntfy server if applicable
+            token=None,                                                              # Optional access token for protected topics
+            priority=3,                                                              # Optional ntfy priority from 1 (min) to 5 (max)
+            tags=["twitch"],                                                         # Optional ntfy tags or emoji short names
+            events=[Events.STREAMER_ONLINE, Events.DROP_CLAIM],
         )
     ),
     'streamer_settings': StreamerSettings(
