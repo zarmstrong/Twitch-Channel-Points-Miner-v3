@@ -1406,7 +1406,16 @@ class Twitch(object):
     @staticmethod
     def __reward_name_is_owned(reward_name, owned_reward_names, game_name=""):
         reward_words = re.findall(r"[a-z0-9]+", str(reward_name or "").lower())
-        game_words = set(re.findall(r"[a-z0-9]+", str(game_name or "").lower()))
+        game_word_list = re.findall(r"[a-z0-9]+", str(game_name or "").lower())
+        game_words = set(game_word_list)
+        # Badge titles sometimes insert a campaign label between the game and
+        # reward names (for example, "Final Fantasy XIV Fan Festival 2026 EU -
+        # Moogle Chat"). Twitch may also omit a trailing "Online" from that
+        # game prefix. Keep this match anchored to the game title so an
+        # unrelated badge that happens to share the reward suffix is rejected.
+        game_title_prefix = list(game_word_list)
+        while game_title_prefix and game_title_prefix[-1] in {"online"}:
+            game_title_prefix.pop()
         if not reward_words:
             return False
         for owned_name in owned_reward_names:
@@ -1417,9 +1426,26 @@ class Twitch(object):
             if (
                 prefix_length > 0
                 and owned_words[prefix_length:] == reward_words
-                and set(owned_words[:prefix_length]).issubset(game_words)
+                and (
+                    set(owned_words[:prefix_length]).issubset(game_words)
+                    or (
+                        game_title_prefix
+                        and owned_words[: len(game_title_prefix)] == game_title_prefix
+                    )
+                )
             ):
                 return True
+            if (
+                game_title_prefix
+                and owned_words[: len(game_title_prefix)] == game_title_prefix
+                and owned_words[-1:] == reward_words[-1:]
+            ):
+                reward_index = 0
+                for owned_word in owned_words[len(game_title_prefix) :]:
+                    if owned_word == reward_words[reward_index]:
+                        reward_index += 1
+                        if reward_index == len(reward_words):
+                            return True
         return False
 
     def __get_available_badge_names(self, refresh=False):
