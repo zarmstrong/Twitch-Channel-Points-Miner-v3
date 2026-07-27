@@ -37,6 +37,8 @@ class Ntfy(object):
         self.timeout = timeout
 
     def send(self, message: str, event: Events) -> tuple[bool, str | None]:
+        if self.topic == "YOUR_NTFY_TOPIC":
+            return False, "The ntfy topic is still set to the example placeholder."
         if str(event) not in self.events:
             return False, "This event is not enabled for ntfy."
 

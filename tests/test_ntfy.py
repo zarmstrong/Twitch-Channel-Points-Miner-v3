@@ -46,6 +46,18 @@ def test_ntfy_ignores_events_not_selected():
     post.assert_not_called()
 
 
+def test_ntfy_does_not_publish_to_placeholder_topic():
+    ntfy = Ntfy("YOUR_NTFY_TOPIC", [Events.DROP_CLAIM])
+
+    with patch("TwitchChannelPointsMiner.classes.Ntfy.requests.post") as post:
+        assert ntfy.send("claimed", Events.DROP_CLAIM) == (
+            False,
+            "The ntfy topic is still set to the example placeholder.",
+        )
+
+    post.assert_not_called()
+
+
 def test_ntfy_normalizes_server_url_after_dashboard_update():
     ntfy = Ntfy("topic", [Events.DROP_CLAIM])
     ntfy.server_url = "https://ntfy.example///"
