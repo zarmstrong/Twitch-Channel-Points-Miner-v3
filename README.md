@@ -71,6 +71,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
             - [Telegram](#telegram)
             - [Discord](#discord)
             - [Generic Webhook](#generic-webhook)
+            - [ntfy](#ntfy)
             - [Matrix](#matrix)
             - [Pushover](#pushover)
             - [Gotify](#gotify)
@@ -890,6 +891,7 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 | `pushover` | Pushover or None | `None` | Send selected events through Pushover. |
 | `gotify` | Gotify or None | `None` | Send selected events to a Gotify server. |
 | `email` | Email or None | `None` | Send selected events through an SMTP server. |
+| `ntfy` | Ntfy or None | `None` | Publish selected events to an ntfy topic. |
 | `daily_report` | bool | `False` | Generate a daily channel-points and Drop activity report. |
 | `daily_report_time` | str | `"00:00"` | Local delivery time for the daily report, in 24-hour `HH:MM` format. |
 
@@ -950,6 +952,7 @@ Placeholder values are ignored; use real credentials and never commit them.
 | Pushover | Pushover account or group | `Pushover` |
 | Gotify | Self-hosted Gotify application | `Gotify` |
 | Email | Addresses reached through SMTP | `Email` |
+| ntfy | ntfy topic (hosted or self-hosted) | `Ntfy` |
 
 Delivery failures are logged and do not stop mining. Enable
 `console_username` when several accounts share a destination. The analytics
@@ -1011,6 +1014,36 @@ Webhook(
     method="POST",
     events=[Events.DROP_CLAIM, Events.CONFIGURATION],
     timeout=5,
+)
+```
+
+##### ntfy
+
+`Ntfy` publishes plain-text notifications to [ntfy](https://ntfy.sh/). The
+default server is `https://ntfy.sh`; set `server_url` for a self-hosted server.
+Topic names act like passwords when access control is not enabled, so use a
+hard-to-guess topic and do not commit it. Protected topics can use an access
+token.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `topic` | str | Required | Destination topic name. |
+| `events` | list | Required | Events to send. |
+| `server_url` | str | `"https://ntfy.sh"` | Hosted or self-hosted ntfy server URL. |
+| `token` | str or None | `None` | Optional ntfy access token. |
+| `priority` | int or None | `None` | Optional ntfy priority from 1 through 5. |
+| `tags` | list, tuple, str, or None | `None` | Optional ntfy tags. |
+| `timeout` | float | `10` | Request timeout in seconds. |
+
+```python
+from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
+
+Ntfy(
+    topic="YOUR_PRIVATE_TOPIC",
+    token="YOUR_ACCESS_TOKEN",
+    priority=3,
+    tags=["twitch"],
+    events=[Events.STREAMER_OFFLINE, Events.DROP_CLAIM],
 )
 ```
 

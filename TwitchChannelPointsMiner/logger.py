@@ -15,6 +15,7 @@ from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
+from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.Telegram import Telegram
@@ -83,6 +84,7 @@ class LoggerSettings:
         "matrix",
         "pushover",
         "gotify",
+        "ntfy",
         "email",
         "daily_report",
         "daily_report_time",
@@ -108,6 +110,7 @@ class LoggerSettings:
         matrix: Matrix or None = None,
         pushover: Pushover or None = None,
         gotify: Gotify or None = None,
+        ntfy: Ntfy or None = None,
         email: Email or None = None,
         daily_report: bool = False,
         daily_report_time: str = "00:00",
@@ -141,6 +144,7 @@ class LoggerSettings:
         self.matrix = matrix
         self.pushover = pushover
         self.gotify = gotify
+        self.ntfy = ntfy
         self.email = email
         self.daily_report = daily_report
         try:
@@ -238,6 +242,7 @@ class GlobalFormatter(logging.Formatter):
             self.matrix(record)
             self.pushover(record)
             self.gotify(record)
+            self.ntfy(record)
             self.email(record)
 
             if self.settings.colored is True:
@@ -317,6 +322,15 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.email.host != "smtp.example.com"
         ):
             self._send(self.settings.email, record)
+
+    def ntfy(self, record):
+        skip_ntfy = hasattr(record, "skip_ntfy")
+        if (
+            self.settings.ntfy is not None
+            and skip_ntfy is False
+            and self.settings.ntfy.topic != "YOUR_NTFY_TOPIC"
+        ):
+            self._send(self.settings.ntfy, record)
 
     @staticmethod
     def _send(notifier, record):

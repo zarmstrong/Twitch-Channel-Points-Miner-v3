@@ -68,6 +68,10 @@ NOTIFICATION_SCHEMAS = {
         "secrets": ("userkey", "token"),
     },
     "gotify": {"fields": ("priority", "events"), "secrets": ("endpoint",)},
+    "ntfy": {
+        "fields": ("server_url", "priority", "tags", "events"),
+        "secrets": ("topic", "token"),
+    },
 }
 NOTIFICATION_REQUIRED = {
     "telegram": {"chat_id", "token"},
@@ -77,6 +81,7 @@ NOTIFICATION_REQUIRED = {
     "matrix": {"username", "password", "homeserver", "room_id"},
     "pushover": {"userkey", "token"},
     "gotify": {"endpoint"},
+    "ntfy": {"server_url", "topic"},
 }
 NOTIFICATION_POSITIONAL_FIELDS = {
     "telegram": ("chat_id", "token", "events", "disable_notification"),
@@ -97,6 +102,15 @@ NOTIFICATION_POSITIONAL_FIELDS = {
     "matrix": ("username", "password", "homeserver", "room_id", "events"),
     "pushover": ("userkey", "token", "priority", "sound", "events"),
     "gotify": ("endpoint", "priority", "events"),
+    "ntfy": (
+        "topic",
+        "events",
+        "server_url",
+        "token",
+        "priority",
+        "tags",
+        "timeout",
+    ),
 }
 
 
@@ -719,6 +733,7 @@ def apply_web_overrides(config, config_path):
     )
     from TwitchChannelPointsMiner.classes.Gotify import Gotify
     from TwitchChannelPointsMiner.classes.Matrix import Matrix
+    from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
     from TwitchChannelPointsMiner.classes.Pushover import Pushover
     from TwitchChannelPointsMiner.classes.Telegram import Telegram
     from TwitchChannelPointsMiner.classes.Webhook import Webhook
@@ -850,6 +865,7 @@ def apply_web_overrides(config, config_path):
             "matrix": Matrix,
             "pushover": Pushover,
             "gotify": Gotify,
+            "ntfy": Ntfy,
         }
         notification_overrides = overrides.get("notifications", {})
         if not isinstance(notification_overrides, dict):
@@ -947,6 +963,18 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
             "endpoint": secrets.get("endpoint", current("endpoint")),
             "priority": fields.get("priority", current("priority", 0)),
             "events": events,
+        }
+    if provider == "ntfy":
+        return {
+            "topic": secrets.get("topic", current("topic")),
+            "events": events,
+            "server_url": fields.get(
+                "server_url", current("server_url", "https://ntfy.sh")
+            ),
+            "token": secrets.get("token", current("token")),
+            "priority": fields.get("priority", current("priority")),
+            "tags": fields.get("tags", current("tags", [])),
+            "timeout": current("timeout", 10),
         }
     if provider == "pushover":
         return {

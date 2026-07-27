@@ -49,6 +49,7 @@ LOGGER_NOTIFICATION_SETTINGS = (
     "pushover",
     "gotify",
     "email",
+    "ntfy",
 )
 LOGGER_NOTIFICATION_TEMPLATES = {
     "telegram": 'Telegram(chat_id=123456789, token="TOKEN", events=[])',
@@ -58,6 +59,7 @@ LOGGER_NOTIFICATION_TEMPLATES = {
     "pushover": 'Pushover(userkey="USER_KEY", token="TOKEN", priority=0, sound="pushover", events=[])',
     "gotify": 'Gotify(endpoint="https://example.com/message?token=TOKEN", priority=0, events=[])',
     "email": 'Email(host="smtp.example.com", port=587, sender="miner@example.com", recipients=["you@example.com"], events=[])',
+    "ntfy": 'Ntfy(topic="YOUR_NTFY_TOPIC", events=[])',
 }
 BET_SETTINGS_DEFAULTS = (
     ("strategy", "None"),

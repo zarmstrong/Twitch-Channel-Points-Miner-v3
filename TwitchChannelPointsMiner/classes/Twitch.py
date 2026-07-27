@@ -1738,6 +1738,7 @@ class Twitch(object):
                 "skip_webhook": True,
                 "skip_matrix": True,
                 "skip_gotify": True,
+                "skip_ntfy": True,
             },
         )
 
@@ -2594,6 +2595,7 @@ class Twitch(object):
                                                     "skip_webhook": True,
                                                     "skip_matrix": True,
                                                     "skip_gotify": True,
+                                                    "skip_ntfy": True,
                                                 },
                                             )
 
@@ -2615,6 +2617,11 @@ class Twitch(object):
                                             )
                                         if Settings.logger.gotify is not None:
                                             Settings.logger.gotify.send(
+                                                "\n".join(drop_messages),
+                                                Events.DROP_STATUS,
+                                            )
+                                        if Settings.logger.ntfy is not None:
+                                            Settings.logger.ntfy.send(
                                                 "\n".join(drop_messages),
                                                 Events.DROP_STATUS,
                                             )
@@ -3870,6 +3877,7 @@ class Twitch(object):
                                         "skip_webhook": True,
                                         "skip_matrix": True,
                                         "skip_gotify": True,
+                                        "skip_ntfy": True,
                                     },
                                 )
                             elif previous_signature == "" and current_signature != "":
@@ -3882,6 +3890,7 @@ class Twitch(object):
                                         "skip_webhook": True,
                                         "skip_matrix": True,
                                         "skip_gotify": True,
+                                        "skip_ntfy": True,
                                     },
                                 )
 
