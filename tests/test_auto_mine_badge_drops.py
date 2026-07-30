@@ -6,7 +6,10 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
 )
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    Streamer,
+    StreamerSettings,
+)
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
 
@@ -67,9 +70,13 @@ class FakeTwitch:
 class FakeWebSocketsPool:
     def __init__(self):
         self.topics = []
+        self.removed = []
 
     def submit(self, topic):
         self.topics.append(topic)
+
+    def remove_streamer_topics(self, streamer):
+        self.removed.append(streamer.username)
 
 
 def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
@@ -127,6 +134,40 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
             },
         ),
     ]
+
+
+def test_badge_ownership_change_retires_only_stale_badge_streamers():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    stale = Streamer(
+        "stale",
+        from_category=True,
+        from_badge_campaign=True,
+    )
+    current = Streamer(
+        "current",
+        from_category=True,
+        from_badge_campaign=True,
+    )
+    configured = Streamer(
+        "configured",
+        from_category=True,
+        from_badge_campaign=True,
+        explicitly_configured=True,
+    )
+    miner.streamers = [stale, current, configured]
+    miner.original_streamers = [10, 20, 30]
+    miner.ws_pool = FakeWebSocketsPool()
+
+    miner._TwitchChannelPointsMiner__reconcile_badge_campaign_streamers(["current"])
+
+    assert [streamer.username for streamer in miner.streamers] == [
+        "current",
+        "configured",
+    ]
+    assert miner.original_streamers == [20, 30]
+    assert miner.ws_pool.removed == ["stale"]
+    assert current.from_badge_campaign is True
+    assert configured.from_badge_campaign is False
 
 
 def test_category_discovery_keeps_point_baselines_aligned():
