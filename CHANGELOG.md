@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.11.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.11.0...3.11.1) (2026-07-31)
+
+
+### Bug Fixes
+
+* **drops:** advance after earning badge drops ([#68](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/68)) ([039e77a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/039e77adc93c82f5d4719d756ee3f83bccbbb0cd))
+* **drops:** preserve badge inventory baseline after transient refresh failures ([039e77a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/039e77adc93c82f5d4719d756ee3f83bccbbb0cd))
+
 ## [3.11.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.10.1...3.11.0) (2026-07-27)
 
 
