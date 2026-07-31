@@ -170,6 +170,55 @@ def test_badge_ownership_change_retires_only_stale_badge_streamers():
     assert configured.from_badge_campaign is False
 
 
+def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
+    class RecoveringTwitch(FakeTwitch):
+        def __init__(self):
+            super().__init__()
+            self.available_badge_names = {"old badge"}
+            self.responses = iter([None, {"old badge", "new badge"}])
+
+        def get_earned_badge_names(self, refresh=False):
+            assert refresh is True
+            self.available_badge_names = None
+            result = next(self.responses)
+            if result is not None:
+                self.available_badge_names = result
+            return result
+
+    class EmptyCatalog:
+        def eligible_badge_campaigns(self, owned_badges):
+            return []
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    stale = Streamer(
+        "stale",
+        from_category=True,
+        from_badge_campaign=True,
+    )
+    miner.twitch = RecoveringTwitch()
+    miner.streamers = [stale]
+    miner.original_streamers = [10]
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.drop_badge_catalog = EmptyCatalog()
+    miner.badge_drop_streamer_limit = 1
+    miner.badge_drop_category_chat = ChatPresence.NEVER
+    miner.badge_drop_category_sort = "VIEWERS_DESC"
+    miner.badge_drop_blacklist = set()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.twitch.available_badge_names == {"old badge"}
+    assert miner.streamers == [stale]
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == []
+    assert miner.original_streamers == []
+    assert miner.ws_pool.removed == ["stale"]
+
+
 def test_category_discovery_keeps_point_baselines_aligned():
     defaults = StreamerSettings(chat=ChatPresence.NEVER)
     defaults.default()

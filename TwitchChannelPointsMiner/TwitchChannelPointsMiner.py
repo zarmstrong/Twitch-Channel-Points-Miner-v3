@@ -1170,6 +1170,7 @@ class TwitchChannelPointsMiner:
             previous_owned_badges = getattr(self.twitch, "available_badge_names", None)
             owned_badges = self.twitch.get_earned_badge_names(refresh=True)
             if owned_badges is None:
+                self.twitch.available_badge_names = previous_owned_badges
                 logger.warning(
                     "Skipping automatic badge Drop discovery because Twitch did "
                     "not return the account's earned badge inventory",
