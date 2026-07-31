@@ -1113,11 +1113,15 @@ class TwitchChannelPointsMiner:
             self.__auto_mine_badge_campaigns()
         if refresh_seconds <= 0:
             return
+        ownership_refresh_seconds = min(refresh_seconds, 5 * 60)
+        next_catalog_refresh = time.monotonic() + refresh_seconds
         while self.running and self.twitch.running:
-            if self.drop_badge_catalog_stop_event.wait(refresh_seconds):
+            if self.drop_badge_catalog_stop_event.wait(ownership_refresh_seconds):
                 return
             if self.running and self.twitch.running:
-                self.__sync_drop_badge_catalog()
+                if time.monotonic() >= next_catalog_refresh:
+                    self.__sync_drop_badge_catalog()
+                    next_catalog_refresh = time.monotonic() + refresh_seconds
                 if self.auto_mine_badge_drops:
                     self.__auto_mine_badge_campaigns()
 
@@ -1163,8 +1167,10 @@ class TwitchChannelPointsMiner:
             return
 
         try:
+            previous_owned_badges = getattr(self.twitch, "available_badge_names", None)
             owned_badges = self.twitch.get_earned_badge_names(refresh=True)
             if owned_badges is None:
+                self.twitch.available_badge_names = previous_owned_badges
                 logger.warning(
                     "Skipping automatic badge Drop discovery because Twitch did "
                     "not return the account's earned badge inventory",
@@ -1236,7 +1242,14 @@ class TwitchChannelPointsMiner:
                 )
 
         added = 0
+        earned_badge_changed = (
+            previous_owned_badges is not None
+            and owned_badges.issuperset(previous_owned_badges)
+            and owned_badges != previous_owned_badges
+        )
         with self.config_reload_lock:
+            if earned_badge_changed:
+                self.__reconcile_badge_campaign_streamers(discovered_usernames)
             existing_usernames = {streamer.username for streamer in self.streamers}
             for username in dict.fromkeys(discovered_usernames):
                 username = str(username).lower().strip()
@@ -1325,6 +1338,51 @@ class TwitchChannelPointsMiner:
             f"{added} new live streamers",
             extra={"emoji": ":gift:", "category_log": True},
         )
+
+    def __reconcile_badge_campaign_streamers(self, discovered_usernames):
+        """Retire badge-only channels after Twitch reports an ownership change."""
+        discovered = {
+            str(username).lower().strip()
+            for username in discovered_usernames
+            if str(username).strip()
+        }
+        retained = []
+        retained_baselines = []
+        removed = []
+        for index, streamer in enumerate(self.streamers):
+            baseline = (
+                self.original_streamers[index]
+                if index < len(self.original_streamers)
+                else streamer.channel_points
+            )
+            if (
+                streamer.from_badge_campaign is not True
+                or streamer.username in discovered
+            ):
+                retained.append(streamer)
+                retained_baselines.append(baseline)
+                continue
+
+            streamer.from_badge_campaign = False
+            if streamer.explicitly_configured or streamer.from_followers:
+                retained.append(streamer)
+                retained_baselines.append(baseline)
+                continue
+
+            self.ws_pool.remove_streamer_topics(streamer)
+            if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
+                streamer.irc_chat.stop()
+                streamer.irc_chat.join(timeout=5)
+            removed.append(streamer.username)
+
+        self.streamers[:] = retained
+        self.original_streamers[:] = retained_baselines
+        if removed:
+            logger.info(
+                "Earned badge inventory changed; retired badge Drop streamers: "
+                + ", ".join(removed),
+                extra={"emoji": ":next_track_button:", "category_log": True},
+            )
 
     def __refresh_category_streamers(
         self,
