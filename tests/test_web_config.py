@@ -516,6 +516,7 @@ def test_new_notification_secret_is_applied_but_never_returned(tmp_path):
                 "enabled": True,
                 "chat_id": 123,
                 "token": "super-secret-token",
+                "message_thread_id": 987,
                 "disable_notification": True,
                 "events": ["DROP_CLAIM"],
             },
@@ -529,8 +530,25 @@ def test_new_notification_secret_is_applied_but_never_returned(tmp_path):
     apply_web_overrides(module, config)
 
     assert "super-secret-token" in logger_settings.telegram.telegram_api
+    assert logger_settings.telegram.message_thread_id == 987
+    assert result["notifications"]["telegram"]["fields"]["message_thread_id"] == 987
     assert result["notifications"]["telegram"]["secrets"] == {"token": True}
     assert "super-secret-token" not in json.dumps(result)
+
+
+def test_telegram_message_thread_id_must_be_integer(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match="message_thread_id must be an integer"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "telegram",
+                "values": {"message_thread_id": "topic"},
+            },
+        )
 
 
 def test_secret_only_update_does_not_enable_disabled_notification(tmp_path):
