@@ -1467,7 +1467,7 @@ function saveNotificationSettings() {
         if (input.data('secret') && value === '') return;
         if (name === 'message_thread_id' && value === '') value = null;
         if (input.data('array') && !Array.isArray(value)) value = value ? value.split(',').map(item => item.trim()).filter(Boolean) : [];
-        if (input.attr('type') === 'number' && value !== '') value = Number(value);
+        if (input.attr('type') === 'number' && value !== '' && value !== null) value = Number(value);
         values[name] = value;
     });
     var provider = card.data('provider');
