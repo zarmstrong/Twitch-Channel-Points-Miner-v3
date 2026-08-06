@@ -35,11 +35,11 @@ To build the per-user Windows installer after building the executable, install
 
 ```powershell
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
-  "/DMyAppVersion=3.2.0" windows_installer.iss
+  "/DMyAppVersion=<version>" windows_installer.iss
 ```
 
 The installer is written to
-`dist\TwitchChannelPointsMiner-3.2.0-Setup.exe`. It installs under the current
+`dist\TwitchChannelPointsMiner-<version>-Setup.exe`. It installs under the current
 user's local application data, creates a Start menu shortcut, and offers an
 optional desktop shortcut. This keeps the application directory writable for
 the first-launch configuration file and does not require administrator access.
