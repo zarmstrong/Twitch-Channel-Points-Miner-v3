@@ -130,9 +130,34 @@ jobs:
           Compress-Archive -Path "dist/TwitchChannelPointsMiner.exe" -DestinationPath "dist/$zipName" -Force
           "zip_path=dist/$zipName" >> $env:GITHUB_OUTPUT
 
-      - name: Upload executable to release
+      - name: Build Windows installer
+        id: installer
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+        run: |
+          $version = $env:RELEASE_TAG -replace '^Twitch-Channel-Points-Miner-v2-', ''
+          $compiler = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) {
+            choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+          if (-not (Test-Path $compiler)) {
+            throw "Inno Setup compiler was not found at $compiler after installation"
+          }
+          & $compiler "/DMyAppVersion=$version" "windows_installer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          "installer_path=dist/TwitchChannelPointsMiner-$version-Setup.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows artifacts to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release_please.outputs.tag_name }}
-          files: ${{ steps.package.outputs.zip_path }}
+          files: |
+            ${{ steps.package.outputs.zip_path }}
+            ${{ steps.installer.outputs.installer_path }}
           fail_on_unmatched_files: true
