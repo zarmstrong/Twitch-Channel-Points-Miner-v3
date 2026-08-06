@@ -661,11 +661,18 @@ def _update_managed_web_config(config_path, payload):
             _runtime_notification_events(values["events"])
         for number_name in ("chat_id", "message_thread_id", "port", "priority"):
             if values.get(number_name) == "":
-                values.pop(number_name)
+                if number_name == "message_thread_id":
+                    values[number_name] = None
+                else:
+                    values.pop(number_name)
                 continue
-            if number_name in values and (
-                not isinstance(values[number_name], int)
-                or isinstance(values[number_name], bool)
+            if (
+                number_name in values
+                and values[number_name] is not None
+                and (
+                    not isinstance(values[number_name], int)
+                    or isinstance(values[number_name], bool)
+                )
             ):
                 raise ConfigEditError(f"{number_name} must be an integer.")
         for bool_name in ("disable_notification", "use_ssl", "starttls"):
