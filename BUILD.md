@@ -30,10 +30,25 @@ directory before running it. The executable's first-launch configuration and
 upgrade behavior are documented in the [Windows section](README.md#windows) of
 the main README.
 
+To build the per-user Windows installer after building the executable, install
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
+
+```powershell
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+  "/DMyAppVersion=<version>" windows_installer.iss
+```
+
+The installer is written to
+`dist\TwitchChannelPointsMiner-<version>-Setup.exe`. It installs under the current
+user's local application data, creates a Start menu shortcut, and offers an
+optional desktop shortcut. This keeps the application directory writable for
+the first-launch configuration file and does not require administrator access.
+
 Tagged releases that contain code changes run the same build automatically and
-attach a versioned `TwitchChannelPointsMiner-<version>.zip` to the GitHub
-release. See [the release workflow](.github/workflows/release-please.yml) for
-the automated build definition.
+attach both a versioned portable zip and a
+`TwitchChannelPointsMiner-<version>-Setup.exe` installer to the GitHub release.
+See [the release workflow](.github/workflows/release-please.yml) for the
+automated build definition.
 
 ## Docker images
 
