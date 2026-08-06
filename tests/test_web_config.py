@@ -573,6 +573,21 @@ def test_telegram_message_thread_id_can_be_cleared(tmp_path):
     assert result["notifications"]["telegram"]["fields"]["message_thread_id"] is None
 
 
+def test_other_notification_numeric_fields_cannot_be_none(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match="port must be an integer"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "email",
+                "values": {"port": None},
+            },
+        )
+
+
 def test_secret_only_update_does_not_enable_disabled_notification(tmp_path):
     config = tmp_path / "config.py"
     write_config(config)

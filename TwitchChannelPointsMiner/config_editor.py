@@ -666,15 +666,13 @@ def _update_managed_web_config(config_path, payload):
                 else:
                     values.pop(number_name)
                 continue
-            if (
-                number_name in values
-                and values[number_name] is not None
-                and (
-                    not isinstance(values[number_name], int)
-                    or isinstance(values[number_name], bool)
-                )
-            ):
-                raise ConfigEditError(f"{number_name} must be an integer.")
+            if number_name in values:
+                if number_name == "message_thread_id" and values[number_name] is None:
+                    continue
+                if not isinstance(values[number_name], int) or isinstance(
+                    values[number_name], bool
+                ):
+                    raise ConfigEditError(f"{number_name} must be an integer.")
         for bool_name in ("disable_notification", "use_ssl", "starttls"):
             if bool_name in values and not isinstance(values[bool_name], bool):
                 raise ConfigEditError(f"{bool_name} must be true or false.")
