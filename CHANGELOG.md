@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.12.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.11.1...3.12.0) (2026-08-06)
+
+
+### Features
+
+* add message_thread_id support for Telegram notifications ([#70](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/70)) ([0e3a1a0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0e3a1a03a4fb706b84ebce21c04f6bfd50e30e7b))
+* add Windows installer release artifact ([#71](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/71)) ([b9de9ed](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b9de9edab6ae037e2365376cdb47a6115222f0a4))
+
+
+### Bug Fixes
+
+* **config:** restrict nullable notification field ([0e3a1a0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0e3a1a03a4fb706b84ebce21c04f6bfd50e30e7b))
+* **web:** preserve cleared Telegram topic IDs ([0e3a1a0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0e3a1a03a4fb706b84ebce21c04f6bfd50e30e7b))
+* **web:** support Telegram topic IDs in dashboard ([0e3a1a0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0e3a1a03a4fb706b84ebce21c04f6bfd50e30e7b))
+
 ## [3.11.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.11.0...3.11.1) (2026-07-31)
 
 

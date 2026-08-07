@@ -41,7 +41,7 @@ LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 SOURCE_NAMES = {"streamers", "followers", "categories", "badges"}
 NOTIFICATION_SCHEMAS = {
     "telegram": {
-        "fields": ("chat_id", "disable_notification", "events"),
+        "fields": ("chat_id", "message_thread_id", "disable_notification", "events"),
         "secrets": ("token",),
     },
     "discord": {"fields": ("events",), "secrets": ("webhook_api",)},
@@ -84,7 +84,13 @@ NOTIFICATION_REQUIRED = {
     "ntfy": {"topic"},
 }
 NOTIFICATION_POSITIONAL_FIELDS = {
-    "telegram": ("chat_id", "token", "events", "disable_notification"),
+    "telegram": (
+        "chat_id",
+        "token",
+        "events",
+        "disable_notification",
+        "message_thread_id",
+    ),
     "discord": ("webhook_api", "events"),
     "webhook": ("endpoint", "method", "events", "timeout"),
     "email": (
@@ -653,20 +659,25 @@ def _update_managed_web_config(config_path, payload):
                 raise ConfigEditError(f"{list_name} must be a list of strings.")
         if "events" in values:
             _runtime_notification_events(values["events"])
-        for number_name in ("chat_id", "port", "priority"):
+        for number_name in ("chat_id", "message_thread_id", "port", "priority"):
             if values.get(number_name) == "":
-                values.pop(number_name)
+                if number_name == "message_thread_id":
+                    values[number_name] = None
+                else:
+                    values.pop(number_name)
                 continue
-            if number_name in values and (
-                not isinstance(values[number_name], int)
-                or isinstance(values[number_name], bool)
-            ):
-                raise ConfigEditError(f"{number_name} must be an integer.")
+            if number_name in values:
+                if number_name == "message_thread_id" and values[number_name] is None:
+                    continue
+                if not isinstance(values[number_name], int) or isinstance(
+                    values[number_name], bool
+                ):
+                    raise ConfigEditError(f"{number_name} must be an integer.")
         for bool_name in ("disable_notification", "use_ssl", "starttls"):
             if bool_name in values and not isinstance(values[bool_name], bool):
                 raise ConfigEditError(f"{bool_name} must be true or false.")
         list_fields = {"events", "recipients", "tags"}
-        number_fields = {"chat_id", "port", "priority"}
+        number_fields = {"chat_id", "message_thread_id", "port", "priority"}
         bool_fields = {"disable_notification", "use_ssl", "starttls"}
         text_fields = set(schema["fields"]) - list_fields - number_fields - bool_fields
         for text_name in text_fields | set(schema["secrets"]):
@@ -944,6 +955,9 @@ def _notification_constructor_kwargs(provider, existing, fields, secrets):
             "events": events,
             "disable_notification": fields.get(
                 "disable_notification", current("disable_notification", False)
+            ),
+            "message_thread_id": fields.get(
+                "message_thread_id", current("message_thread_id")
             ),
         }
     if provider == "discord":

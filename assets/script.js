@@ -1418,7 +1418,7 @@ function buildNotificationField(name, value, secret, configured, eventOptions) {
     var label = $('<label>').addClass('label').text(name.replace(/_/g, ' '));
     var booleanFields = ['disable_notification', 'use_ssl', 'starttls'];
     var arrayFields = ['events', 'recipients', 'tags'];
-    var numberFields = ['chat_id', 'port', 'priority'];
+    var numberFields = ['chat_id', 'message_thread_id', 'port', 'priority'];
     var input;
     if (name === 'events') {
         var selectedEvents = Array.isArray(value) ? value : [];
@@ -1465,8 +1465,9 @@ function saveNotificationSettings() {
             value = input.attr('type') === 'checkbox' ? input.prop('checked') : input.val().trim();
         }
         if (input.data('secret') && value === '') return;
+        if (name === 'message_thread_id' && value === '') value = null;
         if (input.data('array') && !Array.isArray(value)) value = value ? value.split(',').map(item => item.trim()).filter(Boolean) : [];
-        if (input.attr('type') === 'number' && value !== '') value = Number(value);
+        if (input.attr('type') === 'number' && value !== '' && value !== null) value = Number(value);
         values[name] = value;
     });
     var provider = card.data('provider');

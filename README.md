@@ -937,6 +937,7 @@ logger_settings = LoggerSettings(
         chat_id=123456789,
         token="YOUR_BOT_TOKEN",
         events=[Events.STREAMER_OFFLINE, Events.DROP_CLAIM],
+        message_thread_id=987,
     ),
 )
 ```
@@ -971,6 +972,7 @@ destination `chat_id` (for example with [@getmyid_bot](https://t.me/getmyid_bot)
 | `token` | str | Required | Bot token issued by BotFather. |
 | `events` | list | Required | Events to send. |
 | `disable_notification` | bool | `False` | Send without sound or vibration. |
+| `message_thread_id` | int or None | `None` | Optional Telegram forum topic ID for supergroup topics. |
 
 ```python
 Telegram(
@@ -978,6 +980,7 @@ Telegram(
     token="YOUR_BOT_TOKEN",
     events=[Events.STREAMER_ONLINE, Events.CHAT_MENTION],
     disable_notification=True,
+    message_thread_id=987,
 )
 ```
 
