@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.13.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.12.0...3.13.0) (2026-08-07)
+
+
+### Features
+
+* **installer:** prefill initial configuration options and link documentation ([1f6cee1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1f6cee1c813e6f31f586003243d44b673e0c0e5e))
+* **installer:** publish a per-user Windows installer ([1f6cee1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1f6cee1c813e6f31f586003243d44b673e0c0e5e))
+* **windows:** add installer and guided first-run setup ([#73](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/73)) ([1f6cee1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1f6cee1c813e6f31f586003243d44b673e0c0e5e))
+
+
+### Bug Fixes
+
+* **windows:** pause after creating the first-run configuration ([1f6cee1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1f6cee1c813e6f31f586003243d44b673e0c0e5e))
+
 ## [3.12.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.11.1...3.12.0) (2026-08-06)
 
 
