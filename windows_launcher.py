@@ -40,6 +40,17 @@ def prepare_config(application_dir):
     return config_dir, True
 
 
+def pause_for_first_run():
+    """Keep a Windows console visible after creating its initial config."""
+    if os.name != "nt":
+        return
+    try:
+        input("Press Enter to close this window...")
+    except EOFError:
+        # A redirected or non-interactive Windows launch may not have stdin.
+        pass
+
+
 def main():
     application_dir = application_directory()
     os.chdir(application_dir)
@@ -50,6 +61,7 @@ def main():
             "Edit that file with your Twitch account and mining settings, then "
             "run the executable again."
         )
+        pause_for_first_run()
         return 0
 
     return runner_main(
