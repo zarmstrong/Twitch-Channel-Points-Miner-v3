@@ -234,10 +234,12 @@ The Windows executable does not require Python or Git.
 
 1. Download `TwitchChannelPointsMiner-<version>.zip` from the official
    [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases).
+   You can also download `TwitchChannelPointsMiner-<version>-Setup.exe` if you
+   prefer guided installation; the steps below describe the ZIP workflow.
 2. Extract the whole archive to a permanent private folder; do not run it from
    inside the ZIP.
 3. Run `TwitchChannelPointsMiner.exe` once. It creates `config\config.py` and
-   closes.
+   waits for you to press Enter before closing.
 4. Open `config\config.py` in a text editor, replace the example account and
    streamers, and disable unused notification providers.
 5. Run the executable again and follow the Twitch sign-in instructions.
@@ -1567,13 +1569,17 @@ folder private because it will contain your Twitch login and saved session.
    and select the newest release.
 2. Under **Assets**, download the file named
    `TwitchChannelPointsMiner-<version>.zip`. Do not download **Source code**.
+   If you prefer an installer, download
+   `TwitchChannelPointsMiner-<version>-Setup.exe` and follow its prompts instead
+   of the ZIP extraction steps below.
 3. Open your **Downloads** folder, right-click the downloaded ZIP file, and
    select **Extract All...**.
 4. Choose a permanent location that you can easily find, such as
    `Documents\TwitchChannelPointsMiner`, and select **Extract**. Do not run the
    program from inside the ZIP file.
 5. Open the extracted folder and double-click `TwitchChannelPointsMiner.exe`.
-   The first run creates the configuration file and then closes. This is normal.
+   The first run creates the configuration file and waits for you to press Enter
+   before closing, so its instructions remain visible.
 
 Only download the executable from the project's official Releases page. If
 Microsoft Defender SmartScreen appears, check that the publisher warning names
@@ -1622,9 +1628,9 @@ executable. Do not move the executable by itself after setup; move the entire
 
 ### Windows troubleshooting
 
-- **The window closes the first time:** This is expected. Open
-  `config\config.py`, finish [Set up your account](#set-up-your-account), and run
-  the executable again.
+- **The first-run window asks you to press Enter:** This keeps the setup
+  instructions visible. Open `config\config.py`, finish
+  [Set up your account](#set-up-your-account), and run the executable again.
 - **Windows says it cannot find the configuration:** Right-click the downloaded
   ZIP and use **Extract All...** before running the executable.
 - **Notepad saved `config.py.txt`:** In File Explorer, enable **View > Show >

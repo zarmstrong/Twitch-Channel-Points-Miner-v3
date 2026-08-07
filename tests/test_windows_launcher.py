@@ -59,3 +59,23 @@ def test_main_forwards_command_line_arguments(tmp_path, monkeypatch):
             "--convert-only",
         ]
     ]
+
+
+def test_first_run_pauses_on_windows(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt))
+
+    windows_launcher.pause_for_first_run()
+
+    assert prompts == ["Press Enter to close this window..."]
+
+
+def test_first_run_does_not_pause_on_other_platforms(monkeypatch):
+    monkeypatch.setattr(windows_launcher.os, "name", "posix")
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("unexpected pause")),
+    )
+
+    windows_launcher.pause_for_first_run()

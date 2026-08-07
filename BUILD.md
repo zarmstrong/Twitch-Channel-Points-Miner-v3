@@ -43,6 +43,9 @@ The installer is written to
 user's local application data, creates a Start menu shortcut, and offers an
 optional desktop shortcut. This keeps the application directory writable for
 the first-launch configuration file and does not require administrator access.
+The installer also offers to prefill the Twitch username and watched channels
+in a new configuration and to open the configuration guide. Existing
+configurations are never overwritten.
 
 Tagged releases that contain code changes run the same build automatically and
 attach both a versioned portable zip and a
