@@ -113,11 +113,14 @@ begin
     StartAt := Pos('STREAMERS = [', ConfigText);
     if StartAt > 0 then
     begin
-      EndAt := PosEx('    ]', ConfigText, StartAt);
+      EndAt := Pos('    ]', Copy(ConfigText, StartAt, MaxInt));
       if EndAt > 0 then
+      begin
+        EndAt := StartAt + EndAt - 1;
         ConfigText := Copy(ConfigText, 1, StartAt - 1) +
           'STREAMERS = [' + Streamers + ']' +
           Copy(ConfigText, EndAt + Length('    ]'), MaxInt);
+      end;
     end;
   end;
 
