@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.0...3.13.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **windows:** restore Inno Setup compiler compatibility ([1918831](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1918831075912d57912fc7de3e289ddb363e8fe4))
+
 ## [3.13.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.12.0...3.13.0) (2026-08-07)
 
 
