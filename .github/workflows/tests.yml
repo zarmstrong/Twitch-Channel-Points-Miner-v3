@@ -48,3 +48,55 @@ jobs:
 
       - name: Run tests
         run: python -m pytest
+
+  windows_installer:
+    name: Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install validators==0.22.0 pyinstaller==6.21.0
+
+      - name: Build Windows executable
+        shell: cmd
+        run: build_windows.bat
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) {
+            choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+          if (-not (Test-Path $compiler)) {
+            throw "Inno Setup compiler was not found at $compiler after installation"
+          }
+          & $compiler "/DMyAppVersion=0.0.0-pr${{ github.event.pull_request.number || github.run_number }}" "windows_installer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-${{ github.event.pull_request.number || github.run_number }}
+          path: |
+            dist/TwitchChannelPointsMiner.exe
+            dist/TwitchChannelPointsMiner-0.0.0-pr${{ github.event.pull_request.number || github.run_number }}-Setup.exe
+          if-no-files-found: error

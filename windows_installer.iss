@@ -58,23 +58,33 @@ end;
 
 function PythonStreamerList(Value: String): String;
 var
-  Channels: TArrayOfString;
-  I: Integer;
+  CommaAt: Integer;
   Channel: String;
 begin
-  StringChangeEx(Value, ',', #13#10, True);
-  Channels := SplitString(Value, #13#10);
   Result := '';
-  for I := 0 to GetArrayLength(Channels) - 1 do
+  repeat
   begin
-    Channel := Trim(Channels[I]);
+    CommaAt := Pos(',', Value);
+    if CommaAt > 0 then
+    begin
+      Channel := Copy(Value, 1, CommaAt - 1);
+      Delete(Value, 1, CommaAt);
+    end
+    else
+    begin
+      Channel := Value;
+      Value := '';
+    end;
+
+    Channel := Trim(Channel);
     if Channel <> '' then
     begin
       if Result <> '' then
         Result := Result + ', ';
       Result := Result + '"' + EscapePythonString(Channel) + '"';
     end;
-  end;
+  end
+  until Value = '';
 end;
 
 procedure CustomizeStarterConfig;
@@ -103,11 +113,14 @@ begin
     StartAt := Pos('STREAMERS = [', ConfigText);
     if StartAt > 0 then
     begin
-      EndAt := PosEx('    ]', ConfigText, StartAt);
+      EndAt := Pos('    ]', Copy(ConfigText, StartAt, MaxInt));
       if EndAt > 0 then
+      begin
+        EndAt := StartAt + EndAt - 1;
         ConfigText := Copy(ConfigText, 1, StartAt - 1) +
           'STREAMERS = [' + Streamers + ']' +
           Copy(ConfigText, EndAt + Length('    ]'), MaxInt);
+      end;
     end;
   end;
 
