@@ -1540,11 +1540,21 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
+        fallback_deadlines = self.__twitchdrops_app_fallback(
+            categories,
+            twitch_category_slugs,
+        )
+        # The external campaign index fills gaps when Twitch does not expose a
+        # configured game at all.  Once Twitch has evaluated a game, its
+        # authenticated inventory is authoritative: merging an external
+        # deadline for the same game can resurrect a campaign that this account
+        # has already completed and keep the miner on a stale category.
         active_category_deadlines.update(
-            self.__twitchdrops_app_fallback(
-                categories,
-                twitch_category_slugs,
-            )
+            {
+                game_slug: deadline
+                for game_slug, deadline in fallback_deadlines.items()
+                if game_slug not in twitch_category_slugs
+            }
         )
         if active_category_deadlines == {}:
             for requested_slug in requested_category_slugs:
