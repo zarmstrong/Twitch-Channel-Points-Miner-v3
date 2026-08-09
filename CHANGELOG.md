@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.3](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.2...3.13.3) (2026-08-09)
+
+
+### Bug Fixes
+
+* **drops:** prevent stale fallback categories ([#79](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/79)) ([5f3f3b7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5f3f3b70c168cc7f6ef95623b869da596c269af6))
+
 ## [3.13.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.1...3.13.2) (2026-08-09)
 
 
