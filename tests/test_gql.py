@@ -1205,6 +1205,13 @@ def test_category_filter_passes_completed_twitch_category_to_fallback(monkeypatc
     fallback_calls = []
     monkeypatch.setattr(
         Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: pytest.fail(
+            "fallback discovery should not inspect awarded benefits"
+        ),
+    )
+    monkeypatch.setattr(
+        Twitch,
         "_Twitch__twitchdrops_app_fallback",
         lambda self, categories, known_slugs: fallback_calls.append(known_slugs)
         or {},

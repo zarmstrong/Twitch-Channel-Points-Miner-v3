@@ -299,7 +299,7 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     assert twitch.twitchdrops_app_campaigns == {}
 
 
-def test_awarded_repeatable_reward_does_not_complete_fallback_campaign(monkeypatch):
+def test_non_badge_reward_name_does_not_complete_fallback_campaign(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
             "data": {"currentUser": {"availableBadges": []}}
