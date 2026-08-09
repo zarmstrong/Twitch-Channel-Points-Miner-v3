@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
@@ -291,11 +292,96 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     )
 
     deadlines = twitch._Twitch__twitchdrops_app_fallback(
-        ["two-point-museum"], set(), set()
+        ["two-point-museum"], set()
     )
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_campaigns == {}
+
+
+def test_non_badge_reward_name_does_not_complete_fallback_campaign(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "the-elder-scrolls-online",
+                "game": "The Elder Scrolls Online",
+                "url": "https://twitchdrops.app/game/the-elder-scrolls-online",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "The Elder Scrolls Online",
+            "campaigns": [
+                {
+                    "name": "U51 on PTS",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "Ouroboros Crown Crate"}],
+                }
+            ],
+        },
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["the-elder-scrolls-online"],
+        set(),
+    )
+
+    assert deadlines == {"the-elder-scrolls-online": datetime(2099, 1, 1)}
+    assert "the-elder-scrolls-online" in twitch.twitchdrops_app_campaigns
+
+
+def test_future_campaign_in_active_report_is_not_mined_early(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "minecraft",
+                "game": "Minecraft",
+                "url": "https://twitchdrops.app/game/minecraft",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Minecraft",
+            "campaigns": [
+                {
+                    "name": "Boss Run Marathon",
+                    "starts_at": "2098-12-31T00:00:00Z",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": ["example"],
+                    "drops": [{"name": "Frog Hoodie"}],
+                }
+            ],
+        },
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
+    assert twitch.next_upcoming_drop_start() == datetime(2098, 12, 31)
 
 
 def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_games(
@@ -331,7 +417,6 @@ def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_game
     twitch._Twitch__twitchdrops_app_fallback(
         ["path-of-exile", "not-on-front-page"],
         known_slugs,
-        set(),
     )
 
     assert detail_requests == ["https://twitchdrops.app/game/path-of-exile"]

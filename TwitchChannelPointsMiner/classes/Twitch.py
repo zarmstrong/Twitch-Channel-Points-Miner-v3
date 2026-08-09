@@ -1187,23 +1187,19 @@ class Twitch(object):
 
         return active_deadlines, twitch_category_slugs
 
-    def __twitchdrops_app_fallback(
-        self, categories, known_category_slugs, awarded_benefit_fingerprints
-    ):
+    def __twitchdrops_app_fallback(self, categories, known_category_slugs):
         deadlines = {}
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
         scraper = TwitchDropsAppScraper(timeout=20)
         now = datetime.utcnow()
-        awarded_names = {
-            name
-            for name, image_url in awarded_benefit_fingerprints
-            if name and image_url == ""
-        }
-        owned_reward_names = awarded_names | self.__get_available_badge_names(
-            refresh=True
-        )
+        # Inventory benefit names are not campaign-scoped.  Games commonly reuse
+        # consumable reward names (for example ESO's Crown Crates), so treating a
+        # historical award with the same name as completion can suppress a new
+        # campaign.  The full badge inventory is safe here because badges are
+        # account-owned rather than repeatable campaign consumables.
+        owned_reward_names = self.__get_available_badge_names(refresh=True)
         try:
             indexed_games = scraper.scrape_front_page()
         except (ValueError, requests.RequestException) as error:
@@ -1314,6 +1310,14 @@ class Twitch(object):
                 <= now
             )
             for campaign in reported_campaigns:
+                starts_at = self.__parse_twitch_datetime(campaign.get("starts_at"))
+                if starts_at is not None and starts_at > now:
+                    current_start = self.twitchdrops_app_upcoming_starts.get(
+                        requested_slug
+                    )
+                    if current_start is None or starts_at < current_start:
+                        self.twitchdrops_app_upcoming_starts[requested_slug] = starts_at
+                    continue
                 ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
                 if ends_at is None or ends_at <= now:
                     continue
@@ -1536,12 +1540,10 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
-        _, awarded_benefit_fingerprints = self.__awarded_benefits(inventory)
         active_category_deadlines.update(
             self.__twitchdrops_app_fallback(
                 categories,
                 twitch_category_slugs,
-                awarded_benefit_fingerprints,
             )
         )
         if active_category_deadlines == {}:
