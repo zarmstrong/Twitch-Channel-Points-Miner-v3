@@ -1187,9 +1187,7 @@ class Twitch(object):
 
         return active_deadlines, twitch_category_slugs
 
-    def __twitchdrops_app_fallback(
-        self, categories, known_category_slugs, _awarded_benefit_fingerprints
-    ):
+    def __twitchdrops_app_fallback(self, categories, known_category_slugs):
         deadlines = {}
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
@@ -1542,12 +1540,10 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
-        _, awarded_benefit_fingerprints = self.__awarded_benefits(inventory)
         active_category_deadlines.update(
             self.__twitchdrops_app_fallback(
                 categories,
                 twitch_category_slugs,
-                awarded_benefit_fingerprints,
             )
         )
         if active_category_deadlines == {}:

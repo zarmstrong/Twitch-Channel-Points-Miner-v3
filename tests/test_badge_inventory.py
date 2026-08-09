@@ -292,7 +292,7 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     )
 
     deadlines = twitch._Twitch__twitchdrops_app_fallback(
-        ["two-point-museum"], set(), set()
+        ["two-point-museum"], set()
     )
 
     assert deadlines == {}
@@ -336,7 +336,6 @@ def test_awarded_repeatable_reward_does_not_complete_fallback_campaign(monkeypat
     deadlines = twitch._Twitch__twitchdrops_app_fallback(
         ["the-elder-scrolls-online"],
         set(),
-        {("ouroboros crown crate", "")},
     )
 
     assert deadlines == {"the-elder-scrolls-online": datetime(2099, 1, 1)}
@@ -378,9 +377,7 @@ def test_future_campaign_in_active_report_is_not_mined_early(monkeypatch):
         },
     )
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(
-        ["minecraft"], set(), set()
-    )
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_campaigns == {}
@@ -420,7 +417,6 @@ def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_game
     twitch._Twitch__twitchdrops_app_fallback(
         ["path-of-exile", "not-on-front-page"],
         known_slugs,
-        set(),
     )
 
     assert detail_requests == ["https://twitchdrops.app/game/path-of-exile"]
