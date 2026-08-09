@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.1...3.13.2) (2026-08-09)
+
+
+### Bug Fixes
+
+* **drops:** correct fallback campaign eligibility ([7d945cc](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7d945cccf0a570ab02360924b32d0173613bdf07))
+
 ## [3.13.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.0...3.13.1) (2026-08-08)
 
 
