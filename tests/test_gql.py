@@ -1241,11 +1241,11 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
         "_Twitch__active_drop_category_slugs_from_campaigns",
         lambda self, inventory, requested: ({}, set()),
     )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {"two-point-museum": datetime(2099, 1, 1)},
-    )
+    def fallback(self, categories, known_slugs):
+        known_slugs.add("two-point-museum")
+        return {"two-point-museum": datetime(2099, 1, 1)}
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
 
     assert twitch.filter_categories_with_active_drops(["two-point-museum"]) == [
         "two-point-museum"

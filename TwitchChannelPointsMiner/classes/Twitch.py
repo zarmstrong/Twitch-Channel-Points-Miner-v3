@@ -1540,6 +1540,7 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
+        twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         fallback_deadlines = self.__twitchdrops_app_fallback(
             categories,
             twitch_category_slugs,
@@ -1553,7 +1554,7 @@ class Twitch(object):
             {
                 game_slug: deadline
                 for game_slug, deadline in fallback_deadlines.items()
-                if game_slug not in twitch_category_slugs
+                if game_slug not in twitch_evaluated_category_slugs
             }
         )
         if active_category_deadlines == {}:
