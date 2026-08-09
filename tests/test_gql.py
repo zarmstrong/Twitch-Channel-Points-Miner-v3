@@ -1,4 +1,5 @@
 import importlib
+from datetime import datetime
 from types import SimpleNamespace
 from threading import Event
 
@@ -1189,7 +1190,7 @@ def test_category_filter_skips_discovery_when_inventory_is_unavailable(
     assert twitch.filter_categories_with_active_drops(["Rust", "Diablo IV"]) == []
 
 
-def test_category_filter_passes_completed_twitch_category_to_fallback(monkeypatch):
+def test_category_filter_does_not_resurrect_completed_twitch_category(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}
     monkeypatch.setattr(
@@ -1214,7 +1215,7 @@ def test_category_filter_passes_completed_twitch_category_to_fallback(monkeypatc
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
         lambda self, categories, known_slugs: fallback_calls.append(known_slugs)
-        or {},
+        or {"two-point-museum": datetime(2099, 1, 1)},
     )
     monkeypatch.setattr(
         Twitch,
@@ -1225,6 +1226,30 @@ def test_category_filter_passes_completed_twitch_category_to_fallback(monkeypatc
 
     assert twitch.filter_categories_with_active_drops(["two-point-museum"]) == []
     assert fallback_calls == [{"two-point-museum"}]
+
+
+def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"gameEventDrops": []},
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        lambda self, inventory, requested: ({}, set()),
+    )
+    def fallback(self, categories, known_slugs):
+        known_slugs.add("two-point-museum")
+        return {"two-point-museum": datetime(2099, 1, 1)}
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
+
+    assert twitch.filter_categories_with_active_drops(["two-point-museum"]) == [
+        "two-point-museum"
+    ]
 
 
 def test_category_eligibility_replacement_preserves_other_games():
