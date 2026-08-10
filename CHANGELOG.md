@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.13.4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.3...3.13.4) (2026-08-10)
+
+
+### Bug Fixes
+
+* **drops:** retire completed campaign monitors ([#82](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/82)) ([4956ec5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/4956ec58742996418d43fe8b5efe54ae4f7c4d50))
+* **pubsub:** reuse websocket capacity across streamer churn ([80cdaf5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/80cdaf5beb32ab768676e107d598063b107c8abc))
+
 ## [3.13.3](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.2...3.13.3) (2026-08-09)
 
 
