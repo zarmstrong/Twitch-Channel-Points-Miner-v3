@@ -45,20 +45,20 @@ class WebSocketsPool:
 
     def submit(self, topic):
         with self.topic_lock:
-            websocket = next(
-                (websocket for websocket in self.ws if topic in websocket.topics),
-                None,
-            )
-            if websocket is None:
-                websocket = next(
-                    (websocket for websocket in self.ws if len(websocket.topics) < 50),
-                    None,
-                )
-            if websocket is None:
+            index = None
+            available_index = None
+            for current_index, websocket in enumerate(self.ws):
+                if topic in websocket.topics:
+                    index = current_index
+                    break
+                if available_index is None and len(websocket.topics) < 50:
+                    available_index = current_index
+            if index is None:
+                index = available_index
+            if index is None:
                 self.ws.append(self.__new(len(self.ws)))
                 self.__start(-1)
-                websocket = self.ws[-1]
-            index = self.ws.index(websocket)
+                index = len(self.ws) - 1
             websocket, should_listen = self.__register(index, topic)
 
         if should_listen:
