@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.14.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.5...3.14.0) (2026-08-10)
+
+
+### Features
+
+* **logging:** add configurable daily log rotation ([#86](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/86)) ([5bf9143](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5bf914321665aba3c9d0382bbec2c62c2087738c))
+
+
+### Bug Fixes
+
+* **drops:** recognize awarded fallback rewards ([#87](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/87)) ([5e17feb](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5e17febb30f267d27bc4ed0571687beb438b0ee7))
+
 ## [3.13.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.4...3.13.5) (2026-08-10)
 
 
