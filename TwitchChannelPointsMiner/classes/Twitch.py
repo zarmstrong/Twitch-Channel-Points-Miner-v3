@@ -1146,9 +1146,9 @@ class Twitch(object):
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             game_slug = self.__slugify(game_name) if game_name else ""
-            if game_slug:
-                self.campaign_game_slugs[campaign_id] = game_slug
             if campaign_id in completed_campaign_ids:
+                if game_slug:
+                    self.campaign_game_slugs[campaign_id] = game_slug
                 campaign_evaluations.append(
                     {
                         "campaign": campaign.get("name"),
@@ -1166,7 +1166,11 @@ class Twitch(object):
                 campaign = self.__merge_campaign_inventory_progress(
                     campaign, inventory_campaign
                 )
+                game = campaign.get("game") or {}
+                game_name = (game.get("displayName") or game.get("name") or "").strip()
+                game_slug = self.__slugify(game_name) if game_name else ""
             if game_slug:
+                self.campaign_game_slugs[campaign_id] = game_slug
                 twitch_category_slugs.add(game_slug)
             matches_configured_category = game_slug in requested_category_slugs
             evaluation = {

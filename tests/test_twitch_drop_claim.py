@@ -180,7 +180,17 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     monkeypatch,
 ):
     twitch = bare_twitch(monkeypatch)
-    dashboard_campaigns = [campaign_data()]
+    sparse_campaign = campaign_data()
+    sparse_campaign.pop("game")
+    sparse_campaign.pop("timeBasedDrops")
+    dashboard_campaigns = [sparse_campaign]
+    inventory_campaign = campaign_data()
+    inventory_campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 0,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_drops_dashboard",
@@ -208,7 +218,7 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     )
 
     twitch._Twitch__active_drop_category_slugs_from_campaigns(
-        {"dropCampaignsInProgress": []}, {"example-game"}
+        {"dropCampaignsInProgress": [inventory_campaign]}, {"example-game"}
     )
     dashboard_campaigns.clear()
 
