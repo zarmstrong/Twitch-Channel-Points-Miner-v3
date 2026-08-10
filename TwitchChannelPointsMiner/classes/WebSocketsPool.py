@@ -45,11 +45,20 @@ class WebSocketsPool:
 
     def submit(self, topic):
         with self.topic_lock:
-            # Check if we need to create a new WebSocket instance
-            if self.ws == [] or len(self.ws[-1].topics) >= 50:
+            websocket = next(
+                (websocket for websocket in self.ws if topic in websocket.topics),
+                None,
+            )
+            if websocket is None:
+                websocket = next(
+                    (websocket for websocket in self.ws if len(websocket.topics) < 50),
+                    None,
+                )
+            if websocket is None:
                 self.ws.append(self.__new(len(self.ws)))
                 self.__start(-1)
-            index = len(self.ws) - 1
+                websocket = self.ws[-1]
+            index = self.ws.index(websocket)
             websocket, should_listen = self.__register(index, topic)
 
         if should_listen:
@@ -74,11 +83,18 @@ class WebSocketsPool:
                     if topic.streamer is not streamer
                 ]
                 removals.append((websocket, removed))
+            retired = []
+            while self.ws and not self.ws[-1].topics:
+                websocket = self.ws.pop()
+                websocket.forced_close = True
+                retired.append(websocket)
         for websocket, removed in removals:
-            if websocket.is_opened and removed:
+            if websocket not in retired and websocket.is_opened and removed:
                 auth_token = self.twitch.twitch_login.get_auth_token()
                 for topic in removed:
                     websocket.unlisten(topic, auth_token)
+        for websocket in retired:
+            websocket.close()
 
     def __submit(self, index, topic, replay=False):
         with self.topic_lock:
