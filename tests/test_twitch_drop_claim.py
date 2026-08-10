@@ -236,6 +236,50 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     assert twitch_games == {"example-game"}
 
 
+def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    detail_requests = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+
+    def resolve_details(self, campaigns):
+        detail_requests.extend(campaigns)
+        return [campaign_data()] if campaigns else []
+
+    monkeypatch.setattr(Twitch, "_Twitch__get_campaigns_details", resolve_details)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    deadlines, twitch_games = (
+        twitch._Twitch__active_drop_category_slugs_from_campaigns(
+            {"completedRewardCampaigns": [{"id": "campaign-1"}]},
+            {"example-game"},
+        )
+    )
+
+    assert detail_requests == [{"id": "campaign-1"}]
+    assert deadlines == {}
+    assert twitch_games == {"example-game"}
+
+
 def test_drop_report_snapshot_uses_analytics_mutex():
     class RecordingLock:
         def __init__(self):

@@ -1080,6 +1080,8 @@ class Twitch(object):
     ) -> Dict[str, datetime]:
         active_deadlines = {}
         twitch_category_slugs = set()
+        completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
+        self.completed_drop_campaigns.update(completed_campaign_ids)
         dashboard_campaigns = self.__get_drops_dashboard(status="OPEN")
         raw_query_campaigns, _ = self.__get_reward_campaigns_raw_query()
         helix_campaigns, _ = self.__get_open_drop_campaigns_from_helix()
@@ -1116,6 +1118,22 @@ class Twitch(object):
             if campaign_id not in [None, ""]:
                 campaigns_by_id[str(campaign_id)] = campaign
 
+        # Completed inventory records expose only campaign IDs. Resolve any IDs
+        # missing from the open dashboard so their games remain authoritative
+        # and an external catalog cannot resurrect the completed categories.
+        completed_campaigns_to_resolve = [
+            {"id": campaign_id}
+            for campaign_id in completed_campaign_ids
+            if campaign_id not in campaigns_by_id
+            and campaign_id not in self.campaign_game_slugs
+        ]
+        for campaign in self.__get_campaigns_details(completed_campaigns_to_resolve):
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = campaign.get("id")
+            if campaign_id not in [None, ""]:
+                campaigns_by_id[str(campaign_id)] = campaign
+
         inventory_campaigns = {
             str(campaign.get("id")): campaign
             for campaign in inventory.get("dropCampaignsInProgress", []) or []
@@ -1125,8 +1143,6 @@ class Twitch(object):
             if campaign_id not in campaigns_by_id:
                 campaigns_by_id[campaign_id] = campaign
         completed_drop_ids = self.__completed_drop_ids_from_inventory(inventory)
-        completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
-        self.completed_drop_campaigns.update(completed_campaign_ids)
         # Completed campaigns can disappear from both the dashboard and the
         # in-progress inventory immediately after their final reward is claimed.
         # Keep their previously observed game authoritative for this session so
