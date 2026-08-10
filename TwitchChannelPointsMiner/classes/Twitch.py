@@ -1248,6 +1248,7 @@ class Twitch(object):
         # campaign.  The full badge inventory is safe here because badges are
         # account-owned rather than repeatable campaign consumables.
         owned_reward_names = self.__get_available_badge_names(refresh=True)
+        captured_drop_history = self.__captured_drop_history()
         try:
             indexed_games = scraper.scrape_front_page()
         except (ValueError, requests.RequestException) as error:
@@ -1358,6 +1359,10 @@ class Twitch(object):
                 <= now
             )
             for campaign in reported_campaigns:
+                if not campaign.get("starts_at"):
+                    campaign["starts_at"] = indexed_game.get("starts_at")
+                if not campaign.get("ends_at"):
+                    campaign["ends_at"] = indexed_game.get("ends_at")
                 starts_at = self.__parse_twitch_datetime(campaign.get("starts_at"))
                 if starts_at is not None and starts_at > now:
                     current_start = self.twitchdrops_app_upcoming_starts.get(
@@ -1377,10 +1382,19 @@ class Twitch(object):
                 missing_drop_names = sorted(
                     drop_name
                     for drop_name in drop_names
-                    if not self.__reward_name_is_owned(
-                        drop_name,
-                        owned_reward_names,
-                        report.get("game") or category_name,
+                    if not (
+                        self.__reward_name_is_owned(
+                            drop_name,
+                            owned_reward_names,
+                            report.get("game") or category_name,
+                        )
+                        or self.__fallback_reward_was_awarded(drop_name, campaign)
+                        or self.__fallback_reward_was_captured(
+                            drop_name,
+                            campaign,
+                            report.get("game") or category_name,
+                            captured_drop_history,
+                        )
                     )
                 )
                 campaign_evaluations.append(
@@ -1498,6 +1512,88 @@ class Twitch(object):
                         reward_index += 1
                         if reward_index == len(reward_words):
                             return True
+        return False
+
+    def __fallback_reward_was_awarded(self, reward_name, campaign):
+        """Match a fallback reward to an award from the same campaign window."""
+        starts_at = self.__parse_twitch_datetime(campaign.get("starts_at"))
+        ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
+        if starts_at is None or ends_at is None:
+            return False
+
+        normalized_name = str(reward_name or "").strip().casefold()
+        if normalized_name == "":
+            return False
+
+        for awarded_drop in self.awarded_game_event_drops.values():
+            if not isinstance(awarded_drop, dict):
+                continue
+            awarded_name = str(awarded_drop.get("name") or "").strip().casefold()
+            if awarded_name != normalized_name:
+                continue
+            awarded_at = self.__parse_twitch_datetime(awarded_drop.get("lastAwardedAt"))
+            if awarded_at is not None and starts_at <= awarded_at <= ends_at:
+                return True
+
+        return False
+
+    @staticmethod
+    def __captured_drop_history():
+        if Settings.enable_analytics is not True:
+            return []
+
+        analytics_file = os.path.join(Settings.analytics_path, "drops_by_category.json")
+        if os.path.isfile(analytics_file) is False:
+            return []
+
+        try:
+            with open(analytics_file, "r", encoding="utf-8") as current:
+                data = json.load(current)
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        drops = data.get("drops") if isinstance(data, dict) else None
+        if not isinstance(drops, list):
+            return []
+        return [
+            item
+            for item in drops
+            if isinstance(item, dict) and item.get("status") == "captured"
+        ]
+
+    def __fallback_reward_was_captured(
+        self, reward_name, campaign, game_name, captured_drop_history
+    ):
+        campaign_name = str(campaign.get("name") or "").strip().casefold()
+        reward_name = str(reward_name or "").strip().casefold()
+        game_slug = self.__slugify(game_name)
+        campaign_end = self.__parse_twitch_datetime(campaign.get("ends_at"))
+        if not campaign_name or not reward_name or not game_slug:
+            return False
+
+        for captured_drop in captured_drop_history:
+            if self.__slugify(captured_drop.get("category") or "") != game_slug:
+                continue
+            if (
+                str(captured_drop.get("campaign") or "").strip().casefold()
+                != campaign_name
+            ):
+                continue
+            if (
+                str(captured_drop.get("item_name") or "").strip().casefold()
+                != reward_name
+            ):
+                continue
+
+            captured_end = self.__parse_twitch_datetime(
+                captured_drop.get("drop_end_at")
+            )
+            if campaign_end is None or captured_end is None:
+                continue
+            if abs((campaign_end - captured_end).total_seconds()) > 1:
+                continue
+            return True
+
         return False
 
     def __get_available_badge_names(self, refresh=False):

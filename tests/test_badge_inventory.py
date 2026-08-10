@@ -1,9 +1,11 @@
+import json
 import logging
 from datetime import datetime
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 
 
@@ -16,6 +18,7 @@ def bare_twitch(gql):
     twitch.log_drop_checks = False
     twitch.category_log_level = logging.DEBUG
     twitch.category_campaign_eligibility = {}
+    twitch.awarded_game_event_drops = {}
     return twitch
 
 
@@ -340,6 +343,162 @@ def test_non_badge_reward_name_does_not_complete_fallback_campaign(monkeypatch):
 
     assert deadlines == {"the-elder-scrolls-online": datetime(2099, 1, 1)}
     assert "the-elder-scrolls-online" in twitch.twitchdrops_app_campaigns
+
+
+def test_current_campaign_award_completes_non_badge_fallback(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    twitch.awarded_game_event_drops["reward-1"] = {
+        "id": "reward-1",
+        "name": "ATLS Foundation Livery",
+        "lastAwardedAt": "2025-01-01T12:00:00Z",
+    }
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "star-citizen",
+                "game": "Star Citizen",
+                "url": "https://twitchdrops.app/game/star-citizen",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Star Citizen",
+            "campaigns": [
+                {
+                    "name": "Foundation Festival 2026",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "ATLS Foundation Livery"}],
+                }
+            ],
+        },
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["star-citizen"], set())
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
+
+
+def test_old_same_named_award_does_not_complete_new_fallback_campaign():
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.awarded_game_event_drops["old-reward"] = {
+        "name": "Repeatable Crate",
+        "lastAwardedAt": "2026-07-01T12:00:00Z",
+    }
+    campaign = {
+        "starts_at": "2026-08-01T00:00:00Z",
+        "ends_at": "2026-08-31T23:59:59Z",
+    }
+
+    assert (
+        twitch._Twitch__fallback_reward_was_awarded("Repeatable Crate", campaign)
+        is False
+    )
+
+
+def test_persisted_captured_drop_completes_fallback_campaign(monkeypatch, tmp_path):
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps(
+            {
+                "drops": [
+                    {
+                        "category": "Star Citizen",
+                        "campaign": "Foundation Festival 2026",
+                        "item_name": "ATLS Foundation Livery",
+                        "status": "captured",
+                        "drop_end_at": "2026-08-12T19:59:59Z",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    twitch = bare_twitch(SimpleNamespace())
+    campaign = {
+        "name": "Foundation Festival 2026",
+        "ends_at": "2026-08-12T19:59:59Z",
+    }
+
+    captured = twitch._Twitch__captured_drop_history()
+
+    assert twitch._Twitch__fallback_reward_was_captured(
+        "ATLS Foundation Livery", campaign, "Star Citizen", captured
+    )
+
+
+def test_captured_drop_from_old_campaign_end_does_not_complete_fallback():
+    twitch = bare_twitch(SimpleNamespace())
+    campaign = {
+        "name": "Recurring Campaign",
+        "ends_at": "2026-08-31T23:59:59Z",
+    }
+    captured = [
+        {
+            "category": "Example Game",
+            "campaign": "Recurring Campaign",
+            "item_name": "Repeatable Crate",
+            "status": "captured",
+            "drop_end_at": "2026-07-31T23:59:59Z",
+        }
+    ]
+
+    assert not twitch._Twitch__fallback_reward_was_captured(
+        "Repeatable Crate", campaign, "Example Game", captured
+    )
+
+
+def test_captured_drop_without_end_does_not_complete_fallback():
+    twitch = bare_twitch(SimpleNamespace())
+    campaign = {
+        "name": "Recurring Campaign",
+        "ends_at": "2026-08-31T23:59:59Z",
+    }
+    captured = [
+        {
+            "category": "Example Game",
+            "campaign": "Recurring Campaign",
+            "item_name": "Repeatable Crate",
+            "status": "captured",
+            "drop_end_at": None,
+        }
+    ]
+
+    assert not twitch._Twitch__fallback_reward_was_captured(
+        "Repeatable Crate", campaign, "Example Game", captured
+    )
+
+
+def test_campaign_without_end_does_not_use_captured_drop():
+    twitch = bare_twitch(SimpleNamespace())
+    campaign = {"name": "Recurring Campaign", "ends_at": None}
+    captured = [
+        {
+            "category": "Example Game",
+            "campaign": "Recurring Campaign",
+            "item_name": "Repeatable Crate",
+            "status": "captured",
+            "drop_end_at": "2026-08-31T23:59:59Z",
+        }
+    ]
+
+    assert not twitch._Twitch__fallback_reward_was_captured(
+        "Repeatable Crate", campaign, "Example Game", captured
+    )
 
 
 def test_future_campaign_in_active_report_is_not_mined_early(monkeypatch):
