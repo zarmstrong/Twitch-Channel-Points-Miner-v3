@@ -217,7 +217,7 @@ $(document).ready(function () {
     // Load a recent tail first, then request only entries appended after it.
     function getLog() {
         if (isLogCheckboxChecked) {
-            $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`, function (data, _status, xhr) {
+            $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
                 // Process and display the new log entries received
                 // Logs contain Twitch-controlled text (for example prediction
                 // titles), so never interpret them as HTML.
@@ -230,8 +230,10 @@ $(document).ready(function () {
                 if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
                     lastReceivedLogIndex = nextPosition;
                 }
-
-                if (autoUpdateLog) {
+            }).always(function () {
+                // A rollover can briefly replace the active log between polls.
+                // Retry transient failures without advancing the byte position.
+                if (autoUpdateLog && isLogCheckboxChecked) {
                     setTimeout(getLog, logPollInterval);
                 }
             });
