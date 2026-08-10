@@ -1,4 +1,5 @@
 import importlib
+import logging
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
@@ -30,7 +31,9 @@ def campaign_data():
 def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     twitch = object.__new__(Twitch)
     twitch.completed_drop_campaigns = set()
+    twitch.campaign_game_slugs = {}
     twitch.log_drop_checks = False
+    twitch.category_log_level = logging.INFO
     twitch.category_campaign_eligibility = {}
     twitch.evaluated_category_campaigns = set()
     twitch.twitchdrops_app_campaigns = {}
@@ -45,14 +48,14 @@ def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     return twitch
 
 
-def test_claiming_final_drop_suppresses_stale_campaign(monkeypatch):
+def test_claiming_final_drop_waits_for_inventory_confirmation(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     campaign = Campaign(campaign_data())
     drop = campaign.drops[0]
     drop.drop_instance_id = "instance-1"
 
     assert twitch.claim_drop(drop, campaign=campaign) is True
-    assert twitch.completed_drop_campaigns == {"campaign-1"}
+    assert twitch.completed_drop_campaigns == set()
 
 
 def test_completed_campaign_overrides_category_eligibility(monkeypatch):
@@ -118,7 +121,7 @@ def test_discovered_eligibility_applies_to_existing_configured_streamer(monkeypa
     assert twitch._Twitch__drops_condition(streamer) is True
 
 
-def test_bulk_inventory_claim_marks_completed_campaign(monkeypatch):
+def test_bulk_inventory_claim_waits_for_refreshed_inventory(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     data = campaign_data()
     data["timeBasedDrops"][0]["self"] = {
@@ -138,7 +141,7 @@ def test_bulk_inventory_claim_marks_completed_campaign(monkeypatch):
 
     twitch.claim_all_drops_from_inventory()
 
-    assert twitch.completed_drop_campaigns == {"campaign-1"}
+    assert twitch.completed_drop_campaigns == set()
 
 
 def test_completed_reward_campaign_ids_suppress_stale_campaigns(monkeypatch):
@@ -154,6 +157,83 @@ def test_completed_reward_campaign_ids_suppress_stale_campaigns(monkeypatch):
     twitch.completed_drop_campaigns.update(completed)
 
     assert twitch.completed_drop_campaigns == {"campaign-1", "campaign-2"}
+
+
+def test_all_claimed_inventory_drops_confirm_campaign_completion(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    data = campaign_data()
+    data["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": True,
+    }
+
+    completed = twitch._Twitch__completed_campaign_ids_from_inventory(
+        {"dropCampaignsInProgress": [data]}
+    )
+
+    assert completed == {"campaign-1"}
+
+
+def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    sparse_campaign = campaign_data()
+    sparse_campaign.pop("game")
+    sparse_campaign.pop("timeBasedDrops")
+    dashboard_campaigns = [sparse_campaign]
+    inventory_campaign = campaign_data()
+    inventory_campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 0,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": dashboard_campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": [inventory_campaign]}, {"example-game"}
+    )
+    dashboard_campaigns.clear()
+
+    deadlines, twitch_games = (
+        twitch._Twitch__active_drop_category_slugs_from_campaigns(
+            {
+                "dropCampaignsInProgress": [],
+                "completedRewardCampaigns": [{"id": "campaign-1"}],
+            },
+            {"example-game"},
+        )
+    )
+
+    assert deadlines == {}
+    assert twitch_games == {"example-game"}
 
 
 def test_drop_report_snapshot_uses_analytics_mutex():

@@ -95,6 +95,7 @@ class Twitch(object):
         "category_campaign_eligibility",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
+        "campaign_game_slugs",
         "available_badge_names",
         "restart_requested",
         "gql",
@@ -149,6 +150,7 @@ class Twitch(object):
         self.category_campaign_eligibility = {}
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
+        self.campaign_game_slugs = {}
         self.available_badge_names = None
         self.restart_requested = Event()
 
@@ -857,6 +859,24 @@ class Twitch(object):
             if campaign_id not in [None, ""]:
                 completed_ids.add(str(campaign_id))
 
+        # Twitch can briefly leave a completed campaign in the in-progress
+        # collection before moving it to completedRewardCampaigns. All Drops
+        # being explicitly claimed is also authoritative completion evidence.
+        for campaign in inventory.get("dropCampaignsInProgress", []) or []:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = campaign.get("id")
+            drops = campaign.get("timeBasedDrops", []) or []
+            if campaign_id in [None, ""] or not drops:
+                continue
+            if all(
+                isinstance(drop, dict)
+                and isinstance(drop.get("self"), dict)
+                and drop["self"].get("isClaimed") is True
+                for drop in drops
+            ):
+                completed_ids.add(str(campaign_id))
+
         return completed_ids
 
     def __merge_campaign_inventory_progress(
@@ -1107,6 +1127,14 @@ class Twitch(object):
         completed_drop_ids = self.__completed_drop_ids_from_inventory(inventory)
         completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
         self.completed_drop_campaigns.update(completed_campaign_ids)
+        # Completed campaigns can disappear from both the dashboard and the
+        # in-progress inventory immediately after their final reward is claimed.
+        # Keep their previously observed game authoritative for this session so
+        # the external campaign catalog cannot resurrect the completed category.
+        for campaign_id in self.completed_drop_campaigns:
+            game_slug = self.campaign_game_slugs.get(str(campaign_id))
+            if game_slug:
+                twitch_category_slugs.add(game_slug)
         awarded_benefit_ids, awarded_benefit_fingerprints = self.__awarded_benefits(
             inventory
         )
@@ -1115,7 +1143,12 @@ class Twitch(object):
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
                 continue
+            game = campaign.get("game") or {}
+            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            game_slug = self.__slugify(game_name) if game_name else ""
             if campaign_id in completed_campaign_ids:
+                if game_slug:
+                    self.campaign_game_slugs[campaign_id] = game_slug
                 campaign_evaluations.append(
                     {
                         "campaign": campaign.get("name"),
@@ -1125,20 +1158,19 @@ class Twitch(object):
                         "skip_reason": "completed_campaign",
                     }
                 )
-                game = campaign.get("game") or {}
-                game_name = (game.get("displayName") or game.get("name") or "").strip()
                 if game_name:
-                    twitch_category_slugs.add(self.__slugify(game_name))
+                    twitch_category_slugs.add(game_slug)
                 continue
             inventory_campaign = inventory_campaigns.get(campaign_id)
             if inventory_campaign is not None:
                 campaign = self.__merge_campaign_inventory_progress(
                     campaign, inventory_campaign
                 )
-            game = campaign.get("game") or {}
-            game_name = (game.get("displayName") or game.get("name") or "").strip()
-            game_slug = self.__slugify(game_name) if game_name else ""
+                game = campaign.get("game") or {}
+                game_name = (game.get("displayName") or game.get("name") or "").strip()
+                game_slug = self.__slugify(game_name) if game_name else ""
             if game_slug:
+                self.campaign_game_slugs[campaign_id] = game_slug
                 twitch_category_slugs.add(game_slug)
             matches_configured_category = game_slug in requested_category_slugs
             evaluation = {
@@ -3738,10 +3770,9 @@ class Twitch(object):
                         and campaign_drop.id != drop.id
                     ]
                     if not remaining_drops:
-                        self.completed_drop_campaigns.add(campaign.id)
                         self.__log_drop_check(
-                            f"campaign {campaign.id} completed after claiming drop "
-                            f"{drop.id}; suppressing stale category eligibility"
+                            f"campaign {campaign.id} final drop {drop.id} claimed; "
+                            "waiting for inventory completion confirmation"
                         )
                 for variant in self.__drop_variant_entries_from_drop(drop):
                     self.__save_drop_claim_analytics(
@@ -3788,10 +3819,9 @@ class Twitch(object):
                     ):
                         campaign_id = campaign.get("id")
                         if campaign_id:
-                            self.completed_drop_campaigns.add(campaign_id)
                             self.__log_drop_check(
-                                f"campaign {campaign_id} completed while claiming "
-                                "inventory drops; suppressing stale category eligibility"
+                                f"campaign {campaign_id} final inventory drop claimed; "
+                                "waiting for inventory completion confirmation"
                             )
 
     def sync_campaigns(self, streamers, chunk_size=3):
