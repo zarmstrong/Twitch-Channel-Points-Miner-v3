@@ -339,6 +339,20 @@ def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
     assert "$('#auto-update-log').toggle(isLogCheckboxChecked);" in script
 
 
+def test_log_polling_retries_after_transient_rollover_failure():
+    script = (
+        Path(__file__).resolve().parents[1] / "assets" / "script.js"
+    ).read_text(encoding="utf-8")
+    get_log = script.split("function getLog()", 1)[1].split(
+        "// Retrieve the saved header visibility", 1
+    )[0]
+    retry = get_log.split(".always(function ()", 1)[1]
+
+    assert ".done(function (data, _status, xhr)" in get_log
+    assert "setTimeout(getLog, logPollInterval);" in retry
+    assert "autoUpdateLog && isLogCheckboxChecked" in retry
+
+
 def test_dark_theme_keeps_config_panel_headings_readable():
     stylesheet = (
         Path(__file__).resolve().parents[1] / "assets" / "dark-theme.css"

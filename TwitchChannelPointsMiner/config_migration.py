@@ -37,6 +37,7 @@ LOGGER_SETTINGS_DEFAULTS = (
     ("colored", "False"),
     ("color_palette", "ColorPalette()"),
     ("auto_clear", "True"),
+    ("log_retention_days", "7"),
     ("daily_report", "False"),
     ("daily_report_time", '"00:00"'),
     ("username", "None"),

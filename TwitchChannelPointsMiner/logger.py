@@ -78,6 +78,7 @@ class LoggerSettings:
         "colored",
         "color_palette",
         "auto_clear",
+        "log_retention_days",
         "telegram",
         "discord",
         "webhook",
@@ -104,6 +105,7 @@ class LoggerSettings:
         colored: bool = False,
         color_palette: ColorPalette = ColorPalette(),
         auto_clear: bool = True,
+        log_retention_days: int = 7,
         telegram: Telegram or None = None,
         discord: Discord or None = None,
         webhook: Webhook or None = None,
@@ -138,6 +140,13 @@ class LoggerSettings:
         self.colored = colored
         self.color_palette = color_palette
         self.auto_clear = auto_clear
+        if (
+            isinstance(log_retention_days, bool)
+            or not isinstance(log_retention_days, int)
+            or log_retention_days < 1
+        ):
+            raise ValueError("log_retention_days must be a positive integer")
+        self.log_retention_days = log_retention_days
         self.telegram = telegram
         self.discord = discord
         self.webhook = webhook
@@ -397,9 +406,9 @@ def configure_loggers(username, settings):
             )
             file_handler = TimedRotatingFileHandler(
                 logs_file,
-                when="D",
+                when="midnight",
                 interval=1,
-                backupCount=7,
+                backupCount=settings.log_retention_days,
                 encoding="utf-8",
                 delay=False,
             )

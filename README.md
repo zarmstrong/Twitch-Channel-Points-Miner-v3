@@ -933,6 +933,9 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.logger import LoggerSettings
 
 logger_settings = LoggerSettings(
+    save=True,
+    auto_clear=True,
+    log_retention_days=7,
     telegram=Telegram(
         chat_id=123456789,
         token="YOUR_BOT_TOKEN",
@@ -941,6 +944,11 @@ logger_settings = LoggerSettings(
     ),
 )
 ```
+
+With `auto_clear=True` (the default), the active `logs/<username>.log` file is
+rolled at local midnight on Windows and Linux. Daily archives use a date suffix,
+and `log_retention_days` controls how many are retained (7 by default). Set
+`auto_clear=False` to preserve the existing timestamped-file-per-start behavior.
 
 Assign this object to `MINER_CONFIG["logger_settings"]`. The complete
 [configuration template](config.example.py) shows all providers together.
