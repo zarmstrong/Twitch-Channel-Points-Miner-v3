@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.4...3.13.5) (2026-08-10)
+
+
+### Bug Fixes
+
+* **drops:** prevent completed fallback resurrection ([#84](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/84)) ([7be8e29](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7be8e29879ced6ff14dc742bbd341a46b40bbaca))
+
 ## [3.13.4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.3...3.13.4) (2026-08-10)
 
 
