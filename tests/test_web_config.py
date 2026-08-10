@@ -18,6 +18,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
@@ -840,10 +841,13 @@ def test_websocket_pool_reuses_capacity_in_older_socket():
 
 
 def test_websocket_pool_finds_existing_topic_on_older_socket():
-    topic = SimpleNamespace(streamer=Streamer("target"))
+    streamer = Streamer("target")
+    streamer.channel_id = 100
+    existing_topic = PubsubTopic("video-playback-by-id", streamer=streamer)
+    duplicate_topic = PubsubTopic("video-playback-by-id", streamer=streamer)
     existing = SimpleNamespace(
         index=0,
-        topics=[topic],
+        topics=[existing_topic],
         pending_topics=[],
         is_opened=True,
         listen=lambda _topic, _token: pytest.fail("unexpected duplicate listen"),
@@ -865,9 +869,9 @@ def test_websocket_pool_finds_existing_topic_on_older_socket():
     )
     pool.ws = [existing, available]
 
-    pool.submit(topic)
+    pool.submit(duplicate_topic)
 
-    assert existing.topics == [topic]
+    assert existing.topics == [existing_topic]
     assert available.topics == []
 
 
