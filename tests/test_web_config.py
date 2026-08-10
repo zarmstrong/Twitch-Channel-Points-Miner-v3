@@ -18,6 +18,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
@@ -808,6 +809,108 @@ def test_websocket_pool_does_not_relisten_an_existing_topic():
     assert websocket.pending_topics == []
 
 
+def test_websocket_pool_reuses_capacity_in_older_socket():
+    topic = SimpleNamespace(streamer=Streamer("target"))
+    available = SimpleNamespace(
+        index=0,
+        topics=[object() for _index in range(49)],
+        pending_topics=[],
+        is_opened=False,
+    )
+    full = SimpleNamespace(
+        index=1,
+        topics=[object() for _index in range(50)],
+        pending_topics=[],
+        is_opened=False,
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(get_auth_token=lambda: "oauth-token")
+        ),
+        [],
+        {},
+    )
+    pool.ws = [available, full]
+
+    pool.submit(topic)
+
+    assert len(pool.ws) == 2
+    assert available.topics[-1] is topic
+    assert available.pending_topics == [topic]
+    assert topic not in full.topics
+
+
+def test_websocket_pool_finds_existing_topic_on_older_socket():
+    streamer = Streamer("target")
+    streamer.channel_id = 100
+    existing_topic = PubsubTopic("video-playback-by-id", streamer=streamer)
+    duplicate_topic = PubsubTopic("video-playback-by-id", streamer=streamer)
+    existing = SimpleNamespace(
+        index=0,
+        topics=[existing_topic],
+        pending_topics=[],
+        is_opened=True,
+        listen=lambda _topic, _token: pytest.fail("unexpected duplicate listen"),
+    )
+    available = SimpleNamespace(
+        index=1,
+        topics=[],
+        pending_topics=[],
+        is_opened=False,
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(
+                get_auth_token=lambda: pytest.fail("unexpected token request")
+            )
+        ),
+        [],
+        {},
+    )
+    pool.ws = [existing, available]
+
+    pool.submit(duplicate_topic)
+
+    assert existing.topics == [existing_topic]
+    assert available.topics == []
+
+
+def test_websocket_pool_retires_empty_trailing_sockets():
+    target = Streamer("target")
+    retained = Streamer("retained")
+    closed = []
+    first = SimpleNamespace(
+        index=0,
+        topics=[SimpleNamespace(streamer=retained)],
+        pending_topics=[],
+        is_opened=True,
+    )
+    trailing = SimpleNamespace(
+        index=1,
+        topics=[SimpleNamespace(streamer=target)],
+        pending_topics=[],
+        is_opened=True,
+        forced_close=False,
+        close=lambda: closed.append(True),
+    )
+    pool = WebSocketsPool(
+        SimpleNamespace(
+            twitch_login=SimpleNamespace(
+                get_auth_token=lambda: pytest.fail("unexpected token request")
+            )
+        ),
+        [],
+        {},
+    )
+    pool.ws = [first, trailing]
+
+    pool.remove_streamer_topics(target)
+
+    assert pool.ws == [first]
+    assert trailing.forced_close is True
+    assert closed == [True]
+
+
 def test_websocket_selection_and_registration_share_one_lock_scope():
     class RecordingLock:
         depth = 0
@@ -822,6 +925,7 @@ def test_websocket_selection_and_registration_share_one_lock_scope():
 
     topic_lock = RecordingLock()
     websocket = SimpleNamespace(
+        index=0,
         topics=[object() for _index in range(49)],
         pending_topics=[],
         is_opened=False,
