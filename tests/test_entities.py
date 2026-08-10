@@ -150,10 +150,10 @@ def test_pubsub_topic_uses_user_or_streamer_channel():
 
 def test_pubsub_topics_compare_by_twitch_topic_string():
     first_streamer = type("Streamer", (), {"channel_id": "200"})()
-    second_streamer = type("Streamer", (), {"channel_id": "200"})()
+    second_streamer = type("Streamer", (), {"channel_id": 200})()
 
     assert PubsubTopic("user-topic", user_id="100") == PubsubTopic(
-        "user-topic", user_id="100"
+        "user-topic", user_id=100
     )
     assert PubsubTopic("channel-topic", streamer=first_streamer) == PubsubTopic(
         "channel-topic", streamer=second_streamer
@@ -161,3 +161,11 @@ def test_pubsub_topics_compare_by_twitch_topic_string():
     assert PubsubTopic("channel-topic", streamer=first_streamer) != PubsubTopic(
         "other-topic", streamer=second_streamer
     )
+
+
+def test_pubsub_topic_hash_matches_twitch_topic_string():
+    first = PubsubTopic("user-topic", user_id="100")
+    second = PubsubTopic("user-topic", user_id=100)
+
+    assert hash(first) == hash(second)
+    assert {first, second} == {first}

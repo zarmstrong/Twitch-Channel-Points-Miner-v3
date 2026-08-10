@@ -18,11 +18,7 @@ class PubsubTopic(object):
     def __eq__(self, other):
         if not isinstance(other, PubsubTopic):
             return NotImplemented
-        return (
-            self.topic == other.topic
-            and self.user_id == other.user_id
-            and self.__streamer_channel_id() == other.__streamer_channel_id()
-        )
+        return str(self) == str(other)
 
-    def __streamer_channel_id(self):
-        return None if self.streamer is None else self.streamer.channel_id
+    def __hash__(self):
+        return hash(str(self))
