@@ -2038,7 +2038,10 @@ class Twitch(object):
                 return []
 
             if drops_enabled is True:
-                if not self.__stream_has_drops_enabled_tag(forced_streamer_username):
+                drops_logins = self.__get_drops_enabled_directory_logins(
+                    self.__slugify(game_name)
+                )
+                if forced_streamer_username not in drops_logins:
                     self.__log_category(
                         f"Forced category streamer '{forced_streamer_username}' is in '{game_name}' but missing DropsEnabled tag",
                         extra={"emoji": ":no_entry:"},
@@ -2066,6 +2069,7 @@ class Twitch(object):
 
         stream_candidates = []
         usernames_seen = set()
+        drops_enabled_logins = None
         cursor = None
         max_results = max(limit, 1)
         search_window = (
@@ -2089,12 +2093,19 @@ class Twitch(object):
             if streams == []:
                 break
 
+            if drops_enabled is True and drops_enabled_logins is None:
+                drops_enabled_logins = self.__get_drops_enabled_directory_logins(
+                    self.__slugify(game_name)
+                )
+                if not drops_enabled_logins:
+                    break
+
             for stream in streams:
                 username = (stream.get("user_login") or "").lower().strip()
                 if not username:
                     continue
                 if drops_enabled is True:
-                    if not self.__stream_has_drops_enabled_tag(username):
+                    if username not in drops_enabled_logins:
                         continue
 
                 if username not in usernames_seen:
@@ -2251,15 +2262,38 @@ class Twitch(object):
         )
         return usernames
 
-    def __stream_has_drops_enabled_tag(self, username: str) -> bool:
+    def __get_drops_enabled_directory_logins(self, game_slug: str) -> set[str]:
+        request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
+        request["variables"] = {
+            "slug": game_slug,
+            "sortTypeIsRecency": False,
+            "limit": 100,
+            "includeIsDJ": False,
+            "options": {
+                "sort": "RELEVANCE",
+                "recommendationsContext": {"platform": "web"},
+                "tags": [DROP_ID],
+            },
+        }
         try:
-            response = self.gql.video_player_stream_info_overlay_channel(username)
+            response = self.gql.post_gql_request_raw("DirectoryPage_Game", request)
         except RetryError as error:
-            logger.error(f"Error checking Drops tag for {username}: {error}")
-            return False
+            logger.error(f"Error loading Drops directory for {game_slug}: {error}")
+            return set()
 
-        stream = response.user.stream if response.user is not None else None
-        return bool(stream is not None and DROP_ID in {tag.id for tag in stream.tags})
+        game = (response.get("data") or {}).get("game") or {}
+        edges = (game.get("streams") or {}).get("edges") or []
+        return {
+            login
+            for edge in edges
+            if isinstance(edge, dict)
+            for node in [edge.get("node") or {}]
+            if isinstance(node, dict)
+            for broadcaster in [node.get("broadcaster") or {}]
+            if isinstance(broadcaster, dict)
+            for login in [str(broadcaster.get("login") or "").lower().strip()]
+            if login
+        }
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:

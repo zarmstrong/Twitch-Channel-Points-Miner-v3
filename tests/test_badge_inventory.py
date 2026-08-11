@@ -87,46 +87,44 @@ def test_restricted_campaign_lookup_trusts_campaign_channel_allowlist(monkeypatc
     assert usernames == ["ravenquest-channel"]
 
 
-def test_drops_tag_detection_uses_twitch_tag_id(monkeypatch):
+def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
     )
     twitch = bare_twitch(
         SimpleNamespace(
-            video_player_stream_info_overlay_channel=lambda username: SimpleNamespace(
-                user=SimpleNamespace(
-                    stream=SimpleNamespace(
-                        tags=[
-                            SimpleNamespace(
-                                id="official-drops-id", localized_name="Drops有効"
-                            )
-                        ]
-                    )
-                )
-            )
+            post_gql_request_raw=lambda operation, request: {
+                "data": {
+                    "game": {
+                        "streams": {
+                            "edges": [
+                                {"node": {"broadcaster": {"login": "Eligible"}}}
+                            ]
+                        }
+                    }
+                }
+            }
         )
     )
 
-    assert twitch._Twitch__stream_has_drops_enabled_tag("eligible") is True
+    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == {
+        "eligible"
+    }
 
 
-def test_user_created_drops_tag_does_not_pass_id_check(monkeypatch):
+def test_drops_directory_filter_does_not_trust_user_tag_text(monkeypatch):
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
     )
     twitch = bare_twitch(
         SimpleNamespace(
-            video_player_stream_info_overlay_channel=lambda username: SimpleNamespace(
-                user=SimpleNamespace(
-                    stream=SimpleNamespace(
-                        tags=[SimpleNamespace(id="custom-tag-id", localized_name="DropsSoon")]
-                    )
-                )
-            )
+            post_gql_request_raw=lambda operation, request: {
+                "data": {"game": {"streams": {"edges": []}}}
+            }
         )
     )
 
-    assert twitch._Twitch__stream_has_drops_enabled_tag("fake") is False
+    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == set()
 
 
 def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):
