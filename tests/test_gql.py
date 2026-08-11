@@ -1347,6 +1347,39 @@ def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     assert len(stream_calls) == 1
 
 
+def test_category_search_rejects_user_created_drops_lookalike(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"game": {"streams": {"edges": []}}}
+        }
+    )
+    twitch = twitch_with_gql(gql)
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "game-id", "name": "Game"}]}
+        return {
+            "data": [
+                {
+                    "user_login": "lookalike",
+                    "game_id": "game-id",
+                    "viewer_count": 1,
+                    "tags": ["DropsSoon"],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category("game") == []
+
+
 def test_campaign_inventory_merge_keeps_new_drop_and_existing_progress():
     twitch = twitch_with_gql(SimpleNamespace())
     fresh = {

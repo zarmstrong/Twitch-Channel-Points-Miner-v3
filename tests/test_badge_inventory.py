@@ -96,16 +96,16 @@ def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
     def post_gql_request_raw(operation, request):
         calls.append((operation, request))
         return {
-                "data": {
-                    "game": {
-                        "streams": {
-                            "edges": [
-                                {"node": {"broadcaster": {"login": "Eligible"}}}
-                            ]
-                        }
+            "data": {
+                "game": {
+                    "streams": {
+                        "edges": [
+                            {"node": {"broadcaster": {"login": "Eligible"}}}
+                        ]
                     }
                 }
             }
+        }
 
     twitch = bare_twitch(
         SimpleNamespace(post_gql_request_raw=post_gql_request_raw)
