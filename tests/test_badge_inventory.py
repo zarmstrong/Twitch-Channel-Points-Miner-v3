@@ -60,6 +60,81 @@ def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
     assert len(calls[0]) == 100
 
 
+def test_restricted_campaign_lookup_trusts_campaign_channel_allowlist(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__helix_get",
+        lambda self, endpoint, params: {
+            "data": [
+                {
+                    "user_login": "ravenquest-channel",
+                    "game_id": "ravenquest-id",
+                    "viewer_count": 25,
+                    "tags": ["Português", "DropsAtivados"],
+                }
+            ]
+        },
+    )
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["ravenquest-channel"]}],
+        "ravenquest-id",
+        "RavenQuest",
+    )
+
+    assert usernames == ["ravenquest-channel"]
+
+
+def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
+    )
+    calls = []
+
+    def post_gql_request_raw(operation, request):
+        calls.append((operation, request))
+        return {
+            "data": {
+                "game": {
+                    "streams": {
+                        "edges": [
+                            {"node": {"broadcaster": {"login": "Eligible"}}}
+                        ]
+                    }
+                }
+            }
+        }
+
+    twitch = bare_twitch(
+        SimpleNamespace(post_gql_request_raw=post_gql_request_raw)
+    )
+
+    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == {
+        "eligible"
+    }
+    assert calls[0][0] == "DirectoryPage_Game"
+    assert calls[0][1]["variables"]["options"]["tags"] == [
+        "official-drops-id"
+    ]
+
+
+def test_drops_directory_filter_does_not_trust_user_tag_text(monkeypatch):
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
+    )
+    twitch = bare_twitch(
+        SimpleNamespace(
+            post_gql_request_raw=lambda operation, request: {
+                "data": {"game": {"streams": {"edges": []}}}
+            }
+        )
+    )
+
+    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == set()
+
+
 def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):
     twitch = bare_twitch(SimpleNamespace())
 

@@ -64,6 +64,15 @@ class GQLOperations:
             }
         },
     }
+    DirectoryPage_Game = {
+        "operationName": "DirectoryPage_Game",
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "c7c9d5aad09155c4161d2382092dc44610367f3536aac39019ec2582ae5065f9",
+            }
+        },
+    }
     ClaimCommunityPoints = {
         "operationName": "ClaimCommunityPoints",
         "extensions": {

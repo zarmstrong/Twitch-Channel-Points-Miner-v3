@@ -46,6 +46,7 @@ from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
     CLIENT_ID,
     CLIENT_VERSION,
+    DROP_ID,
     URL,
     GQLOperations,
 )
@@ -2037,11 +2038,13 @@ class Twitch(object):
                 return []
 
             if drops_enabled is True:
-                stream_tags = forced_stream.get("tags", []) or []
-                normalized_tags = [tag.replace(" ", "").lower() for tag in stream_tags]
-                if "dropsenabled" not in normalized_tags:
+                drops_logins = self.__get_drops_enabled_directory_logins(
+                    self.__slugify(game_name)
+                )
+                if forced_streamer_username not in drops_logins:
                     self.__log_category(
-                        f"Forced category streamer '{forced_streamer_username}' is in '{game_name}' but missing DropsEnabled tag",
+                        f"Forced category streamer '{forced_streamer_username}' is in "
+                        f"'{game_name}' but not listed in Twitch's Drops-enabled directory",
                         extra={"emoji": ":no_entry:"},
                     )
                     return []
@@ -2067,6 +2070,7 @@ class Twitch(object):
 
         stream_candidates = []
         usernames_seen = set()
+        drops_enabled_logins = None
         cursor = None
         max_results = max(limit, 1)
         search_window = (
@@ -2090,17 +2094,23 @@ class Twitch(object):
             if streams == []:
                 break
 
+            if drops_enabled is True and drops_enabled_logins is None:
+                drops_enabled_logins = self.__get_drops_enabled_directory_logins(
+                    self.__slugify(game_name)
+                )
+                if not drops_enabled_logins:
+                    break
+                search_window = min(search_window, len(drops_enabled_logins))
+
             for stream in streams:
+                username = (stream.get("user_login") or "").lower().strip()
+                if not username:
+                    continue
                 if drops_enabled is True:
-                    stream_tags = stream.get("tags", []) or []
-                    normalized_tags = [
-                        tag.replace(" ", "").lower() for tag in stream_tags
-                    ]
-                    if "dropsenabled" not in normalized_tags:
+                    if username not in drops_enabled_logins:
                         continue
 
-                username = (stream.get("user_login") or "").lower().strip()
-                if username and username not in usernames_seen:
+                if username not in usernames_seen:
                     usernames_seen.add(username)
                     stream_candidates.append(stream)
                     if len(stream_candidates) >= search_window:
@@ -2152,8 +2162,24 @@ class Twitch(object):
             ),
         )
 
+        if drops_enabled is True:
+            eligible_count = len(drops_enabled_logins or [])
+            eligible_label = (
+                f"at least {eligible_count}"
+                if eligible_count >= 100
+                else eligible_count
+            )
+            message = (
+                f"Selected {len(usernames)} of {eligible_label} Drops-enabled live "
+                f"channels for '{game_name}' (limit: {max_results}, sort: {sort_key})"
+            )
+        else:
+            message = (
+                f"Found {len(usernames)} live channels for '{game_name}' "
+                f"(limit: {max_results}, sort: {sort_key})"
+            )
         self.__log_category(
-            f"Found {len(usernames)} live channels for '{game_name}' (sort: {sort_key})",
+            message,
             extra={"emoji": ":satellite_antenna:"},
         )
         return usernames
@@ -2198,13 +2224,6 @@ class Twitch(object):
                     game_id
                 ):
                     continue
-                if drops_enabled is True:
-                    normalized_tags = [
-                        tag.replace(" ", "").lower()
-                        for tag in stream.get("tags", []) or []
-                    ]
-                    if "dropsenabled" not in normalized_tags:
-                        continue
                 login = (stream.get("user_login") or "").lower().strip()
                 if login:
                     live_streams[login] = stream
@@ -2260,6 +2279,39 @@ class Twitch(object):
             extra={"emoji": ":satellite_antenna:"},
         )
         return usernames
+
+    def __get_drops_enabled_directory_logins(self, game_slug: str) -> set[str]:
+        request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
+        request["variables"] = {
+            "slug": game_slug,
+            "sortTypeIsRecency": False,
+            "limit": 100,
+            "includeIsDJ": False,
+            "options": {
+                "sort": "RELEVANCE",
+                "recommendationsContext": {"platform": "web"},
+                "tags": [DROP_ID],
+            },
+        }
+        try:
+            response = self.gql.post_gql_request_raw("DirectoryPage_Game", request)
+        except RetryError as error:
+            logger.error(f"Error loading Drops directory for {game_slug}: {error}")
+            return set()
+
+        game = (response.get("data") or {}).get("game") or {}
+        edges = (game.get("streams") or {}).get("edges") or []
+        return {
+            login
+            for edge in edges
+            if isinstance(edge, dict)
+            for node in [edge.get("node") or {}]
+            if isinstance(node, dict)
+            for broadcaster in [node.get("broadcaster") or {}]
+            if isinstance(broadcaster, dict)
+            for login in [str(broadcaster.get("login") or "").lower().strip()]
+            if login
+        }
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:
