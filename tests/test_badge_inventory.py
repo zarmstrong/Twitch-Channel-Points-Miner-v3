@@ -60,7 +60,7 @@ def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
     assert len(calls[0]) == 100
 
 
-def test_restricted_campaign_lookup_accepts_portuguese_drops_tag(monkeypatch):
+def test_restricted_campaign_lookup_trusts_campaign_channel_allowlist(monkeypatch):
     twitch = bare_twitch(SimpleNamespace())
 
     monkeypatch.setattr(
@@ -87,19 +87,46 @@ def test_restricted_campaign_lookup_accepts_portuguese_drops_tag(monkeypatch):
     assert usernames == ["ravenquest-channel"]
 
 
-def test_drops_tag_detection_is_language_independent():
-    has_drops_tag = Twitch._Twitch__has_drops_enabled_tag
+def test_drops_tag_detection_uses_twitch_tag_id(monkeypatch):
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
+    )
+    twitch = bare_twitch(
+        SimpleNamespace(
+            video_player_stream_info_overlay_channel=lambda username: SimpleNamespace(
+                user=SimpleNamespace(
+                    stream=SimpleNamespace(
+                        tags=[
+                            SimpleNamespace(
+                                id="official-drops-id", localized_name="Drops有効"
+                            )
+                        ]
+                    )
+                )
+            )
+        )
+    )
 
-    for tag in (
-        "DropsEnabled",
-        "Drops Ativados",
-        "DropsActivados",
-        "DropsAktiviert",
-        "Drops有効",
-    ):
-        assert has_drops_tag([tag]) is True
+    assert twitch._Twitch__stream_has_drops_enabled_tag("eligible") is True
 
-    assert has_drops_tag(["Português", "English"]) is False
+
+def test_user_created_drops_tag_does_not_pass_id_check(monkeypatch):
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
+    )
+    twitch = bare_twitch(
+        SimpleNamespace(
+            video_player_stream_info_overlay_channel=lambda username: SimpleNamespace(
+                user=SimpleNamespace(
+                    stream=SimpleNamespace(
+                        tags=[SimpleNamespace(id="custom-tag-id", localized_name="DropsPoop")]
+                    )
+                )
+            )
+        )
+    )
+
+    assert twitch._Twitch__stream_has_drops_enabled_tag("fake") is False
 
 
 def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):

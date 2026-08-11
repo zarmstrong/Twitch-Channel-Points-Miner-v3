@@ -46,6 +46,7 @@ from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
     CLIENT_ID,
     CLIENT_VERSION,
+    DROP_ID,
     URL,
     GQLOperations,
 )
@@ -2037,8 +2038,7 @@ class Twitch(object):
                 return []
 
             if drops_enabled is True:
-                stream_tags = forced_stream.get("tags", []) or []
-                if not self.__has_drops_enabled_tag(stream_tags):
+                if not self.__stream_has_drops_enabled_tag(forced_streamer_username):
                     self.__log_category(
                         f"Forced category streamer '{forced_streamer_username}' is in '{game_name}' but missing DropsEnabled tag",
                         extra={"emoji": ":no_entry:"},
@@ -2090,13 +2090,14 @@ class Twitch(object):
                 break
 
             for stream in streams:
+                username = (stream.get("user_login") or "").lower().strip()
+                if not username:
+                    continue
                 if drops_enabled is True:
-                    stream_tags = stream.get("tags", []) or []
-                    if not self.__has_drops_enabled_tag(stream_tags):
+                    if not self.__stream_has_drops_enabled_tag(username):
                         continue
 
-                username = (stream.get("user_login") or "").lower().strip()
-                if username and username not in usernames_seen:
+                if username not in usernames_seen:
                     usernames_seen.add(username)
                     stream_candidates.append(stream)
                     if len(stream_candidates) >= search_window:
@@ -2194,9 +2195,6 @@ class Twitch(object):
                     game_id
                 ):
                     continue
-                if drops_enabled is True:
-                    if not self.__has_drops_enabled_tag(stream.get("tags", []) or []):
-                        continue
                 login = (stream.get("user_login") or "").lower().strip()
                 if login:
                     live_streams[login] = stream
@@ -2253,15 +2251,15 @@ class Twitch(object):
         )
         return usernames
 
-    @staticmethod
-    def __has_drops_enabled_tag(tags) -> bool:
-        normalized_tags = {
-            tag.replace(" ", "").casefold() for tag in tags if isinstance(tag, str)
-        }
-        # Twitch localizes the text after its "Drops" brand name (for example,
-        # DropsEnabled, DropsAtivados, and Drops有効). Matching the stable brand
-        # prefix avoids maintaining an incomplete list of translated suffixes.
-        return any(tag.startswith("drops") for tag in normalized_tags)
+    def __stream_has_drops_enabled_tag(self, username: str) -> bool:
+        try:
+            response = self.gql.video_player_stream_info_overlay_channel(username)
+        except RetryError as error:
+            logger.error(f"Error checking Drops tag for {username}: {error}")
+            return False
+
+        stream = response.user.stream if response.user is not None else None
+        return bool(stream is not None and DROP_ID in {tag.id for tag in stream.tags})
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:
