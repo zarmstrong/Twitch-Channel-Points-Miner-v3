@@ -119,7 +119,7 @@ def test_user_created_drops_tag_does_not_pass_id_check(monkeypatch):
             video_player_stream_info_overlay_channel=lambda username: SimpleNamespace(
                 user=SimpleNamespace(
                     stream=SimpleNamespace(
-                        tags=[SimpleNamespace(id="custom-tag-id", localized_name="DropsPoop")]
+                        tags=[SimpleNamespace(id="custom-tag-id", localized_name="DropsSoon")]
                     )
                 )
             )
