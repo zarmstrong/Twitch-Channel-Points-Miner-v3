@@ -2038,8 +2038,7 @@ class Twitch(object):
 
             if drops_enabled is True:
                 stream_tags = forced_stream.get("tags", []) or []
-                normalized_tags = [tag.replace(" ", "").lower() for tag in stream_tags]
-                if "dropsenabled" not in normalized_tags:
+                if not self.__has_drops_enabled_tag(stream_tags):
                     self.__log_category(
                         f"Forced category streamer '{forced_streamer_username}' is in '{game_name}' but missing DropsEnabled tag",
                         extra={"emoji": ":no_entry:"},
@@ -2093,10 +2092,7 @@ class Twitch(object):
             for stream in streams:
                 if drops_enabled is True:
                     stream_tags = stream.get("tags", []) or []
-                    normalized_tags = [
-                        tag.replace(" ", "").lower() for tag in stream_tags
-                    ]
-                    if "dropsenabled" not in normalized_tags:
+                    if not self.__has_drops_enabled_tag(stream_tags):
                         continue
 
                 username = (stream.get("user_login") or "").lower().strip()
@@ -2199,11 +2195,7 @@ class Twitch(object):
                 ):
                     continue
                 if drops_enabled is True:
-                    normalized_tags = [
-                        tag.replace(" ", "").lower()
-                        for tag in stream.get("tags", []) or []
-                    ]
-                    if "dropsenabled" not in normalized_tags:
+                    if not self.__has_drops_enabled_tag(stream.get("tags", []) or []):
                         continue
                 login = (stream.get("user_login") or "").lower().strip()
                 if login:
@@ -2260,6 +2252,13 @@ class Twitch(object):
             extra={"emoji": ":satellite_antenna:"},
         )
         return usernames
+
+    @staticmethod
+    def __has_drops_enabled_tag(tags) -> bool:
+        normalized_tags = {
+            tag.replace(" ", "").casefold() for tag in tags if isinstance(tag, str)
+        }
+        return bool(normalized_tags.intersection({"dropsenabled", "dropsativados"}))
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:

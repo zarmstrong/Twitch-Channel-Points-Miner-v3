@@ -60,6 +60,33 @@ def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
     assert len(calls[0]) == 100
 
 
+def test_restricted_campaign_lookup_accepts_portuguese_drops_tag(monkeypatch):
+    twitch = bare_twitch(SimpleNamespace())
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__helix_get",
+        lambda self, endpoint, params: {
+            "data": [
+                {
+                    "user_login": "ravenquest-channel",
+                    "game_id": "ravenquest-id",
+                    "viewer_count": 25,
+                    "tags": ["Português", "DropsAtivados"],
+                }
+            ]
+        },
+    )
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["ravenquest-channel"]}],
+        "ravenquest-id",
+        "RavenQuest",
+    )
+
+    assert usernames == ["ravenquest-channel"]
+
+
 def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):
     twitch = bare_twitch(SimpleNamespace())
 
