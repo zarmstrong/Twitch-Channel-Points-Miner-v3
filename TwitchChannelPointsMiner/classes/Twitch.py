@@ -2258,7 +2258,10 @@ class Twitch(object):
         normalized_tags = {
             tag.replace(" ", "").casefold() for tag in tags if isinstance(tag, str)
         }
-        return bool(normalized_tags.intersection({"dropsenabled", "dropsativados"}))
+        # Twitch localizes the text after its "Drops" brand name (for example,
+        # DropsEnabled, DropsAtivados, and Drops有効). Matching the stable brand
+        # prefix avoids maintaining an incomplete list of translated suffixes.
+        return any(tag.startswith("drops") for tag in normalized_tags)
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:

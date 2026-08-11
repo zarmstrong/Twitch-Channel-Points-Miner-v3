@@ -87,6 +87,21 @@ def test_restricted_campaign_lookup_accepts_portuguese_drops_tag(monkeypatch):
     assert usernames == ["ravenquest-channel"]
 
 
+def test_drops_tag_detection_is_language_independent():
+    has_drops_tag = Twitch._Twitch__has_drops_enabled_tag
+
+    for tag in (
+        "DropsEnabled",
+        "Drops Ativados",
+        "DropsActivados",
+        "DropsAktiviert",
+        "Drops有効",
+    ):
+        assert has_drops_tag([tag]) is True
+
+    assert has_drops_tag(["Português", "English"]) is False
+
+
 def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):
     twitch = bare_twitch(SimpleNamespace())
 
