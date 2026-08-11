@@ -2043,7 +2043,8 @@ class Twitch(object):
                 )
                 if forced_streamer_username not in drops_logins:
                     self.__log_category(
-                        f"Forced category streamer '{forced_streamer_username}' is in '{game_name}' but missing DropsEnabled tag",
+                        f"Forced category streamer '{forced_streamer_username}' is in "
+                        f"'{game_name}' but not listed in Twitch's Drops-enabled directory",
                         extra={"emoji": ":no_entry:"},
                     )
                     return []
@@ -2099,6 +2100,7 @@ class Twitch(object):
                 )
                 if not drops_enabled_logins:
                     break
+                search_window = min(search_window, len(drops_enabled_logins))
 
             for stream in streams:
                 username = (stream.get("user_login") or "").lower().strip()

@@ -91,9 +91,11 @@ def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.classes.Twitch.DROP_ID", "official-drops-id"
     )
-    twitch = bare_twitch(
-        SimpleNamespace(
-            post_gql_request_raw=lambda operation, request: {
+    calls = []
+
+    def post_gql_request_raw(operation, request):
+        calls.append((operation, request))
+        return {
                 "data": {
                     "game": {
                         "streams": {
@@ -104,12 +106,18 @@ def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
                     }
                 }
             }
-        )
+
+    twitch = bare_twitch(
+        SimpleNamespace(post_gql_request_raw=post_gql_request_raw)
     )
 
     assert twitch._Twitch__get_drops_enabled_directory_logins("game") == {
         "eligible"
     }
+    assert calls[0][0] == "DirectoryPage_Game"
+    assert calls[0][1]["variables"]["options"]["tags"] == [
+        "official-drops-id"
+    ]
 
 
 def test_drops_directory_filter_does_not_trust_user_tag_text(monkeypatch):
