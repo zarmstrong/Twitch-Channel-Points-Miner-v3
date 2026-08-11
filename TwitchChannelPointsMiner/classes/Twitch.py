@@ -2160,8 +2160,24 @@ class Twitch(object):
             ),
         )
 
+        if drops_enabled is True:
+            eligible_count = len(drops_enabled_logins or [])
+            eligible_label = (
+                f"at least {eligible_count}"
+                if eligible_count >= 100
+                else eligible_count
+            )
+            message = (
+                f"Selected {len(usernames)} of {eligible_label} Drops-enabled live "
+                f"channels for '{game_name}' (limit: {max_results}, sort: {sort_key})"
+            )
+        else:
+            message = (
+                f"Found {len(usernames)} live channels for '{game_name}' "
+                f"(limit: {max_results}, sort: {sort_key})"
+            )
         self.__log_category(
-            f"Found {len(usernames)} live channels for '{game_name}' (sort: {sort_key})",
+            message,
             extra={"emoji": ":satellite_antenna:"},
         )
         return usernames
