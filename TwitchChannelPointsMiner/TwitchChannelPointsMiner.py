@@ -1495,8 +1495,6 @@ class TwitchChannelPointsMiner:
                 )
             )
 
-        self.__reconcile_category_streamers(discovered_usernames)
-
         existing_usernames = {streamer.username for streamer in self.streamers}
         blacklist_usernames = {str(username).lower().strip() for username in blacklist}
         added = 0
@@ -1559,6 +1557,9 @@ class TwitchChannelPointsMiner:
                     extra={"emoji": ":cry:"},
                 )
 
+        # Keep the previous category set available while replacement channels
+        # are initialized so the minute watcher cannot observe a partial refresh.
+        self.__reconcile_category_streamers(discovered_usernames)
         self.__order_category_streamers(discovered_usernames)
 
         if added > 0 and self.sync_campaigns_thread is None:

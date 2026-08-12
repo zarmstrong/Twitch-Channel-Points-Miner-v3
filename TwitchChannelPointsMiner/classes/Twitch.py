@@ -1389,7 +1389,19 @@ class Twitch(object):
                             owned_reward_names,
                             report.get("game") or category_name,
                         )
-                        or self.__fallback_reward_was_awarded(drop_name, campaign)
+                        or self.__fallback_reward_was_awarded(
+                            drop_name,
+                            campaign,
+                            next(
+                                (
+                                    drop.get("image_url")
+                                    for drop in campaign.get("drops", [])
+                                    if str(drop.get("name") or "").strip().lower()
+                                    == drop_name
+                                ),
+                                None,
+                            ),
+                        )
                         or self.__fallback_reward_was_captured(
                             drop_name,
                             campaign,
@@ -1515,7 +1527,7 @@ class Twitch(object):
                             return True
         return False
 
-    def __fallback_reward_was_awarded(self, reward_name, campaign):
+    def __fallback_reward_was_awarded(self, reward_name, campaign, reward_image=None):
         """Match a fallback reward to an award from the same campaign window."""
         starts_at = self.__parse_twitch_datetime(campaign.get("starts_at"))
         ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
@@ -1532,6 +1544,9 @@ class Twitch(object):
             awarded_name = str(awarded_drop.get("name") or "").strip().casefold()
             if awarded_name != normalized_name:
                 continue
+            awarded_image = str(awarded_drop.get("imageURL") or "").strip()
+            if reward_image and awarded_image == str(reward_image).strip():
+                return True
             awarded_at = self.__parse_twitch_datetime(awarded_drop.get("lastAwardedAt"))
             if awarded_at is not None and starts_at <= awarded_at <= ends_at:
                 return True
