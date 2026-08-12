@@ -1429,6 +1429,34 @@ class TwitchChannelPointsMiner:
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 
+    def __order_category_streamers(self, discovered_usernames):
+        """Match category streamer priority to the latest discovery order."""
+        priority = {
+            username: index
+            for index, username in enumerate(
+                dict.fromkeys(
+                    str(username).lower().strip()
+                    for username in discovered_usernames
+                    if str(username).strip()
+                )
+            )
+        }
+        category_indexes = [
+            index
+            for index, streamer in enumerate(self.streamers)
+            if streamer.from_category is True and streamer.username in priority
+        ]
+        ordered = sorted(
+            (
+                (self.streamers[index], self.original_streamers[index])
+                for index in category_indexes
+            ),
+            key=lambda item: priority[item[0].username],
+        )
+        for index, (streamer, baseline) in zip(category_indexes, ordered):
+            self.streamers[index] = streamer
+            self.original_streamers[index] = baseline
+
     def __refresh_category_streamers(
         self,
         categories,
@@ -1530,6 +1558,8 @@ class TwitchChannelPointsMiner:
                     f"Streamer {username} does not exist",
                     extra={"emoji": ":cry:"},
                 )
+
+        self.__order_category_streamers(discovered_usernames)
 
         if added > 0 and self.sync_campaigns_thread is None:
             self.sync_campaigns_thread = threading.Thread(

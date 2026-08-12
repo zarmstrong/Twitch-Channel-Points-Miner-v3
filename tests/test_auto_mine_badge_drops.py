@@ -288,3 +288,36 @@ def test_category_refresh_preserves_other_sources_when_category_is_stale():
     assert miner.original_streamers == [10, 20, 30]
     assert miner.ws_pool.removed == []
     assert all(streamer.from_category is False for streamer in miner.streamers)
+
+
+def test_category_refresh_reorders_existing_streamers_to_latest_priority():
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    lower_priority = Streamer("blacklisted", from_category=True)
+    explicit = Streamer("explicit", explicitly_configured=True)
+    higher_priority = Streamer("allchannel", from_category=True)
+    miner.username = "testuser"
+    miner.twitch = FakeTwitch()
+    miner.streamers = [lower_priority, explicit, higher_priority]
+    miner.original_streamers = [10, 20, 30]
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+    )
+
+    assert miner.streamers == [higher_priority, explicit, lower_priority]
+    assert miner.original_streamers == [30, 20, 10]
