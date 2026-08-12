@@ -1253,6 +1253,7 @@ class Twitch(object):
 
     def __twitchdrops_app_fallback(self, categories, known_category_slugs):
         deadlines = {}
+        twitch_authoritative_slugs = set(known_category_slugs)
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
@@ -1336,6 +1337,14 @@ class Twitch(object):
                     f"{indexed_start.isoformat()} UTC",
                     extra={"emoji": ":alarm_clock:", "category_log": True},
                 )
+
+            if requested_slug in twitch_authoritative_slugs:
+                self.__log_category(
+                    f"Skip Twitch Drops gist evaluation for '{category_name}' "
+                    "because Twitch inventory is authoritative",
+                    extra={"emoji": ":white_check_mark:"},
+                )
+                continue
 
             try:
                 report = scraper.scrape(indexed_game["url"])
