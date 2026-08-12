@@ -1384,6 +1384,51 @@ class TwitchChannelPointsMiner:
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 
+    def __reconcile_category_streamers(self, discovered_usernames):
+        """Retire category-only channels absent from the latest discovery."""
+        discovered = {
+            str(username).lower().strip()
+            for username in discovered_usernames
+            if str(username).strip()
+        }
+        retained = []
+        retained_baselines = []
+        removed = []
+        for index, streamer in enumerate(self.streamers):
+            baseline = (
+                self.original_streamers[index]
+                if index < len(self.original_streamers)
+                else streamer.channel_points
+            )
+            if streamer.from_category is not True or streamer.username in discovered:
+                retained.append(streamer)
+                retained_baselines.append(baseline)
+                continue
+
+            streamer.from_category = False
+            if (
+                streamer.explicitly_configured
+                or streamer.from_followers
+                or streamer.from_badge_campaign
+            ):
+                retained.append(streamer)
+                retained_baselines.append(baseline)
+                continue
+
+            self.ws_pool.remove_streamer_topics(streamer)
+            if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
+                streamer.irc_chat.stop()
+                streamer.irc_chat.join(timeout=5)
+            removed.append(streamer.username)
+
+        self.streamers[:] = retained
+        self.original_streamers[:] = retained_baselines
+        if removed:
+            logger.info(
+                "Category refresh retired stale Drop streamers: " + ", ".join(removed),
+                extra={"emoji": ":next_track_button:", "category_log": True},
+            )
+
     def __refresh_category_streamers(
         self,
         categories,
@@ -1421,6 +1466,8 @@ class TwitchChannelPointsMiner:
                     sort_by=sort_by,
                 )
             )
+
+        self.__reconcile_category_streamers(discovered_usernames)
 
         existing_usernames = {streamer.username for streamer in self.streamers}
         blacklist_usernames = {str(username).lower().strip() for username in blacklist}

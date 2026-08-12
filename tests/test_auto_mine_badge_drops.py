@@ -250,3 +250,41 @@ def test_category_discovery_keeps_point_baselines_aligned():
         "blacklisted",
     ]
     assert miner.original_streamers == [0, 0]
+
+
+def test_category_refresh_retires_streamers_missing_from_latest_discovery():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    stale = Streamer("stale", from_category=True)
+    current = Streamer("allchannel", from_category=True)
+    miner.streamers = [stale, current]
+    miner.original_streamers = [10, 20]
+    miner.ws_pool = FakeWebSocketsPool()
+
+    miner._TwitchChannelPointsMiner__reconcile_category_streamers(
+        ["allchannel", "blacklisted"]
+    )
+
+    assert miner.streamers == [current]
+    assert miner.original_streamers == [20]
+    assert miner.ws_pool.removed == ["stale"]
+
+
+def test_category_refresh_preserves_other_sources_when_category_is_stale():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    configured = Streamer(
+        "configured",
+        from_category=True,
+        explicitly_configured=True,
+    )
+    followed = Streamer("followed", from_category=True, from_followers=True)
+    badge = Streamer("badge", from_category=True, from_badge_campaign=True)
+    miner.streamers = [configured, followed, badge]
+    miner.original_streamers = [10, 20, 30]
+    miner.ws_pool = FakeWebSocketsPool()
+
+    miner._TwitchChannelPointsMiner__reconcile_category_streamers([])
+
+    assert miner.streamers == [configured, followed, badge]
+    assert miner.original_streamers == [10, 20, 30]
+    assert miner.ws_pool.removed == []
+    assert all(streamer.from_category is False for streamer in miner.streamers)
