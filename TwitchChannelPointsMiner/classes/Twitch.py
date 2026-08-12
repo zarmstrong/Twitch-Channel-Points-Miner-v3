@@ -1662,6 +1662,11 @@ class Twitch(object):
         if drops_enabled is False:
             return categories
 
+        def category_slug(category):
+            category_name, _ = self.__split_category_streamer_selector(category)
+            normalized_category = self.__normalize_category(category_name)
+            return self.__slugify(normalized_category.replace("-", " "))
+
         inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
             logger.warning(
@@ -1670,14 +1675,9 @@ class Twitch(object):
             )
             return []
 
-        requested_category_slugs = set()
-        for category in categories:
-            category_name, _ = self.__split_category_streamer_selector(category)
-            normalized_category = self.__normalize_category(category_name)
-            if normalized_category:
-                requested_category_slugs.add(
-                    self.__slugify(normalized_category.replace("-", " "))
-                )
+        requested_category_slugs = {
+            slug for category in categories if (slug := category_slug(category))
+        }
         (
             active_category_deadlines,
             twitch_category_slugs,
@@ -1685,6 +1685,7 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
+        inventory_active_category_slugs = set(active_category_deadlines)
         twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         fallback_deadlines = self.__twitchdrops_app_fallback(
             categories,
@@ -1713,11 +1714,9 @@ class Twitch(object):
 
         filtered_categories = []
         for category in categories:
-            category_name, _ = self.__split_category_streamer_selector(category)
-            normalized_category = self.__normalize_category(category_name)
-            if normalized_category == "":
+            requested_slug = category_slug(category)
+            if requested_slug == "":
                 continue
-            requested_slug = self.__slugify(normalized_category.replace("-", " "))
             if requested_slug in active_category_deadlines:
                 filtered_categories.append(category)
             else:
@@ -1731,15 +1730,19 @@ class Twitch(object):
         if "." in order_name:
             order_name = order_name.split(".")[-1]
         if order_name == "EXPIRATION":
-            filtered_categories.sort(
-                key=lambda category: active_category_deadlines.get(
-                    self.__slugify(
-                        self.__normalize_category(
-                            self.__split_category_streamer_selector(category)[0]
-                        ).replace("-", " ")
-                    ),
-                    datetime.max,
+
+            def expiration_sort_key(category):
+                slug = category_slug(category)
+                return (
+                    slug not in inventory_active_category_slugs,
+                    active_category_deadlines.get(slug, datetime.max),
                 )
+
+            filtered_categories.sort(key=expiration_sort_key)
+        else:
+            filtered_categories.sort(
+                key=lambda category: category_slug(category)
+                not in inventory_active_category_slugs,
             )
 
         return filtered_categories
