@@ -1429,6 +1429,39 @@ class TwitchChannelPointsMiner:
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 
+    def __order_category_streamers(self, discovered_usernames):
+        """Match category streamer priority to the latest discovery order."""
+        if len(self.original_streamers) < len(self.streamers):
+            self.original_streamers.extend(
+                streamer.channel_points
+                for streamer in self.streamers[len(self.original_streamers) :]
+            )
+        priority = {
+            username: index
+            for index, username in enumerate(
+                dict.fromkeys(
+                    str(username).lower().strip()
+                    for username in discovered_usernames
+                    if str(username).strip()
+                )
+            )
+        }
+        category_indexes = [
+            index
+            for index, streamer in enumerate(self.streamers)
+            if streamer.from_category is True and streamer.username in priority
+        ]
+        ordered = sorted(
+            (
+                (self.streamers[index], self.original_streamers[index])
+                for index in category_indexes
+            ),
+            key=lambda item: priority[item[0].username],
+        )
+        for index, (streamer, baseline) in zip(category_indexes, ordered):
+            self.streamers[index] = streamer
+            self.original_streamers[index] = baseline
+
     def __refresh_category_streamers(
         self,
         categories,
@@ -1466,8 +1499,6 @@ class TwitchChannelPointsMiner:
                     sort_by=sort_by,
                 )
             )
-
-        self.__reconcile_category_streamers(discovered_usernames)
 
         existing_usernames = {streamer.username for streamer in self.streamers}
         blacklist_usernames = {str(username).lower().strip() for username in blacklist}
@@ -1530,6 +1561,11 @@ class TwitchChannelPointsMiner:
                     f"Streamer {username} does not exist",
                     extra={"emoji": ":cry:"},
                 )
+
+        # Keep the previous category set available while replacement channels
+        # are initialized so the minute watcher cannot observe a partial refresh.
+        self.__reconcile_category_streamers(discovered_usernames)
+        self.__order_category_streamers(discovered_usernames)
 
         if added > 0 and self.sync_campaigns_thread is None:
             self.sync_campaigns_thread = threading.Thread(

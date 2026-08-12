@@ -288,3 +288,101 @@ def test_category_refresh_preserves_other_sources_when_category_is_stale():
     assert miner.original_streamers == [10, 20, 30]
     assert miner.ws_pool.removed == []
     assert all(streamer.from_category is False for streamer in miner.streamers)
+
+
+def test_category_refresh_reorders_existing_streamers_to_latest_priority():
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    lower_priority = Streamer("blacklisted", from_category=True)
+    explicit = Streamer("explicit", explicitly_configured=True)
+    higher_priority = Streamer("allchannel", from_category=True)
+    miner.username = "testuser"
+    miner.twitch = FakeTwitch()
+    miner.streamers = [lower_priority, explicit, higher_priority]
+    miner.original_streamers = [10, 20, 30]
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+    )
+
+    assert miner.streamers == [higher_priority, explicit, lower_priority]
+    assert miner.original_streamers == [30, 20, 10]
+
+
+def test_category_refresh_reorder_repairs_missing_baselines():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    lower_priority = Streamer("lower", from_category=True)
+    higher_priority = Streamer("higher", from_category=True)
+    lower_priority.channel_points = 10
+    higher_priority.channel_points = 30
+    miner.streamers = [lower_priority, higher_priority]
+    miner.original_streamers = [10]
+
+    miner._TwitchChannelPointsMiner__order_category_streamers(["higher", "lower"])
+
+    assert miner.streamers == [higher_priority, lower_priority]
+    assert miner.original_streamers == [30, 10]
+
+
+def test_category_refresh_adds_replacements_before_retiring_stale_streamers():
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    class RecordingTwitch(FakeTwitch):
+        def __init__(self, miner):
+            super().__init__()
+            self.miner = miner
+            self.streamers_seen_during_load = []
+
+        def load_channel_points_context(self, streamer):
+            self.streamers_seen_during_load.append(
+                [current.username for current in self.miner.streamers]
+            )
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    stale = Streamer("stale", from_category=True)
+    miner.username = "testuser"
+    miner.streamers = [stale]
+    miner.original_streamers = [10]
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+    miner.twitch = RecordingTwitch(miner)
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+    )
+
+    assert len(miner.twitch.streamers_seen_during_load) == 2
+    assert all(
+        "stale" in usernames
+        for usernames in miner.twitch.streamers_seen_during_load
+    )
+    assert [streamer.username for streamer in miner.streamers] == [
+        "allchannel",
+        "blacklisted",
+    ]
+    assert miner.ws_pool.removed == ["stale"]

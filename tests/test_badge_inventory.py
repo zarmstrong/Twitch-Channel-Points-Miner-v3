@@ -618,7 +618,7 @@ def test_future_campaign_in_active_report_is_not_mined_early(monkeypatch):
     assert twitch.next_upcoming_drop_start() == datetime(2098, 12, 31)
 
 
-def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_games(
+def test_twitchdrops_app_skips_detail_requests_for_twitch_games(
     monkeypatch,
 ):
     twitch = bare_twitch(
@@ -637,6 +637,8 @@ def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_game
                 "slug": "path-of-exile",
                 "game": "Path of Exile",
                 "url": "https://twitchdrops.app/game/path-of-exile",
+                "starts_at": "2099-01-01T00:00:00Z",
+                "upcoming": True,
             }
         ],
     )
@@ -653,8 +655,9 @@ def test_twitchdrops_app_front_page_filters_detail_requests_even_for_twitch_game
         known_slugs,
     )
 
-    assert detail_requests == ["https://twitchdrops.app/game/path-of-exile"]
+    assert detail_requests == []
     assert known_slugs == {"path-of-exile"}
+    assert twitch.next_upcoming_drop_start() == datetime(2099, 1, 1)
 
 
 def test_game_prefixed_badge_name_matches_campaign_benefit():

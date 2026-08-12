@@ -851,9 +851,12 @@ class Twitch(object):
     def __completed_campaign_ids_from_inventory(self, inventory: dict) -> set:
         completed_ids = set()
 
-        for campaign in inventory.get("completedRewardCampaigns", []) or []:
-            if not isinstance(campaign, dict):
+        for completed_record in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(completed_record, dict):
                 continue
+            campaign = completed_record.get("campaign")
+            if not isinstance(campaign, dict):
+                campaign = completed_record
             campaign_id = campaign.get("id")
             if campaign_id in [None, ""] and isinstance(campaign.get("campaign"), dict):
                 campaign_id = campaign["campaign"].get("id")
@@ -1102,11 +1105,30 @@ class Twitch(object):
             ):
                 campaigns_by_id[campaign_id] = campaign
 
+        # Newer inventory responses include the complete completed campaign,
+        # including its game. Consume that authoritative record directly so a
+        # failed detail lookup cannot let an external fallback resurrect it.
+        for completed_record in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(completed_record, dict):
+                continue
+            campaign = completed_record.get("campaign")
+            if not isinstance(campaign, dict):
+                campaign = completed_record
+            campaign_id = campaign.get("id")
+            game = campaign.get("game") or {}
+            if campaign_id in [None, ""] or not (
+                game.get("displayName") or game.get("name")
+            ):
+                continue
+            campaigns_by_id[str(campaign_id)] = campaign
+
         # Campaigns can be extended after Twitch has already returned a populated
         # dashboard summary. Always refresh their details so a newly appended drop
         # is not hidden by that stale summary.
         campaigns_to_refresh = []
         for campaign in campaigns_by_id.values():
+            if str(campaign.get("id")) in completed_campaign_ids:
+                continue
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             if game_name and self.__slugify(game_name) in requested_category_slugs:
@@ -1119,9 +1141,8 @@ class Twitch(object):
             if campaign_id not in [None, ""]:
                 campaigns_by_id[str(campaign_id)] = campaign
 
-        # Completed inventory records expose only campaign IDs. Resolve any IDs
-        # missing from the open dashboard so their games remain authoritative
-        # and an external catalog cannot resurrect the completed categories.
+        # Older inventory variants expose only campaign IDs. Resolve any IDs
+        # missing from the available records so their games remain authoritative.
         completed_campaigns_to_resolve = [
             {"id": campaign_id}
             for campaign_id in completed_campaign_ids
@@ -1238,6 +1259,7 @@ class Twitch(object):
 
     def __twitchdrops_app_fallback(self, categories, known_category_slugs):
         deadlines = {}
+        twitch_authoritative_slugs = set(known_category_slugs)
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
@@ -1321,6 +1343,14 @@ class Twitch(object):
                     f"{indexed_start.isoformat()} UTC",
                     extra={"emoji": ":alarm_clock:", "category_log": True},
                 )
+
+            if requested_slug in twitch_authoritative_slugs:
+                self.__log_category(
+                    f"Skip Twitch Drops gist evaluation for '{category_name}' "
+                    "because Twitch inventory is authoritative",
+                    extra={"emoji": ":white_check_mark:"},
+                )
+                continue
 
             try:
                 report = scraper.scrape(indexed_game["url"])
