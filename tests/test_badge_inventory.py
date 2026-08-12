@@ -484,25 +484,6 @@ def test_old_same_named_award_does_not_complete_new_fallback_campaign():
     )
 
 
-def test_old_same_named_award_with_matching_art_completes_fallback_campaign():
-    twitch = bare_twitch(SimpleNamespace())
-    twitch.awarded_game_event_drops["frog-hoodie"] = {
-        "name": "Frog Hoodie",
-        "imageURL": "https://example.com/frog-hoodie.png",
-        "lastAwardedAt": "2026-07-01T12:00:00Z",
-    }
-    campaign = {
-        "starts_at": "2026-08-01T00:00:00Z",
-        "ends_at": "2026-08-31T23:59:59Z",
-    }
-
-    assert twitch._Twitch__fallback_reward_was_awarded(
-        "Frog Hoodie",
-        campaign,
-        "https://example.com/frog-hoodie.png",
-    )
-
-
 def test_persisted_captured_drop_completes_fallback_campaign(monkeypatch, tmp_path):
     (tmp_path / "drops_by_category.json").write_text(
         json.dumps(

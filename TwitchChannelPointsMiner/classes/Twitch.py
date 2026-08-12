@@ -1102,11 +1102,27 @@ class Twitch(object):
             ):
                 campaigns_by_id[campaign_id] = campaign
 
+        # Newer inventory responses include the complete completed campaign,
+        # including its game. Consume that authoritative record directly so a
+        # failed detail lookup cannot let an external fallback resurrect it.
+        for campaign in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = campaign.get("id")
+            game = campaign.get("game") or {}
+            if campaign_id in [None, ""] or not (
+                game.get("displayName") or game.get("name")
+            ):
+                continue
+            campaigns_by_id[str(campaign_id)] = campaign
+
         # Campaigns can be extended after Twitch has already returned a populated
         # dashboard summary. Always refresh their details so a newly appended drop
         # is not hidden by that stale summary.
         campaigns_to_refresh = []
         for campaign in campaigns_by_id.values():
+            if str(campaign.get("id")) in completed_campaign_ids:
+                continue
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             if game_name and self.__slugify(game_name) in requested_category_slugs:
@@ -1119,9 +1135,8 @@ class Twitch(object):
             if campaign_id not in [None, ""]:
                 campaigns_by_id[str(campaign_id)] = campaign
 
-        # Completed inventory records expose only campaign IDs. Resolve any IDs
-        # missing from the open dashboard so their games remain authoritative
-        # and an external catalog cannot resurrect the completed categories.
+        # Older inventory variants expose only campaign IDs. Resolve any IDs
+        # missing from the available records so their games remain authoritative.
         completed_campaigns_to_resolve = [
             {"id": campaign_id}
             for campaign_id in completed_campaign_ids
@@ -1389,19 +1404,7 @@ class Twitch(object):
                             owned_reward_names,
                             report.get("game") or category_name,
                         )
-                        or self.__fallback_reward_was_awarded(
-                            drop_name,
-                            campaign,
-                            next(
-                                (
-                                    drop.get("image_url")
-                                    for drop in campaign.get("drops", [])
-                                    if str(drop.get("name") or "").strip().lower()
-                                    == drop_name
-                                ),
-                                None,
-                            ),
-                        )
+                        or self.__fallback_reward_was_awarded(drop_name, campaign)
                         or self.__fallback_reward_was_captured(
                             drop_name,
                             campaign,
@@ -1527,7 +1530,7 @@ class Twitch(object):
                             return True
         return False
 
-    def __fallback_reward_was_awarded(self, reward_name, campaign, reward_image=None):
+    def __fallback_reward_was_awarded(self, reward_name, campaign):
         """Match a fallback reward to an award from the same campaign window."""
         starts_at = self.__parse_twitch_datetime(campaign.get("starts_at"))
         ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
@@ -1544,9 +1547,6 @@ class Twitch(object):
             awarded_name = str(awarded_drop.get("name") or "").strip().casefold()
             if awarded_name != normalized_name:
                 continue
-            awarded_image = str(awarded_drop.get("imageURL") or "").strip()
-            if reward_image and awarded_image == str(reward_image).strip():
-                return True
             awarded_at = self.__parse_twitch_datetime(awarded_drop.get("lastAwardedAt"))
             if awarded_at is not None and starts_at <= awarded_at <= ends_at:
                 return True
