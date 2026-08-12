@@ -851,9 +851,12 @@ class Twitch(object):
     def __completed_campaign_ids_from_inventory(self, inventory: dict) -> set:
         completed_ids = set()
 
-        for campaign in inventory.get("completedRewardCampaigns", []) or []:
-            if not isinstance(campaign, dict):
+        for completed_record in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(completed_record, dict):
                 continue
+            campaign = completed_record.get("campaign")
+            if not isinstance(campaign, dict):
+                campaign = completed_record
             campaign_id = campaign.get("id")
             if campaign_id in [None, ""] and isinstance(campaign.get("campaign"), dict):
                 campaign_id = campaign["campaign"].get("id")
@@ -1105,9 +1108,12 @@ class Twitch(object):
         # Newer inventory responses include the complete completed campaign,
         # including its game. Consume that authoritative record directly so a
         # failed detail lookup cannot let an external fallback resurrect it.
-        for campaign in inventory.get("completedRewardCampaigns", []) or []:
-            if not isinstance(campaign, dict):
+        for completed_record in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(completed_record, dict):
                 continue
+            campaign = completed_record.get("campaign")
+            if not isinstance(campaign, dict):
+                campaign = completed_record
             campaign_id = campaign.get("id")
             game = campaign.get("game") or {}
             if campaign_id in [None, ""] or not (

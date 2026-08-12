@@ -330,6 +330,56 @@ def test_full_completed_inventory_campaign_prevents_fallback_resurrection(monkey
     assert twitch.campaign_game_slugs == {"minecraft-campaign": "minecraft"}
 
 
+def test_wrapped_completed_inventory_campaign_prevents_fallback_resurrection(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns: [],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+    completed_record = {
+        "campaign": {
+            "id": "warhounds-campaign",
+            "name": "Closed Playtest",
+            "status": "COMPLETED",
+            "game": {"displayName": "Warhounds"},
+        }
+    }
+
+    deadlines, twitch_games = (
+        twitch._Twitch__active_drop_category_slugs_from_campaigns(
+            {"completedRewardCampaigns": [completed_record]},
+            {"warhounds"},
+        )
+    )
+
+    assert deadlines == {}
+    assert twitch_games == {"warhounds"}
+    assert twitch.campaign_game_slugs == {"warhounds-campaign": "warhounds"}
+
+
 def test_drop_report_snapshot_uses_analytics_mutex():
     class RecordingLock:
         def __init__(self):
