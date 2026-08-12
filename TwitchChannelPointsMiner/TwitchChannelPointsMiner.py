@@ -1431,6 +1431,11 @@ class TwitchChannelPointsMiner:
 
     def __order_category_streamers(self, discovered_usernames):
         """Match category streamer priority to the latest discovery order."""
+        if len(self.original_streamers) < len(self.streamers):
+            self.original_streamers.extend(
+                streamer.channel_points
+                for streamer in self.streamers[len(self.original_streamers) :]
+            )
         priority = {
             username: index
             for index, username in enumerate(

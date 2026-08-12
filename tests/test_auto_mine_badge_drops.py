@@ -323,6 +323,21 @@ def test_category_refresh_reorders_existing_streamers_to_latest_priority():
     assert miner.original_streamers == [30, 20, 10]
 
 
+def test_category_refresh_reorder_repairs_missing_baselines():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    lower_priority = Streamer("lower", from_category=True)
+    higher_priority = Streamer("higher", from_category=True)
+    lower_priority.channel_points = 10
+    higher_priority.channel_points = 30
+    miner.streamers = [lower_priority, higher_priority]
+    miner.original_streamers = [10]
+
+    miner._TwitchChannelPointsMiner__order_category_streamers(["higher", "lower"])
+
+    assert miner.streamers == [higher_priority, lower_priority]
+    assert miner.original_streamers == [30, 10]
+
+
 def test_category_refresh_adds_replacements_before_retiring_stale_streamers():
     defaults = StreamerSettings(chat=ChatPresence.NEVER)
     defaults.default()
