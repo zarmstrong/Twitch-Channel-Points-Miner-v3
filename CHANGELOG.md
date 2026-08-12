@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.14.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.1...3.14.2) (2026-08-12)
+
+
+### Bug Fixes
+
+* **categories:** apply refreshed streamer priority ([#93](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/93)) ([2552623](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/255262369b753c9a491c4695bf79cc0ca496fb74))
+* **drops:** trust completed inventory campaigns ([2552623](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/255262369b753c9a491c4695bf79cc0ca496fb74))
+
 ## [3.14.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.0...3.14.1) (2026-08-12)
 
 Category Drops mining now prioritizes active, incomplete campaigns confirmed by
