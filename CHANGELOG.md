@@ -2,6 +2,11 @@
 
 ## [3.14.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.0...3.14.1) (2026-08-12)
 
+Category Drops mining now prioritizes active, incomplete campaigns confirmed by
+the authenticated Twitch inventory over campaigns found only in the external
+fallback index. Fallback campaigns remain available for games Twitch has not
+exposed to the account, without displacing verified campaign progress.
+
 
 ### Bug Fixes
 
