@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.14.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.0...3.14.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **categories:** recognize localized Drops tags ([#89](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/89)) ([1bcb560](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1bcb5606ed59fc305932e757b71467ef759c63b6))
+* **categories:** retire stale discovered streamers ([#91](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/91)) ([5933e34](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5933e348563f01ac58fbe6b18860df799698d816))
+* **categories:** stop category pagination at the Drops directory result count ([1bcb560](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1bcb5606ed59fc305932e757b71467ef759c63b6))
+* **categories:** trust restricted campaign channel allowlists ([1bcb560](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1bcb5606ed59fc305932e757b71467ef759c63b6))
+* **drops:** prioritize inventory campaigns ([#92](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/92)) ([f48bf54](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f48bf544a3741c248533d71692d8b8b247e3a009))
+* **logging:** distinguish eligible streams from the configured selection limit ([1bcb560](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1bcb5606ed59fc305932e757b71467ef759c63b6))
+
 ## [3.14.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.13.5...3.14.0) (2026-08-10)
 
 
