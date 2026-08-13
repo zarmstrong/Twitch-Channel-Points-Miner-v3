@@ -4131,18 +4131,20 @@ class Twitch(object):
         chunks = create_chunks(campaigns, 20)
         for chunk in chunks:
             json_data = []
-            requested_channel_ids = []
+            requested_channel_contexts = []
             for campaign in chunk:
                 campaign_id = str(campaign.get("id") or "")
-                channel_id = str(
+                channel_context = str(
                     campaign_channel_id_by_id.get(campaign_id) or viewer_context
                 )
-                requested_channel_ids.append(channel_id)
+                requested_channel_contexts.append(channel_context)
 
                 json_data.append(copy.deepcopy(GQLOperations.DropCampaignDetails))
                 json_data[-1]["variables"] = {
                     "dropID": campaign["id"],
-                    "channelLogin": channel_id,
+                    # Twitch accepts a broadcaster/viewer ID or login here despite
+                    # the legacy GraphQL variable name.
+                    "channelLogin": channel_context,
                 }
 
             try:
@@ -4159,7 +4161,7 @@ class Twitch(object):
                 drop_campaign = extract_drop_campaign(response_item)
                 if drop_campaign is not None:
                     result.append(drop_campaign)
-                elif requested_channel_ids[index] != viewer_context:
+                elif requested_channel_contexts[index] != viewer_context:
                     retry_campaigns.append(campaign)
                 else:
                     misses += 1
