@@ -121,6 +121,21 @@ def _normalize_badge_drop_streamer_limit(limit):
     return 1
 
 
+def _normalize_drop_progress_stall_minutes(minutes):
+    if (
+        isinstance(minutes, (int, float))
+        and not isinstance(minutes, bool)
+        and math.isfinite(minutes)
+        and (minutes == 0 or minutes >= 5)
+    ):
+        return float(minutes)
+    logger.error(
+        "drop_progress_stall_minutes must be 0 or at least 5; "
+        "using the default value 10"
+    )
+    return 10.0
+
+
 def _normalize_update_check_interval(interval):
     if isinstance(interval, bool) or not isinstance(interval, (int, float)):
         raise TypeError("update_check_interval_hours must be a whole number of hours")
@@ -531,6 +546,7 @@ class TwitchChannelPointsMiner:
         log_drop_checks: bool = False,
         track_category_streamer_points: bool = False,
         category_refresh_interval_hours: float = 6,
+        drop_progress_stall_minutes: float = 10,
         drop_badge_catalog: bool = True,
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
@@ -554,6 +570,7 @@ class TwitchChannelPointsMiner:
             log_drop_checks=log_drop_checks,
             track_category_streamer_points=track_category_streamer_points,
             category_refresh_interval_hours=category_refresh_interval_hours,
+            drop_progress_stall_minutes=drop_progress_stall_minutes,
             drop_badge_catalog=drop_badge_catalog,
             drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
             auto_mine_badge_drops=auto_mine_badge_drops,
@@ -579,6 +596,7 @@ class TwitchChannelPointsMiner:
         log_drop_checks: bool = False,
         track_category_streamer_points: bool = False,
         category_refresh_interval_hours: float = 6,
+        drop_progress_stall_minutes: float = 10,
         drop_badge_catalog: bool = True,
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
@@ -598,6 +616,9 @@ class TwitchChannelPointsMiner:
             self.twitch.scrape_drop_progress_on_load = scrape_drop_progress_on_load
             self.twitch.log_drop_checks = log_drop_checks
             self.twitch.category_log_level = category_log_level
+            drop_progress_stall_minutes = _normalize_drop_progress_stall_minutes(
+                drop_progress_stall_minutes
+            )
             Settings.track_category_streamer_points = track_category_streamer_points
             self.auto_mine_badge_drops = auto_mine_badge_drops is True
             self.badge_drop_streamer_limit = _normalize_badge_drop_streamer_limit(
@@ -842,6 +863,7 @@ class TwitchChannelPointsMiner:
                 kwargs={
                     "streams_watched": self.streams_watched,
                     "source_priority": self.streamer_source_priority,
+                    "drop_progress_stall_minutes": drop_progress_stall_minutes,
                 },
             )
             self.minute_watcher_thread.name = "Minute watcher"

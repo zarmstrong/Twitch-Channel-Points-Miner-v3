@@ -820,11 +820,17 @@ class Parser:
                     channel, "viewerDropCampaigns", optional_parser(expect_list)
                 )
                 ids = []
+                campaigns = []
                 if viewer_drop_campaigns is not None:
                     for index, campaign in enumerate(viewer_drop_campaigns):
                         with JsonParentContext(index):
                             ids.append(parse_expected_value(campaign, "id", expect_str))
-                return DropsHighlightServiceAvailableDropsResponse(ids)
+                            campaigns.append(copy.deepcopy(campaign))
+                return DropsHighlightServiceAvailableDropsResponse(
+                    ids,
+                    campaigns,
+                    campaigns_available=viewer_drop_campaigns is not None,
+                )
 
     def parse_inventory_response(self, response: Any):
         """

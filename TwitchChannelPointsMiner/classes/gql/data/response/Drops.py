@@ -123,8 +123,15 @@ class DropCampaignInProgress:
 
 
 class DropsHighlightServiceAvailableDropsResponse:
-    def __init__(self, ids: list[str]):
+    def __init__(
+        self,
+        ids: list[str],
+        campaigns: list[dict] | None = None,
+        campaigns_available: bool = False,
+    ):
         self.ids = ids
+        self.campaigns = campaigns or []
+        self.campaigns_available = campaigns_available
 
     def __repr__(self):
         return f"DropsHighlightServiceAvailableDropsResponse({self.__dict__})"

@@ -37,6 +37,9 @@ def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     twitch.category_campaign_eligibility = {}
     twitch.evaluated_category_campaigns = set()
     twitch.twitchdrops_app_campaigns = {}
+    twitch.advertised_drop_campaigns = {}
+    twitch.campaign_channel_ids = {}
+    twitch.campaign_detail_attempts = set()
     twitch.gql = SimpleNamespace(
         claim_drop_rewards=lambda drop_instance_id: SimpleNamespace(
             status=claim_status, errors=[]
@@ -46,6 +49,220 @@ def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
         Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
     )
     return twitch
+
+
+def advertised_campaign():
+    campaign = campaign_data()
+    campaign["timeBasedDrops"][0]["benefitEdges"] = [
+        {
+            "benefit": {
+                "id": "reward-1",
+                "name": "Reusable Reward",
+                "imageAssetURL": "https://example.test/reward.png",
+            }
+        }
+    ]
+    return campaign
+
+
+def category_streamer():
+    return SimpleNamespace(
+        username="drops-channel",
+        channel_id="12345",
+        from_category=True,
+        from_badge_campaign=False,
+        stream=SimpleNamespace(game_name=lambda: "Example Game"),
+    )
+
+
+def test_advertised_campaign_normalizes_null_allow(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = advertised_campaign()
+    campaign["allow"] = None
+
+    normalized = twitch._Twitch__normalize_advertised_campaign(campaign)
+
+    assert normalized["allow"] == {"channels": None}
+    assert Campaign(normalized).channels == []
+
+
+def test_channel_campaign_uses_broadcaster_id_and_in_window_award(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = advertised_campaign()
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[campaign], campaigns_available=True
+        )
+    )
+    twitch.awarded_game_event_drops = {
+        "reward-1": {
+            "id": "reward-1",
+            "name": "Reusable Reward",
+            "imageURL": "https://example.test/reward.png",
+            "lastAwardedAt": "2025-01-01T00:00:00Z",
+        }
+    }
+    detail_contexts = []
+
+    def campaign_details(self, campaigns, campaign_channel_id_by_id=None):
+        detail_contexts.append(campaign_channel_id_by_id)
+        return []
+
+    monkeypatch.setattr(Twitch, "_Twitch__get_campaigns_details", campaign_details)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "campaign-1"
+    ]
+    assert detail_contexts == [{"campaign-1": "12345"}]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
+def test_reused_reward_from_earlier_campaign_remains_incomplete(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = advertised_campaign()
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[campaign], campaigns_available=True
+        )
+    )
+    twitch.awarded_game_event_drops = {
+        "reward-1": {
+            "id": "reward-1",
+            "name": "Reusable Reward",
+            "imageURL": "https://example.test/reward.png",
+            "lastAwardedAt": "2019-12-31T23:59:59Z",
+        }
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+    )
+
+    twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+def test_overlapping_campaigns_with_same_reward_remain_incomplete(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    first_campaign = advertised_campaign()
+    second_campaign = advertised_campaign()
+    second_campaign["id"] = "campaign-2"
+    second_campaign["name"] = "Second Campaign"
+    second_campaign["timeBasedDrops"][0]["id"] = "drop-2"
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[first_campaign, second_campaign], campaigns_available=True
+        )
+    )
+    twitch.awarded_game_event_drops = {
+        "reward-1": {
+            "id": "reward-1",
+            "name": "Reusable Reward",
+            "imageURL": "https://example.test/reward.png",
+            "lastAwardedAt": "2025-01-01T00:00:00Z",
+        }
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+    )
+
+    twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        2,
+        2,
+    )
+
+
+def test_authoritative_channel_campaign_result_blocks_wrong_game(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[
+                {
+                    "id": "unrelated",
+                    "game": {"name": "Special Events"},
+                    "timeBasedDrops": [],
+                }
+            ],
+            campaigns_available=True,
+        )
+    )
+    twitch.discovered_open_drop_campaigns = [advertised_campaign()]
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
+def test_campaign_deadline_logs_include_game_name(monkeypatch, caplog):
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["game"] = {"displayName": "Warframe"}
+    campaign["name"] = "Prime Time #493"
+    campaign["timeBasedDrops"] = [
+        {
+            "id": "possible-drop",
+            "name": "Random Hex Treasure",
+            "benefitEdges": [],
+            "requiredMinutesWatched": 10,
+            "startAt": "2020-01-01T00:00:00Z",
+            "endAt": "2099-01-01T00:00:00Z",
+        },
+        {
+            "id": "impossible-drop",
+            "name": "Long Reward",
+            "benefitEdges": [],
+            "requiredMinutesWatched": 100000000,
+            "startAt": "2020-01-01T00:00:00Z",
+            "endAt": "2099-01-01T00:00:00Z",
+        },
+    ]
+    caplog.set_level(logging.INFO)
+
+    twitch._Twitch__active_incomplete_drop_deadline(
+        campaign,
+        completed_drop_ids=set(),
+        awarded_benefit_ids=set(),
+        awarded_benefit_fingerprints=set(),
+    )
+
+    assert (
+        "Enough time for [Warframe] Prime Time #493 - Random Hex Treasure:"
+        in caplog.text
+    )
+    assert (
+        "Not enough time for [Warframe] Prime Time #493 - Long Reward:"
+        in caplog.text
+    )
+
+
+def test_campaign_deadline_logs_unknown_for_malformed_game(monkeypatch, caplog):
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["game"] = "unexpected-game-value"
+    caplog.set_level(logging.INFO)
+
+    twitch._Twitch__active_incomplete_drop_deadline(
+        campaign,
+        completed_drop_ids=set(),
+        awarded_benefit_ids=set(),
+        awarded_benefit_fingerprints=set(),
+    )
+
+    assert "Enough time for [Unknown Game] Example Campaign - Reward:" in caplog.text
 
 
 def test_claiming_final_drop_waits_for_inventory_confirmation(monkeypatch):
@@ -234,6 +451,64 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
 
     assert deadlines == {}
     assert twitch_games == {"example-game"}
+
+
+def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["allow"] = {
+        "channels": [
+            {"id": "100", "name": "AllowedOne"},
+            {"id": "200", "name": "AllowedTwo"},
+        ]
+    }
+    campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 5,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [campaign],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": [campaign]}, {"example-game"}
+    )
+
+    assert set(deadlines) == {"example-game"}
+    assert twitch_games == {"example-game"}
+    assert twitch.active_drop_campaigns == {
+        "example-game": [
+            {
+                "id": "campaign-1",
+                "name": "Example Campaign",
+                "channels": ["allowedone", "allowedtwo"],
+            }
+        ]
+    }
 
 
 def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(

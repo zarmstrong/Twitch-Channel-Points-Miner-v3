@@ -343,7 +343,10 @@ streamer_source_priority=[
 ```
 
 Move `StreamerSource.BADGES` to the front to prioritize earning badge Drops.
-The existing `priority` rules are applied within each source group.
+The `priority` rules are applied globally; source priority breaks ties within
+each rule. For example, `Priority.DROPS` can reserve a slot for an active
+category campaign before `Priority.ORDER` fills remaining slots with configured
+streamers.
 
 See [Settings](#settings) for the available priority, logger, streamer, and bet
 objects. Keep credentials and integration tokens only in your private
@@ -455,6 +458,7 @@ settings.
 | `category_chat` | `None` | Chat policy for category-discovered streamers. `None` inherits the default streamer setting. |
 | `category_log_level` | `logging.INFO` | Severity used for category discovery and refresh messages. |
 | `category_refresh_interval_hours` | `6` | Hours between campaign/channel refreshes. Positive values have a 30-minute minimum; `0` disables refresh. |
+| `drop_progress_stall_minutes` | `10` | Rotate to another eligible category channel when authenticated Drop progress remains unchanged for this many minutes. The minimum is `5`; `0` disables stall detection. |
 | `drop_badge_catalog` | `True` | On startup, classify rewards from the shared Drops gist against the shared Twitch badge catalog and persist the result in the config directory. |
 | `drop_badge_refresh_interval_hours` | `1` | Hours between checks for new campaigns. Positive values have a one-hour minimum; `0` keeps the startup check but disables periodic checks. |
 | `auto_mine_badge_drops` | `False` | Automatically add live channels for active, unearned watch-time badge campaigns. |

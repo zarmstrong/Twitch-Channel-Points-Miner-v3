@@ -84,6 +84,9 @@ class Twitch(object):
         "drop_progress_last_saved",
         "drop_status_last_saved",
         "drop_report_state",
+        "drop_inventory_progress",
+        "drop_inventory_progress_updated_at",
+        "drop_watch_health",
         "track_drop_item_art",
         "scrape_drop_progress_on_load",
         "log_drop_checks",
@@ -93,6 +96,10 @@ class Twitch(object):
         "twitchdrops_app_campaigns",
         "twitchdrops_app_game_names",
         "twitchdrops_app_upcoming_starts",
+        "active_drop_campaigns",
+        "advertised_drop_campaigns",
+        "campaign_channel_ids",
+        "campaign_detail_attempts",
         "category_campaign_eligibility",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
@@ -139,6 +146,9 @@ class Twitch(object):
         self.drop_progress_last_saved = {}
         self.drop_status_last_saved = {}
         self.drop_report_state = {}
+        self.drop_inventory_progress = {}
+        self.drop_inventory_progress_updated_at = 0
+        self.drop_watch_health = {}
         self.track_drop_item_art = False
         self.scrape_drop_progress_on_load = False
         self.log_drop_checks = False
@@ -148,6 +158,10 @@ class Twitch(object):
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
+        self.active_drop_campaigns = {}
+        self.advertised_drop_campaigns = {}
+        self.campaign_channel_ids = {}
+        self.campaign_detail_attempts = set()
         self.category_campaign_eligibility = {}
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
@@ -266,6 +280,196 @@ class Twitch(object):
         normalized = unicodedata.normalize("NFKD", str(value))
         ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
         return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
+
+    def __cache_drop_inventory_progress(self, inventory: dict):
+        progress_by_game = {}
+        for campaign in inventory.get("dropCampaignsInProgress", []) or []:
+            if not isinstance(campaign, dict):
+                continue
+            game = campaign.get("game") or {}
+            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            game_slug = self.__slugify(game_name)
+            if game_slug == "":
+                continue
+
+            campaign_id = str(campaign.get("id") or "")
+            campaign_name = str(campaign.get("name") or "Unknown campaign")
+            for drop in campaign.get("timeBasedDrops", []) or []:
+                if not isinstance(drop, dict):
+                    continue
+                drop_self = drop.get("self")
+                if not isinstance(drop_self, dict):
+                    continue
+                if (
+                    drop_self.get("isClaimed") is True
+                    or drop_self.get("hasPreconditionsMet") is False
+                ):
+                    continue
+
+                required_minutes = drop.get("requiredMinutesWatched") or 0
+                current_minutes = drop_self.get("currentMinutesWatched") or 0
+                if required_minutes <= 0 or current_minutes >= required_minutes:
+                    continue
+
+                progress_by_game.setdefault(game_slug, []).append(
+                    (
+                        campaign_id,
+                        campaign_name,
+                        str(drop.get("id") or ""),
+                        str(drop.get("name") or "Unknown drop"),
+                        current_minutes,
+                        required_minutes,
+                    )
+                )
+
+        self.drop_inventory_progress = {
+            game_slug: tuple(sorted(progress))
+            for game_slug, progress in progress_by_game.items()
+        }
+        self.drop_inventory_progress_updated_at = time.time()
+
+    @staticmethod
+    def __drop_progress_label(progress) -> str:
+        labels = [
+            f"{campaign_name} / {drop_name} ({current}/{required}m)"
+            for _, campaign_name, _, drop_name, current, required in progress[:3]
+        ]
+        if len(progress) > 3:
+            labels.append(f"{len(progress) - 3} more")
+        return ", ".join(labels)
+
+    def __drop_progress_streamer_cooldowns(
+        self, streamers, now: float, stall_seconds: float
+    ) -> set:
+        if stall_seconds <= 0:
+            self.drop_watch_health = {}
+            return set()
+
+        progress_by_game = getattr(self, "drop_inventory_progress", {})
+        health = getattr(self, "drop_watch_health", {})
+        self.drop_watch_health = health
+
+        for game_slug in list(health):
+            if game_slug not in progress_by_game:
+                health.pop(game_slug, None)
+                continue
+            blocked_until = health[game_slug].get("blocked_until", {})
+            for username, deadline in list(blocked_until.items()):
+                if deadline <= now:
+                    blocked_until.pop(username, None)
+
+        inventory_updated_at = getattr(self, "drop_inventory_progress_updated_at", 0)
+        if inventory_updated_at == 0 or (now - inventory_updated_at) > 3 * 60:
+            return {
+                (game_slug, username)
+                for game_slug, state in health.items()
+                for username, deadline in state.get("blocked_until", {}).items()
+                if deadline > now
+            }
+
+        watched_streamers = [
+            streamer
+            for streamer in streamers
+            if streamer.is_watching is True
+            and getattr(streamer, "from_category", False) is True
+            and self.__drops_condition(streamer) is True
+        ]
+        for streamer in watched_streamers:
+            game_name = streamer.stream.game_name() or ""
+            game_slug = self.__slugify(game_name)
+            progress = progress_by_game.get(game_slug)
+            if not progress:
+                continue
+
+            state = health.setdefault(
+                game_slug,
+                {
+                    "username": streamer.username,
+                    "progress": progress,
+                    "last_progress_at": now,
+                    "blocked_until": {},
+                    "rotation_from": None,
+                    "waiting_for_alternative": None,
+                },
+            )
+            blocked_until = state["blocked_until"]
+
+            if state.get("username") != streamer.username:
+                state["username"] = streamer.username
+                state["progress"] = progress
+                state["last_progress_at"] = now
+                state["waiting_for_alternative"] = None
+                continue
+
+            if state.get("progress") != progress:
+                rotated_from = state.get("rotation_from")
+                if rotated_from and rotated_from != streamer.username:
+                    logger.info(
+                        f"{Fore.GREEN}Drop progress resumed on {streamer.username} "
+                        f"after rotating from {rotated_from}: "
+                        f"{self.__drop_progress_label(progress)}{Fore.RESET}",
+                        extra={
+                            "emoji": ":white_check_mark:",
+                            "event": Events.DROP_STATUS,
+                        },
+                    )
+                state["progress"] = progress
+                state["last_progress_at"] = now
+                state["rotation_from"] = None
+                state["waiting_for_alternative"] = None
+                continue
+
+            stalled_for = now - state["last_progress_at"]
+            if stalled_for < stall_seconds:
+                continue
+
+            alternatives = []
+            for candidate in streamers:
+                if (
+                    candidate.username == streamer.username
+                    or candidate.is_online is not True
+                    or getattr(candidate, "from_category", False) is not True
+                    or self.__slugify(candidate.stream.game_name() or "") != game_slug
+                    or self.__drops_condition(candidate) is not True
+                    or blocked_until.get(candidate.username, 0) > now
+                    or (candidate.online_at != 0 and (now - candidate.online_at) <= 30)
+                ):
+                    continue
+                alternatives.append(candidate.username)
+
+            if alternatives:
+                blocked_until[streamer.username] = now + stall_seconds
+                state["username"] = None
+                state["rotation_from"] = streamer.username
+                state["waiting_for_alternative"] = None
+                logger.warning(
+                    f"{Fore.YELLOW}Drop progress has not changed for "
+                    f"{stalled_for / 60:.0f}m on {streamer.username}; rotating to "
+                    f"another eligible {game_name} channel ({', '.join(alternatives)}). "
+                    f"Current progress: {self.__drop_progress_label(progress)}"
+                    f"{Fore.RESET}",
+                    extra={
+                        "emoji": ":arrows_counterclockwise:",
+                        "event": Events.DROP_STATUS,
+                    },
+                )
+            elif state.get("waiting_for_alternative") != streamer.username:
+                state["waiting_for_alternative"] = streamer.username
+                logger.warning(
+                    f"{Fore.YELLOW}Drop progress has not changed for "
+                    f"{stalled_for / 60:.0f}m on {streamer.username}, but no other "
+                    f"eligible live {game_name} channel is available; continuing to "
+                    f"watch. Current progress: {self.__drop_progress_label(progress)}"
+                    f"{Fore.RESET}",
+                    extra={"emoji": ":warning:", "event": Events.DROP_STATUS},
+                )
+
+        return {
+            (game_slug, username)
+            for game_slug, state in health.items()
+            for username, deadline in state.get("blocked_until", {}).items()
+            if deadline > now
+        }
 
     def __drop_variant_entries(self, drop_dict):
         benefit_edges = drop_dict.get("benefitEdges", []) or []
@@ -886,13 +1090,16 @@ class Twitch(object):
     def __merge_campaign_inventory_progress(
         self, campaign: dict, inventory_campaign: dict
     ) -> dict:
-        """Keep fresh campaign drops while applying the user's inventory progress."""
+        """Keep fresh campaign drops with authenticated inventory state and access."""
         if not campaign.get("timeBasedDrops"):
-            return inventory_campaign
-        if not inventory_campaign.get("timeBasedDrops"):
-            return campaign
+            return copy.deepcopy(inventory_campaign)
 
         merged_campaign = copy.deepcopy(campaign)
+        if "allow" in inventory_campaign:
+            merged_campaign["allow"] = copy.deepcopy(inventory_campaign["allow"])
+        if not inventory_campaign.get("timeBasedDrops"):
+            return merged_campaign
+
         merged_drops = merged_campaign.get("timeBasedDrops", [])
         merged_drop_ids = {
             str(drop.get("id"))
@@ -920,6 +1127,26 @@ class Twitch(object):
 
         return merged_campaign
 
+    @staticmethod
+    def __campaign_channel_logins(campaign: dict) -> List[str]:
+        channels = campaign.get("channels")
+        if channels is None:
+            allow = campaign.get("allow")
+            channels = allow.get("channels") if isinstance(allow, dict) else None
+
+        logins = []
+        for channel in channels or []:
+            if isinstance(channel, str):
+                login = channel
+            elif isinstance(channel, dict):
+                login = channel.get("name") or channel.get("login")
+            else:
+                continue
+            login = str(login or "").lower().strip()
+            if login and login not in logins:
+                logins.append(login)
+        return logins
+
     def __awarded_benefits(self, inventory: dict) -> Tuple[set, set]:
         benefit_ids = set()
         benefit_fingerprints = set()
@@ -943,7 +1170,10 @@ class Twitch(object):
         return benefit_ids, benefit_fingerprints
 
     def __drop_benefits_were_awarded(
-        self, drop: dict, benefit_ids: set, benefit_fingerprints: set
+        self,
+        drop: dict,
+        benefit_ids: set,
+        benefit_fingerprints: set,
     ) -> bool:
         benefits = []
         for edge in drop.get("benefitEdges", []) or []:
@@ -954,22 +1184,92 @@ class Twitch(object):
         if benefits == []:
             return False
 
-        for benefit in benefits:
-            benefit_id = benefit.get("id")
-            if benefit_id not in [None, ""] and str(benefit_id) in benefit_ids:
-                continue
-
-            name = str(benefit.get("name") or "").strip().lower()
-            image_url = str(benefit.get("imageAssetURL") or "").strip()
-            if name and (
-                (name, image_url) in benefit_fingerprints
-                or (name, "") in benefit_fingerprints
-            ):
-                continue
-
+        starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
+        ends_at = self.__parse_twitch_datetime(drop.get("endAt"))
+        if starts_at is None or ends_at is None:
             return False
 
+        for benefit in benefits:
+            benefit_id = benefit.get("id")
+            name = str(benefit.get("name") or "").strip().lower()
+            image_url = str(benefit.get("imageAssetURL") or "").strip()
+            inventory_match = (
+                benefit_id not in [None, ""] and str(benefit_id) in benefit_ids
+            ) or (
+                name
+                and (
+                    (name, image_url) in benefit_fingerprints
+                    or (name, "") in benefit_fingerprints
+                )
+            )
+            if inventory_match is False:
+                return False
+
+            matching_awards = []
+            for awarded_drop in getattr(self, "awarded_game_event_drops", {}).values():
+                if not isinstance(awarded_drop, dict):
+                    continue
+                awarded_id = awarded_drop.get("id")
+                awarded_name = str(awarded_drop.get("name") or "").strip().lower()
+                awarded_image = str(awarded_drop.get("imageURL") or "").strip()
+                if benefit_id not in [None, ""] and str(awarded_id) == str(benefit_id):
+                    matching_awards.append(awarded_drop)
+                elif (
+                    name
+                    and awarded_name == name
+                    and (
+                        not image_url or not awarded_image or awarded_image == image_url
+                    )
+                ):
+                    matching_awards.append(awarded_drop)
+
+            if not any(
+                (awarded_at := self.__parse_twitch_datetime(award.get("lastAwardedAt")))
+                is not None
+                and starts_at <= awarded_at <= ends_at
+                for award in matching_awards
+            ):
+                return False
+
         return True
+
+    @staticmethod
+    def __ambiguous_campaign_benefits(campaigns) -> Tuple[set, set]:
+        campaigns_by_benefit_id = {}
+        campaigns_by_benefit_name = {}
+        for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = str(campaign.get("id") or id(campaign))
+            for drop in campaign.get("timeBasedDrops", []) or []:
+                if not isinstance(drop, dict):
+                    continue
+                for edge in drop.get("benefitEdges", []) or []:
+                    benefit = edge.get("benefit") if isinstance(edge, dict) else None
+                    if not isinstance(benefit, dict):
+                        continue
+                    benefit_id = str(benefit.get("id") or "")
+                    benefit_name = str(benefit.get("name") or "").strip().lower()
+                    if benefit_id:
+                        campaigns_by_benefit_id.setdefault(benefit_id, set()).add(
+                            campaign_id
+                        )
+                    if benefit_name:
+                        campaigns_by_benefit_name.setdefault(benefit_name, set()).add(
+                            campaign_id
+                        )
+        return (
+            {
+                benefit_id
+                for benefit_id, campaign_ids in campaigns_by_benefit_id.items()
+                if len(campaign_ids) > 1
+            },
+            {
+                benefit_name
+                for benefit_name, campaign_ids in campaigns_by_benefit_name.items()
+                if len(campaign_ids) > 1
+            },
+        )
 
     def __active_incomplete_drop_deadline(
         self,
@@ -977,9 +1277,21 @@ class Twitch(object):
         completed_drop_ids: set,
         awarded_benefit_ids: set,
         awarded_benefit_fingerprints: set,
+        log_status: bool = True,
+        ambiguous_benefit_ids: Optional[set] = None,
+        ambiguous_benefit_names: Optional[set] = None,
     ) -> Optional[datetime]:
         now = datetime.utcnow()
         earliest_deadline = None
+        campaign_game = campaign.get("game") or {}
+        if isinstance(campaign_game, dict):
+            game_name = (
+                campaign_game.get("displayName")
+                or campaign_game.get("name")
+                or "Unknown Game"
+            )
+        else:
+            game_name = "Unknown Game"
         campaign_benefit_counts = {}
         for campaign_drop in campaign.get("timeBasedDrops", []) or []:
             if not isinstance(campaign_drop, dict):
@@ -1038,6 +1350,18 @@ class Twitch(object):
                     campaign_benefit_counts.get(benefit_id, 0) > 1
                     for benefit_id in benefit_ids
                 )
+                benefit_names = {
+                    str(benefit.get("name") or "").strip().lower()
+                    for edge in drop.get("benefitEdges", []) or []
+                    for benefit in [
+                        edge.get("benefit") if isinstance(edge, dict) else None
+                    ]
+                    if isinstance(benefit, dict) and benefit.get("name")
+                }
+                has_repeated_benefit = has_repeated_benefit or bool(
+                    benefit_ids.intersection(ambiguous_benefit_ids or set())
+                    or benefit_names.intersection(ambiguous_benefit_names or set())
+                )
                 if has_repeated_benefit is False and self.__drop_benefits_were_awarded(
                     drop,
                     awarded_benefit_ids,
@@ -1053,12 +1377,14 @@ class Twitch(object):
             drop_name = drop.get("name") or "Unknown Drop"
 
             if time_left_minutes is not None and remaining_minutes > time_left_minutes:
-                logger.info(
-                    f"{Fore.RED}Not enough time for {campaign_name} - {drop_name}: "
-                    f"needs {remaining_minutes:.0f}m, "
-                    f"{max(time_left_minutes, 0):.0f}m left{Fore.RESET}",
-                    extra={"emoji": ":red_circle:"},
-                )
+                if log_status:
+                    logger.info(
+                        f"{Fore.RED}Not enough time for [{game_name}] "
+                        f"{campaign_name} - {drop_name}: "
+                        f"needs {remaining_minutes:.0f}m, "
+                        f"{max(time_left_minutes, 0):.0f}m left{Fore.RESET}",
+                        extra={"emoji": ":red_circle:"},
+                    )
                 continue
 
             time_left_label = (
@@ -1066,11 +1392,13 @@ class Twitch(object):
                 if time_left_minutes is not None
                 else "no known deadline"
             )
-            logger.info(
-                f"{Fore.BLUE}Enough time for {campaign_name} - {drop_name}: "
-                f"needs {remaining_minutes:.0f}m, {time_left_label}{Fore.RESET}",
-                extra={"emoji": ":large_blue_circle:"},
-            )
+            if log_status:
+                logger.info(
+                    f"{Fore.BLUE}Enough time for [{game_name}] "
+                    f"{campaign_name} - {drop_name}: "
+                    f"needs {remaining_minutes:.0f}m, {time_left_label}{Fore.RESET}",
+                    extra={"emoji": ":large_blue_circle:"},
+                )
             deadline = ends_at or datetime.max
             if earliest_deadline is None or deadline < earliest_deadline:
                 earliest_deadline = deadline
@@ -1081,8 +1409,9 @@ class Twitch(object):
         self,
         inventory: dict,
         requested_category_slugs: set,
-    ) -> Dict[str, datetime]:
+    ) -> Tuple[Dict[str, datetime], set[str]]:
         active_deadlines = {}
+        active_campaigns = {}
         twitch_category_slugs = set()
         completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
         self.completed_drop_campaigns.update(completed_campaign_ids)
@@ -1104,6 +1433,18 @@ class Twitch(object):
                 not existing.get("timeBasedDrops") and campaign.get("timeBasedDrops")
             ):
                 campaigns_by_id[campaign_id] = campaign
+
+        advertised_campaigns = getattr(self, "advertised_drop_campaigns", {})
+        for campaign_id, campaign in advertised_campaigns.items():
+            if not isinstance(campaign, dict):
+                continue
+            game = campaign.get("game") or {}
+            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            if (
+                self.__slugify(game_name) in requested_category_slugs
+                and self.__is_open_drop_campaign(campaign) is True
+            ):
+                campaigns_by_id[str(campaign_id)] = copy.deepcopy(campaign)
 
         # Newer inventory responses include the complete completed campaign,
         # including its game. Consume that authoritative record directly so a
@@ -1134,7 +1475,20 @@ class Twitch(object):
             if game_name and self.__slugify(game_name) in requested_category_slugs:
                 campaigns_to_refresh.append(campaign)
 
-        for campaign in self.__get_campaigns_details(campaigns_to_refresh):
+        campaign_channel_ids = getattr(self, "campaign_channel_ids", {})
+        refresh_contexts = {
+            str(campaign.get("id")): campaign_channel_ids[str(campaign.get("id"))]
+            for campaign in campaigns_to_refresh
+            if str(campaign.get("id")) in campaign_channel_ids
+        }
+        if refresh_contexts:
+            refreshed_campaigns = self.__get_campaigns_details(
+                campaigns_to_refresh,
+                campaign_channel_id_by_id=refresh_contexts,
+            )
+        else:
+            refreshed_campaigns = self.__get_campaigns_details(campaigns_to_refresh)
+        for campaign in refreshed_campaigns:
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
@@ -1177,6 +1531,10 @@ class Twitch(object):
             inventory
         )
         campaign_evaluations = []
+        (
+            ambiguous_benefit_ids,
+            ambiguous_benefit_names,
+        ) = self.__ambiguous_campaign_benefits(campaigns_by_id.values())
 
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
@@ -1238,11 +1596,21 @@ class Twitch(object):
                 completed_drop_ids,
                 awarded_benefit_ids,
                 awarded_benefit_fingerprints,
+                ambiguous_benefit_ids=ambiguous_benefit_ids,
+                ambiguous_benefit_names=ambiguous_benefit_names,
             )
             evaluation["active_incomplete"] = deadline is not None
             campaign_evaluations.append(evaluation)
             if deadline is None:
                 continue
+
+            active_campaigns.setdefault(game_slug, []).append(
+                {
+                    "id": campaign_id,
+                    "name": campaign.get("name"),
+                    "channels": self.__campaign_channel_logins(campaign),
+                }
+            )
 
             current_deadline = active_deadlines.get(game_slug)
             if current_deadline is None or deadline < current_deadline:
@@ -1254,6 +1622,8 @@ class Twitch(object):
             level=self.category_log_level,
             category_log=True,
         )
+
+        self.active_drop_campaigns = active_campaigns
 
         return active_deadlines, twitch_category_slugs
 
@@ -1555,7 +1925,6 @@ class Twitch(object):
         normalized_name = str(reward_name or "").strip().casefold()
         if normalized_name == "":
             return False
-
         for awarded_drop in self.awarded_game_event_drops.values():
             if not isinstance(awarded_drop, dict):
                 continue
@@ -1565,7 +1934,6 @@ class Twitch(object):
             awarded_at = self.__parse_twitch_datetime(awarded_drop.get("lastAwardedAt"))
             if awarded_at is not None and starts_at <= awarded_at <= ends_at:
                 return True
-
         return False
 
     @staticmethod
@@ -1822,6 +2190,21 @@ class Twitch(object):
             return "Unknown"
         return stream.game.get("displayName") or stream.game.get("name") or "Unknown"
 
+    def __campaign_matches_stream(self, campaign, stream) -> bool:
+        campaign_game = getattr(campaign, "game", None) or {}
+        stream_game = getattr(stream, "game", None) or {}
+        campaign_game_id = str(campaign_game.get("id") or "")
+        stream_game_id = str(stream_game.get("id") or "")
+        if campaign_game_id and stream_game_id:
+            return campaign_game_id == stream_game_id
+        campaign_game_name = campaign_game.get("displayName") or campaign_game.get(
+            "name"
+        )
+        stream_game_name = stream_game.get("displayName") or stream_game.get("name")
+        return self.__slugify(campaign_game_name or "") == self.__slugify(
+            stream_game_name or ""
+        )
+
     def __category_drops_condition(self, streamer):
         if streamer.settings.claim_drops is not True or streamer.is_online is not True:
             return False
@@ -2026,19 +2409,29 @@ class Twitch(object):
         if not game_id:
             return []
 
+        requested_game_slug = self.__slugify(normalized_category.replace("-", " "))
+        game_slug = self.__slugify(game_name)
+        active_campaigns_by_game = getattr(self, "active_drop_campaigns", {})
+        active_twitch_campaigns = active_campaigns_by_game.get(
+            game_slug
+        ) or active_campaigns_by_game.get(requested_game_slug, [])
+        fallback_catalog_campaigns = self.twitchdrops_app_campaigns.get(
+            game_slug
+        ) or self.twitchdrops_app_campaigns.get(requested_game_slug, [])
         fallback_campaigns = (
             restricted_campaigns
             if restricted_campaigns is not None
-            else self.twitchdrops_app_campaigns.get(
-                self.__slugify(normalized_category.replace("-", " ")), []
-            )
+            else active_twitch_campaigns or fallback_catalog_campaigns
         )
         if (
             respect_campaign_restrictions is True
             and forced_streamer_username is None
             and fallback_campaigns
         ):
-            if any(campaign.get("channels") for campaign in fallback_campaigns):
+            if any(
+                self.__campaign_channel_logins(campaign)
+                for campaign in fallback_campaigns
+            ):
                 return self.__get_live_restricted_campaign_streamers(
                     fallback_campaigns,
                     game_id,
@@ -2051,6 +2444,30 @@ class Twitch(object):
                 )
 
         if forced_streamer_username is not None:
+            eligible_campaigns = len(fallback_campaigns)
+            if (
+                drops_enabled is True
+                and respect_campaign_restrictions is True
+                and fallback_campaigns
+            ):
+                campaign_channel_logins = [
+                    self.__campaign_channel_logins(campaign)
+                    for campaign in fallback_campaigns
+                ]
+                eligible_campaigns = sum(
+                    1
+                    for channel_logins in campaign_channel_logins
+                    if not channel_logins or forced_streamer_username in channel_logins
+                )
+                if eligible_campaigns == 0:
+                    self.__log_category(
+                        f"Forced category streamer '{forced_streamer_username}' is "
+                        f"not eligible for any active '{game_name}' campaign",
+                        extra={"emoji": ":no_entry:"},
+                    )
+                    self.__replace_category_campaign_eligibility(game_slug, {})
+                    return []
+
             stream_response = self.__helix_get(
                 "streams",
                 {"user_login": forced_streamer_username, "first": 1},
@@ -2086,10 +2503,18 @@ class Twitch(object):
                 f"Using forced category streamer '{forced_streamer_username}' for '{game_name}'",
                 extra={"emoji": ":satellite:"},
             )
-            game_slug = self.__slugify(game_name)
             self.__replace_category_campaign_eligibility(
                 game_slug,
-                ({forced_streamer_username: (1, 1)} if drops_enabled is True else {}),
+                (
+                    {
+                        forced_streamer_username: (
+                            eligible_campaigns if fallback_campaigns else 1,
+                            len(fallback_campaigns) if fallback_campaigns else 1,
+                        )
+                    }
+                    if drops_enabled is True
+                    else {}
+                ),
             )
             return [forced_streamer_username]
 
@@ -2226,11 +2651,10 @@ class Twitch(object):
         target_per_campaign=20,
         max_total=None,
     ):
-        campaign_login_lists = [
-            list(dict.fromkeys(login.lower() for login in campaign.get("channels", [])))
-            for campaign in campaigns
-            if campaign.get("channels")
+        all_campaign_login_lists = [
+            self.__campaign_channel_logins(campaign) for campaign in campaigns
         ]
+        campaign_login_lists = [logins for logins in all_campaign_login_lists if logins]
         campaign_logins = [set(logins) for logins in campaign_login_lists]
         overlap_counts = {}
         first_seen = {}
@@ -2273,7 +2697,7 @@ class Twitch(object):
             reverse=True,
         )
         unrestricted_campaigns = sum(
-            1 for campaign in campaigns if not campaign.get("channels")
+            1 for logins in all_campaign_login_lists if not logins
         )
         eligible_campaign_counts = {
             login: unrestricted_campaigns
@@ -2306,7 +2730,7 @@ class Twitch(object):
             },
         )
         self.__log_category(
-            f"Checked {checked}/{len(ranked_logins)} Twitch Drops gist channels for "
+            f"Checked {checked}/{len(ranked_logins)} campaign-restricted channels for "
             f"'{game_name}'; selected {len(usernames)} live across "
             f"{len(campaigns)} campaigns",
             extra={"emoji": ":satellite_antenna:"},
@@ -2573,11 +2997,17 @@ class Twitch(object):
         chunk_size=3,
         streams_watched=2,
         source_priority=None,
+        drop_progress_stall_minutes=10,
     ):
         while self.running:
             iteration_started_at = time.time()
             try:
                 now = time.time()
+                drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
+                    streamers,
+                    now,
+                    max(float(drop_progress_stall_minutes), 0) * 60,
+                )
                 streamers_index = [
                     i
                     for i in range(0, len(streamers))
@@ -2593,6 +3023,13 @@ class Twitch(object):
                     and (
                         self._has_reached_points_limit(streamers[i]) is False
                         or self._has_pending_watch_streak(streamers[i], now)
+                    )
+                    and (
+                        (
+                            self.__slugify(streamers[i].stream.game_name() or ""),
+                            streamers[i].username,
+                        )
+                        not in drop_progress_cooldowns
                     )
                 ]
 
@@ -2642,22 +3079,26 @@ class Twitch(object):
                 def remaining_watch_amount():
                     return max_watch_amount - len(streamers_watching)
 
-                for source in source_priority:
-                    if remaining_watch_amount() <= 0:
-                        break
-                    source_indexes = [
+                indexes_by_source = {
+                    source: [
                         index
                         for index in streamers_index
                         if streamer_source(index) == source
                     ]
+                    for source in source_priority
+                }
 
-                    for prior in priority:
+                for prior in priority:
+                    if remaining_watch_amount() <= 0:
+                        break
+
+                    for source in source_priority:
                         if remaining_watch_amount() <= 0:
                             break
 
                         available_source_indexes = [
                             index
-                            for index in source_indexes
+                            for index in indexes_by_source[source]
                             if index not in streamers_watching
                         ]
 
@@ -3136,6 +3577,115 @@ class Twitch(object):
         if game_slug == "":
             return []
 
+        advertised_campaigns = []
+        (
+            channel_campaigns,
+            campaign_data_available,
+        ) = self.__get_campaigns_from_channel_id(streamer.channel_id)
+        for campaign in channel_campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_game = campaign.get("game") or {}
+            campaign_game_slug = self.__slugify(
+                campaign_game.get("displayName") or campaign_game.get("name") or ""
+            )
+            if campaign_game_slug != game_slug and not (
+                getattr(streamer, "from_badge_campaign", False) is True
+                and campaign_game_slug == "special-events"
+            ):
+                continue
+            campaign_id = str(campaign.get("id") or "")
+            if campaign_id == "":
+                continue
+            normalized_campaign = self.__normalize_advertised_campaign(campaign)
+            advertised_campaigns.append(normalized_campaign)
+            self.advertised_drop_campaigns[campaign_id] = normalized_campaign
+            self.campaign_channel_ids[campaign_id] = str(streamer.channel_id)
+
+        detail_candidates = [
+            campaign
+            for campaign in advertised_campaigns
+            if (
+                str(campaign.get("id")),
+                str(streamer.channel_id),
+            )
+            not in self.campaign_detail_attempts
+        ]
+        if detail_candidates:
+            contexts = {
+                str(campaign["id"]): str(streamer.channel_id)
+                for campaign in detail_candidates
+            }
+            for attempt in contexts.items():
+                self.campaign_detail_attempts.add(attempt)
+            for campaign in self.__get_campaigns_details(
+                detail_candidates,
+                campaign_channel_id_by_id=contexts,
+            ):
+                campaign_id = str(campaign.get("id") or "")
+                if campaign_id:
+                    normalized_campaign = self.__normalize_advertised_campaign(campaign)
+                    self.advertised_drop_campaigns[campaign_id] = normalized_campaign
+
+        if advertised_campaigns:
+            advertised_campaigns = [
+                self.advertised_drop_campaigns[str(campaign["id"])]
+                for campaign in advertised_campaigns
+            ]
+            self.__log_drop_check_json(
+                f"Twitch channel campaigns for '{streamer.username}'",
+                [
+                    self.__campaign_debug_summary(campaign)
+                    for campaign in advertised_campaigns
+                ],
+                level=logging.DEBUG,
+            )
+
+            if getattr(streamer, "from_category", False) is True:
+                completed_drop_ids = set()
+                (
+                    awarded_benefit_ids,
+                    awarded_benefit_fingerprints,
+                ) = self.__awarded_benefits({})
+                (
+                    ambiguous_benefit_ids,
+                    ambiguous_benefit_names,
+                ) = self.__ambiguous_campaign_benefits(advertised_campaigns)
+                eligible_campaigns = sum(
+                    1
+                    for campaign in advertised_campaigns
+                    if str(campaign.get("id")) not in self.completed_drop_campaigns
+                    and self.__active_incomplete_drop_deadline(
+                        campaign,
+                        completed_drop_ids,
+                        awarded_benefit_ids,
+                        awarded_benefit_fingerprints,
+                        log_status=False,
+                        ambiguous_benefit_ids=ambiguous_benefit_ids,
+                        ambiguous_benefit_names=ambiguous_benefit_names,
+                    )
+                    is not None
+                )
+                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
+                    eligible_campaigns,
+                    len(advertised_campaigns),
+                )
+
+            return [str(campaign["id"]) for campaign in advertised_campaigns]
+
+        if campaign_data_available:
+            if getattr(streamer, "from_category", False) is True:
+                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
+                    0,
+                    0,
+                )
+            self.__log_drop_check(
+                f"Twitch channel '{streamer.username}' advertises no active "
+                f"campaign for {streamer.stream.game_name()}",
+                level=logging.DEBUG,
+            )
+            return []
+
         campaign_ids = set()
         possible_campaigns = list(self.discovered_open_drop_campaigns or [])
         possible_campaigns.extend(self.twitchdrops_app_campaigns.get(game_slug, []))
@@ -3160,11 +3710,82 @@ class Twitch(object):
                 campaign_ids.add(str(campaign_id))
         return list(campaign_ids)
 
-    def __get_campaigns_from_channel_id(self, channel_id: str) -> List[dict]:
-        # Twitch removed the channel-specific viewerDropCampaigns field. Campaign
-        # discovery now comes from the dashboard, raw query, Helix, and
-        # Gist fallback paths used by log_open_drop_campaigns().
-        return []
+    def __normalize_advertised_campaign(self, campaign: dict) -> dict:
+        normalized = copy.deepcopy(campaign)
+        drops = [
+            drop
+            for drop in normalized.get("timeBasedDrops", []) or []
+            if isinstance(drop, dict)
+        ]
+        if not normalized.get("startAt") and not normalized.get("startsAt"):
+            starts = [drop.get("startAt") for drop in drops if drop.get("startAt")]
+            if starts:
+                normalized["startAt"] = min(starts)
+        if not normalized.get("endAt") and not normalized.get("endsAt"):
+            ends = [drop.get("endAt") for drop in drops if drop.get("endAt")]
+            if ends:
+                normalized["endAt"] = max(ends)
+        normalized.setdefault("status", "ACTIVE")
+        allow = normalized.get("allow")
+        if not isinstance(allow, dict):
+            allow = {}
+        allow.setdefault("channels", None)
+        normalized["allow"] = allow
+        return normalized
+
+    @staticmethod
+    def __campaign_debug_summary(campaign: dict) -> dict:
+        game = campaign.get("game") or {}
+        return {
+            "id": campaign.get("id"),
+            "name": campaign.get("name"),
+            "game": game.get("displayName") or game.get("name"),
+            "start_at": campaign.get("startAt") or campaign.get("startsAt"),
+            "end_at": campaign.get("endAt") or campaign.get("endsAt"),
+            "drops": [
+                {
+                    "id": drop.get("id"),
+                    "name": drop.get("name"),
+                    "start_at": drop.get("startAt"),
+                    "end_at": drop.get("endAt"),
+                    "self": drop.get("self"),
+                    "benefits": [
+                        {
+                            "id": benefit.get("id"),
+                            "name": benefit.get("name"),
+                        }
+                        for edge in drop.get("benefitEdges", []) or []
+                        for benefit in [
+                            edge.get("benefit") if isinstance(edge, dict) else None
+                        ]
+                        if isinstance(benefit, dict)
+                    ],
+                }
+                for drop in campaign.get("timeBasedDrops", []) or []
+                if isinstance(drop, dict)
+            ],
+        }
+
+    def __get_campaigns_from_channel_id(
+        self, channel_id: str
+    ) -> Tuple[List[dict], bool]:
+        try:
+            response = self.gql.get_available_drops(str(channel_id))
+            return response.campaigns, response.campaigns_available
+        except RetryError as error:
+            self.__log_drop_check(
+                f"unable to load channel-advertised campaigns for {channel_id}: "
+                f"{error}",
+                level=logging.DEBUG,
+            )
+            return [], False
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            self.__log_drop_check(
+                f"invalid channel-advertised campaign response for {channel_id}: "
+                f"{error}",
+                level=logging.DEBUG,
+            )
+            return [], False
 
     def __get_reward_campaigns_raw_query(self):
         query_variants = [
@@ -3318,6 +3939,7 @@ class Twitch(object):
                     )
                 if cache_key:
                     self.awarded_game_event_drops[str(cache_key)] = awarded_drop
+            self.__cache_drop_inventory_progress(inventory)
             self.completed_drop_campaigns.update(
                 self.__completed_campaign_ids_from_inventory(inventory)
             )
@@ -3505,7 +4127,7 @@ class Twitch(object):
     def __get_campaigns_details(
         self,
         campaigns,
-        campaign_channel_login_by_id: Optional[Dict[str, str]] = None,
+        campaign_channel_id_by_id: Optional[Dict[str, str]] = None,
     ):
         def extract_drop_campaign(response_item):
             if not isinstance(response_item, dict):
@@ -3524,22 +4146,24 @@ class Twitch(object):
         viewer_context = str(
             self.twitch_login.get_user_id() or self.twitch_login.username
         )
-        campaign_channel_login_by_id = campaign_channel_login_by_id or {}
+        campaign_channel_id_by_id = campaign_channel_id_by_id or {}
         chunks = create_chunks(campaigns, 20)
         for chunk in chunks:
             json_data = []
-            requested_logins = []
+            requested_channel_contexts = []
             for campaign in chunk:
                 campaign_id = str(campaign.get("id") or "")
-                channel_login = str(
-                    campaign_channel_login_by_id.get(campaign_id) or viewer_context
+                channel_context = str(
+                    campaign_channel_id_by_id.get(campaign_id) or viewer_context
                 )
-                requested_logins.append(channel_login)
+                requested_channel_contexts.append(channel_context)
 
                 json_data.append(copy.deepcopy(GQLOperations.DropCampaignDetails))
                 json_data[-1]["variables"] = {
                     "dropID": campaign["id"],
-                    "channelLogin": str(channel_login),
+                    # Twitch accepts a broadcaster/viewer ID or login here despite
+                    # the legacy GraphQL variable name.
+                    "channelLogin": channel_context,
                 }
 
             try:
@@ -3556,7 +4180,7 @@ class Twitch(object):
                 drop_campaign = extract_drop_campaign(response_item)
                 if drop_campaign is not None:
                     result.append(drop_campaign)
-                elif requested_logins[index] != viewer_context:
+                elif requested_channel_contexts[index] != viewer_context:
                     retry_campaigns.append(campaign)
                 else:
                     misses += 1
@@ -4041,11 +4665,45 @@ class Twitch(object):
                     self.claim_all_drops_from_inventory()
                     #####################################
 
-                    # Get full details from all dashboard campaigns.
-                    # Inventory only exposes currently tracked campaigns, so we also
-                    # expand every dashboard campaign to avoid missing completed or inactive items.
+                    # Expand dashboard campaigns together with exact campaigns
+                    # advertised by live channels. Twitch can omit a completed
+                    # campaign from the viewer dashboard while a channel still
+                    # exposes its campaign ID and drop metadata.
+                    campaign_candidates = {}
+                    for candidate in self.__get_drops_dashboard():
+                        if isinstance(candidate, dict) and candidate.get("id"):
+                            campaign_candidates[str(candidate["id"])] = candidate
+                    for campaign_id, candidate in getattr(
+                        self, "advertised_drop_campaigns", {}
+                    ).items():
+                        if (
+                            isinstance(candidate, dict)
+                            and self.__is_open_drop_campaign(candidate) is True
+                        ):
+                            campaign_candidates[str(campaign_id)] = candidate
+
+                    campaign_candidate_list = list(campaign_candidates.values())
+                    campaign_channel_ids = getattr(self, "campaign_channel_ids", {})
+                    detail_contexts = {
+                        campaign_id: campaign_channel_ids[campaign_id]
+                        for campaign_id in campaign_candidates
+                        if campaign_id in campaign_channel_ids
+                    }
                     campaigns_details = self.__get_campaigns_details(
-                        self.__get_drops_dashboard()
+                        campaign_candidate_list,
+                        campaign_channel_id_by_id=detail_contexts,
+                    )
+                    detailed_ids = {
+                        str(campaign.get("id"))
+                        for campaign in campaigns_details
+                        if isinstance(campaign, dict) and campaign.get("id")
+                    }
+                    campaigns_details.extend(
+                        copy.deepcopy(candidate)
+                        for campaign_id, candidate in campaign_candidates.items()
+                        if campaign_id not in detailed_ids
+                        and campaign_id
+                        in getattr(self, "advertised_drop_campaigns", {})
                     )
 
                     for campaign_details in campaigns_details:
@@ -4098,7 +4756,9 @@ class Twitch(object):
                         current_campaigns = list(
                             filter(
                                 lambda x: x.drops != []
-                                and x.game == streamers[i].stream.game
+                                and self.__campaign_matches_stream(
+                                    x, streamers[i].stream
+                                )
                                 and x.id in streamers[i].stream.campaigns_ids,
                                 campaigns,
                             )

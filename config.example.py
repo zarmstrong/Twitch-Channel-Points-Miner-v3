@@ -205,6 +205,7 @@ MINE_CONFIG = {
     'scrape_drop_progress_on_load': True,
     'log_drop_checks': True,
     'category_refresh_interval_hours': 3,
+    'drop_progress_stall_minutes': 10,
     'drop_badge_catalog': True,
     'drop_badge_refresh_interval_hours': 1,
     'auto_mine_badge_drops': False,
