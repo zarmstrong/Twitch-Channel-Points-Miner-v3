@@ -1567,6 +1567,50 @@ def test_category_search_uses_active_twitch_campaign_allowlist(monkeypatch):
     }
 
 
+def test_category_search_uses_nested_campaign_allowlist(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.active_drop_campaigns = {
+        "naraka-bladepoint": [
+            {
+                "id": "campaign-1",
+                "allow": {"channels": [{"name": " NARAKABladepoint "}]},
+            }
+        ]
+    }
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+    calls = []
+
+    def helix_get(endpoint, params):
+        calls.append((endpoint, params))
+        if endpoint == "search/categories":
+            return {"data": [{"id": "naraka-id", "name": "NARAKA: BLADEPOINT"}]}
+        assert params["user_login"] == ["narakabladepoint"]
+        return {
+            "data": [
+                {
+                    "user_login": "narakabladepoint",
+                    "game_id": "naraka-id",
+                    "viewer_count": 100,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category("naraka-bladepoint") == [
+        "narakabladepoint"
+    ]
+    assert [endpoint for endpoint, _ in calls] == ["search/categories", "streams"]
+    assert twitch.category_campaign_eligibility == {
+        ("naraka-bladepoint", "narakabladepoint"): (1, 1)
+    }
+
+
 def test_forced_category_streamer_must_match_active_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {

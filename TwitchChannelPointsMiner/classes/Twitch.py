@@ -2274,7 +2274,10 @@ class Twitch(object):
             and forced_streamer_username is None
             and fallback_campaigns
         ):
-            if any(campaign.get("channels") for campaign in fallback_campaigns):
+            if any(
+                self.__campaign_channel_logins(campaign)
+                for campaign in fallback_campaigns
+            ):
                 return self.__get_live_restricted_campaign_streamers(
                     fallback_campaigns,
                     game_id,
@@ -2489,11 +2492,10 @@ class Twitch(object):
         target_per_campaign=20,
         max_total=None,
     ):
-        campaign_login_lists = [
-            self.__campaign_channel_logins(campaign)
-            for campaign in campaigns
-            if campaign.get("channels")
+        all_campaign_login_lists = [
+            self.__campaign_channel_logins(campaign) for campaign in campaigns
         ]
+        campaign_login_lists = [logins for logins in all_campaign_login_lists if logins]
         campaign_logins = [set(logins) for logins in campaign_login_lists]
         overlap_counts = {}
         first_seen = {}
@@ -2536,7 +2538,7 @@ class Twitch(object):
             reverse=True,
         )
         unrestricted_campaigns = sum(
-            1 for campaign in campaigns if not campaign.get("channels")
+            1 for logins in all_campaign_login_lists if not logins
         )
         eligible_campaign_counts = {
             login: unrestricted_campaigns
