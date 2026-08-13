@@ -1330,6 +1330,45 @@ def test_category_search_uses_fallback_game_name_for_directory_slug(monkeypatch)
     assert calls[1][1]["game_id"] == "bitcraft-id"
 
 
+def test_category_search_prefers_resolved_game_campaign_allowlist(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.active_drop_campaigns = {
+        "actual-game": [{"id": "campaign-1", "channels": ["allowed-channel"]}]
+    }
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+    calls = []
+
+    def helix_get(endpoint, params):
+        calls.append((endpoint, params))
+        if endpoint == "search/categories":
+            return {"data": [{"id": "actual-id", "name": "Actual Game"}]}
+        assert params["user_login"] == ["allowed-channel"]
+        return {
+            "data": [
+                {
+                    "user_login": "allowed-channel",
+                    "game_id": "actual-id",
+                    "viewer_count": 10,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category(
+        "configured-alias", drops_enabled=False
+    ) == ["allowed-channel"]
+    assert [endpoint for endpoint, _ in calls] == ["search/categories", "streams"]
+    assert twitch.category_campaign_eligibility == {
+        ("actual-game", "allowed-channel"): (1, 1)
+    }
+
+
 def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {

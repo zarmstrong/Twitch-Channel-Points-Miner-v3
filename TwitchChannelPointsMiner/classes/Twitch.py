@@ -2259,16 +2259,19 @@ class Twitch(object):
             return []
 
         requested_game_slug = self.__slugify(normalized_category.replace("-", " "))
-        active_twitch_campaigns = getattr(self, "active_drop_campaigns", {}).get(
-            requested_game_slug, []
-        )
+        game_slug = self.__slugify(game_name)
+        active_campaigns_by_game = getattr(self, "active_drop_campaigns", {})
+        active_twitch_campaigns = active_campaigns_by_game.get(
+            game_slug
+        ) or active_campaigns_by_game.get(requested_game_slug, [])
+        fallback_catalog_campaigns = self.twitchdrops_app_campaigns.get(
+            game_slug
+        ) or self.twitchdrops_app_campaigns.get(requested_game_slug, [])
         fallback_campaigns = (
             restricted_campaigns
             if restricted_campaigns is not None
-            else active_twitch_campaigns
-            or self.twitchdrops_app_campaigns.get(requested_game_slug, [])
+            else active_twitch_campaigns or fallback_catalog_campaigns
         )
-        game_slug = self.__slugify(game_name)
         if (
             respect_campaign_restrictions is True
             and forced_streamer_username is None
