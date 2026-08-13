@@ -1708,6 +1708,41 @@ def test_forced_category_streamer_must_match_active_campaign_allowlist(monkeypat
     assert calls == ["search/categories"]
 
 
+def test_points_only_forced_streamer_ignores_campaign_allowlist(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.active_drop_campaigns = {
+        "naraka-bladepoint": [
+            {"id": "campaign-1", "channels": ["narakabladepoint"]}
+        ]
+    }
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "naraka-id", "name": "NARAKA: BLADEPOINT"}]}
+        return {
+            "data": [
+                {
+                    "user_login": "generic-streamer",
+                    "game_id": "naraka-id",
+                    "viewer_count": 100,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category(
+        "naraka-bladepoint|generic-streamer", drops_enabled=False
+    ) == ["generic-streamer"]
+    assert twitch.category_campaign_eligibility == {}
+
+
 def test_forced_category_streamer_normalizes_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {

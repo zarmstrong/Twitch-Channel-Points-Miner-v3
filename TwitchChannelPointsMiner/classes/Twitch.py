@@ -2433,7 +2433,12 @@ class Twitch(object):
                 )
 
         if forced_streamer_username is not None:
-            if fallback_campaigns:
+            eligible_campaigns = len(fallback_campaigns)
+            if (
+                drops_enabled is True
+                and respect_campaign_restrictions is True
+                and fallback_campaigns
+            ):
                 campaign_channel_logins = [
                     self.__campaign_channel_logins(campaign)
                     for campaign in fallback_campaigns
