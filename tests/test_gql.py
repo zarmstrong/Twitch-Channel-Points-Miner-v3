@@ -1465,6 +1465,56 @@ def test_campaign_inventory_merge_keeps_inventory_channel_allowlist():
     assert fresh["allow"] == {"channels": None}
 
 
+def test_inventory_progress_cache_tracks_only_incomplete_eligible_drops():
+    twitch = twitch_with_gql(SimpleNamespace())
+    inventory = {
+        "dropCampaignsInProgress": [
+            {
+                "id": "campaign-1",
+                "name": "Example campaign",
+                "game": {"displayName": "Example Game"},
+                "timeBasedDrops": [
+                    {
+                        "id": "active-drop",
+                        "name": "Active reward",
+                        "requiredMinutesWatched": 15,
+                        "self": {
+                            "currentMinutesWatched": 5,
+                            "hasPreconditionsMet": True,
+                            "isClaimed": False,
+                        },
+                    },
+                    {
+                        "id": "claimed-drop",
+                        "name": "Claimed reward",
+                        "requiredMinutesWatched": 10,
+                        "self": {
+                            "currentMinutesWatched": 10,
+                            "hasPreconditionsMet": True,
+                            "isClaimed": True,
+                        },
+                    },
+                ],
+            }
+        ]
+    }
+
+    twitch._Twitch__cache_drop_inventory_progress(inventory)
+
+    assert twitch.drop_inventory_progress == {
+        "example-game": (
+            (
+                "campaign-1",
+                "Example campaign",
+                "active-drop",
+                "Active reward",
+                5,
+                15,
+            ),
+        )
+    }
+
+
 def test_category_search_uses_active_twitch_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {

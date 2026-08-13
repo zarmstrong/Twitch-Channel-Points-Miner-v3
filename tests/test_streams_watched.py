@@ -1,5 +1,6 @@
 import importlib
 import inspect
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ import requests
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
     _normalize_badge_drop_streamer_limit,
+    _normalize_drop_progress_stall_minutes,
     _normalize_streamer_source_priority,
     _normalize_streams_watched,
 )
@@ -43,6 +45,30 @@ def test_minute_watcher_accepts_streams_watched_argument():
     ]
 
     assert parameter.default == 2
+
+
+def test_drop_progress_stall_defaults_to_ten_minutes():
+    mine_parameter = inspect.signature(TwitchChannelPointsMiner.mine).parameters[
+        "drop_progress_stall_minutes"
+    ]
+    watcher_parameter = inspect.signature(
+        Twitch.send_minute_watched_events
+    ).parameters["drop_progress_stall_minutes"]
+
+    assert mine_parameter.default == 10
+    assert watcher_parameter.default == 10
+
+
+@pytest.mark.parametrize("value", [-1, 1, 4.9, True, "10", None])
+def test_drop_progress_stall_invalid_values_use_default(caplog, value):
+    assert _normalize_drop_progress_stall_minutes(value) == 10
+    assert "drop_progress_stall_minutes must be 0 or at least 5" in caplog.text
+
+
+@pytest.mark.parametrize("value", [0, 5, 10, 12.5])
+def test_drop_progress_stall_valid_values_are_preserved(caplog, value):
+    assert _normalize_drop_progress_stall_minutes(value) == float(value)
+    assert caplog.text == ""
 
 
 def test_streamer_source_priority_default_is_immutable():
@@ -107,18 +133,36 @@ def _run_one_watch_iteration(
     streams_watched,
     source_priority=None,
     priority=None,
+    drop_inventory_progress=None,
+    drop_watch_health=None,
+    drop_progress_stall_minutes=10,
+    now=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
     twitch.user_agent = "test-agent"
     twitch.completed_drop_campaigns = set()
     twitch.category_campaign_eligibility = {
-        (streamer.username, streamer.username): (1, 1)
+        (
+            twitch._Twitch__slugify(streamer.stream.game_name()),
+            streamer.username,
+        ): (1, 1)
         for streamer in streamers
         if streamer.from_category and streamer.drops_condition()
     }
     twitch.twitchdrops_app_campaigns = {}
+    twitch.drop_inventory_progress = drop_inventory_progress or {}
+    twitch.drop_inventory_progress_updated_at = (
+        now if drop_inventory_progress and now is not None else 0
+    )
+    twitch.drop_watch_health = drop_watch_health or {}
     posted = []
+
+    if now is not None:
+        twitch_module = importlib.import_module(
+            "TwitchChannelPointsMiner.classes.Twitch"
+        )
+        monkeypatch.setattr(twitch_module.time, "time", lambda: now)
 
     monkeypatch.setattr(
         requests,
@@ -136,8 +180,35 @@ def _run_one_watch_iteration(
         priority or [Priority.ORDER],
         streams_watched=streams_watched,
         source_priority=source_priority,
+        drop_progress_stall_minutes=drop_progress_stall_minutes,
     )
     return posted
+
+
+def _drop_progress(current=5):
+    return (
+        (
+            "campaign-1",
+            "Example campaign",
+            "drop-1",
+            "Example drop",
+            current,
+            15,
+        ),
+    )
+
+
+def _drop_watch_health(username, progress=None, last_progress_at=0):
+    return {
+        "game": {
+            "username": username,
+            "progress": progress or _drop_progress(),
+            "last_progress_at": last_progress_at,
+            "blocked_until": {},
+            "rotation_from": None,
+            "waiting_for_alternative": None,
+        }
+    }
 
 
 def test_minute_watcher_prioritizes_favorites(monkeypatch):
@@ -224,6 +295,107 @@ def test_minute_watcher_marks_only_selected_streamers_as_watched(monkeypatch):
 
     assert streamers[0].is_watching is True
     assert streamers[1].is_watching is False
+
+
+def test_minute_watcher_rotates_stalled_drop_streamer(monkeypatch, caplog):
+    stalled = _watch_streamer("stalled", from_category=True, drops_eligible=True)
+    replacement = _watch_streamer(
+        "replacement", from_category=True, drops_eligible=True
+    )
+    for streamer in (stalled, replacement):
+        streamer.stream.game_name = lambda: "Game"
+    stalled.is_watching = True
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [stalled, replacement],
+        streams_watched=1,
+        drop_inventory_progress={"game": _drop_progress()},
+        drop_watch_health=_drop_watch_health("stalled"),
+        now=600,
+    )
+
+    assert posted == ["https://spade.test/replacement"]
+    assert stalled.is_watching is False
+    assert replacement.is_watching is True
+    assert "rotating to another eligible Game channel (replacement)" in caplog.text
+
+
+def test_minute_watcher_keeps_stalled_streamer_without_alternative(
+    monkeypatch, caplog
+):
+    only_streamer = _watch_streamer(
+        "only", from_category=True, drops_eligible=True
+    )
+    only_streamer.stream.game_name = lambda: "Game"
+    only_streamer.is_watching = True
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [only_streamer],
+        streams_watched=1,
+        drop_inventory_progress={"game": _drop_progress()},
+        drop_watch_health=_drop_watch_health("only"),
+        now=600,
+    )
+
+    assert posted == ["https://spade.test/only"]
+    assert "no other eligible live Game channel is available" in caplog.text
+
+
+def test_drop_progress_advancement_resets_stall_timer(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    replacement = _watch_streamer(
+        "replacement", from_category=True, drops_eligible=True
+    )
+    replacement.stream.game_name = lambda: "Game"
+    replacement.is_watching = True
+    health = _drop_watch_health(
+        "replacement", progress=_drop_progress(current=5), last_progress_at=0
+    )
+    health["game"]["rotation_from"] = "stalled"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [replacement],
+        streams_watched=1,
+        drop_inventory_progress={"game": _drop_progress(current=6)},
+        drop_watch_health=health,
+        now=600,
+    )
+
+    assert posted == ["https://spade.test/replacement"]
+    assert health["game"]["last_progress_at"] == 600
+    assert health["game"]["rotation_from"] is None
+    assert "Drop progress resumed on replacement after rotating from stalled" in caplog.text
+
+
+def test_stale_inventory_does_not_rotate_drop_streamer(monkeypatch, caplog):
+    stalled = _watch_streamer("stalled", from_category=True, drops_eligible=True)
+    replacement = _watch_streamer(
+        "replacement", from_category=True, drops_eligible=True
+    )
+    for streamer in (stalled, replacement):
+        streamer.stream.game_name = lambda: "Game"
+    stalled.is_watching = True
+    health = _drop_watch_health("stalled")
+    twitch = Twitch.__new__(Twitch)
+    twitch.completed_drop_campaigns = set()
+    twitch.category_campaign_eligibility = {
+        ("game", "stalled"): (1, 1),
+        ("game", "replacement"): (1, 1),
+    }
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.drop_inventory_progress = {"game": _drop_progress()}
+    twitch.drop_inventory_progress_updated_at = 300
+    twitch.drop_watch_health = health
+
+    cooldowns = twitch._Twitch__drop_progress_streamer_cooldowns(
+        [stalled, replacement], now=600, stall_seconds=600
+    )
+
+    assert cooldowns == set()
+    assert "Drop progress has not changed" not in caplog.text
 
 
 def test_raid_is_joined_only_from_watched_streamer():

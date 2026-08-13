@@ -84,6 +84,9 @@ class Twitch(object):
         "drop_progress_last_saved",
         "drop_status_last_saved",
         "drop_report_state",
+        "drop_inventory_progress",
+        "drop_inventory_progress_updated_at",
+        "drop_watch_health",
         "track_drop_item_art",
         "scrape_drop_progress_on_load",
         "log_drop_checks",
@@ -140,6 +143,9 @@ class Twitch(object):
         self.drop_progress_last_saved = {}
         self.drop_status_last_saved = {}
         self.drop_report_state = {}
+        self.drop_inventory_progress = {}
+        self.drop_inventory_progress_updated_at = 0
+        self.drop_watch_health = {}
         self.track_drop_item_art = False
         self.scrape_drop_progress_on_load = False
         self.log_drop_checks = False
@@ -268,6 +274,196 @@ class Twitch(object):
         normalized = unicodedata.normalize("NFKD", str(value))
         ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
         return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
+
+    def __cache_drop_inventory_progress(self, inventory: dict):
+        progress_by_game = {}
+        for campaign in inventory.get("dropCampaignsInProgress", []) or []:
+            if not isinstance(campaign, dict):
+                continue
+            game = campaign.get("game") or {}
+            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            game_slug = self.__slugify(game_name)
+            if game_slug == "":
+                continue
+
+            campaign_id = str(campaign.get("id") or "")
+            campaign_name = str(campaign.get("name") or "Unknown campaign")
+            for drop in campaign.get("timeBasedDrops", []) or []:
+                if not isinstance(drop, dict):
+                    continue
+                drop_self = drop.get("self")
+                if not isinstance(drop_self, dict):
+                    continue
+                if (
+                    drop_self.get("isClaimed") is True
+                    or drop_self.get("hasPreconditionsMet") is False
+                ):
+                    continue
+
+                required_minutes = drop.get("requiredMinutesWatched") or 0
+                current_minutes = drop_self.get("currentMinutesWatched") or 0
+                if required_minutes <= 0 or current_minutes >= required_minutes:
+                    continue
+
+                progress_by_game.setdefault(game_slug, []).append(
+                    (
+                        campaign_id,
+                        campaign_name,
+                        str(drop.get("id") or ""),
+                        str(drop.get("name") or "Unknown drop"),
+                        current_minutes,
+                        required_minutes,
+                    )
+                )
+
+        self.drop_inventory_progress = {
+            game_slug: tuple(sorted(progress))
+            for game_slug, progress in progress_by_game.items()
+        }
+        self.drop_inventory_progress_updated_at = time.time()
+
+    @staticmethod
+    def __drop_progress_label(progress) -> str:
+        labels = [
+            f"{campaign_name} / {drop_name} ({current}/{required}m)"
+            for _, campaign_name, _, drop_name, current, required in progress[:3]
+        ]
+        if len(progress) > 3:
+            labels.append(f"{len(progress) - 3} more")
+        return ", ".join(labels)
+
+    def __drop_progress_streamer_cooldowns(
+        self, streamers, now: float, stall_seconds: float
+    ) -> set:
+        if stall_seconds <= 0:
+            self.drop_watch_health = {}
+            return set()
+
+        progress_by_game = getattr(self, "drop_inventory_progress", {})
+        health = getattr(self, "drop_watch_health", {})
+        self.drop_watch_health = health
+
+        for game_slug in list(health):
+            if game_slug not in progress_by_game:
+                health.pop(game_slug, None)
+                continue
+            blocked_until = health[game_slug].get("blocked_until", {})
+            for username, deadline in list(blocked_until.items()):
+                if deadline <= now:
+                    blocked_until.pop(username, None)
+
+        inventory_updated_at = getattr(self, "drop_inventory_progress_updated_at", 0)
+        if inventory_updated_at == 0 or (now - inventory_updated_at) > 3 * 60:
+            return {
+                (game_slug, username)
+                for game_slug, state in health.items()
+                for username, deadline in state.get("blocked_until", {}).items()
+                if deadline > now
+            }
+
+        watched_streamers = [
+            streamer
+            for streamer in streamers
+            if streamer.is_watching is True
+            and getattr(streamer, "from_category", False) is True
+            and self.__drops_condition(streamer) is True
+        ]
+        for streamer in watched_streamers:
+            game_name = streamer.stream.game_name() or ""
+            game_slug = self.__slugify(game_name)
+            progress = progress_by_game.get(game_slug)
+            if not progress:
+                continue
+
+            state = health.setdefault(
+                game_slug,
+                {
+                    "username": streamer.username,
+                    "progress": progress,
+                    "last_progress_at": now,
+                    "blocked_until": {},
+                    "rotation_from": None,
+                    "waiting_for_alternative": None,
+                },
+            )
+            blocked_until = state["blocked_until"]
+
+            if state.get("username") != streamer.username:
+                state["username"] = streamer.username
+                state["progress"] = progress
+                state["last_progress_at"] = now
+                state["waiting_for_alternative"] = None
+                continue
+
+            if state.get("progress") != progress:
+                rotated_from = state.get("rotation_from")
+                if rotated_from and rotated_from != streamer.username:
+                    logger.info(
+                        f"{Fore.GREEN}Drop progress resumed on {streamer.username} "
+                        f"after rotating from {rotated_from}: "
+                        f"{self.__drop_progress_label(progress)}{Fore.RESET}",
+                        extra={
+                            "emoji": ":white_check_mark:",
+                            "event": Events.DROP_STATUS,
+                        },
+                    )
+                state["progress"] = progress
+                state["last_progress_at"] = now
+                state["rotation_from"] = None
+                state["waiting_for_alternative"] = None
+                continue
+
+            stalled_for = now - state["last_progress_at"]
+            if stalled_for < stall_seconds:
+                continue
+
+            alternatives = []
+            for candidate in streamers:
+                if (
+                    candidate.username == streamer.username
+                    or candidate.is_online is not True
+                    or getattr(candidate, "from_category", False) is not True
+                    or self.__slugify(candidate.stream.game_name() or "") != game_slug
+                    or self.__drops_condition(candidate) is not True
+                    or blocked_until.get(candidate.username, 0) > now
+                    or (candidate.online_at != 0 and (now - candidate.online_at) <= 30)
+                ):
+                    continue
+                alternatives.append(candidate.username)
+
+            if alternatives:
+                blocked_until[streamer.username] = now + stall_seconds
+                state["username"] = None
+                state["rotation_from"] = streamer.username
+                state["waiting_for_alternative"] = None
+                logger.warning(
+                    f"{Fore.YELLOW}Drop progress has not changed for "
+                    f"{stalled_for / 60:.0f}m on {streamer.username}; rotating to "
+                    f"another eligible {game_name} channel ({', '.join(alternatives)}). "
+                    f"Current progress: {self.__drop_progress_label(progress)}"
+                    f"{Fore.RESET}",
+                    extra={
+                        "emoji": ":arrows_counterclockwise:",
+                        "event": Events.DROP_STATUS,
+                    },
+                )
+            elif state.get("waiting_for_alternative") != streamer.username:
+                state["waiting_for_alternative"] = streamer.username
+                logger.warning(
+                    f"{Fore.YELLOW}Drop progress has not changed for "
+                    f"{stalled_for / 60:.0f}m on {streamer.username}, but no other "
+                    f"eligible live {game_name} channel is available; continuing to "
+                    f"watch. Current progress: {self.__drop_progress_label(progress)}"
+                    f"{Fore.RESET}",
+                    extra={"emoji": ":warning:", "event": Events.DROP_STATUS},
+                )
+
+        return {
+            (game_slug, username)
+            for game_slug, state in health.items()
+            for username, deadline in state.get("blocked_until", {}).items()
+            if deadline > now
+        }
 
     def __drop_variant_entries(self, drop_dict):
         benefit_edges = drop_dict.get("benefitEdges", []) or []
@@ -2637,11 +2833,17 @@ class Twitch(object):
         chunk_size=3,
         streams_watched=2,
         source_priority=None,
+        drop_progress_stall_minutes=10,
     ):
         while self.running:
             iteration_started_at = time.time()
             try:
                 now = time.time()
+                drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
+                    streamers,
+                    now,
+                    max(float(drop_progress_stall_minutes), 0) * 60,
+                )
                 streamers_index = [
                     i
                     for i in range(0, len(streamers))
@@ -2657,6 +2859,13 @@ class Twitch(object):
                     and (
                         self._has_reached_points_limit(streamers[i]) is False
                         or self._has_pending_watch_streak(streamers[i], now)
+                    )
+                    and (
+                        (
+                            self.__slugify(streamers[i].stream.game_name() or ""),
+                            streamers[i].username,
+                        )
+                        not in drop_progress_cooldowns
                     )
                 ]
 
@@ -3382,6 +3591,7 @@ class Twitch(object):
                     )
                 if cache_key:
                     self.awarded_game_event_drops[str(cache_key)] = awarded_drop
+            self.__cache_drop_inventory_progress(inventory)
             self.completed_drop_campaigns.update(
                 self.__completed_campaign_ids_from_inventory(inventory)
             )
