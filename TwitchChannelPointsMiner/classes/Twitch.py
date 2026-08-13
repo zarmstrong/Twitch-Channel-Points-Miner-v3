@@ -3702,7 +3702,11 @@ class Twitch(object):
             if ends:
                 normalized["endAt"] = max(ends)
         normalized.setdefault("status", "ACTIVE")
-        normalized.setdefault("allow", {"channels": None})
+        allow = normalized.get("allow")
+        if not isinstance(allow, dict):
+            allow = {}
+        allow.setdefault("channels", None)
+        normalized["allow"] = allow
         return normalized
 
     @staticmethod

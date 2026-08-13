@@ -75,6 +75,17 @@ def category_streamer():
     )
 
 
+def test_advertised_campaign_normalizes_null_allow(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = advertised_campaign()
+    campaign["allow"] = None
+
+    normalized = twitch._Twitch__normalize_advertised_campaign(campaign)
+
+    assert normalized["allow"] == {"channels": None}
+    assert Campaign(normalized).channels == []
+
+
 def test_channel_campaign_uses_broadcaster_id_and_in_window_award(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     campaign = advertised_campaign()
