@@ -236,6 +236,64 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     assert twitch_games == {"example-game"}
 
 
+def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["allow"] = {
+        "channels": [
+            {"id": "100", "name": "AllowedOne"},
+            {"id": "200", "name": "AllowedTwo"},
+        ]
+    }
+    campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 5,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [campaign],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": [campaign]}, {"example-game"}
+    )
+
+    assert set(deadlines) == {"example-game"}
+    assert twitch_games == {"example-game"}
+    assert twitch.active_drop_campaigns == {
+        "example-game": [
+            {
+                "id": "campaign-1",
+                "name": "Example Campaign",
+                "channels": ["allowedone", "allowedtwo"],
+            }
+        ]
+    }
+
+
 def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
     monkeypatch,
 ):

@@ -93,6 +93,7 @@ class Twitch(object):
         "twitchdrops_app_campaigns",
         "twitchdrops_app_game_names",
         "twitchdrops_app_upcoming_starts",
+        "active_drop_campaigns",
         "category_campaign_eligibility",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
@@ -148,6 +149,7 @@ class Twitch(object):
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
+        self.active_drop_campaigns = {}
         self.category_campaign_eligibility = {}
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
@@ -888,11 +890,14 @@ class Twitch(object):
     ) -> dict:
         """Keep fresh campaign drops while applying the user's inventory progress."""
         if not campaign.get("timeBasedDrops"):
-            return inventory_campaign
-        if not inventory_campaign.get("timeBasedDrops"):
-            return campaign
+            return copy.deepcopy(inventory_campaign)
 
         merged_campaign = copy.deepcopy(campaign)
+        if "allow" in inventory_campaign:
+            merged_campaign["allow"] = copy.deepcopy(inventory_campaign["allow"])
+        if not inventory_campaign.get("timeBasedDrops"):
+            return merged_campaign
+
         merged_drops = merged_campaign.get("timeBasedDrops", [])
         merged_drop_ids = {
             str(drop.get("id"))
@@ -919,6 +924,26 @@ class Twitch(object):
                 merged_drops.append(copy.deepcopy(drop))
 
         return merged_campaign
+
+    @staticmethod
+    def __campaign_channel_logins(campaign: dict) -> List[str]:
+        channels = campaign.get("channels")
+        if channels is None:
+            allow = campaign.get("allow")
+            channels = allow.get("channels") if isinstance(allow, dict) else None
+
+        logins = []
+        for channel in channels or []:
+            if isinstance(channel, str):
+                login = channel
+            elif isinstance(channel, dict):
+                login = channel.get("name") or channel.get("login")
+            else:
+                continue
+            login = str(login or "").lower().strip()
+            if login and login not in logins:
+                logins.append(login)
+        return logins
 
     def __awarded_benefits(self, inventory: dict) -> Tuple[set, set]:
         benefit_ids = set()
@@ -1083,6 +1108,7 @@ class Twitch(object):
         requested_category_slugs: set,
     ) -> Dict[str, datetime]:
         active_deadlines = {}
+        active_campaigns = {}
         twitch_category_slugs = set()
         completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
         self.completed_drop_campaigns.update(completed_campaign_ids)
@@ -1244,6 +1270,14 @@ class Twitch(object):
             if deadline is None:
                 continue
 
+            active_campaigns.setdefault(game_slug, []).append(
+                {
+                    "id": campaign_id,
+                    "name": campaign.get("name"),
+                    "channels": self.__campaign_channel_logins(campaign),
+                }
+            )
+
             current_deadline = active_deadlines.get(game_slug)
             if current_deadline is None or deadline < current_deadline:
                 active_deadlines[game_slug] = deadline
@@ -1254,6 +1288,8 @@ class Twitch(object):
             level=self.category_log_level,
             category_log=True,
         )
+
+        self.active_drop_campaigns = active_campaigns
 
         return active_deadlines, twitch_category_slugs
 
@@ -2026,13 +2062,17 @@ class Twitch(object):
         if not game_id:
             return []
 
+        requested_game_slug = self.__slugify(normalized_category.replace("-", " "))
+        active_twitch_campaigns = getattr(self, "active_drop_campaigns", {}).get(
+            requested_game_slug, []
+        )
         fallback_campaigns = (
             restricted_campaigns
             if restricted_campaigns is not None
-            else self.twitchdrops_app_campaigns.get(
-                self.__slugify(normalized_category.replace("-", " ")), []
-            )
+            else active_twitch_campaigns
+            or self.twitchdrops_app_campaigns.get(requested_game_slug, [])
         )
+        game_slug = self.__slugify(game_name)
         if (
             respect_campaign_restrictions is True
             and forced_streamer_username is None
@@ -2051,6 +2091,22 @@ class Twitch(object):
                 )
 
         if forced_streamer_username is not None:
+            if fallback_campaigns:
+                eligible_campaigns = sum(
+                    1
+                    for campaign in fallback_campaigns
+                    if not campaign.get("channels")
+                    or forced_streamer_username in campaign.get("channels", [])
+                )
+                if eligible_campaigns == 0:
+                    self.__log_category(
+                        f"Forced category streamer '{forced_streamer_username}' is "
+                        f"not eligible for any active '{game_name}' campaign",
+                        extra={"emoji": ":no_entry:"},
+                    )
+                    self.__replace_category_campaign_eligibility(game_slug, {})
+                    return []
+
             stream_response = self.__helix_get(
                 "streams",
                 {"user_login": forced_streamer_username, "first": 1},
@@ -2086,10 +2142,18 @@ class Twitch(object):
                 f"Using forced category streamer '{forced_streamer_username}' for '{game_name}'",
                 extra={"emoji": ":satellite:"},
             )
-            game_slug = self.__slugify(game_name)
             self.__replace_category_campaign_eligibility(
                 game_slug,
-                ({forced_streamer_username: (1, 1)} if drops_enabled is True else {}),
+                (
+                    {
+                        forced_streamer_username: (
+                            eligible_campaigns if fallback_campaigns else 1,
+                            len(fallback_campaigns) if fallback_campaigns else 1,
+                        )
+                    }
+                    if drops_enabled is True
+                    else {}
+                ),
             )
             return [forced_streamer_username]
 
@@ -2306,7 +2370,7 @@ class Twitch(object):
             },
         )
         self.__log_category(
-            f"Checked {checked}/{len(ranked_logins)} Twitch Drops gist channels for "
+            f"Checked {checked}/{len(ranked_logins)} campaign-restricted channels for "
             f"'{game_name}'; selected {len(usernames)} live across "
             f"{len(campaigns)} campaigns",
             extra={"emoji": ":satellite_antenna:"},
