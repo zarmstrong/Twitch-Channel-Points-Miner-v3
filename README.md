@@ -343,7 +343,10 @@ streamer_source_priority=[
 ```
 
 Move `StreamerSource.BADGES` to the front to prioritize earning badge Drops.
-The existing `priority` rules are applied within each source group.
+The `priority` rules are applied globally; source priority breaks ties within
+each rule. For example, `Priority.DROPS` can reserve a slot for an active
+category campaign before `Priority.ORDER` fills remaining slots with configured
+streamers.
 
 See [Settings](#settings) for the available priority, logger, streamer, and bet
 objects. Keep credentials and integration tokens only in your private

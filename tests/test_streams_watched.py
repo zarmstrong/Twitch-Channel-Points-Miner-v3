@@ -288,6 +288,24 @@ def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
     assert posted == ["https://spade.test/one", "https://spade.test/two"]
 
 
+def test_drop_priority_applies_across_streamer_sources(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("configured-one"),
+            _watch_streamer("pathofexile"),
+            _watch_streamer("live-drop", from_category=True, drops_eligible=True),
+        ],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+    )
+
+    assert posted == [
+        "https://spade.test/configured-one",
+        "https://spade.test/live-drop",
+    ]
+
+
 def test_minute_watcher_marks_only_selected_streamers_as_watched(monkeypatch):
     streamers = [_watch_streamer("selected"), _watch_streamer("waiting")]
 

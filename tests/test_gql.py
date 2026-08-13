@@ -110,6 +110,38 @@ def test_drop_campaign_details_parser_reads_drop_campaign_field():
     assert response.campaign.id == "campaign-1"
 
 
+def test_available_drops_parser_preserves_channel_campaign_data():
+    campaign = {
+        "id": "campaign-1",
+        "name": "Campaign",
+        "game": {"id": "game-1", "name": "Example Game"},
+        "timeBasedDrops": [{"id": "drop-1", "name": "Reward"}],
+    }
+    response = Parser().parse_drops_highlight_service_available_drops(
+        {
+            "data": {"channel": {"viewerDropCampaigns": [campaign]}},
+            "extensions": {"operationName": "DropsHighlightService_AvailableDrops"},
+        }
+    )
+
+    assert response.ids == ["campaign-1"]
+    assert response.campaigns == [campaign]
+    assert response.campaigns_available is True
+
+
+def test_available_drops_parser_distinguishes_null_campaign_data():
+    response = Parser().parse_drops_highlight_service_available_drops(
+        {
+            "data": {"channel": {"viewerDropCampaigns": None}},
+            "extensions": {"operationName": "DropsHighlightService_AvailableDrops"},
+        }
+    )
+
+    assert response.ids == []
+    assert response.campaigns == []
+    assert response.campaigns_available is False
+
+
 def test_get_id_from_login_parses_typed_response_and_session_headers():
     calls = []
 
@@ -1148,11 +1180,11 @@ def test_campaign_details_retries_viewer_context_after_null_user():
 
     campaigns = twitch._Twitch__get_campaigns_details(
         [{"id": "campaign-1"}],
-        campaign_channel_login_by_id={"campaign-1": "restricted-channel"},
+        campaign_channel_id_by_id={"campaign-1": "restricted-channel-id"},
     )
 
     assert campaigns == [{"id": "campaign-1", "name": "Drop"}]
-    assert calls[0][0]["variables"]["channelLogin"] == "restricted-channel"
+    assert calls[0][0]["variables"]["channelLogin"] == "restricted-channel-id"
     assert calls[1][0]["variables"]["channelLogin"] == "viewer-id"
 
 
