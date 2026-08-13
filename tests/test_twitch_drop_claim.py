@@ -207,6 +207,48 @@ def test_authoritative_channel_campaign_result_blocks_wrong_game(monkeypatch):
     )
 
 
+def test_campaign_deadline_logs_include_game_name(monkeypatch, caplog):
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["game"] = {"displayName": "Warframe"}
+    campaign["name"] = "Prime Time #493"
+    campaign["timeBasedDrops"] = [
+        {
+            "id": "possible-drop",
+            "name": "Random Hex Treasure",
+            "benefitEdges": [],
+            "requiredMinutesWatched": 10,
+            "startAt": "2020-01-01T00:00:00Z",
+            "endAt": "2099-01-01T00:00:00Z",
+        },
+        {
+            "id": "impossible-drop",
+            "name": "Long Reward",
+            "benefitEdges": [],
+            "requiredMinutesWatched": 100000000,
+            "startAt": "2020-01-01T00:00:00Z",
+            "endAt": "2099-01-01T00:00:00Z",
+        },
+    ]
+    caplog.set_level(logging.INFO)
+
+    twitch._Twitch__active_incomplete_drop_deadline(
+        campaign,
+        completed_drop_ids=set(),
+        awarded_benefit_ids=set(),
+        awarded_benefit_fingerprints=set(),
+    )
+
+    assert (
+        "Enough time for [Warframe] Prime Time #493 - Random Hex Treasure:"
+        in caplog.text
+    )
+    assert (
+        "Not enough time for [Warframe] Prime Time #493 - Long Reward:"
+        in caplog.text
+    )
+
+
 def test_claiming_final_drop_waits_for_inventory_confirmation(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     campaign = Campaign(campaign_data())

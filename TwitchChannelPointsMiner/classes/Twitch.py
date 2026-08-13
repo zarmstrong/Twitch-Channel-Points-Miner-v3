@@ -1283,6 +1283,12 @@ class Twitch(object):
     ) -> Optional[datetime]:
         now = datetime.utcnow()
         earliest_deadline = None
+        campaign_game = campaign.get("game") or {}
+        game_name = (
+            campaign_game.get("displayName") or campaign_game.get("name")
+            if isinstance(campaign_game, dict)
+            else None
+        ) or "Unknown Game"
         campaign_benefit_counts = {}
         for campaign_drop in campaign.get("timeBasedDrops", []) or []:
             if not isinstance(campaign_drop, dict):
@@ -1370,7 +1376,8 @@ class Twitch(object):
             if time_left_minutes is not None and remaining_minutes > time_left_minutes:
                 if log_status:
                     logger.info(
-                        f"{Fore.RED}Not enough time for {campaign_name} - {drop_name}: "
+                        f"{Fore.RED}Not enough time for [{game_name}] "
+                        f"{campaign_name} - {drop_name}: "
                         f"needs {remaining_minutes:.0f}m, "
                         f"{max(time_left_minutes, 0):.0f}m left{Fore.RESET}",
                         extra={"emoji": ":red_circle:"},
@@ -1384,7 +1391,8 @@ class Twitch(object):
             )
             if log_status:
                 logger.info(
-                    f"{Fore.BLUE}Enough time for {campaign_name} - {drop_name}: "
+                    f"{Fore.BLUE}Enough time for [{game_name}] "
+                    f"{campaign_name} - {drop_name}: "
                     f"needs {remaining_minutes:.0f}m, {time_left_label}{Fore.RESET}",
                     extra={"emoji": ":large_blue_circle:"},
                 )
