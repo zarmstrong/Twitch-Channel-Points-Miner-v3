@@ -2288,11 +2288,14 @@ class Twitch(object):
 
         if forced_streamer_username is not None:
             if fallback_campaigns:
+                campaign_channel_logins = [
+                    self.__campaign_channel_logins(campaign)
+                    for campaign in fallback_campaigns
+                ]
                 eligible_campaigns = sum(
                     1
-                    for campaign in fallback_campaigns
-                    if not campaign.get("channels")
-                    or forced_streamer_username in campaign.get("channels", [])
+                    for channel_logins in campaign_channel_logins
+                    if not channel_logins or forced_streamer_username in channel_logins
                 )
                 if eligible_campaigns == 0:
                     self.__log_category(
@@ -2487,7 +2490,7 @@ class Twitch(object):
         max_total=None,
     ):
         campaign_login_lists = [
-            list(dict.fromkeys(login.lower() for login in campaign.get("channels", [])))
+            self.__campaign_channel_logins(campaign)
             for campaign in campaigns
             if campaign.get("channels")
         ]
