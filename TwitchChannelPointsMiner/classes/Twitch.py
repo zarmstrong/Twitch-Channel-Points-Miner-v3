@@ -1084,7 +1084,7 @@ class Twitch(object):
     def __merge_campaign_inventory_progress(
         self, campaign: dict, inventory_campaign: dict
     ) -> dict:
-        """Keep fresh campaign drops while applying the user's inventory progress."""
+        """Keep fresh campaign drops with authenticated inventory state and access."""
         if not campaign.get("timeBasedDrops"):
             return copy.deepcopy(inventory_campaign)
 
