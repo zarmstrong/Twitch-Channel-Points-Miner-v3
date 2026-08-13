@@ -3076,6 +3076,15 @@ class Twitch(object):
                 def remaining_watch_amount():
                     return max_watch_amount - len(streamers_watching)
 
+                indexes_by_source = {
+                    source: [
+                        index
+                        for index in streamers_index
+                        if streamer_source(index) == source
+                    ]
+                    for source in source_priority
+                }
+
                 for prior in priority:
                     if remaining_watch_amount() <= 0:
                         break
@@ -3086,9 +3095,8 @@ class Twitch(object):
 
                         available_source_indexes = [
                             index
-                            for index in streamers_index
-                            if streamer_source(index) == source
-                            and index not in streamers_watching
+                            for index in indexes_by_source[source]
+                            if index not in streamers_watching
                         ]
 
                         if prior == Priority.ORDER:
