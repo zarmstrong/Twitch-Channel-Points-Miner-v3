@@ -1302,7 +1302,7 @@ class Twitch(object):
         self,
         inventory: dict,
         requested_category_slugs: set,
-    ) -> Dict[str, datetime]:
+    ) -> Tuple[Dict[str, datetime], set[str]]:
         active_deadlines = {}
         active_campaigns = {}
         twitch_category_slugs = set()
