@@ -249,6 +249,22 @@ def test_campaign_deadline_logs_include_game_name(monkeypatch, caplog):
     )
 
 
+def test_campaign_deadline_logs_unknown_for_malformed_game(monkeypatch, caplog):
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["game"] = "unexpected-game-value"
+    caplog.set_level(logging.INFO)
+
+    twitch._Twitch__active_incomplete_drop_deadline(
+        campaign,
+        completed_drop_ids=set(),
+        awarded_benefit_ids=set(),
+        awarded_benefit_fingerprints=set(),
+    )
+
+    assert "Enough time for [Unknown Game] Example Campaign - Reward:" in caplog.text
+
+
 def test_claiming_final_drop_waits_for_inventory_confirmation(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     campaign = Campaign(campaign_data())

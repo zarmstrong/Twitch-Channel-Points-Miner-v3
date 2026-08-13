@@ -1284,11 +1284,14 @@ class Twitch(object):
         now = datetime.utcnow()
         earliest_deadline = None
         campaign_game = campaign.get("game") or {}
-        game_name = (
-            campaign_game.get("displayName") or campaign_game.get("name")
-            if isinstance(campaign_game, dict)
-            else None
-        ) or "Unknown Game"
+        if isinstance(campaign_game, dict):
+            game_name = (
+                campaign_game.get("displayName")
+                or campaign_game.get("name")
+                or "Unknown Game"
+            )
+        else:
+            game_name = "Unknown Game"
         campaign_benefit_counts = {}
         for campaign_drop in campaign.get("timeBasedDrops", []) or []:
             if not isinstance(campaign_drop, dict):
