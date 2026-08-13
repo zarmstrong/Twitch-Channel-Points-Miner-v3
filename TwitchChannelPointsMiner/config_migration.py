@@ -106,6 +106,7 @@ MINE_CONFIG_DEFAULTS = (
     ("log_drop_checks", "False"),
     ("track_category_streamer_points", "False"),
     ("category_refresh_interval_hours", "6"),
+    ("drop_progress_stall_minutes", "10"),
     ("drop_badge_catalog", "True"),
     ("drop_badge_refresh_interval_hours", "1"),
     ("auto_mine_badge_drops", "False"),
