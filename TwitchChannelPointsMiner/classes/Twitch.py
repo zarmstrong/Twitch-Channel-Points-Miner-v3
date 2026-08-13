@@ -14,7 +14,7 @@ import string
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import choice, token_hex
 from threading import Event, Lock
@@ -1637,11 +1637,12 @@ class Twitch(object):
                 ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
                 if ends_at is None or ends_at <= now:
                     continue
-                drop_names = {
-                    str(drop.get("name") or "").strip().lower()
+                drops_by_name = {
+                    str(drop.get("name") or "").strip().lower(): drop
                     for drop in campaign.get("drops", [])
                     if str(drop.get("name") or "").strip()
                 }
+                drop_names = set(drops_by_name)
                 missing_drop_names = sorted(
                     drop_name
                     for drop_name in drop_names
@@ -1651,7 +1652,11 @@ class Twitch(object):
                             owned_reward_names,
                             report.get("game") or category_name,
                         )
-                        or self.__fallback_reward_was_awarded(drop_name, campaign)
+                        or self.__fallback_reward_was_awarded(
+                            drop_name,
+                            campaign,
+                            drops_by_name[drop_name].get("image_url"),
+                        )
                         or self.__fallback_reward_was_captured(
                             drop_name,
                             campaign,
@@ -1777,8 +1782,10 @@ class Twitch(object):
                             return True
         return False
 
-    def __fallback_reward_was_awarded(self, reward_name, campaign):
-        """Match a fallback reward to an award from the same campaign window."""
+    def __fallback_reward_was_awarded(
+        self, reward_name, campaign, reward_image_url=None
+    ):
+        """Match a fallback reward to a recent award with the same identity."""
         starts_at = self.__parse_twitch_datetime(campaign.get("starts_at"))
         ends_at = self.__parse_twitch_datetime(campaign.get("ends_at"))
         if starts_at is None or ends_at is None:
@@ -1787,6 +1794,7 @@ class Twitch(object):
         normalized_name = str(reward_name or "").strip().casefold()
         if normalized_name == "":
             return False
+        normalized_image = str(reward_image_url or "").strip()
 
         for awarded_drop in self.awarded_game_event_drops.values():
             if not isinstance(awarded_drop, dict):
@@ -1796,6 +1804,14 @@ class Twitch(object):
                 continue
             awarded_at = self.__parse_twitch_datetime(awarded_drop.get("lastAwardedAt"))
             if awarded_at is not None and starts_at <= awarded_at <= ends_at:
+                return True
+            awarded_image = str(awarded_drop.get("imageURL") or "").strip()
+            if (
+                normalized_image
+                and awarded_image == normalized_image
+                and awarded_at is not None
+                and starts_at - timedelta(days=7) <= awarded_at <= ends_at
+            ):
                 return True
 
         return False

@@ -471,6 +471,7 @@ def test_old_same_named_award_does_not_complete_new_fallback_campaign():
     twitch = bare_twitch(SimpleNamespace())
     twitch.awarded_game_event_drops["old-reward"] = {
         "name": "Repeatable Crate",
+        "imageURL": "https://example.test/repeatable.png",
         "lastAwardedAt": "2026-07-01T12:00:00Z",
     }
     campaign = {
@@ -479,9 +480,65 @@ def test_old_same_named_award_does_not_complete_new_fallback_campaign():
     }
 
     assert (
-        twitch._Twitch__fallback_reward_was_awarded("Repeatable Crate", campaign)
+        twitch._Twitch__fallback_reward_was_awarded(
+            "Repeatable Crate",
+            campaign,
+            "https://example.test/repeatable.png",
+        )
         is False
     )
+
+
+def test_recent_matching_art_award_handles_late_fallback_start(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    twitch.awarded_game_event_drops["warhounds-key"] = {
+        "name": "Closed Playtest Key",
+        "imageURL": "https://example.test/warhounds-key.png",
+        "lastAwardedAt": "2026-08-07T18:53:05Z",
+    }
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "warhounds",
+                "game": "Warhounds",
+                "url": "https://twitchdrops.app/game/warhounds",
+                "starts_at": "2026-08-10T20:00:00Z",
+                "ends_at": "2099-08-13T19:59:59Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Warhounds",
+            "campaigns": [
+                {
+                    "name": "Closed Playtest",
+                    "ends_at": "2099-08-13T19:59:59Z",
+                    "channels": [],
+                    "drops": [
+                        {
+                            "name": "Closed Playtest Key",
+                            "image_url": "https://example.test/warhounds-key.png",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["warhounds"], set())
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
 
 
 def test_persisted_captured_drop_completes_fallback_campaign(monkeypatch, tmp_path):
