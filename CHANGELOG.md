@@ -1,5 +1,33 @@
 # Changelog
 
+## [3.15.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.2...3.15.0) (2026-08-14)
+
+
+### Features
+
+* **config:** use config.py as the canonical dashboard configuration ([7d2f137](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7d2f137389ea2359869bce19428d097de0d37d4e))
+
+
+### Bug Fixes
+
+* **categories:** preserve points-only forced streams ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+* **config:** preserve imports for dashboard-generated expressions ([7d2f137](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7d2f137389ea2359869bce19428d097de0d37d4e))
+* **drops:** enforce campaign eligibility, priority, and stall rotation ([#96](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/96)) ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+* **drops:** include game names in deadline logs ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+* **drops:** match reused rewards to campaign windows ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+* **watching:** prioritize active drops across streamer sources ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+
+
+### Performance Improvements
+
+* **config:** migrate legacy streamer settings in one rewrite ([7d2f137](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7d2f137389ea2359869bce19428d097de0d37d4e))
+* **watching:** precompute streamer source groups ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+
+
+### Documentation
+
+* **drops:** clarify campaign inventory merging ([bcd7345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bcd7345f6f212c8792ed487fb2a6bcb6816e5823))
+
 ## [3.14.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.1...3.14.2) (2026-08-12)
 
 
