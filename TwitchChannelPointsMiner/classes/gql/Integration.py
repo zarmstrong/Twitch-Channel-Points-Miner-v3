@@ -140,6 +140,7 @@ class GQL:
                 attempt_interval_seconds=1,
                 backoff_multiplier=2,
                 max_interval_seconds=10,
+                jitter_ratio=0.25,
             )
         )
         """Strategy for handling failed requests."""
