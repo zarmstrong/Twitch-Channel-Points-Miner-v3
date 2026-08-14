@@ -544,6 +544,9 @@ def test_empty_batch_returns_without_making_http_request():
             {"max_interval_seconds": -1},
             "max_interval_seconds must be a non-negative number or None",
         ),
+        ({"jitter_ratio": -0.1}, "jitter_ratio must be a number between 0 and 1"),
+        ({"jitter_ratio": 1.1}, "jitter_ratio must be a number between 0 and 1"),
+        ({"jitter_ratio": True}, "jitter_ratio must be a number between 0 and 1"),
     ],
 )
 def test_attempt_strategy_rejects_invalid_configuration(kwargs, message):
@@ -580,6 +583,46 @@ def test_attempt_strategy_applies_bounded_exponential_backoff(monkeypatch):
 
     assert result.attempts == 4
     assert sleeps == [1, 3, 5]
+
+
+def test_attempt_strategy_applies_bounded_retry_jitter(monkeypatch):
+    sleeps = []
+
+    def fail():
+        raise requests.ConnectionError("offline")
+
+    attempt_strategy_module = importlib.import_module(
+        "TwitchChannelPointsMiner.utils.AttemptStrategy"
+    )
+    monkeypatch.setattr(attempt_strategy_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        attempt_strategy_module.random,
+        "uniform",
+        lambda minimum, maximum: maximum,
+    )
+    strategy = AttemptStrategy(
+        attempts=4,
+        attempt_interval_seconds=1,
+        backoff_multiplier=3,
+        max_interval_seconds=5,
+        jitter_ratio=0.2,
+    )
+
+    result = strategy.make_attempts(
+        fail,
+        lambda value: None,
+        lambda error: True,
+        lambda error: None,
+    )
+
+    assert result.attempts == 4
+    assert sleeps == pytest.approx([1.2, 3.6, 5])
+
+
+def test_default_gql_retries_use_jitter():
+    gql = GQL(client_session())
+
+    assert gql.attempt_strategy.jitter_ratio == 0.25
 
 
 def test_channel_follows_stops_when_next_page_has_no_new_cursor(caplog):

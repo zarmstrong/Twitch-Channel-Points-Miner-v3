@@ -1,4 +1,5 @@
 import logging
+import random
 import time
 from typing import Callable, Generic, TypeVar
 
@@ -87,6 +88,7 @@ class AttemptStrategy:
         attempt_interval_seconds: int | float = 1,
         backoff_multiplier: int | float = 1,
         max_interval_seconds: int | float | None = None,
+        jitter_ratio: int | float = 0,
     ):
         if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
             raise ValueError("attempts must be a positive integer")
@@ -112,6 +114,12 @@ class AttemptStrategy:
             raise ValueError(
                 "max_interval_seconds must be a non-negative number or None"
             )
+        if (
+            isinstance(jitter_ratio, bool)
+            or not isinstance(jitter_ratio, (int, float))
+            or not 0 <= jitter_ratio <= 1
+        ):
+            raise ValueError("jitter_ratio must be a number between 0 and 1")
         self.attempts = attempts
         """The number of attempts that should be made."""
         self.attempt_interval_seconds = attempt_interval_seconds
@@ -120,11 +128,15 @@ class AttemptStrategy:
         """Multiplier applied to the base wait after each failed attempt."""
         self.max_interval_seconds = max_interval_seconds
         """Optional upper bound for the wait between attempts."""
+        self.jitter_ratio = jitter_ratio
+        """Maximum proportional variation applied to each retry interval."""
 
     def _interval_after(self, failed_attempts: int) -> float:
         interval = self.attempt_interval_seconds * (
             self.backoff_multiplier ** (failed_attempts - 1)
         )
+        if self.jitter_ratio > 0:
+            interval *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
         if self.max_interval_seconds is not None:
             interval = min(interval, self.max_interval_seconds)
         return interval
