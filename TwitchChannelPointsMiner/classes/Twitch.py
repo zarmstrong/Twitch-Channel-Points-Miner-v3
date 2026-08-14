@@ -2086,7 +2086,6 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
-        inventory_active_category_slugs = set(active_category_deadlines)
         twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         fallback_deadlines = self.__twitchdrops_app_fallback(
             categories,
@@ -2131,19 +2130,10 @@ class Twitch(object):
         if "." in order_name:
             order_name = order_name.split(".")[-1]
         if order_name == "EXPIRATION":
-
-            def expiration_sort_key(category):
-                slug = category_slug(category)
-                return (
-                    slug not in inventory_active_category_slugs,
-                    active_category_deadlines.get(slug, datetime.max),
-                )
-
-            filtered_categories.sort(key=expiration_sort_key)
-        else:
             filtered_categories.sort(
-                key=lambda category: category_slug(category)
-                not in inventory_active_category_slugs,
+                key=lambda category: active_category_deadlines.get(
+                    category_slug(category), datetime.max
+                )
             )
 
         return filtered_categories
@@ -3681,22 +3671,37 @@ class Twitch(object):
 
             return [str(campaign["id"]) for campaign in advertised_campaigns]
 
+        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
         if campaign_data_available:
-            if getattr(streamer, "from_category", False) is True:
-                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
-                    0,
-                    0,
+            if (
+                getattr(streamer, "from_category", False) is not True
+                or fallback_campaigns == []
+            ):
+                if getattr(streamer, "from_category", False) is True:
+                    self.category_campaign_eligibility[
+                        (game_slug, streamer.username)
+                    ] = (0, 0)
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' advertises no active "
+                    f"campaign for {streamer.stream.game_name()}",
+                    level=logging.DEBUG,
                 )
+                return []
+
+            # Twitch can omit an account-ineligible campaign from the channel
+            # response even though its official Drops-enabled directory entry
+            # and the external campaign index made it eligible for discovery.
+            # Keep that fallback result instead of replacing it with (0, 0).
             self.__log_drop_check(
-                f"Twitch channel '{streamer.username}' advertises no active "
-                f"campaign for {streamer.stream.game_name()}",
+                f"Twitch channel '{streamer.username}' did not expose the "
+                f"fallback campaign for {streamer.stream.game_name()}; keeping "
+                "category discovery eligibility",
                 level=logging.DEBUG,
             )
-            return []
 
         campaign_ids = set()
         possible_campaigns = list(self.discovered_open_drop_campaigns or [])
-        possible_campaigns.extend(self.twitchdrops_app_campaigns.get(game_slug, []))
+        possible_campaigns.extend(fallback_campaigns)
         for campaign in possible_campaigns:
             if not isinstance(campaign, dict):
                 continue

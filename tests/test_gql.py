@@ -1316,6 +1316,7 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
         "_Twitch__active_drop_category_slugs_from_campaigns",
         lambda self, inventory, requested: ({}, set()),
     )
+
     def fallback(self, categories, known_slugs):
         known_slugs.add("two-point-museum")
         return {"two-point-museum": datetime(2099, 1, 1)}
@@ -1327,9 +1328,23 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
     ]
 
 
-@pytest.mark.parametrize("order", ["ORDER", "EXPIRATION"])
-def test_category_filter_prioritizes_inventory_campaigns_over_fallback(
-    monkeypatch, order
+@pytest.mark.parametrize(
+    ("order", "categories", "expected"),
+    [
+        (
+            "ORDER",
+            ["fallback-game", "inventory-game"],
+            ["fallback-game", "inventory-game"],
+        ),
+        (
+            "EXPIRATION",
+            ["inventory-game", "fallback-game"],
+            ["fallback-game", "inventory-game"],
+        ),
+    ],
+)
+def test_category_filter_orders_campaigns_across_inventory_and_fallback(
+    monkeypatch, order, categories, expected
 ):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}
@@ -1349,14 +1364,64 @@ def test_category_filter_prioritizes_inventory_campaigns_over_fallback(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {
-            "fallback-game": datetime(2099, 1, 1)
-        },
+        lambda self, categories, known_slugs: {"fallback-game": datetime(2099, 1, 1)},
     )
 
-    assert twitch.filter_categories_with_active_drops(
-        ["fallback-game", "inventory-game"], order=order
-    ) == ["inventory-game", "fallback-game"]
+    assert (
+        twitch.filter_categories_with_active_drops(categories, order=order) == expected
+    )
+
+
+def test_category_streamer_keeps_fallback_eligibility_when_twitch_omits_campaign():
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            get_available_drops=lambda channel_id: SimpleNamespace(
+                campaigns=[], campaigns_available=True
+            )
+        )
+    )
+    twitch.log_drop_checks = False
+    twitch.category_campaign_eligibility = {("djs", "example-dj"): (1, 1)}
+    twitch.twitchdrops_app_campaigns = {
+        "djs": [{"id": "fallback-campaign", "channels": [], "game_name": "DJs"}]
+    }
+    twitch.discovered_open_drop_campaigns = []
+    streamer = SimpleNamespace(
+        channel_id="channel-1",
+        username="example-dj",
+        from_category=True,
+        from_badge_campaign=False,
+        stream=SimpleNamespace(game_name=lambda: "DJs"),
+    )
+
+    campaign_ids = twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert campaign_ids == ["fallback-campaign"]
+    assert twitch.category_campaign_eligibility[("djs", "example-dj")] == (1, 1)
+
+
+def test_category_streamer_honors_empty_twitch_campaign_response_without_fallback():
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            get_available_drops=lambda channel_id: SimpleNamespace(
+                campaigns=[], campaigns_available=True
+            )
+        )
+    )
+    twitch.log_drop_checks = False
+    twitch.category_campaign_eligibility = {("game", "example"): (1, 1)}
+    twitch.twitchdrops_app_campaigns = {}
+    streamer = SimpleNamespace(
+        channel_id="channel-1",
+        username="example",
+        from_category=True,
+        stream=SimpleNamespace(game_name=lambda: "Game"),
+    )
+
+    campaign_ids = twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert campaign_ids == []
+    assert twitch.category_campaign_eligibility[("game", "example")] == (0, 0)
 
 
 def test_category_eligibility_replacement_preserves_other_games():
