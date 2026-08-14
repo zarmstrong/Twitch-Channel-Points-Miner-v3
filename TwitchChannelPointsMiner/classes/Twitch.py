@@ -2083,7 +2083,6 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
-        inventory_active_category_slugs = set(active_category_deadlines)
         twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         fallback_deadlines = self.__twitchdrops_app_fallback(
             categories,
@@ -2128,19 +2127,10 @@ class Twitch(object):
         if "." in order_name:
             order_name = order_name.split(".")[-1]
         if order_name == "EXPIRATION":
-
-            def expiration_sort_key(category):
-                slug = category_slug(category)
-                return (
-                    slug not in inventory_active_category_slugs,
-                    active_category_deadlines.get(slug, datetime.max),
-                )
-
-            filtered_categories.sort(key=expiration_sort_key)
-        else:
             filtered_categories.sort(
-                key=lambda category: category_slug(category)
-                not in inventory_active_category_slugs,
+                key=lambda category: active_category_deadlines.get(
+                    category_slug(category), datetime.max
+                )
             )
 
         return filtered_categories

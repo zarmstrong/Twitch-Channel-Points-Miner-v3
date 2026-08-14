@@ -1273,6 +1273,7 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
         "_Twitch__active_drop_category_slugs_from_campaigns",
         lambda self, inventory, requested: ({}, set()),
     )
+
     def fallback(self, categories, known_slugs):
         known_slugs.add("two-point-museum")
         return {"two-point-museum": datetime(2099, 1, 1)}
@@ -1284,9 +1285,23 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
     ]
 
 
-@pytest.mark.parametrize("order", ["ORDER", "EXPIRATION"])
-def test_category_filter_prioritizes_inventory_campaigns_over_fallback(
-    monkeypatch, order
+@pytest.mark.parametrize(
+    ("order", "categories", "expected"),
+    [
+        (
+            "ORDER",
+            ["fallback-game", "inventory-game"],
+            ["fallback-game", "inventory-game"],
+        ),
+        (
+            "EXPIRATION",
+            ["inventory-game", "fallback-game"],
+            ["fallback-game", "inventory-game"],
+        ),
+    ],
+)
+def test_category_filter_orders_campaigns_across_inventory_and_fallback(
+    monkeypatch, order, categories, expected
 ):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}
@@ -1306,14 +1321,12 @@ def test_category_filter_prioritizes_inventory_campaigns_over_fallback(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {
-            "fallback-game": datetime(2099, 1, 1)
-        },
+        lambda self, categories, known_slugs: {"fallback-game": datetime(2099, 1, 1)},
     )
 
-    assert twitch.filter_categories_with_active_drops(
-        ["fallback-game", "inventory-game"], order=order
-    ) == ["inventory-game", "fallback-game"]
+    assert (
+        twitch.filter_categories_with_active_drops(categories, order=order) == expected
+    )
 
 
 def test_category_eligibility_replacement_preserves_other_games():
