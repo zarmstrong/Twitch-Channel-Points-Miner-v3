@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from flask import Flask
 
+import TwitchChannelPointsMiner.config_editor as config_editor
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.Matrix import Matrix
@@ -629,6 +630,87 @@ def test_canonical_config_edits_build_effective_runtime_config(tmp_path):
     assert module.MINE_CONFIG["category_limit"] == 9
     assert module.MINE_CONFIG["category_sort"] == "RANDOM"
     assert module.MINE_CONFIG["category_drops_enabled"] is False
+
+
+def test_canonical_config_edits_add_required_symbol_imports(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        """\
+MINER_CONFIG = {"streamer_settings": {}}
+STREAMERS = ["one"]
+MINE_CONFIG = {"categories": [], "category_sort": "ORDER"}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": True, "chat": "NEVER"},
+        },
+    )
+    update_managed_web_config(
+        config,
+        {"action": "update_category", "values": {"sort": "RANDOM"}},
+    )
+    update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"followers": True}},
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert "from TwitchChannelPointsMiner.classes.Chat import ChatPresence" in source
+    assert (
+        "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+        "Streamer, StreamerSettings"
+    ) in source
+    assert (
+        "from TwitchChannelPointsMiner.classes.Settings import CategorySort" in source
+    )
+    assert (
+        "from TwitchChannelPointsMiner.classes.Settings import StreamerSource" in source
+    )
+    namespace = {}
+    exec(compile(source, config.name, "exec"), namespace)
+    assert namespace["STREAMERS"][0].settings.favorite is True
+    assert namespace["STREAMERS"][0].settings.chat is ChatPresence.NEVER
+    assert namespace["MINE_CONFIG"]["category_sort"] == "RANDOM"
+    assert any(
+        source.name == "FOLLOWERS"
+        for source in namespace["MINER_CONFIG"]["streamer_source_priority"]
+    )
+
+
+def test_legacy_streamers_migrate_in_one_source_rewrite(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    write_config(config)
+    records = [
+        {"username": "one", "settings": {"favorite": False, "chat": "NEVER"}},
+        {"username": "two", "settings": {"favorite": True, "chat": "ALWAYS"}},
+    ]
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"streamers": records}), encoding="utf-8"
+    )
+    calls = []
+    write_streamers = config_editor._write_streamers
+
+    def record_write(config_path, migrated_records, updated_usernames=None):
+        calls.append((migrated_records, updated_usernames))
+        return write_streamers(config_path, migrated_records, updated_usernames)
+
+    monkeypatch.setattr(config_editor, "_write_streamers", record_write)
+
+    migrate_web_config(config)
+
+    assert len(calls) == 1
+    assert calls[0][1] == {"one", "two"}
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].settings.chat is ChatPresence.NEVER
+    assert loaded.STREAMERS[1].settings.favorite is True
+    assert loaded.STREAMERS[1].settings.chat is ChatPresence.ALWAYS
 
 
 def test_remove_streamers_unsubscribes_only_purely_explicit_streamers():

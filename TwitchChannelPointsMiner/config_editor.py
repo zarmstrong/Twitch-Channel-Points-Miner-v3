@@ -374,13 +374,11 @@ def migrate_web_config(config_path):
             if not isinstance(username, str) or STREAMER_RE.fullmatch(username) is None:
                 raise ConfigEditError("Each managed streamer needs a valid username.")
             _validate_streamer_settings(record.get("settings", {}))
-        _write_streamers(config_path, records)
-        for record in records:
-            _write_streamers(
-                config_path,
-                records,
-                str(record.get("username", "")).lower(),
-            )
+        _write_streamers(
+            config_path,
+            records,
+            {str(record.get("username", "")).lower() for record in records},
+        )
     if "categories" in overrides:
         categories = overrides["categories"]
         if not isinstance(categories, list) or any(
@@ -643,7 +641,21 @@ def _write_call_keywords(config_path, find_call, values):
             _insert_config_item(config_path, call, f"{name}={rendered}")
 
 
-def _write_streamers(config_path, records, updated_username=None):
+def _write_streamers(config_path, records, updated_usernames=None):
+    if isinstance(updated_usernames, str):
+        updated_usernames = {updated_usernames}
+    else:
+        updated_usernames = set(updated_usernames or ())
+    if updated_usernames:
+        _ensure_config_import(
+            config_path,
+            "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
+        )
+        _ensure_config_import(
+            config_path,
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+            "Streamer, StreamerSettings",
+        )
     source = Path(config_path).read_text(encoding="utf-8")
     tree, streamers, _categories = _config_lists(source)
     existing = {
@@ -655,7 +667,7 @@ def _write_streamers(config_path, records, updated_username=None):
     for record in records:
         username = record["username"]
         node = existing.get(username.lower(), ast.Constant(username))
-        if updated_username == username.lower():
+        if username.lower() in updated_usernames:
             if isinstance(node, ast.Constant):
                 node = _expression(f"Streamer({username!r})")
             settings_keyword = _call_keyword(node, "settings")
@@ -954,6 +966,11 @@ def _update_managed_web_config(config_path, payload):
             mapping[name]: (f"CategorySort.{value}" if name == "sort" else repr(value))
             for name, value in values.items()
         }
+        if "sort" in values:
+            _ensure_config_import(
+                config_path,
+                "from TwitchChannelPointsMiner.classes.Settings import CategorySort",
+            )
         _set_dict_items(config_path, "MINE_CONFIG", rendered)
     elif action == "update_sources":
         values = payload.get("values") or {}
@@ -981,6 +998,10 @@ def _update_managed_web_config(config_path, payload):
                 priority.append(member)
             elif not enabled and member in priority:
                 priority.remove(member)
+        _ensure_config_import(
+            config_path,
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
+        )
         _set_dict_items(
             config_path,
             "MINER_CONFIG",
