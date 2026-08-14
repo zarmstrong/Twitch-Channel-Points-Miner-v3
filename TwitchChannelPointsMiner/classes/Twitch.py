@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from secrets import choice, token_hex
-from threading import Event, Lock
+from threading import BoundedSemaphore, Event, Lock
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -66,6 +66,7 @@ from TwitchChannelPointsMiner.utils import (
 
 logger = logging.getLogger(__name__)
 JsonType = Dict[str, Any]
+CHANNEL_POINTS_MAX_CONCURRENCY = 3
 
 
 class Twitch(object):
@@ -81,6 +82,7 @@ class Twitch(object):
         "client_version",
         "twilight_build_id_pattern",
         "analytics_mutex",
+        "channel_points_semaphore",
         "drop_progress_last_saved",
         "drop_status_last_saved",
         "drop_report_state",
@@ -143,6 +145,7 @@ class Twitch(object):
             r'window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
         )
         self.analytics_mutex = Lock()
+        self.channel_points_semaphore = BoundedSemaphore(CHANNEL_POINTS_MAX_CONCURRENCY)
         self.drop_progress_last_saved = {}
         self.drop_status_last_saved = {}
         self.drop_report_state = {}
@@ -3343,7 +3346,12 @@ class Twitch(object):
     # Load the amount of current points for a channel, check if a bonus is available
     def load_channel_points_context(self, streamer):
         try:
-            response = self.gql.get_channel_points_context(streamer.username)
+            semaphore = getattr(self, "channel_points_semaphore", None)
+            if semaphore is None:
+                response = self.gql.get_channel_points_context(streamer.username)
+            else:
+                with semaphore:
+                    response = self.gql.get_channel_points_context(streamer.username)
         except RetryError as error:
             logger.error(
                 f"Error loading channel points for {streamer.username}: {error}"

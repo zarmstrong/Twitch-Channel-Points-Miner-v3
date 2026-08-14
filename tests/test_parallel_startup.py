@@ -1,6 +1,7 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
+from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import _unique_streamer_names
 from TwitchChannelPointsMiner.classes.Exceptions import (
@@ -54,6 +55,48 @@ def test_initialize_streamers_context_runs_work_in_parallel(monkeypatch):
     assert {
         username for operation, username in initialized if operation == "online"
     } == {streamer.username for streamer in streamers}
+
+
+def test_channel_points_context_limits_parallel_requests():
+    twitch = Twitch.__new__(Twitch)
+    twitch.channel_points_semaphore = threading.BoundedSemaphore(3)
+    state_lock = threading.Lock()
+    three_started = threading.Event()
+    release_requests = threading.Event()
+    active_requests = 0
+    max_active_requests = 0
+
+    def get_channel_points_context(_username):
+        nonlocal active_requests, max_active_requests
+        with state_lock:
+            active_requests += 1
+            max_active_requests = max(max_active_requests, active_requests)
+            if active_requests == 3:
+                three_started.set()
+        assert release_requests.wait(timeout=5)
+        with state_lock:
+            active_requests -= 1
+        return SimpleNamespace(community=SimpleNamespace(channel=None))
+
+    twitch.gql = SimpleNamespace(
+        get_channel_points_context=get_channel_points_context
+    )
+    streamers = [Streamer(f"streamer{index}") for index in range(8)]
+
+    with ThreadPoolExecutor(max_workers=len(streamers)) as executor:
+        futures = [
+            executor.submit(twitch.load_channel_points_context, streamer)
+            for streamer in streamers
+        ]
+        assert three_started.wait(timeout=5)
+        with state_lock:
+            assert active_requests == 3
+            assert max_active_requests == 3
+        release_requests.set()
+        for future in futures:
+            future.result(timeout=5)
+
+    assert max_active_requests == 3
 
 
 def test_initialize_streamers_context_isolates_individual_failures(monkeypatch):
