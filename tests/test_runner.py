@@ -7,8 +7,11 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 )
 
 from TwitchChannelPointsMiner import runner
-from TwitchChannelPointsMiner.classes.Settings import Priority
-from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+from TwitchChannelPointsMiner.classes.Settings import Priority, StreamerSource
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    Streamer,
+    StreamerSettings,
+)
 from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
 from TwitchChannelPointsMiner.runner import _load_config
 
@@ -48,26 +51,13 @@ def test_streamer_settings_snapshot_ignores_volatile_runtime_state():
     ) == runner._streamer_settings_snapshot(second)
 
 
-def test_config_digest_tolerates_temporarily_unreadable_overrides(
-    tmp_path, monkeypatch
-):
+def test_config_digest_uses_only_config_file(tmp_path):
     config = tmp_path / "config.py"
-    override = tmp_path / "web-config.json"
     config.write_text("configuration", encoding="utf-8")
-    override.write_text("{}", encoding="utf-8")
-    original_read_bytes = type(config).read_bytes
+    original_digest = runner._config_digest(config)
+    config.write_text("updated configuration", encoding="utf-8")
 
-    def read_bytes(path):
-        if path == override:
-            raise OSError("temporarily unavailable")
-        return original_read_bytes(path)
-
-    monkeypatch.setattr(type(config), "read_bytes", read_bytes)
-
-    unavailable_digest = runner._config_digest(config)
-    monkeypatch.setattr(type(config), "read_bytes", original_read_bytes)
-
-    assert runner._config_digest(config) != unavailable_digest
+    assert runner._config_digest(config) != original_digest
 
 
 def test_config_watcher_refreshes_restart_snapshots(monkeypatch, caplog):
@@ -194,13 +184,13 @@ ANALYTICS_CONFIG = None
 def test_load_config_discards_dynamically_assembled_twitch_password(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
-        f'''\
+        f"""\
 CONFIG_VERSION = {CONFIG_VERSION}
 MINER_CONFIG = {{"username": "alice", **{{"password": "secret"}}}}
 STREAMERS = []
 MINE_CONFIG = {{}}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
 
@@ -238,13 +228,13 @@ ANALYTICS_CONFIG = None
 def test_load_config_reports_migration_errors_without_executing_config(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
-        f'''\
+        f"""\
 CONFIG_VERSION = {CONFIG_VERSION + 1}
 MINER_CONFIG = {{}}
 STREAMERS = []
 MINE_CONFIG = {{}}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
 
@@ -260,45 +250,69 @@ ANALYTICS_CONFIG = None
 def test_load_config_wraps_dashboard_override_errors(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
-        f'''\
+        f"""\
 CONFIG_VERSION = {CONFIG_VERSION}
 MINER_CONFIG = {{}}
 STREAMERS = []
 MINE_CONFIG = {{}}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
     (tmp_path / "web-config.json").write_text("{broken", encoding="utf-8")
 
     with pytest.raises(
-        RuntimeError, match="Unable to apply dashboard-managed configuration"
+        RuntimeError, match="Unable to migrate dashboard configuration"
     ) as raised:
         _load_config(config)
 
     assert raised.value.__cause__.__class__.__name__ == "ConfigEditError"
 
 
+def test_load_config_migrates_legacy_dashboard_overrides(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"""\
+CONFIG_VERSION = {CONFIG_VERSION}
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+MINER_CONFIG = {{"streamer_source_priority": [StreamerSource.STREAMERS]}}
+STREAMERS = ["one"]
+MINE_CONFIG = {{"followers": False, "categories": []}}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+    legacy = tmp_path / "web-config.json"
+    legacy.write_text('{"sources": {"followers": true}}', encoding="utf-8")
+
+    loaded = _load_config(config)
+
+    assert loaded.MINE_CONFIG["followers"] is True
+    assert StreamerSource.FOLLOWERS in loaded.MINER_CONFIG["streamer_source_priority"]
+    assert not legacy.exists()
+    assert (tmp_path / ".web-config.json.migrated.bak").is_file()
+
+
 def test_load_config_sanitizes_dashboard_override_io_errors(tmp_path, monkeypatch):
     config = tmp_path / "config.py"
     config.write_text(
-        f'''\
+        f"""\
 CONFIG_VERSION = {CONFIG_VERSION}
 MINER_CONFIG = {{}}
 STREAMERS = []
 MINE_CONFIG = {{}}
 ANALYTICS_CONFIG = None
-''',
+""",
         encoding="utf-8",
     )
 
-    def fail_overrides(_module, _path):
+    def fail_migration(_path):
         raise OSError("permission denied: /private/config/web-config.json")
 
-    monkeypatch.setattr(runner, "apply_web_overrides", fail_overrides)
+    monkeypatch.setattr(runner, "migrate_web_config", fail_migration)
 
     with pytest.raises(
-        RuntimeError, match="Unable to access dashboard-managed configuration"
+        RuntimeError, match="Unable to migrate dashboard configuration"
     ) as raised:
         _load_config(config)
 
