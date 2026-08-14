@@ -3663,22 +3663,37 @@ class Twitch(object):
 
             return [str(campaign["id"]) for campaign in advertised_campaigns]
 
+        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
         if campaign_data_available:
-            if getattr(streamer, "from_category", False) is True:
-                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
-                    0,
-                    0,
+            if (
+                getattr(streamer, "from_category", False) is not True
+                or fallback_campaigns == []
+            ):
+                if getattr(streamer, "from_category", False) is True:
+                    self.category_campaign_eligibility[
+                        (game_slug, streamer.username)
+                    ] = (0, 0)
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' advertises no active "
+                    f"campaign for {streamer.stream.game_name()}",
+                    level=logging.DEBUG,
                 )
+                return []
+
+            # Twitch can omit an account-ineligible campaign from the channel
+            # response even though its official Drops-enabled directory entry
+            # and the external campaign index made it eligible for discovery.
+            # Keep that fallback result instead of replacing it with (0, 0).
             self.__log_drop_check(
-                f"Twitch channel '{streamer.username}' advertises no active "
-                f"campaign for {streamer.stream.game_name()}",
+                f"Twitch channel '{streamer.username}' did not expose the "
+                f"fallback campaign for {streamer.stream.game_name()}; keeping "
+                "category discovery eligibility",
                 level=logging.DEBUG,
             )
-            return []
 
         campaign_ids = set()
         possible_campaigns = list(self.discovered_open_drop_campaigns or [])
-        possible_campaigns.extend(self.twitchdrops_app_campaigns.get(game_slug, []))
+        possible_campaigns.extend(fallback_campaigns)
         for campaign in possible_campaigns:
             if not isinstance(campaign, dict):
                 continue
