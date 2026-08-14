@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.15.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.15.0...3.15.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **categories:** order campaigns by deadline ([#99](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/99)) ([7320d7c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7320d7ca1f30e158a63b89b7c9d7837b9a65ab72))
+* **drops:** preserve fallback category eligibility ([7320d7c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7320d7ca1f30e158a63b89b7c9d7837b9a65ab72))
+* **gql:** throttle channel points startup requests ([#101](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/101)) ([3e3180f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3e3180fc29b7f6c0308dc33b8599a1a309ecdb33))
+
 ## [3.15.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.14.2...3.15.0) (2026-08-14)
 
 
