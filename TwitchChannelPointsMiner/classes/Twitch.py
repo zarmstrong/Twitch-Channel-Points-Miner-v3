@@ -104,7 +104,7 @@ class Twitch(object):
         "campaign_detail_attempts",
         "category_campaign_eligibility",
         "category_campaign_deadlines",
-        "last_category_drop_pick",
+        "last_category_drop_selection",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "campaign_game_slugs",
@@ -169,7 +169,7 @@ class Twitch(object):
         self.campaign_detail_attempts = set()
         self.category_campaign_eligibility = {}
         self.category_campaign_deadlines = {}
-        self.last_category_drop_pick = None
+        self.last_category_drop_selection = None
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.campaign_game_slugs = {}
@@ -2276,9 +2276,14 @@ class Twitch(object):
         chosen_username = (
             streamers[chosen_index].username if chosen_index is not None else None
         )
-        if chosen_username == getattr(self, "last_category_drop_pick", None):
+        # "No eligible campaign at all" and "eligible campaigns exist but none
+        # got a watch slot this cycle" both leave chosen_username as None -
+        # fold whether there were any candidates into the dedup key so that
+        # transitioning between those two situations still logs once.
+        selection_state = (chosen_username, bool(candidate_indexes))
+        if selection_state == getattr(self, "last_category_drop_selection", None):
             return
-        self.last_category_drop_pick = chosen_username
+        self.last_category_drop_selection = selection_state
 
         def describe(index):
             streamer = streamers[index]
