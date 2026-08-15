@@ -2280,15 +2280,6 @@ class Twitch(object):
             return
         self.last_category_drop_pick = chosen_username
 
-        if chosen_index is None:
-            if candidate_indexes:
-                logger.info(
-                    f"{Fore.YELLOW}No category-discovered drop stream is "
-                    f"currently eligible to watch{Fore.RESET}",
-                    extra={"emoji": ":warning:", "event": Events.DROP_STATUS},
-                )
-            return
-
         def describe(index):
             streamer = streamers[index]
             deadline = category_expiration(index)
@@ -2302,13 +2293,28 @@ class Twitch(object):
                 time_left = f"{minutes_left:.0f}m left"
             return f"{streamer.username} ({game_name}: {time_left})"
 
-        labels = [describe(index) for index in candidate_indexes[:5]]
-        if len(candidate_indexes) > 5:
-            labels.append(f"{len(candidate_indexes) - 5} more")
+        def describe_candidates():
+            labels = [describe(index) for index in candidate_indexes[:5]]
+            if len(candidate_indexes) > 5:
+                labels.append(f"{len(candidate_indexes) - 5} more")
+            return ", ".join(labels)
+
+        if chosen_index is None:
+            if candidate_indexes:
+                # Eligible category streams exist but none of them were given
+                # a watch slot this cycle (other sources/priorities filled it) -
+                # distinct from there being no eligible campaign at all.
+                logger.info(
+                    f"{Fore.YELLOW}{len(candidate_indexes)} category-discovered "
+                    "drop stream(s) eligible but no watch slot free this cycle "
+                    f"({describe_candidates()}){Fore.RESET}",
+                    extra={"emoji": ":warning:", "event": Events.DROP_STATUS},
+                )
+            return
 
         reason = (
             f"soonest-expiring of {len(candidate_indexes)} eligible campaigns "
-            f"({', '.join(labels)})"
+            f"({describe_candidates()})"
             if len(candidate_indexes) > 1
             else "only eligible campaign-drops stream currently live"
         )

@@ -677,3 +677,62 @@ def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
     )
 
     assert selection_messages() == []
+
+
+def test_category_drop_pick_log_distinguishes_no_slot_from_no_eligible(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module(
+        "TwitchChannelPointsMiner.classes.Twitch"
+    )
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    category_streamer = _watch_streamer(
+        "queued-category", from_category=True, drops_eligible=True
+    )
+    category_streamer.stream.game_name = lambda: "Some Game"
+    category_streamer.stream.game = {"displayName": "Some Game"}
+
+    # First cycle: nothing else competes for the slot, so it gets watched
+    # and logged normally.
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category_streamer],
+        streams_watched=2,
+        twitch_out=twitch_out,
+    )
+    assert any(
+        "Selected" in m and "for drops" in m and "queued-category" in m
+        for m in messages
+    )
+
+    # Second cycle (same miner state): two explicit streamers now fill both
+    # watch slots ahead of the category source, bumping the previously
+    # eligible category stream out entirely - it never gets a chance to
+    # watch, which is a different situation from "nothing is eligible".
+    messages.clear()
+    twitch = twitch_out[0]
+    twitch.running = True
+    twitch.send_minute_watched_events(
+        [_watch_streamer("one"), _watch_streamer("two"), category_streamer],
+        [Priority.ORDER],
+        streams_watched=2,
+    )
+
+    no_slot_messages = [
+        m for m in messages if "eligible but no watch slot free" in m
+    ]
+    assert len(no_slot_messages) == 1
+    assert "queued-category" in no_slot_messages[0]
+    assert "Some Game" in no_slot_messages[0]
+    assert not any("Selected" in m and "for drops" in m for m in messages)
+    assert not any("No category-discovered drop stream is" in m for m in messages)
