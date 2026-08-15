@@ -103,6 +103,8 @@ class Twitch(object):
         "campaign_channel_ids",
         "campaign_detail_attempts",
         "category_campaign_eligibility",
+        "category_campaign_deadlines",
+        "last_category_drop_pick",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "campaign_game_slugs",
@@ -166,6 +168,8 @@ class Twitch(object):
         self.campaign_channel_ids = {}
         self.campaign_detail_attempts = set()
         self.category_campaign_eligibility = {}
+        self.category_campaign_deadlines = {}
+        self.last_category_drop_pick = None
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.campaign_game_slugs = {}
@@ -2103,6 +2107,10 @@ class Twitch(object):
                 if game_slug not in twitch_evaluated_category_slugs
             }
         )
+        # Cache the per-category deadlines so send_minute_watched_events can
+        # arbitrate between simultaneously-live category streams by whichever
+        # campaign is closest to expiring, instead of by discovery order.
+        self.category_campaign_deadlines = dict(active_category_deadlines)
         if active_category_deadlines == {}:
             for requested_slug in requested_category_slugs:
                 self.__replace_category_campaign_eligibility(requested_slug, {})
@@ -2261,6 +2269,54 @@ class Twitch(object):
             return True
 
         return False
+
+    def __log_category_drop_pick(
+        self, streamers, chosen_index, candidate_indexes, category_expiration
+    ):
+        chosen_username = (
+            streamers[chosen_index].username if chosen_index is not None else None
+        )
+        if chosen_username == getattr(self, "last_category_drop_pick", None):
+            return
+        self.last_category_drop_pick = chosen_username
+
+        if chosen_index is None:
+            if candidate_indexes:
+                logger.info(
+                    f"{Fore.YELLOW}No category-discovered drop stream is "
+                    f"currently eligible to watch{Fore.RESET}",
+                    extra={"emoji": ":warning:", "event": Events.DROP_STATUS},
+                )
+            return
+
+        def describe(index):
+            streamer = streamers[index]
+            deadline = category_expiration(index)
+            game_name = self.__stream_game_label(streamer.stream)
+            if deadline == datetime.max:
+                time_left = "no known deadline"
+            else:
+                minutes_left = max(
+                    (deadline - datetime.utcnow()).total_seconds() / 60, 0
+                )
+                time_left = f"{minutes_left:.0f}m left"
+            return f"{streamer.username} ({game_name}: {time_left})"
+
+        labels = [describe(index) for index in candidate_indexes[:5]]
+        if len(candidate_indexes) > 5:
+            labels.append(f"{len(candidate_indexes) - 5} more")
+
+        reason = (
+            f"soonest-expiring of {len(candidate_indexes)} eligible campaigns "
+            f"({', '.join(labels)})"
+            if len(candidate_indexes) > 1
+            else "only eligible campaign-drops stream currently live"
+        )
+        logger.info(
+            f"{Fore.CYAN}Selected {streamers[chosen_index].username} for drops: "
+            f"{reason}{Fore.RESET}",
+            extra={"emoji": ":dart:", "event": Events.DROP_STATUS},
+        )
 
     def __log_watched_streamers(self, streamers, streamers_watching):
         def watch_reason(streamer):
@@ -3072,6 +3128,14 @@ class Twitch(object):
                 def remaining_watch_amount():
                     return max_watch_amount - len(streamers_watching)
 
+                category_deadlines = getattr(self, "category_campaign_deadlines", {})
+
+                def category_expiration(index):
+                    game_slug = self.__slugify(
+                        streamers[index].stream.game_name() or ""
+                    )
+                    return category_deadlines.get(game_slug, datetime.max)
+
                 indexes_by_source = {
                     source: [
                         index
@@ -3080,6 +3144,13 @@ class Twitch(object):
                     ]
                     for source in source_priority
                 }
+                # Category-discovered streams don't get a slot each in priority
+                # order like the other sources do (only one is ever watched at
+                # a time, below) - order them so whichever campaign is closest
+                # to expiring is always the one considered/selected first.
+                indexes_by_source[StreamerSource.CATEGORIES].sort(
+                    key=category_expiration
+                )
 
                 for prior in priority:
                     if remaining_watch_amount() <= 0:
@@ -3175,14 +3246,30 @@ class Twitch(object):
                 )[:max_watch_amount]
 
                 # Safety net: never watch more than one category-discovered streamer
-                # in the same loop iteration.
-                category_picks = 0
+                # in the same loop iteration. When several qualified this cycle,
+                # keep whichever campaign is closest to expiring.
+                category_candidates = [
+                    index
+                    for index in streamers_watching
+                    if getattr(streamers[index], "from_category", False) is True
+                ]
+                preferred_category_index = (
+                    min(category_candidates, key=category_expiration)
+                    if category_candidates
+                    else None
+                )
+                self.__log_category_drop_pick(
+                    streamers,
+                    preferred_category_index,
+                    indexes_by_source[StreamerSource.CATEGORIES],
+                    category_expiration,
+                )
+
                 filtered_streamers_watching = []
                 for index in streamers_watching:
                     if getattr(streamers[index], "from_category", False) is True:
-                        if category_picks >= 1:
+                        if index != preferred_category_index:
                             continue
-                        category_picks += 1
                     filtered_streamers_watching.append(index)
 
                 # If multiple discovered streams occupied the initial selection,

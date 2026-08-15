@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -136,7 +137,9 @@ def _run_one_watch_iteration(
     drop_inventory_progress=None,
     drop_watch_health=None,
     drop_progress_stall_minutes=10,
+    category_campaign_deadlines=None,
     now=None,
+    twitch_out=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -150,12 +153,16 @@ def _run_one_watch_iteration(
         for streamer in streamers
         if streamer.from_category and streamer.drops_condition()
     }
+    twitch.category_campaign_deadlines = category_campaign_deadlines or {}
+    twitch.last_category_drop_pick = None
     twitch.twitchdrops_app_campaigns = {}
     twitch.drop_inventory_progress = drop_inventory_progress or {}
     twitch.drop_inventory_progress_updated_at = (
         now if drop_inventory_progress and now is not None else 0
     )
     twitch.drop_watch_health = drop_watch_health or {}
+    if twitch_out is not None:
+        twitch_out.append(twitch)
     posted = []
 
     if now is not None:
@@ -584,3 +591,89 @@ def test_badge_drop_streamer_limit_rejects_values_other_than_one_or_two(
 def test_badge_drop_streamer_limit_accepts_one_or_two(caplog, value):
     assert _normalize_badge_drop_streamer_limit(value) == value
     assert caplog.text == ""
+
+
+def test_category_drop_pick_prefers_soonest_expiring_campaign(monkeypatch):
+    # Discovered first (lower array index) but its campaign expires later -
+    # discovery order must not win over expiration.
+    slow_game = _watch_streamer(
+        "later-deadline", from_category=True, drops_eligible=True
+    )
+    slow_game.stream.game_name = lambda: "Slow Game"
+    urgent_game = _watch_streamer(
+        "sooner-deadline", from_category=True, drops_eligible=True
+    )
+    urgent_game.stream.game_name = lambda: "Urgent Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [slow_game, urgent_game],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "slow-game": datetime(2099, 1, 1),
+            "urgent-game": datetime(2020, 1, 1),
+        },
+    )
+
+    assert posted == ["https://spade.test/sooner-deadline"]
+
+
+def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module(
+        "TwitchChannelPointsMiner.classes.Twitch"
+    )
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    fortnite = _watch_streamer(
+        "brasil_fortnite", from_category=True, drops_eligible=True
+    )
+    fortnite.stream.game_name = lambda: "Fortnite"
+    fortnite.stream.game = {"displayName": "Fortnite"}
+    division = _watch_streamer(
+        "nothingbutskillz", from_category=True, drops_eligible=True
+    )
+    division.stream.game_name = lambda: "The Division 2"
+    division.stream.game = {"displayName": "The Division 2"}
+
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [division, fortnite],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "fortnite": datetime(2020, 1, 1),
+            "the-division-2": datetime(2099, 1, 1),
+        },
+        twitch_out=twitch_out,
+    )
+
+    def selection_messages():
+        return [m for m in messages if "Selected" in m and "for drops" in m]
+
+    assert len(selection_messages()) == 1
+    reason = selection_messages()[0]
+    assert "brasil_fortnite" in reason
+    assert "Fortnite" in reason
+    assert "The Division 2" in reason
+
+    # Re-running against the same, unchanged pick must not repeat the log line.
+    messages.clear()
+    twitch = twitch_out[0]
+    twitch.running = True
+    twitch.send_minute_watched_events(
+        [division, fortnite],
+        [Priority.ORDER],
+        streams_watched=1,
+    )
+
+    assert selection_messages() == []
