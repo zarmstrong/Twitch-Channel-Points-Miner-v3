@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.15.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.15.1...3.15.2) (2026-08-15)
+
+
+### Bug Fixes
+
+* **drops:** always pick the soonest-expiring category campaign ([#103](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/103)) ([07fb863](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/07fb863bd95ba79301654ebf57388f5e07f7e731))
+
 ## [3.15.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.15.0...3.15.1) (2026-08-14)
 
 
