@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -136,7 +137,9 @@ def _run_one_watch_iteration(
     drop_inventory_progress=None,
     drop_watch_health=None,
     drop_progress_stall_minutes=10,
+    category_campaign_deadlines=None,
     now=None,
+    twitch_out=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -150,12 +153,16 @@ def _run_one_watch_iteration(
         for streamer in streamers
         if streamer.from_category and streamer.drops_condition()
     }
+    twitch.category_campaign_deadlines = category_campaign_deadlines or {}
+    twitch.last_category_drop_selection = None
     twitch.twitchdrops_app_campaigns = {}
     twitch.drop_inventory_progress = drop_inventory_progress or {}
     twitch.drop_inventory_progress_updated_at = (
         now if drop_inventory_progress and now is not None else 0
     )
     twitch.drop_watch_health = drop_watch_health or {}
+    if twitch_out is not None:
+        twitch_out.append(twitch)
     posted = []
 
     if now is not None:
@@ -584,3 +591,217 @@ def test_badge_drop_streamer_limit_rejects_values_other_than_one_or_two(
 def test_badge_drop_streamer_limit_accepts_one_or_two(caplog, value):
     assert _normalize_badge_drop_streamer_limit(value) == value
     assert caplog.text == ""
+
+
+def test_category_drop_pick_prefers_soonest_expiring_campaign(monkeypatch):
+    # Discovered first (lower array index) but its campaign expires later -
+    # discovery order must not win over expiration.
+    slow_game = _watch_streamer(
+        "later-deadline", from_category=True, drops_eligible=True
+    )
+    slow_game.stream.game_name = lambda: "Slow Game"
+    urgent_game = _watch_streamer(
+        "sooner-deadline", from_category=True, drops_eligible=True
+    )
+    urgent_game.stream.game_name = lambda: "Urgent Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [slow_game, urgent_game],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "slow-game": datetime(2099, 1, 1),
+            "urgent-game": datetime(2020, 1, 1),
+        },
+    )
+
+    assert posted == ["https://spade.test/sooner-deadline"]
+
+
+def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module(
+        "TwitchChannelPointsMiner.classes.Twitch"
+    )
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    fortnite = _watch_streamer(
+        "brasil_fortnite", from_category=True, drops_eligible=True
+    )
+    fortnite.stream.game_name = lambda: "Fortnite"
+    fortnite.stream.game = {"displayName": "Fortnite"}
+    division = _watch_streamer(
+        "nothingbutskillz", from_category=True, drops_eligible=True
+    )
+    division.stream.game_name = lambda: "The Division 2"
+    division.stream.game = {"displayName": "The Division 2"}
+
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [division, fortnite],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "fortnite": datetime(2020, 1, 1),
+            "the-division-2": datetime(2099, 1, 1),
+        },
+        twitch_out=twitch_out,
+    )
+
+    def selection_messages():
+        return [m for m in messages if "Selected" in m and "for drops" in m]
+
+    assert len(selection_messages()) == 1
+    reason = selection_messages()[0]
+    assert "brasil_fortnite" in reason
+    assert "Fortnite" in reason
+    assert "The Division 2" in reason
+
+    # Re-running against the same, unchanged pick must not repeat the log line.
+    messages.clear()
+    twitch = twitch_out[0]
+    twitch.running = True
+    twitch.send_minute_watched_events(
+        [division, fortnite],
+        [Priority.ORDER],
+        streams_watched=1,
+    )
+
+    assert selection_messages() == []
+
+
+def test_category_drop_pick_log_distinguishes_no_slot_from_no_eligible(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module(
+        "TwitchChannelPointsMiner.classes.Twitch"
+    )
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    category_streamer = _watch_streamer(
+        "queued-category", from_category=True, drops_eligible=True
+    )
+    category_streamer.stream.game_name = lambda: "Some Game"
+    category_streamer.stream.game = {"displayName": "Some Game"}
+
+    # First cycle: nothing else competes for the slot, so it gets watched
+    # and logged normally.
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category_streamer],
+        streams_watched=2,
+        twitch_out=twitch_out,
+    )
+    assert any(
+        "Selected" in m and "for drops" in m and "queued-category" in m
+        for m in messages
+    )
+
+    # Second cycle (same miner state): two explicit streamers now fill both
+    # watch slots ahead of the category source, bumping the previously
+    # eligible category stream out entirely - it never gets a chance to
+    # watch, which is a different situation from "nothing is eligible".
+    messages.clear()
+    twitch = twitch_out[0]
+    twitch.running = True
+    twitch.send_minute_watched_events(
+        [_watch_streamer("one"), _watch_streamer("two"), category_streamer],
+        [Priority.ORDER],
+        streams_watched=2,
+    )
+
+    no_slot_messages = [
+        m for m in messages if "eligible but no watch slot free" in m
+    ]
+    assert len(no_slot_messages) == 1
+    assert "queued-category" in no_slot_messages[0]
+    assert "Some Game" in no_slot_messages[0]
+    assert not any("Selected" in m and "for drops" in m for m in messages)
+    assert not any("No category-discovered drop stream is" in m for m in messages)
+
+
+def test_category_drop_pick_logs_when_first_candidate_appears_with_no_slot(
+    monkeypatch,
+):
+    # Both "no eligible campaign at all" and "eligible but no watch slot
+    # free" leave chosen_username as None - the dedup key must still treat
+    # that transition as a change worth logging.
+    messages = []
+    twitch_module = importlib.import_module(
+        "TwitchChannelPointsMiner.classes.Twitch"
+    )
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    def category_pick_messages():
+        return [
+            m
+            for m in messages
+            if ("Selected" in m and "for drops" in m)
+            or "eligible but no watch slot free" in m
+            or "No category-discovered drop stream is" in m
+        ]
+
+    # First cycle: no category streamer at all - no category-pick message
+    # should be logged (the routine "Watching for points" line still is).
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("one"), _watch_streamer("two")],
+        streams_watched=2,
+        twitch_out=twitch_out,
+    )
+    assert category_pick_messages() == []
+
+    # Second cycle (same miner state): an eligible category streamer shows
+    # up, but both slots are still held by the explicit streamers - this is
+    # a different situation from "nothing eligible" and must be logged.
+    category_streamer = _watch_streamer(
+        "late-arrival", from_category=True, drops_eligible=True
+    )
+    category_streamer.stream.game_name = lambda: "Late Game"
+    category_streamer.stream.game = {"displayName": "Late Game"}
+
+    twitch = twitch_out[0]
+    twitch.running = True
+    # This streamer didn't exist when _run_one_watch_iteration built the
+    # eligibility cache from the first cycle's streamer list, so register it
+    # directly - mirrors what a real category-discovery refresh would do.
+    twitch.category_campaign_eligibility[("late-game", "late-arrival")] = (1, 1)
+    twitch.send_minute_watched_events(
+        [_watch_streamer("one"), _watch_streamer("two"), category_streamer],
+        [Priority.ORDER],
+        streams_watched=2,
+    )
+
+    no_slot_messages = [
+        m for m in messages if "eligible but no watch slot free" in m
+    ]
+    assert len(no_slot_messages) == 1
+    assert "late-arrival" in no_slot_messages[0]
