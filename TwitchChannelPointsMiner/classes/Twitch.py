@@ -286,6 +286,14 @@ class Twitch(object):
     def __slugify(self, value: str) -> str:
         normalized = unicodedata.normalize("NFKD", str(value))
         ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+        # Drop apostrophes instead of letting the regex below turn them into a
+        # hyphen. Twitch's own category slugs (and the slugs users copy into
+        # config categories) contract "Clancy's" to "clancys", not "clancy-s" -
+        # matching that convention keeps a game_slug computed from a display
+        # name consistent with a game_slug computed from a configured category
+        # string for every possessive game title (Tom Clancy's ..., Sid
+        # Meier's ..., Baldur's Gate, Marvel's ..., Assassin's Creed, ...).
+        ascii_value = ascii_value.replace("'", "")
         return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
 
     def __cache_drop_inventory_progress(self, inventory: dict):
