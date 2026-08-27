@@ -207,6 +207,32 @@ def test_authoritative_channel_campaign_result_blocks_wrong_game(monkeypatch):
     )
 
 
+def test_drops_description_is_none_once_channel_check_confirmed_zero_campaigns(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (0, 0)
+    # An unrelated global campaign for the same game must not resurrect a
+    # description - the live per-channel check already ruled this channel out.
+    twitch.discovered_open_drop_campaigns = [advertised_campaign()]
+
+    assert (
+        twitch._Twitch__streamer_drops_description(category_streamer()) is None
+    )
+
+
+def test_drops_description_uses_global_catalog_without_a_channel_check_yet(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.discovered_open_drop_campaigns = [advertised_campaign()]
+
+    assert (
+        twitch._Twitch__streamer_drops_description(category_streamer())
+        == "Example Game drops"
+    )
+
+
 def test_campaign_deadline_logs_include_game_name(monkeypatch, caplog):
     twitch = bare_twitch(monkeypatch)
     campaign = campaign_data()

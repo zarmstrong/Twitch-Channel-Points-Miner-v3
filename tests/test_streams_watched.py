@@ -327,7 +327,7 @@ def test_stale_category_streamer_is_refreshed_even_when_ineligible(monkeypatch):
     assert checked == ["stale-category"]
 
 
-def test_explicit_streamer_is_refreshed_past_ten_minute_gate(monkeypatch):
+def test_explicit_streamer_is_refreshed_at_ten_minute_gate(monkeypatch):
     stale_explicit = _watch_streamer("stale-explicit")
     stale_explicit.stream.update_elapsed = lambda: 600
 
