@@ -803,6 +803,11 @@ class TwitchChannelPointsMiner:
                                     f"Streamer {username} does not exist",
                                     extra={"emoji": ":cry:"},
                                 )
+                            except RetryError as retry_error:
+                                logger.error(
+                                    f"Failed to load streamer {username} after "
+                                    f"retry: {retry_error}"
+                                )
                             except Exception:
                                 logger.error(
                                     f"Failed to load streamer {username}",
