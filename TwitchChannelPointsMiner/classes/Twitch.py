@@ -3400,13 +3400,25 @@ class Twitch(object):
                     next_iteration = time.time() + 20 / len(streamers_watching)
 
                     try:
-                        response = requests.post(
-                            streamers_snapshot[index].stream.spade_url,
-                            data=streamers_snapshot[index].stream.encode_payload(),
-                            headers={"User-Agent": self.user_agent},
-                            # timeout=60,
-                            timeout=20,
-                        )
+                        for attempt in range(2):
+                            try:
+                                response = requests.post(
+                                    streamers_snapshot[index].stream.spade_url,
+                                    data=streamers_snapshot[
+                                        index
+                                    ].stream.encode_payload(),
+                                    headers={"User-Agent": self.user_agent},
+                                    # timeout=60,
+                                    timeout=20,
+                                )
+                                break
+                            except requests.exceptions.ConnectionError:
+                                if attempt == 0:
+                                    logger.warning(
+                                        f"Connection error sending minute watched for {streamers_snapshot[index]}, retrying once..."
+                                    )
+                                    continue
+                                raise
                         logger.debug(
                             f"Send minute watched request for {streamers_snapshot[index]} - Status code: {response.status_code}"
                         )
