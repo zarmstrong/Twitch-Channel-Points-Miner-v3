@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.16.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.15.2...3.16.0) (2026-08-27)
+
+
+### Features
+
+* **chat:** prefer TLS for IRC chat, falling back to plaintext ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+
+
+### Bug Fixes
+
+* **analytics:** dedupe drops-by-category dashboard rows on drop_id alone ([eda1604](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/eda1604b211ff246a1ff3ba678a2fb4d3803b625))
+* **betting:** use combined outcome totals on 3+ option predictions ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+* **chat:** stop spamming errors when IRC chat thread is stopped ([#111](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/111)) ([a7246fa](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a7246fa55746bf2886b3ab74b13d0c649b17dce9))
+* **drops:** avoid misleading "Online for &lt;game&gt; drops" status messages ([eda1604](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/eda1604b211ff246a1ff3ba678a2fb4d3803b625))
+* **drops:** drop apostrophes in __slugify instead of hyphenating them ([eda1604](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/eda1604b211ff246a1ff3ba678a2fb4d3803b625))
+* **drops:** prune stale games/campaigns from the badge catalog ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+* **drops:** refresh category eligibility for all online streamers, not just watched ones ([#105](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/105)) ([eda1604](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/eda1604b211ff246a1ff3ba678a2fb4d3803b625))
+* **gui:** correct word order for game names with leading digits in Drops tab ([#108](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/108)) ([fab4560](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/fab456018f0c346ec532f0864426ea459ab219bf))
+* **logger:** fix dead timezone-none check for per-run log filenames ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+* **login:** stop device-code polling from hanging forever ([#107](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/107)) ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+* **shutdown:** bound minute-watcher/sync-campaigns join on Ctrl+C ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+* **startup:** retry once when initial streamer bootstrap hits a GQL RetryError ([#110](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/110)) ([fd4cb7a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/fd4cb7af5f4523fe67623f2f92380701dbea67df))
+* **twitch:** harden minute-watcher and eligibility cache against crashes and races ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+* **watch:** retry once on connection error sending minute watched ([#109](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/109)) ([f255270](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f255270339af40f65ab4760ea6fe824165c88f08))
+* **websocket:** make reconnection check-and-set atomic ([a58ded5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a58ded509f5dd6f722494cb5d6e23626eedffeb3))
+
 ## [3.15.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.15.1...3.15.2) (2026-08-15)
 
 
