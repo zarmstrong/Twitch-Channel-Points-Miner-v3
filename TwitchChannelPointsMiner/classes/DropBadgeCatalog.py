@@ -142,6 +142,14 @@ class DropBadgeCatalog:
         "state",
     ]
 
+    # Bound how long a game/campaign no longer reported by the front page can
+    # linger in state before being dropped - without this, games/campaigns.json
+    # grows without limit over weeks/months of continuous uptime, since nothing
+    # ever removed an entry once added.
+    GAME_STALE_AFTER_DAYS = 3
+    CAMPAIGN_RETENTION_AFTER_END_DAYS = 7
+    CAMPAIGN_STALE_WITHOUT_END_DAYS = 30
+
     def __init__(
         self,
         login,
@@ -281,6 +289,52 @@ class DropBadgeCatalog:
                     count += 1
         return count
 
+    def _prune_stale_state(self, indexed_slugs):
+        now = _now()
+
+        stale_game_slugs = []
+        for slug, record in self.state["games"].items():
+            if slug in indexed_slugs:
+                continue
+            last_scraped_at = _parse_timestamp(
+                record.get("last_scraped_at") if isinstance(record, dict) else None
+            )
+            if (
+                last_scraped_at is None
+                or (now - last_scraped_at).total_seconds()
+                >= self.GAME_STALE_AFTER_DAYS * 86400
+            ):
+                stale_game_slugs.append(slug)
+        for slug in stale_game_slugs:
+            del self.state["games"][slug]
+
+        stale_campaign_ids = []
+        for campaign_id, record in self.state["campaigns"].items():
+            if not isinstance(record, dict):
+                stale_campaign_ids.append(campaign_id)
+                continue
+            campaign = record.get("campaign")
+            ends_at = _parse_timestamp(
+                campaign.get("ends_at") if isinstance(campaign, dict) else None
+            )
+            if ends_at is not None:
+                if (
+                    now - ends_at
+                ).total_seconds() >= self.CAMPAIGN_RETENTION_AFTER_END_DAYS * 86400:
+                    stale_campaign_ids.append(campaign_id)
+                continue
+            last_seen_at = _parse_timestamp(record.get("last_seen_at"))
+            if (
+                last_seen_at is None
+                or (now - last_seen_at).total_seconds()
+                >= self.CAMPAIGN_STALE_WITHOUT_END_DAYS * 86400
+            ):
+                stale_campaign_ids.append(campaign_id)
+        for campaign_id in stale_campaign_ids:
+            del self.state["campaigns"][campaign_id]
+
+        return len(stale_game_slugs), len(stale_campaign_ids)
+
     def sync(self, force=False):
         badge_refreshed = False
         badge_sets = self.state["badge_catalog"].get("sets") or []
@@ -356,6 +410,15 @@ class DropBadgeCatalog:
                 if existing is None:
                     new_campaigns.append(record)
 
+        indexed_slugs = {str(game.get("slug") or "") for game in indexed_games}
+        pruned_games, pruned_campaigns = self._prune_stale_state(indexed_slugs)
+        if pruned_games or pruned_campaigns:
+            logger.info(
+                "Drop badge catalog pruned "
+                f"{pruned_games} stale games and {pruned_campaigns} stale campaigns",
+                extra={"emoji": ":wastebasket:", "category_log": True},
+            )
+
         self.state["last_checked_at"] = _iso_now()
         self._save()
         confirmed_badge_rewards = self._confirmed_badge_reward_count()
@@ -367,6 +430,8 @@ class DropBadgeCatalog:
             "badge_sets": len(badge_sets),
             "badge_versions": len(badges),
             "confirmed_badge_rewards": confirmed_badge_rewards,
+            "pruned_games": pruned_games,
+            "pruned_campaigns": pruned_campaigns,
             "path": str(self.path),
         }
 
