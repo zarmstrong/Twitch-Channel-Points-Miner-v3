@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from threading import Lock
 
 from websocket import WebSocketApp, WebSocketConnectionClosedException
 
@@ -19,6 +20,7 @@ class TwitchWebSocket(WebSocketApp):
         self.is_opened = False
 
         self.is_reconnecting = False
+        self.reconnect_lock = Lock()
         self.forced_close = False
 
         # Custom attribute
