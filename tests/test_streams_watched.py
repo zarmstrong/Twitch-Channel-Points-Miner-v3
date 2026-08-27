@@ -347,6 +347,59 @@ def test_explicit_streamer_is_refreshed_at_ten_minute_gate(monkeypatch):
     assert checked == ["stale-explicit"]
 
 
+def test_stale_category_streamer_refresh_flips_it_into_watch_rotation(monkeypatch):
+    # End-to-end companion to test_stale_category_streamer_is_refreshed_even_when_ineligible:
+    # that test only proves check_streamer_online gets *called* on a stale,
+    # ineligible category streamer. This proves a refresh that flips
+    # eligibility to positive within the same iteration actually lands the
+    # streamer in streamers_index and gets it watched, not just re-checked.
+    # (_run_one_watch_iteration/_watch_streamer tie claim_drops to
+    # drops_condition() and pre-seed eligibility from it, so this test builds
+    # the Twitch/streamer state directly to start from "not yet eligible".)
+    category_streamer = _watch_streamer(
+        "revives", from_category=True, drops_eligible=True
+    )
+    category_streamer.stream.update_elapsed = lambda: 200
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.user_agent = "test-agent"
+    twitch.completed_drop_campaigns = set()
+    twitch.category_campaign_eligibility = {}
+    twitch.category_campaign_deadlines = {}
+    twitch.last_category_drop_selection = None
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.drop_inventory_progress = {}
+    twitch.drop_inventory_progress_updated_at = 0
+    twitch.drop_watch_health = {}
+
+    def fake_check_streamer_online(self, streamer):
+        slug = self._Twitch__slugify(streamer.stream.game_name())
+        self.category_campaign_eligibility[(slug, streamer.username)] = (1, 1)
+
+    monkeypatch.setattr(Twitch, "check_streamer_online", fake_check_streamer_online)
+
+    posted = []
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda url, **kwargs: posted.append(url) or SimpleNamespace(status_code=500),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__chuncked_sleep",
+        lambda self, *args, **kwargs: setattr(self, "running", False),
+    )
+
+    twitch.send_minute_watched_events(
+        [category_streamer],
+        [Priority.ORDER],
+        streams_watched=1,
+    )
+
+    assert posted == ["https://spade.test/revives"]
+
+
 def test_drop_priority_applies_across_streamer_sources(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
