@@ -850,15 +850,25 @@ function getFilteredDropsForCategory(category) {
     }
 
     // Collapse repeated snapshots so each drop appears once using the latest data.
+    // Keyed on drop_id alone where available: the same drop_id can be recorded
+    // under different item_name values across its lifecycle (a friendly display
+    // name while actively watched vs. a shorter internal name from the periodic
+    // full-inventory sync), so including item_name/item_art_url in the key let a
+    // completed drop's later "captured" snapshot land under a different key than
+    // its earlier "in_progress" snapshot - leaving a stale, never-collapsing
+    // "in progress" ghost row next to the real completed one. Only fall back to
+    // the old composite key when drop_id itself is missing.
     var dedupedDropsById = {};
     drops.forEach((drop) => {
-        var dropKey = [
-            drop.drop_id || '',
-            drop.item_art_url || '',
-            drop.item_name || 'unknown',
-            drop.campaign || 'unknown',
-            category || 'unknown',
-        ].join('|');
+        var dropKey = drop.drop_id
+            ? ['id', drop.drop_id, category || 'unknown'].join('|')
+            : [
+                  '',
+                  drop.item_art_url || '',
+                  drop.item_name || 'unknown',
+                  drop.campaign || 'unknown',
+                  category || 'unknown',
+              ].join('|');
         var existing = dedupedDropsById[dropKey];
         if (!existing || getDropTimestamp(drop) > getDropTimestamp(existing)) {
             // Keep a known expiry date when the newer snapshot is missing it.

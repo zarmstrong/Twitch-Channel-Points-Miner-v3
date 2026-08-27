@@ -286,6 +286,14 @@ class Twitch(object):
     def __slugify(self, value: str) -> str:
         normalized = unicodedata.normalize("NFKD", str(value))
         ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+        # Drop apostrophes instead of letting the regex below turn them into a
+        # hyphen. Twitch's own category slugs (and the slugs users copy into
+        # config categories) contract "Clancy's" to "clancys", not "clancy-s" -
+        # matching that convention keeps a game_slug computed from a display
+        # name consistent with a game_slug computed from a configured category
+        # string for every possessive game title (Tom Clancy's ..., Sid
+        # Meier's ..., Baldur's Gate, Marvel's ..., Assassin's Creed, ...).
+        ascii_value = ascii_value.replace("'", "")
         return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
 
     def __cache_drop_inventory_progress(self, inventory: dict):
@@ -895,6 +903,14 @@ class Twitch(object):
                     f"{game_name} drops "
                     f"({eligible_campaigns} of {total_campaigns} campaigns)"
                 )
+            if total_campaigns == 0:
+                # The live per-channel check already confirmed this channel
+                # advertises no campaign for this game. Don't fall through to
+                # the unscoped fallback/global catalogs below, which can match
+                # an unrelated open campaign elsewhere on Twitch and print a
+                # misleading "is Online for <game> drops" for a game the user
+                # never configured and that this channel isn't eligible for.
+                return None
 
         fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
         if len(fallback_campaigns) > 1:
@@ -3068,6 +3084,29 @@ class Twitch(object):
                     now,
                     max(float(drop_progress_stall_minutes), 0) * 60,
                 )
+                # Refresh eligibility for every online streamer before filtering
+                # streamers_index below - a category streamer excluded here for a
+                # stale/negative __drops_condition result would otherwise never be
+                # passed to check_streamer_online again (that used to only run for
+                # streamers already in streamers_index), leaving a flaky negative
+                # cached until the next full category refresh (minutes later).
+                # Category streams use a tighter 2-minute gate matching the
+                # underlying Stream.update_required() granularity, so a false
+                # negative self-heals quickly instead of waiting up to 10 minutes.
+                for i in range(0, len(streamers)):
+                    if streamers[i].is_online is not True:
+                        continue
+                    stale_after_seconds = (
+                        120
+                        if getattr(streamers[i], "from_category", False) is True
+                        else 600
+                    )
+                    if streamers[i].stream.update_elapsed() >= stale_after_seconds:
+                        # The last stream/eligibility update is older than the
+                        # staleness window for this streamer's source - refresh it
+                        # now instead of watching it drift further out of date.
+                        self.check_streamer_online(streamers[i])
+
                 streamers_index = [
                     i
                     for i in range(0, len(streamers))
@@ -3092,12 +3131,6 @@ class Twitch(object):
                         not in drop_progress_cooldowns
                     )
                 ]
-
-                for index in streamers_index:
-                    if (streamers[index].stream.update_elapsed() / 60) > 10:
-                        # Why this user It's currently online but the last updated was more than 10minutes ago?
-                        # Please perform a manually update and check if the user it's online
-                        self.check_streamer_online(streamers[index])
 
                 """
                 Twitch has a limit - you can't watch more than 2 channels at one time.
