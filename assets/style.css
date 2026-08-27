@@ -192,6 +192,11 @@ body.header-hidden .top-controls-row {
     min-width: 240px;
 }
 
+.drops-tabs a {
+    direction: ltr;
+    unicode-bidi: embed;
+}
+
 .drops-count {
     float: right;
     margin-left: 10px;
