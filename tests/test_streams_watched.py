@@ -98,6 +98,7 @@ def _watch_streamer(
 ):
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
+        update_minute_watched=lambda: None,
         spade_url=f"https://spade.test/{username}",
         encode_payload=lambda: "payload",
         campaigns=[],
@@ -140,6 +141,7 @@ def _run_one_watch_iteration(
     category_campaign_deadlines=None,
     now=None,
     twitch_out=None,
+    post_side_effects=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -171,11 +173,27 @@ def _run_one_watch_iteration(
         )
         monkeypatch.setattr(twitch_module.time, "time", lambda: now)
 
-    monkeypatch.setattr(
-        requests,
-        "post",
-        lambda url, **kwargs: posted.append(url) or SimpleNamespace(status_code=500),
-    )
+    if post_side_effects is not None:
+        responses = list(post_side_effects)
+
+        def _post(url, **kwargs):
+            posted.append(url)
+            assert (
+                responses
+            ), "requests.post called more times than post_side_effects provided"
+            effect = responses.pop(0)
+            if isinstance(effect, Exception):
+                raise effect
+            return effect
+
+        monkeypatch.setattr(requests, "post", _post)
+    else:
+        monkeypatch.setattr(
+            requests,
+            "post",
+            lambda url, **kwargs: posted.append(url)
+            or SimpleNamespace(status_code=500),
+        )
     monkeypatch.setattr(
         Twitch,
         "_Twitch__chuncked_sleep",
@@ -230,6 +248,46 @@ def test_minute_watcher_prioritizes_favorites(monkeypatch):
     )
 
     assert posted == ["https://spade.test/favorite"]
+
+
+def test_minute_watcher_retries_once_on_connection_error(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("solo")],
+        streams_watched=1,
+        post_side_effects=[
+            requests.exceptions.ConnectionError("boom"),
+            SimpleNamespace(status_code=204),
+        ],
+    )
+
+    assert posted == ["https://spade.test/solo", "https://spade.test/solo"]
+    assert "retrying once" in caplog.text
+    assert "Error while trying to send minute watched" not in caplog.text
+
+
+def test_minute_watcher_gives_up_after_two_connection_errors(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module, "internet_connection_available", lambda *a, **k: True
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("solo")],
+        streams_watched=1,
+        post_side_effects=[
+            requests.exceptions.ConnectionError("boom"),
+            requests.exceptions.ConnectionError("boom again"),
+        ],
+    )
+
+    assert posted == ["https://spade.test/solo", "https://spade.test/solo"]
+    assert "retrying once" in caplog.text
+    assert "Error while trying to send minute watched" in caplog.text
 
 
 def test_minute_watcher_fills_slot_after_selecting_favorite(monkeypatch):
