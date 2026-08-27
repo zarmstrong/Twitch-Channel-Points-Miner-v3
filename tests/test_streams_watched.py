@@ -178,6 +178,9 @@ def _run_one_watch_iteration(
 
         def _post(url, **kwargs):
             posted.append(url)
+            assert (
+                responses
+            ), "requests.post called more times than post_side_effects provided"
             effect = responses.pop(0)
             if isinstance(effect, Exception):
                 raise effect
