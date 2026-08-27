@@ -295,6 +295,58 @@ def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
     assert posted == ["https://spade.test/one", "https://spade.test/two"]
 
 
+def test_stale_category_streamer_is_refreshed_even_when_ineligible(monkeypatch):
+    # A category streamer excluded from streamers_index by a cached negative
+    # __drops_condition result must still reach check_streamer_online once its
+    # stream data goes stale - otherwise the negative can never be refreshed
+    # (it used to only run for streamers already in streamers_index).
+    stale_category = _watch_streamer(
+        "stale-category", from_category=True, drops_eligible=False
+    )
+    stale_category.stream.update_elapsed = lambda: 200
+
+    # A non-category streamer stale by the same amount must NOT be refreshed
+    # yet - it keeps the coarser 10-minute (600s) gate, not the 2-minute
+    # (120s) gate used for category sources.
+    fresh_explicit = _watch_streamer("fresh-explicit")
+    fresh_explicit.stream.update_elapsed = lambda: 200
+
+    checked = []
+    monkeypatch.setattr(
+        Twitch,
+        "check_streamer_online",
+        lambda self, streamer: checked.append(streamer.username),
+    )
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [stale_category, fresh_explicit],
+        streams_watched=2,
+    )
+
+    assert checked == ["stale-category"]
+
+
+def test_explicit_streamer_is_refreshed_past_ten_minute_gate(monkeypatch):
+    stale_explicit = _watch_streamer("stale-explicit")
+    stale_explicit.stream.update_elapsed = lambda: 600
+
+    checked = []
+    monkeypatch.setattr(
+        Twitch,
+        "check_streamer_online",
+        lambda self, streamer: checked.append(streamer.username),
+    )
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [stale_explicit],
+        streams_watched=1,
+    )
+
+    assert checked == ["stale-explicit"]
+
+
 def test_drop_priority_applies_across_streamer_sources(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,

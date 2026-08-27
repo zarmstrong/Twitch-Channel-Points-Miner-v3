@@ -3096,17 +3096,15 @@ class Twitch(object):
                 for i in range(0, len(streamers)):
                     if streamers[i].is_online is not True:
                         continue
-                    stale_after_minutes = (
-                        2
+                    stale_after_seconds = (
+                        120
                         if getattr(streamers[i], "from_category", False) is True
-                        else 10
+                        else 600
                     )
-                    if (
-                        streamers[i].stream.update_elapsed() / 60
-                    ) > stale_after_minutes:
-                        # Why this user It's currently online but the last update was more than
-                        # stale_after_minutes ago? Please perform a manual update and check if
-                        # the user is online.
+                    if streamers[i].stream.update_elapsed() >= stale_after_seconds:
+                        # The last stream/eligibility update is older than the
+                        # staleness window for this streamer's source - refresh it
+                        # now instead of watching it drift further out of date.
                         self.check_streamer_online(streamers[i])
 
                 streamers_index = [
