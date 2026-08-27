@@ -1,14 +1,44 @@
 import logging
+import socket
+import ssl
 import time
 from enum import Enum, auto
-from threading import Thread
+from functools import partial
+from threading import Lock, Thread
 
+import irc.connection
 from irc.bot import SingleServerIRCBot
 
-from TwitchChannelPointsMiner.constants import IRC, IRC_PORT
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
+from TwitchChannelPointsMiner.constants import IRC, IRC_PORT, IRC_TLS_PORT
 
 logger = logging.getLogger(__name__)
+
+_tls_probe_lock = Lock()
+_tls_supported = None
+
+
+def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
+    """Probe once per process whether a TLS handshake to Twitch's IRC endpoint
+    succeeds. The chat OAuth token is otherwise sent over plaintext port 6667 -
+    prefer TLS when it's reachable, but keep working on networks that block or
+    intercept 6697 by falling back to plaintext."""
+    global _tls_supported
+    with _tls_probe_lock:
+        if _tls_supported is None:
+            try:
+                context = ssl.create_default_context()
+                with socket.create_connection((host, port), timeout=timeout) as sock:
+                    with context.wrap_socket(sock, server_hostname=host):
+                        _tls_supported = True
+            except (OSError, ssl.SSLError) as error:
+                logger.warning(
+                    f"IRC TLS handshake with {host}:{port} failed ({error}), "
+                    f"falling back to plaintext IRC on port {IRC_PORT}",
+                    extra={"emoji": ":warning:"},
+                )
+                _tls_supported = False
+        return _tls_supported
 
 
 class ChatPresence(Enum):
@@ -27,8 +57,17 @@ class ClientIRC(SingleServerIRCBot):
         self.channel = "#" + channel
         self.__active = False
 
+        connect_params = {}
+        port = IRC_PORT
+        if _irc_tls_available():
+            port = IRC_TLS_PORT
+            context = ssl.create_default_context()
+            connect_params["connect_factory"] = irc.connection.Factory(
+                wrapper=partial(context.wrap_socket, server_hostname=IRC)
+            )
+
         super(ClientIRC, self).__init__(
-            [(IRC, IRC_PORT, f"oauth:{token}")], username, username
+            [(IRC, port, f"oauth:{token}")], username, username, **connect_params
         )
 
     def on_welcome(self, client, event):
@@ -67,13 +106,16 @@ class ClientIRC(SingleServerIRCBot):
 
         # also self._realname
         # if msg.startswith(f"@{self._nickname}"):
-        if mention != None and mention in msg.lower():
+        if mention is not None and mention in msg.lower():
             # nickname!username@nickname.tmi.twitch.tv
             nick = event.source.split("!", 1)[0]
             # chan = event.target
 
-            logger.info(f"{nick} at {self.channel} wrote: {msg}", extra={
-                        "emoji": ":speech_balloon:", "event": Events.CHAT_MENTION})
+            logger.info(
+                f"{nick} at {self.channel} wrote: {msg}",
+                extra={"emoji": ":speech_balloon:", "event": Events.CHAT_MENTION},
+            )
+
     # """
 
 

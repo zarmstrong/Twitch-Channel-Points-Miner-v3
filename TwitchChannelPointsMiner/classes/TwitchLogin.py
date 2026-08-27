@@ -131,7 +131,7 @@ class TwitchLogin(object):
                     login_response = self.send_oauth_request(
                         "https://id.twitch.tv/oauth2/token", post_data
                     )
-                    if now == expires_at:
+                    if datetime.now(timezone.utc) >= expires_at:
                         logger.error("Code expired. Try again")
                         break
                     # 200 means success, 400 means the user haven't entered the code yet
@@ -156,10 +156,9 @@ class TwitchLogin(object):
                     # ):
                     # raise RequestInvalid()
                     else:
-                        if "error_code" in login_response:
-                            err_code = login_response["error_code"]
+                        err_code = login_response_json.get("error_code")
 
-                        logger.error(f"Unknown error: {login_response}")
+                        logger.error(f"Unknown error: {login_response_json}")
                         raise NotImplementedError(
                             f"Unknown TwitchAPI error code: {err_code}"
                         )

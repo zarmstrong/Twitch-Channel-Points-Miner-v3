@@ -1747,10 +1747,18 @@ class TwitchChannelPointsMiner:
             self.ws_pool.end()
 
         if self.minute_watcher_thread is not None:
-            self.minute_watcher_thread.join()
+            self.minute_watcher_thread.join(timeout=60)
+            if self.minute_watcher_thread.is_alive():
+                logger.warning(
+                    "Minute watcher thread did not stop in time, continuing shutdown anyway"
+                )
 
         if self.sync_campaigns_thread is not None:
-            self.sync_campaigns_thread.join()
+            self.sync_campaigns_thread.join(timeout=60)
+            if self.sync_campaigns_thread.is_alive():
+                logger.warning(
+                    "Sync campaigns thread did not stop in time, continuing shutdown anyway"
+                )
 
         if self.drop_badge_catalog_thread is not None:
             self.drop_badge_catalog_thread.join(timeout=30)

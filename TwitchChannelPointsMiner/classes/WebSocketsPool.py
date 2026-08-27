@@ -4,7 +4,7 @@ import random
 import time
 
 # import os
-from threading import RLock, Thread, Timer
+from threading import Lock, RLock, Thread, Timer
 
 from dateutil import parser
 
@@ -204,8 +204,19 @@ class WebSocketsPool:
 
     @staticmethod
     def handle_reconnection(ws):
-        # Reconnect only if ws.is_reconnecting is False to prevent more than 1 ws from being created
-        if ws.is_reconnecting is False:
+        # Reconnect only if ws.is_reconnecting is False to prevent more than 1 ws from
+        # being created. on_close (the websocket's own thread) and the ping health
+        # check (a separate thread started in on_open) can both call this at once,
+        # so the check-and-set must happen under a lock instead of as two statements.
+        # Defensive getattr/set: tests exercise this with plain duck-typed
+        # stand-ins for TwitchWebSocket that don't carry a reconnect_lock.
+        lock = getattr(ws, "reconnect_lock", None)
+        if lock is None:
+            lock = Lock()
+            ws.reconnect_lock = lock
+        with lock:
+            if ws.is_reconnecting is not False:
+                return
             # Close the current WebSocket.
             ws.is_closed = True
             ws.keep_running = False
@@ -215,32 +226,32 @@ class WebSocketsPool:
             # So the external ping check will be locked
             ws.is_reconnecting = True
 
-            if ws.forced_close is False:
-                logger.info(
-                    f"#{ws.index} - Reconnecting to Twitch PubSub server in ~60 seconds"
+        if ws.forced_close is False:
+            logger.info(
+                f"#{ws.index} - Reconnecting to Twitch PubSub server in ~60 seconds"
+            )
+            time.sleep(30)
+
+            while internet_connection_available() is False:
+                random_sleep = random.randint(1, 3)
+                logger.warning(
+                    f"#{ws.index} - No internet connection available! Retry after {random_sleep}m"
                 )
-                time.sleep(30)
+                time.sleep(random_sleep * 60)
 
-                while internet_connection_available() is False:
-                    random_sleep = random.randint(1, 3)
-                    logger.warning(
-                        f"#{ws.index} - No internet connection available! Retry after {random_sleep}m"
-                    )
-                    time.sleep(random_sleep * 60)
+            # Why not create a new ws on the same array index? Let's try.
+            self = ws.parent_pool
+            with self.topic_lock:
+                topics = list(ws.topics)
+                replacement = self.__new(ws.index)
+                replacement.topics.extend(topics)
+                self.ws[ws.index] = replacement
 
-                # Why not create a new ws on the same array index? Let's try.
-                self = ws.parent_pool
-                with self.topic_lock:
-                    topics = list(ws.topics)
-                    replacement = self.__new(ws.index)
-                    replacement.topics.extend(topics)
-                    self.ws[ws.index] = replacement
+            self.__start(ws.index)  # Start a new thread.
+            time.sleep(30)
 
-                self.__start(ws.index)  # Start a new thread.
-                time.sleep(30)
-
-                for topic in topics:
-                    self.__submit(ws.index, topic, replay=True)
+            for topic in topics:
+                self.__submit(ws.index, topic, replay=True)
 
     @staticmethod
     def on_message(ws, message):

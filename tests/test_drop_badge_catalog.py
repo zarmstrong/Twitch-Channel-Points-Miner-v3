@@ -187,6 +187,62 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
     assert (tmp_path / "drop_badge_catalog.json").is_file()
 
 
+def test_sync_prunes_stale_games_and_campaigns_but_keeps_recent_ones(tmp_path):
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(get_auth_token=lambda: "token"),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession(),
+    )
+    now = datetime.now(timezone.utc)
+
+    catalog.state["games"] = {
+        "long-gone": {
+            "index": {"slug": "long-gone"},
+            "last_scraped_at": (now - timedelta(days=10)).isoformat(),
+            "report": {},
+        },
+        "recently-dropped": {
+            "index": {"slug": "recently-dropped"},
+            "last_scraped_at": (now - timedelta(hours=1)).isoformat(),
+            "report": {},
+        },
+    }
+    catalog.state["campaigns"] = {
+        "long-expired": {
+            "first_seen_at": (now - timedelta(days=20)).isoformat(),
+            "last_seen_at": (now - timedelta(days=10)).isoformat(),
+            "game_slug": "long-gone",
+            "campaign": {"ends_at": (now - timedelta(days=10)).isoformat()},
+        },
+        "recently-expired": {
+            "first_seen_at": (now - timedelta(days=5)).isoformat(),
+            "last_seen_at": (now - timedelta(days=1)).isoformat(),
+            "game_slug": "long-gone",
+            "campaign": {"ends_at": (now - timedelta(days=1)).isoformat()},
+        },
+        "no-end-date-stale": {
+            "first_seen_at": (now - timedelta(days=40)).isoformat(),
+            "last_seen_at": (now - timedelta(days=31)).isoformat(),
+            "game_slug": "long-gone",
+            "campaign": {},
+        },
+    }
+
+    result = catalog.sync()
+
+    assert "long-gone" not in catalog.state["games"]
+    assert "recently-dropped" in catalog.state["games"]
+    assert "example" in catalog.state["games"]
+
+    assert "long-expired" not in catalog.state["campaigns"]
+    assert "no-end-date-stale" not in catalog.state["campaigns"]
+    assert "recently-expired" in catalog.state["campaigns"]
+
+    assert result["pruned_games"] == 1
+    assert result["pruned_campaigns"] == 2
+
+
 def test_eligible_badge_campaigns_only_returns_active_unearned_watch_badges(
     tmp_path,
 ):

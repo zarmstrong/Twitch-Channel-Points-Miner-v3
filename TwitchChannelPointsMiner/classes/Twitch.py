@@ -103,6 +103,7 @@ class Twitch(object):
         "campaign_channel_ids",
         "campaign_detail_attempts",
         "category_campaign_eligibility",
+        "category_campaign_eligibility_lock",
         "category_campaign_deadlines",
         "last_category_drop_selection",
         "evaluated_category_campaigns",
@@ -147,6 +148,7 @@ class Twitch(object):
             r'window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
         )
         self.analytics_mutex = Lock()
+        self.category_campaign_eligibility_lock = Lock()
         self.channel_points_semaphore = BoundedSemaphore(CHANNEL_POINTS_MAX_CONCURRENCY)
         self.drop_progress_last_saved = {}
         self.drop_status_last_saved = {}
@@ -234,27 +236,37 @@ class Twitch(object):
         extra["category_log"] = True
         logger.log(self.category_log_level, message, **kwargs)
 
+    def __eligibility_lock(self):
+        # Defensive getattr: some tests construct Twitch via __new__ and skip
+        # __init__ (mirroring the evaluated_category_campaigns handling below).
+        lock = getattr(self, "category_campaign_eligibility_lock", None)
+        if lock is None:
+            lock = Lock()
+            self.category_campaign_eligibility_lock = lock
+        return lock
+
     def __replace_category_campaign_eligibility(
         self, game_slug: str, eligibility_by_login: dict
     ):
         """Atomically replace cached eligibility for one game category."""
-        updated_eligibility = {
-            key: value
-            for key, value in self.category_campaign_eligibility.items()
-            if key[0] != game_slug
-        }
-        updated_eligibility.update(
-            {
-                (game_slug, login): eligibility
-                for login, eligibility in eligibility_by_login.items()
+        with self.__eligibility_lock():
+            updated_eligibility = {
+                key: value
+                for key, value in self.category_campaign_eligibility.items()
+                if key[0] != game_slug
             }
-        )
-        self.category_campaign_eligibility = updated_eligibility
-        evaluated_categories = getattr(self, "evaluated_category_campaigns", None)
-        if evaluated_categories is None:
-            evaluated_categories = set()
-            self.evaluated_category_campaigns = evaluated_categories
-        evaluated_categories.add(game_slug)
+            updated_eligibility.update(
+                {
+                    (game_slug, login): eligibility
+                    for login, eligibility in eligibility_by_login.items()
+                }
+            )
+            self.category_campaign_eligibility = updated_eligibility
+            evaluated_categories = getattr(self, "evaluated_category_campaigns", None)
+            if evaluated_categories is None:
+                evaluated_categories = set()
+                self.evaluated_category_campaigns = evaluated_categories
+            evaluated_categories.add(game_slug)
 
     def __drop_tracking_key(self, drop, campaign_name=None, category_name=None):
         return "|".join(
@@ -816,14 +828,28 @@ class Twitch(object):
             response = main_page_request.text
             # logger.info(response)
             regex_settings = "(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)"
-            settings_url = re.search(regex_settings, response).group(1)
+            settings_match = re.search(regex_settings, response)
+            if settings_match is None:
+                logger.error(
+                    "Something went wrong during extraction of 'spade_url': "
+                    f"settings URL not found on {streamer.streamer_url}"
+                )
+                return
+            settings_url = settings_match.group(1)
 
             settings_request = requests.get(
                 settings_url, headers=headers, timeout=(5, 20)
             )
             response = settings_request.text
             regex_spade = '"spade_url":"(.*?)"'
-            streamer.stream.spade_url = re.search(regex_spade, response).group(1)
+            spade_match = re.search(regex_spade, response)
+            if spade_match is None:
+                logger.error(
+                    "Something went wrong during extraction of 'spade_url': "
+                    f"spade_url not found in {settings_url}"
+                )
+                return
+            streamer.stream.spade_url = spade_match.group(1)
         except requests.exceptions.RequestException as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
 
@@ -2953,7 +2979,7 @@ class Twitch(object):
     def __check_connection_handler(self, chunk_size):
         # The success rate It's very hight usually. Why we have failed?
         # Check internet connection ...
-        while internet_connection_available() is False:
+        while self.running and internet_connection_available() is False:
             random_sleep = random.randint(1, 3)
             logger.warning(
                 f"No internet connection available! Retry after {random_sleep}m"
@@ -3079,8 +3105,13 @@ class Twitch(object):
             iteration_started_at = time.time()
             try:
                 now = time.time()
+                # Snapshot the shared streamers list once per iteration - it can be
+                # reassigned in-place (self.streamers[:] = ...) from other threads
+                # (config reload / category reconciliation), and indexing into a
+                # list that shrinks mid-iteration raises IndexError.
+                streamers_snapshot = list(streamers)
                 drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
-                    streamers,
+                    streamers_snapshot,
                     now,
                     max(float(drop_progress_stall_minutes), 0) * 60,
                 )
@@ -3093,40 +3124,47 @@ class Twitch(object):
                 # Category streams use a tighter 2-minute gate matching the
                 # underlying Stream.update_required() granularity, so a false
                 # negative self-heals quickly instead of waiting up to 10 minutes.
-                for i in range(0, len(streamers)):
-                    if streamers[i].is_online is not True:
+                for i in range(0, len(streamers_snapshot)):
+                    if streamers_snapshot[i].is_online is not True:
                         continue
                     stale_after_seconds = (
                         120
-                        if getattr(streamers[i], "from_category", False) is True
+                        if getattr(streamers_snapshot[i], "from_category", False)
+                        is True
                         else 600
                     )
-                    if streamers[i].stream.update_elapsed() >= stale_after_seconds:
+                    if (
+                        streamers_snapshot[i].stream.update_elapsed()
+                        >= stale_after_seconds
+                    ):
                         # The last stream/eligibility update is older than the
                         # staleness window for this streamer's source - refresh it
                         # now instead of watching it drift further out of date.
-                        self.check_streamer_online(streamers[i])
+                        self.check_streamer_online(streamers_snapshot[i])
 
                 streamers_index = [
                     i
-                    for i in range(0, len(streamers))
-                    if streamers[i].is_online is True
+                    for i in range(0, len(streamers_snapshot))
+                    if streamers_snapshot[i].is_online is True
                     and (
-                        getattr(streamers[i], "from_category", False) is not True
-                        or self.__drops_condition(streamers[i]) is True
+                        getattr(streamers_snapshot[i], "from_category", False)
+                        is not True
+                        or self.__drops_condition(streamers_snapshot[i]) is True
                     )
                     and (
-                        streamers[i].online_at == 0
-                        or (now - streamers[i].online_at) > 30
+                        streamers_snapshot[i].online_at == 0
+                        or (now - streamers_snapshot[i].online_at) > 30
                     )
                     and (
-                        self._has_reached_points_limit(streamers[i]) is False
-                        or self._has_pending_watch_streak(streamers[i], now)
+                        self._has_reached_points_limit(streamers_snapshot[i]) is False
+                        or self._has_pending_watch_streak(streamers_snapshot[i], now)
                     )
                     and (
                         (
-                            self.__slugify(streamers[i].stream.game_name() or ""),
-                            streamers[i].username,
+                            self.__slugify(
+                                streamers_snapshot[i].stream.game_name() or ""
+                            ),
+                            streamers_snapshot[i].username,
                         )
                         not in drop_progress_cooldowns
                     )
@@ -3161,11 +3199,20 @@ class Twitch(object):
                 source_priority = normalized_source_priority
 
                 def streamer_source(index):
-                    if getattr(streamers[index], "from_badge_campaign", False) is True:
+                    if (
+                        getattr(streamers_snapshot[index], "from_badge_campaign", False)
+                        is True
+                    ):
                         return StreamerSource.BADGES
-                    if getattr(streamers[index], "from_category", False) is True:
+                    if (
+                        getattr(streamers_snapshot[index], "from_category", False)
+                        is True
+                    ):
                         return StreamerSource.CATEGORIES
-                    if getattr(streamers[index], "from_followers", False) is True:
+                    if (
+                        getattr(streamers_snapshot[index], "from_followers", False)
+                        is True
+                    ):
                         return StreamerSource.FOLLOWERS
                     return StreamerSource.STREAMERS
 
@@ -3176,7 +3223,7 @@ class Twitch(object):
 
                 def category_expiration(index):
                     game_slug = self.__slugify(
-                        streamers[index].stream.game_name() or ""
+                        streamers_snapshot[index].stream.game_name() or ""
                     )
                     return category_deadlines.get(game_slug, datetime.max)
 
@@ -3219,7 +3266,7 @@ class Twitch(object):
                             favorite_indexes = [
                                 index
                                 for index in available_source_indexes
-                                if streamers[index].settings.favorite
+                                if streamers_snapshot[index].settings.favorite
                             ]
                             streamers_watching.update(
                                 favorite_indexes[: remaining_watch_amount()]
@@ -3231,7 +3278,7 @@ class Twitch(object):
                         ]:
                             items = [
                                 {
-                                    "points": streamers[index].channel_points,
+                                    "points": streamers_snapshot[index].channel_points,
                                     "index": index,
                                 }
                                 for index in available_source_indexes
@@ -3250,7 +3297,7 @@ class Twitch(object):
                         elif prior == Priority.STREAK:
                             for index in available_source_indexes:
                                 if self._has_pending_watch_streak(
-                                    streamers[index], now
+                                    streamers_snapshot[index], now
                                 ):
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
@@ -3258,7 +3305,10 @@ class Twitch(object):
 
                         elif prior == Priority.DROPS:
                             for index in available_source_indexes:
-                                if self.__drops_condition(streamers[index]) is True:
+                                if (
+                                    self.__drops_condition(streamers_snapshot[index])
+                                    is True
+                                ):
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
                                         break
@@ -3267,11 +3317,15 @@ class Twitch(object):
                             streamers_with_multiplier = [
                                 index
                                 for index in available_source_indexes
-                                if streamers[index].viewer_has_points_multiplier()
+                                if streamers_snapshot[
+                                    index
+                                ].viewer_has_points_multiplier()
                             ]
                             streamers_with_multiplier = sorted(
                                 streamers_with_multiplier,
-                                key=lambda x: streamers[x].total_points_multiplier(),
+                                key=lambda x: streamers_snapshot[
+                                    x
+                                ].total_points_multiplier(),
                                 reverse=True,
                             )
                             streamers_watching.update(
@@ -3295,7 +3349,8 @@ class Twitch(object):
                 category_candidates = [
                     index
                     for index in streamers_watching
-                    if getattr(streamers[index], "from_category", False) is True
+                    if getattr(streamers_snapshot[index], "from_category", False)
+                    is True
                 ]
                 preferred_category_index = (
                     min(category_candidates, key=category_expiration)
@@ -3303,7 +3358,7 @@ class Twitch(object):
                     else None
                 )
                 self.__log_category_drop_pick(
-                    streamers,
+                    streamers_snapshot,
                     preferred_category_index,
                     indexes_by_source[StreamerSource.CATEGORIES],
                     category_expiration,
@@ -3311,7 +3366,10 @@ class Twitch(object):
 
                 filtered_streamers_watching = []
                 for index in streamers_watching:
-                    if getattr(streamers[index], "from_category", False) is True:
+                    if (
+                        getattr(streamers_snapshot[index], "from_category", False)
+                        is True
+                    ):
                         if index != preferred_category_index:
                             continue
                     filtered_streamers_watching.append(index)
@@ -3323,16 +3381,19 @@ class Twitch(object):
                         break
                     if index in filtered_streamers_watching:
                         continue
-                    if getattr(streamers[index], "from_category", False) is True:
+                    if (
+                        getattr(streamers_snapshot[index], "from_category", False)
+                        is True
+                    ):
                         continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
 
                 watched_indexes = set(streamers_watching)
-                for index, streamer in enumerate(streamers):
+                for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
 
-                self.__log_watched_streamers(streamers, streamers_watching)
+                self.__log_watched_streamers(streamers_snapshot, streamers_watching)
 
                 for index in streamers_watching:
                     # next_iteration = time.time() + 60 / len(streamers_watching)
@@ -3340,17 +3401,17 @@ class Twitch(object):
 
                     try:
                         response = requests.post(
-                            streamers[index].stream.spade_url,
-                            data=streamers[index].stream.encode_payload(),
+                            streamers_snapshot[index].stream.spade_url,
+                            data=streamers_snapshot[index].stream.encode_payload(),
                             headers={"User-Agent": self.user_agent},
                             # timeout=60,
                             timeout=20,
                         )
                         logger.debug(
-                            f"Send minute watched request for {streamers[index]} - Status code: {response.status_code}"
+                            f"Send minute watched request for {streamers_snapshot[index]} - Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
-                            streamers[index].stream.update_minute_watched()
+                            streamers_snapshot[index].stream.update_minute_watched()
 
                             """
                             Remember, you can only earn progress towards a time-based Drop on one participating channel at a time.  [ ! ! ! ]
@@ -3358,7 +3419,7 @@ class Twitch(object):
                             For time-based Drops, if you are unable to claim the Drop in time, you will be able to claim it from the inventory page until the Drops campaign ends.
                             """
 
-                            for campaign in streamers[index].stream.campaigns:
+                            for campaign in streamers_snapshot[index].stream.campaigns:
                                 for drop in campaign.drops:
                                     if (
                                         drop.has_preconditions_met is not False
@@ -3382,7 +3443,7 @@ class Twitch(object):
                                             self.__save_drop_progress_analytics(
                                                 drop,
                                                 campaign=campaign,
-                                                streamer_username=streamers[
+                                                streamer_username=streamers_snapshot[
                                                     index
                                                 ].username,
                                             )
@@ -3393,7 +3454,7 @@ class Twitch(object):
                                         and drop.is_printable is True
                                     ):
                                         drop_messages = [
-                                            f"{streamers[index]} is streaming {streamers[index].stream}",
+                                            f"{streamers_snapshot[index]} is streaming {streamers_snapshot[index].stream}",
                                             f"Campaign: {campaign}",
                                             f"Drop: {drop}",
                                             f"{drop.progress_bar()}",
@@ -3795,10 +3856,10 @@ class Twitch(object):
                     )
                     is not None
                 )
-                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
-                    eligible_campaigns,
-                    len(advertised_campaigns),
-                )
+                with self.__eligibility_lock():
+                    self.category_campaign_eligibility[
+                        (game_slug, streamer.username)
+                    ] = (eligible_campaigns, len(advertised_campaigns))
 
             return [str(campaign["id"]) for campaign in advertised_campaigns]
 
@@ -3809,9 +3870,10 @@ class Twitch(object):
                 or fallback_campaigns == []
             ):
                 if getattr(streamer, "from_category", False) is True:
-                    self.category_campaign_eligibility[
-                        (game_slug, streamer.username)
-                    ] = (0, 0)
+                    with self.__eligibility_lock():
+                        self.category_campaign_eligibility[
+                            (game_slug, streamer.username)
+                        ] = (0, 0)
                 self.__log_drop_check(
                     f"Twitch channel '{streamer.username}' advertises no active "
                     f"campaign for {streamer.stream.game_name()}",
@@ -4435,6 +4497,31 @@ class Twitch(object):
                     )
         return campaigns
 
+    @staticmethod
+    def __drop_report_identity_key(entry):
+        # Mirrors the dedup key in assets/script.js (dashboard rendering): the
+        # same drop_id can be recorded under different item_name values across
+        # its lifecycle (a friendly display name while actively watched vs. a
+        # shorter internal name from the periodic full-inventory sync), so a
+        # composite key including item_name let a completed drop's "captured"
+        # snapshot land under a different key than its earlier "in_progress"
+        # snapshot - leaving a stale ghost row that never collapsed. Key on
+        # drop_id alone when available; fall back to the old composite key
+        # only when drop_id itself is missing.
+        drop_id = str(entry.get("drop_id") or "")
+        category = str(entry.get("category") or "") or "unknown"
+        if drop_id:
+            return "|".join(["id", drop_id, category])
+        return "|".join(
+            [
+                "",
+                str(entry.get("item_art_url") or ""),
+                str(entry.get("item_name") or "") or "unknown",
+                str(entry.get("campaign") or "") or "unknown",
+                category,
+            ]
+        )
+
     def __save_drop_claim_analytics(
         self,
         drop,
@@ -4498,15 +4585,7 @@ class Twitch(object):
             ),
         }
 
-        report_key = "|".join(
-            [
-                str(payload.get("drop_id") or ""),
-                str(payload.get("item_art_url") or ""),
-                str(payload.get("item_name") or ""),
-                str(payload.get("campaign") or ""),
-                str(payload.get("category") or ""),
-            ]
-        )
+        report_key = self.__drop_report_identity_key(payload)
         with self.analytics_mutex:
             self.drop_report_state[report_key] = payload.copy()
 
@@ -4532,15 +4611,7 @@ class Twitch(object):
 
                 compacted = {}
                 for item in data["drops"]:
-                    identity_key = "|".join(
-                        [
-                            str(item.get("drop_id") or ""),
-                            str(item.get("item_art_url") or ""),
-                            str(item.get("item_name") or ""),
-                            str(item.get("campaign") or ""),
-                            str(item.get("category") or ""),
-                        ]
-                    )
+                    identity_key = self.__drop_report_identity_key(item)
                     previous = compacted.get(identity_key)
                     if previous is None or (item.get("x") or 0) >= (
                         previous.get("x") or 0
@@ -4549,15 +4620,12 @@ class Twitch(object):
 
                 data["drops"] = list(compacted.values())
 
+                payload_identity_key = self.__drop_report_identity_key(payload)
                 identity_index = next(
                     (
                         i
                         for i, item in enumerate(data["drops"])
-                        if item.get("drop_id") == payload.get("drop_id")
-                        and item.get("item_art_url") == payload.get("item_art_url")
-                        and item.get("item_name") == payload.get("item_name")
-                        and item.get("campaign") == payload.get("campaign")
-                        and item.get("category") == payload.get("category")
+                        if self.__drop_report_identity_key(item) == payload_identity_key
                     ),
                     None,
                 )
