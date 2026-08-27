@@ -3412,10 +3412,10 @@ class Twitch(object):
                                     timeout=20,
                                 )
                                 break
-                            except requests.exceptions.ConnectionError:
+                            except requests.exceptions.ConnectionError as e:
                                 if attempt == 0:
                                     logger.warning(
-                                        f"Connection error sending minute watched for {streamers_snapshot[index]}, retrying once..."
+                                        f"Connection error sending minute watched for {streamers_snapshot[index]}, retrying once: {e}"
                                     )
                                     continue
                                 raise
