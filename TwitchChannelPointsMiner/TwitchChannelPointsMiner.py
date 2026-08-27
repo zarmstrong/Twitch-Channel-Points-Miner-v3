@@ -25,6 +25,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     StreamerSettings,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
+from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.gql.Integration import GQLFactory
 from TwitchChannelPointsMiner.classes.Settings import (
     CategoryCampaignOrder,
@@ -791,6 +792,27 @@ class TwitchChannelPointsMiner:
                                 f"Streamer {username} does not exist",
                                 extra={"emoji": ":cry:"},
                             )
+                        except RetryError as error:
+                            logger.warning(
+                                f"Failed to load streamer {username}, retrying once: {error}"
+                            )
+                            try:
+                                loaded_streamers[index] = build_streamer(username)
+                            except StreamerDoesNotExistException:
+                                logger.info(
+                                    f"Streamer {username} does not exist",
+                                    extra={"emoji": ":cry:"},
+                                )
+                            except RetryError as retry_error:
+                                logger.error(
+                                    f"Failed to load streamer {username} after "
+                                    f"retry: {retry_error}"
+                                )
+                            except Exception:
+                                logger.error(
+                                    f"Failed to load streamer {username}",
+                                    exc_info=True,
+                                )
                         except Exception:
                             logger.error(
                                 f"Failed to load streamer {username}", exc_info=True
