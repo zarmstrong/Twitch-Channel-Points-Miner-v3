@@ -3400,13 +3400,12 @@ class Twitch(object):
                     next_iteration = time.time() + 20 / len(streamers_watching)
 
                     try:
+                        streamer = streamers_snapshot[index]
                         for attempt in range(2):
                             try:
                                 response = requests.post(
-                                    streamers_snapshot[index].stream.spade_url,
-                                    data=streamers_snapshot[
-                                        index
-                                    ].stream.encode_payload(),
+                                    streamer.stream.spade_url,
+                                    data=streamer.stream.encode_payload(),
                                     headers={"User-Agent": self.user_agent},
                                     # timeout=60,
                                     timeout=20,
@@ -3415,15 +3414,15 @@ class Twitch(object):
                             except requests.exceptions.ConnectionError as e:
                                 if attempt == 0:
                                     logger.warning(
-                                        f"Connection error sending minute watched for {streamers_snapshot[index]}, retrying once: {e}"
+                                        f"Connection error sending minute watched for {streamer}, retrying once: {e}"
                                     )
                                     continue
                                 raise
                         logger.debug(
-                            f"Send minute watched request for {streamers_snapshot[index]} - Status code: {response.status_code}"
+                            f"Send minute watched request for {streamer} - Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
-                            streamers_snapshot[index].stream.update_minute_watched()
+                            streamer.stream.update_minute_watched()
 
                             """
                             Remember, you can only earn progress towards a time-based Drop on one participating channel at a time.  [ ! ! ! ]
@@ -3431,7 +3430,7 @@ class Twitch(object):
                             For time-based Drops, if you are unable to claim the Drop in time, you will be able to claim it from the inventory page until the Drops campaign ends.
                             """
 
-                            for campaign in streamers_snapshot[index].stream.campaigns:
+                            for campaign in streamer.stream.campaigns:
                                 for drop in campaign.drops:
                                     if (
                                         drop.has_preconditions_met is not False
@@ -3455,9 +3454,7 @@ class Twitch(object):
                                             self.__save_drop_progress_analytics(
                                                 drop,
                                                 campaign=campaign,
-                                                streamer_username=streamers_snapshot[
-                                                    index
-                                                ].username,
+                                                streamer_username=streamer.username,
                                             )
 
                                     # We could add .has_preconditions_met condition inside is_printable
@@ -3466,7 +3463,7 @@ class Twitch(object):
                                         and drop.is_printable is True
                                     ):
                                         drop_messages = [
-                                            f"{streamers_snapshot[index]} is streaming {streamers_snapshot[index].stream}",
+                                            f"{streamer} is streaming {streamer.stream}",
                                             f"Campaign: {campaign}",
                                             f"Drop: {drop}",
                                             f"{drop.progress_bar()}",
