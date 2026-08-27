@@ -81,13 +81,18 @@ class ClientIRC(SingleServerIRCBot):
                 self.reactor.process_once(timeout=0.2)
                 time.sleep(0.01)
             except Exception as e:
-                logger.error(
-                    f"Exception raised: {e}. Thread is active: {self.__active}"
-                )
+                # die() closes the socket from another thread while this loop
+                # may be inside select.select() on it, so a spurious error here
+                # (e.g. a negative file descriptor) is expected on shutdown -
+                # only surface it if we weren't asked to stop.
+                if self.__active:
+                    logger.error(
+                        f"Exception raised: {e}. Thread is active: {self.__active}"
+                    )
 
     def die(self, msg="Bye, cruel world!"):
-        self.connection.disconnect(msg)
         self.__active = False
+        self.connection.disconnect(msg)
 
     """
     def on_join(self, connection, event):
