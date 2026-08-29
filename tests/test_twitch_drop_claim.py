@@ -271,6 +271,43 @@ def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypat
     )
 
 
+def test_unrestricted_authoritative_campaign_does_not_shield_unrelated_channel(
+    monkeypatch,
+):
+    # Regression: an unrestricted authoritative campaign (empty "channels")
+    # sitting alongside a genuinely restricted one for the same game must not
+    # make every channel of that game look allow-listed. Only an explicit,
+    # non-empty allow-list containing this channel should override the
+    # channel's own empty query result.
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "restricted-campaign-1",
+                "name": "Restricted Campaign",
+                "channels": ["some-other-channel"],
+            },
+            {
+                "id": "unrestricted-campaign-1",
+                "name": "Unrestricted Campaign",
+                "channels": [],
+            },
+        ]
+    }
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
 def test_drops_description_is_none_once_channel_check_confirmed_zero_campaigns(
     monkeypatch,
 ):

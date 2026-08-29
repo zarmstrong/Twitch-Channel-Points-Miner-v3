@@ -3897,10 +3897,15 @@ class Twitch(object):
         authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
             game_slug, []
         )
+        # Only a genuine, non-empty allow-list containing this channel counts
+        # as evidence to distrust the channel's own (empty) query result. An
+        # unrestricted authoritative campaign says nothing about this
+        # specific channel -- if it really applied here, the channel's own
+        # query should already have reflected it.
         allowlisted_elsewhere = any(
-            not campaign.get("channels")
-            or streamer.username in campaign.get("channels", [])
+            streamer.username in campaign.get("channels", [])
             for campaign in authoritative_campaigns
+            if campaign.get("channels")
         )
         if campaign_data_available:
             if getattr(streamer, "from_category", False) is not True or (
