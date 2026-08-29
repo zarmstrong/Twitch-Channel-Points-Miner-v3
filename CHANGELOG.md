@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.16.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.0...3.16.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **drops:** don't clobber campaign-restricted channel eligibility on empty channel query ([#112](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/112)) ([bfe3b89](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/bfe3b89cd3f29606cd81d387c612b194acce0246))
+
 ## [3.16.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.15.2...3.16.0) (2026-08-27)
 
 
