@@ -938,7 +938,9 @@ class Twitch(object):
                 # never configured and that this channel isn't eligible for.
                 return None
 
-        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
+        fallback_campaigns = list(
+            self.twitchdrops_app_campaigns.get(game_slug, [])
+        ) + list(getattr(self, "active_drop_campaigns", {}).get(game_slug, []))
         if len(fallback_campaigns) > 1:
             eligible_campaigns = sum(
                 1
@@ -2286,9 +2288,17 @@ class Twitch(object):
             return False
 
         # Category discovery has already removed fully collected campaigns.
-        # Use its remaining gist campaign data when Twitch's private
+        # Use its remaining gist campaign data -- and, for campaign-restricted
+        # categories, Twitch's own authoritative allow-list, which is what
+        # gets populated instead of the gist data once Twitch's inventory is
+        # treated as authoritative for this game -- when Twitch's private
         # campaign query fails to populate Stream.campaigns.
-        for campaign in self.twitchdrops_app_campaigns.get(game_slug, []):
+        restricted_campaigns = getattr(self, "active_drop_campaigns", {}).get(
+            game_slug, []
+        )
+        for campaign in list(self.twitchdrops_app_campaigns.get(game_slug, [])) + list(
+            restricted_campaigns
+        ):
             channels = {
                 str(login).lower().strip()
                 for login in campaign.get("channels", []) or []

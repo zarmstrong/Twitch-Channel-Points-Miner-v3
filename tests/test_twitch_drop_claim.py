@@ -297,6 +297,26 @@ def test_drops_description_uses_global_catalog_without_a_channel_check_yet(
     )
 
 
+def test_drops_description_counts_authoritative_restricted_campaigns(monkeypatch):
+    # The gist fallback is intentionally empty for an authoritative
+    # campaign-restricted game, so the description must still count
+    # campaigns from active_drop_campaigns rather than falling through to
+    # the unscoped global catalog.
+    twitch = bare_twitch(monkeypatch)
+    twitch.discovered_open_drop_campaigns = []
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {"id": "restricted-1", "name": "A", "channels": ["drops-channel"]},
+            {"id": "restricted-2", "name": "B", "channels": ["some-other-channel"]},
+        ]
+    }
+
+    assert (
+        twitch._Twitch__streamer_drops_description(category_streamer())
+        == "Example Game drops (1 of 2 campaigns)"
+    )
+
+
 def test_campaign_deadline_logs_include_game_name(monkeypatch, caplog):
     twitch = bare_twitch(monkeypatch)
     campaign = campaign_data()
@@ -396,6 +416,69 @@ def test_negative_category_refresh_does_not_resurrect_collected_fallback(monkeyp
     )
     streamer = SimpleNamespace(
         username="stale-channel",
+        from_category=True,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=stream,
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
+def test_category_condition_uses_authoritative_restricted_campaign_when_eligibility_unset(
+    monkeypatch,
+):
+    # Regression: when eligibility hasn't been cached yet for a campaign-
+    # restricted category, the gist fallback (twitchdrops_app_campaigns) is
+    # intentionally left empty once Twitch's own inventory is authoritative
+    # for that game, so the condition must also honor active_drop_campaigns,
+    # which is where the real allow-list ends up in that case.
+    twitch = bare_twitch(monkeypatch)
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "restricted-campaign-1",
+                "name": "Restricted Campaign",
+                "channels": ["channel"],
+            }
+        ]
+    }
+    stream = SimpleNamespace(
+        campaigns_ids=[],
+        game_name=lambda: "Example Game",
+    )
+    streamer = SimpleNamespace(
+        username="channel",
+        from_category=True,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=stream,
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
+def test_category_condition_blocks_channel_not_in_authoritative_restricted_allowlist(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "restricted-campaign-1",
+                "name": "Restricted Campaign",
+                "channels": ["some-other-channel"],
+            }
+        ]
+    }
+    stream = SimpleNamespace(
+        campaigns_ids=[],
+        game_name=lambda: "Example Game",
+    )
+    streamer = SimpleNamespace(
+        username="channel",
         from_category=True,
         from_badge_campaign=False,
         settings=SimpleNamespace(claim_drops=True),
