@@ -3914,16 +3914,30 @@ class Twitch(object):
                 )
                 return []
 
-            # Twitch can omit an account-ineligible campaign from the channel
-            # response even though its official Drops-enabled directory entry
-            # and the external campaign index made it eligible for discovery.
-            # Keep that fallback result instead of replacing it with (0, 0).
-            self.__log_drop_check(
-                f"Twitch channel '{streamer.username}' did not expose the "
-                f"fallback campaign for {streamer.stream.game_name()}; keeping "
-                "category discovery eligibility",
-                level=logging.DEBUG,
-            )
+            if fallback_campaigns:
+                # Twitch can omit an account-ineligible campaign from the
+                # channel response even though its official Drops-enabled
+                # directory entry and the external campaign index made it
+                # eligible for discovery. Keep that fallback result instead
+                # of replacing it with (0, 0).
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' did not expose the "
+                    f"fallback campaign for {streamer.stream.game_name()}; keeping "
+                    "category discovery eligibility",
+                    level=logging.DEBUG,
+                )
+            else:
+                # No gist fallback exists here at all (it's intentionally
+                # skipped once Twitch's inventory is authoritative for this
+                # game). This channel is only being kept because it's
+                # allow-listed in that authoritative restricted campaign.
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' did not expose its "
+                    f"campaign for {streamer.stream.game_name()} directly, but is "
+                    "allow-listed in an authoritative restricted campaign; "
+                    "keeping category discovery eligibility",
+                    level=logging.DEBUG,
+                )
 
         campaign_ids = set()
         possible_campaigns = list(self.discovered_open_drop_campaigns or [])
