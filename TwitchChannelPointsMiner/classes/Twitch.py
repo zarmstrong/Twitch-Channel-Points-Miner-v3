@@ -3873,10 +3873,24 @@ class Twitch(object):
             return [str(campaign["id"]) for campaign in advertised_campaigns]
 
         fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
+        # Campaign-restricted categories (e.g. Pokémon GO) resolve their
+        # allow-listed channels from Twitch's own authoritative campaign data
+        # rather than the external gist index, so that index stays empty for
+        # them by design. A channel can still be allow-listed there even when
+        # its own advertised-campaigns query comes back empty -- this is
+        # common for official co-stream/viewing-party channels -- so check it
+        # before concluding the channel is ineligible.
+        restricted_campaigns = getattr(self, "active_drop_campaigns", {}).get(
+            game_slug, []
+        )
+        allowlisted_elsewhere = any(
+            not campaign.get("channels")
+            or streamer.username in campaign.get("channels", [])
+            for campaign in restricted_campaigns
+        )
         if campaign_data_available:
-            if (
-                getattr(streamer, "from_category", False) is not True
-                or fallback_campaigns == []
+            if getattr(streamer, "from_category", False) is not True or (
+                fallback_campaigns == [] and not allowlisted_elsewhere
             ):
                 if getattr(streamer, "from_category", False) is True:
                     with self.__eligibility_lock():
@@ -3904,6 +3918,7 @@ class Twitch(object):
         campaign_ids = set()
         possible_campaigns = list(self.discovered_open_drop_campaigns or [])
         possible_campaigns.extend(fallback_campaigns)
+        possible_campaigns.extend(restricted_campaigns)
         for campaign in possible_campaigns:
             if not isinstance(campaign, dict):
                 continue

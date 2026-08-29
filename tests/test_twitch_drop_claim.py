@@ -207,6 +207,70 @@ def test_authoritative_channel_campaign_result_blocks_wrong_game(monkeypatch):
     )
 
 
+def test_channel_allowlisted_in_authoritative_campaign_survives_empty_channel_query(
+    monkeypatch,
+):
+    # Regression: campaign-restricted categories (e.g. Pokémon GO co-streams)
+    # resolve their channel allow-list from Twitch's own authoritative
+    # campaign data, so the external gist index is intentionally left empty
+    # for them. A channel's own advertised-campaigns query can still come
+    # back empty even though it is allow-listed there (common for official
+    # co-stream/viewing-party channels) - that must not clobber the eligibility
+    # already established from the allow-list.
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "restricted-campaign-1",
+                "name": "Restricted Campaign",
+                "channels": ["drops-channel"],
+            }
+        ]
+    }
+    twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (1, 1)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "restricted-campaign-1"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypatch):
+    # The same authoritative campaign exists, but this channel isn't on its
+    # allow-list, so the empty channel query result must still stand.
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "restricted-campaign-1",
+                "name": "Restricted Campaign",
+                "channels": ["some-other-channel"],
+            }
+        ]
+    }
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
 def test_drops_description_is_none_once_channel_check_confirmed_zero_campaigns(
     monkeypatch,
 ):
