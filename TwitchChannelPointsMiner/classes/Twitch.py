@@ -938,11 +938,17 @@ class Twitch(object):
                 # never configured and that this channel isn't eligible for.
                 return None
 
-        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
-        if len(fallback_campaigns) > 1:
+        # Combines the external gist catalog with Twitch's own authoritative
+        # campaign data -- the latter is what's populated instead of the
+        # former once Twitch's inventory is treated as authoritative for
+        # this game, and it may include unrestricted campaigns too.
+        candidate_campaigns = list(
+            self.twitchdrops_app_campaigns.get(game_slug, [])
+        ) + list(getattr(self, "active_drop_campaigns", {}).get(game_slug, []))
+        if len(candidate_campaigns) > 1:
             eligible_campaigns = sum(
                 1
-                for campaign in fallback_campaigns
+                for campaign in candidate_campaigns
                 if not campaign.get("channels")
                 or streamer.username
                 in {
@@ -951,7 +957,7 @@ class Twitch(object):
             )
             return (
                 f"{game_name} drops "
-                f"({eligible_campaigns} of {len(fallback_campaigns)} campaigns)"
+                f"({eligible_campaigns} of {len(candidate_campaigns)} campaigns)"
             )
 
         game_campaigns = [
@@ -2286,9 +2292,17 @@ class Twitch(object):
             return False
 
         # Category discovery has already removed fully collected campaigns.
-        # Use its remaining gist campaign data when Twitch's private
+        # Use its remaining gist campaign data -- and, for campaign-restricted
+        # categories, Twitch's own authoritative allow-list, which is what
+        # gets populated instead of the gist data once Twitch's inventory is
+        # treated as authoritative for this game -- when Twitch's private
         # campaign query fails to populate Stream.campaigns.
-        for campaign in self.twitchdrops_app_campaigns.get(game_slug, []):
+        authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
+            game_slug, []
+        )
+        for campaign in list(self.twitchdrops_app_campaigns.get(game_slug, [])) + list(
+            authoritative_campaigns
+        ):
             channels = {
                 str(login).lower().strip()
                 for login in campaign.get("channels", []) or []
@@ -3873,10 +3887,29 @@ class Twitch(object):
             return [str(campaign["id"]) for campaign in advertised_campaigns]
 
         fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
+        # Campaign-restricted categories (e.g. Pokémon GO) resolve their
+        # allow-listed channels from Twitch's own authoritative campaign data
+        # rather than the external gist index, so that index stays empty for
+        # them by design. A channel can still be allow-listed there even when
+        # its own advertised-campaigns query comes back empty -- this is
+        # common for official co-stream/viewing-party channels -- so check it
+        # before concluding the channel is ineligible.
+        authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
+            game_slug, []
+        )
+        # Only a genuine, non-empty allow-list containing this channel counts
+        # as evidence to distrust the channel's own (empty) query result. An
+        # unrestricted authoritative campaign says nothing about this
+        # specific channel -- if it really applied here, the channel's own
+        # query should already have reflected it.
+        allowlisted_elsewhere = any(
+            streamer.username in campaign.get("channels", [])
+            for campaign in authoritative_campaigns
+            if campaign.get("channels")
+        )
         if campaign_data_available:
-            if (
-                getattr(streamer, "from_category", False) is not True
-                or fallback_campaigns == []
+            if getattr(streamer, "from_category", False) is not True or (
+                fallback_campaigns == [] and not allowlisted_elsewhere
             ):
                 if getattr(streamer, "from_category", False) is True:
                     with self.__eligibility_lock():
@@ -3890,20 +3923,35 @@ class Twitch(object):
                 )
                 return []
 
-            # Twitch can omit an account-ineligible campaign from the channel
-            # response even though its official Drops-enabled directory entry
-            # and the external campaign index made it eligible for discovery.
-            # Keep that fallback result instead of replacing it with (0, 0).
-            self.__log_drop_check(
-                f"Twitch channel '{streamer.username}' did not expose the "
-                f"fallback campaign for {streamer.stream.game_name()}; keeping "
-                "category discovery eligibility",
-                level=logging.DEBUG,
-            )
+            if fallback_campaigns:
+                # Twitch can omit an account-ineligible campaign from the
+                # channel response even though its official Drops-enabled
+                # directory entry and the external campaign index made it
+                # eligible for discovery. Keep that fallback result instead
+                # of replacing it with (0, 0).
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' did not expose the "
+                    f"fallback campaign for {streamer.stream.game_name()}; keeping "
+                    "category discovery eligibility",
+                    level=logging.DEBUG,
+                )
+            else:
+                # No gist fallback exists here at all (it's intentionally
+                # skipped once Twitch's inventory is authoritative for this
+                # game). This channel is only being kept because it's
+                # allow-listed in an authoritative campaign.
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' did not expose its "
+                    f"campaign for {streamer.stream.game_name()} directly, but is "
+                    "allow-listed in an authoritative restricted campaign; "
+                    "keeping category discovery eligibility",
+                    level=logging.DEBUG,
+                )
 
         campaign_ids = set()
         possible_campaigns = list(self.discovered_open_drop_campaigns or [])
         possible_campaigns.extend(fallback_campaigns)
+        possible_campaigns.extend(authoritative_campaigns)
         for campaign in possible_campaigns:
             if not isinstance(campaign, dict):
                 continue
