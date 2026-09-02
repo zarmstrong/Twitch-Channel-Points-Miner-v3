@@ -948,9 +948,11 @@ class Twitch(object):
         if len(candidate_campaigns) > 1:
             eligible_campaigns = sum(
                 1
-                for campaign in candidate_campaigns
-                if not self.__campaign_channel_logins(campaign)
-                or streamer.username in self.__campaign_channel_logins(campaign)
+                for channels in (
+                    self.__campaign_channel_logins(campaign)
+                    for campaign in candidate_campaigns
+                )
+                if not channels or streamer.username in channels
             )
             return (
                 f"{game_name} drops "
