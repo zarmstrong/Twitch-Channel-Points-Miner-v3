@@ -960,6 +960,11 @@ class Twitch(object):
                 f"({eligible_campaigns} of {len(candidate_campaigns)} campaigns)"
             )
         if len(candidate_campaigns) == 1:
+            channels = candidate_campaigns[0].get("channels")
+            if channels and streamer.username not in {
+                str(login).lower().strip() for login in channels
+            }:
+                return None
             return f"{game_name} drops"
 
         game_campaigns = [
