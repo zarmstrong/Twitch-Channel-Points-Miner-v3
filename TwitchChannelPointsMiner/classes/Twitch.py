@@ -949,21 +949,16 @@ class Twitch(object):
             eligible_campaigns = sum(
                 1
                 for campaign in candidate_campaigns
-                if not campaign.get("channels")
-                or streamer.username
-                in {
-                    str(login).lower().strip() for login in campaign.get("channels", [])
-                }
+                if not self.__campaign_channel_logins(campaign)
+                or streamer.username in self.__campaign_channel_logins(campaign)
             )
             return (
                 f"{game_name} drops "
                 f"({eligible_campaigns} of {len(candidate_campaigns)} campaigns)"
             )
         if len(candidate_campaigns) == 1:
-            channels = candidate_campaigns[0].get("channels")
-            if channels and streamer.username not in {
-                str(login).lower().strip() for login in channels
-            }:
+            channels = self.__campaign_channel_logins(candidate_campaigns[0])
+            if channels and streamer.username not in channels:
                 return None
             return f"{game_name} drops"
 
