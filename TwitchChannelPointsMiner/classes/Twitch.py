@@ -959,6 +959,8 @@ class Twitch(object):
                 f"{game_name} drops "
                 f"({eligible_campaigns} of {len(candidate_campaigns)} campaigns)"
             )
+        if len(candidate_campaigns) == 1:
+            return f"{game_name} drops"
 
         game_campaigns = [
             campaign
