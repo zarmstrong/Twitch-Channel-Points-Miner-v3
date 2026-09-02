@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.16.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.1...3.16.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **drops:** don't claim drops for a game with zero known campaigns ([#115](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/115)) ([605d89d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/605d89d4d63365576a3f66d0d6dbdf94ed6887a9))
+
 ## [3.16.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.0...3.16.1) (2026-08-29)
 
 
