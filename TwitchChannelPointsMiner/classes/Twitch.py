@@ -948,17 +948,21 @@ class Twitch(object):
         if len(candidate_campaigns) > 1:
             eligible_campaigns = sum(
                 1
-                for campaign in candidate_campaigns
-                if not campaign.get("channels")
-                or streamer.username
-                in {
-                    str(login).lower().strip() for login in campaign.get("channels", [])
-                }
+                for channels in (
+                    self.__campaign_channel_logins(campaign)
+                    for campaign in candidate_campaigns
+                )
+                if not channels or streamer.username in channels
             )
             return (
                 f"{game_name} drops "
                 f"({eligible_campaigns} of {len(candidate_campaigns)} campaigns)"
             )
+        if len(candidate_campaigns) == 1:
+            channels = self.__campaign_channel_logins(candidate_campaigns[0])
+            if channels and streamer.username not in channels:
+                return None
+            return f"{game_name} drops"
 
         game_campaigns = [
             campaign
@@ -970,7 +974,9 @@ class Twitch(object):
             )
             == game_slug
         ]
-        if len(game_campaigns) <= 1:
+        if not game_campaigns:
+            return None
+        if len(game_campaigns) == 1:
             return f"{game_name} drops"
 
         eligible_campaign_ids = {
