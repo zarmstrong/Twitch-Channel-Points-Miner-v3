@@ -970,7 +970,9 @@ class Twitch(object):
             )
             == game_slug
         ]
-        if len(game_campaigns) <= 1:
+        if not game_campaigns:
+            return None
+        if len(game_campaigns) == 1:
             return f"{game_name} drops"
 
         eligible_campaign_ids = {
