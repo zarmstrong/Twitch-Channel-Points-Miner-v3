@@ -735,12 +735,23 @@ class TwitchChannelPointsMiner:
                         streamers_dict[username] = username.lower().strip()
                         follower_usernames.add(username)
 
+            # Fetch the drops inventory once and share it between the
+            # preferred and wildcard passes below (both would otherwise
+            # independently fetch it via GraphQL when wildcard triggers this
+            # cycle). Matches each function's own early return when
+            # category_drops_enabled is False, so this never fetches
+            # something neither pass would have needed.
+            discovery_inventory = None
+            if category_drops_enabled and (categories or self.wildcard_categories):
+                discovery_inventory = self.twitch.get_drops_inventory()
+
             eligible_categories = []
             if categories:
                 eligible_categories = self.twitch.filter_categories_with_active_drops(
                     categories,
                     order=category_campaign_order,
                     drops_enabled=category_drops_enabled,
+                    inventory=discovery_inventory,
                 )
 
                 if categories and eligible_categories == []:
@@ -782,6 +793,7 @@ class TwitchChannelPointsMiner:
                         limit=self.wildcard_category_limit,
                         pinned_category_slugs=set(),
                         pin_active=self.wildcard_category_pin_active,
+                        inventory=discovery_inventory,
                     )
                 )
                 all_wildcard_category_usernames = []
@@ -1707,10 +1719,19 @@ class TwitchChannelPointsMiner:
 
         # Force live campaign discovery to run again instead of reusing startup data.
         self.twitch.discovered_open_drop_campaigns = None
+        # Fetch the drops inventory once and share it between the preferred
+        # and wildcard passes below, instead of each independently fetching
+        # it via GraphQL when wildcard triggers this cycle. Matches each
+        # function's own early return when drops_enabled is False, so this
+        # never fetches something neither pass would have needed.
+        discovery_inventory = None
+        if drops_enabled and (categories or wildcard_categories):
+            discovery_inventory = self.twitch.get_drops_inventory()
         eligible_categories = self.twitch.filter_categories_with_active_drops(
             categories,
             order=campaign_order,
             drops_enabled=drops_enabled,
+            inventory=discovery_inventory,
         )
         discovered_usernames = []
         for category in eligible_categories:
@@ -1749,6 +1770,7 @@ class TwitchChannelPointsMiner:
                     limit=wildcard_category_limit,
                     pinned_category_slugs=pinned_category_slugs,
                     pin_active=wildcard_category_pin_active,
+                    inventory=discovery_inventory,
                 )
             )
             for category in wildcard_eligible_categories:

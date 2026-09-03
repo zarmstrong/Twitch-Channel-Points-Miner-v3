@@ -2148,8 +2148,23 @@ class Twitch(object):
             if (slug := self.__category_slug(category))
         }
 
+    def get_drops_inventory(self) -> dict:
+        """Fetch the authenticated account's drops inventory.
+
+        Exposed publicly (unlike __get_inventory) so a caller that needs it
+        for both filter_categories_with_active_drops and
+        get_wildcard_categories_with_active_drops in the same discovery pass
+        can fetch it once and pass it to both via their `inventory`
+        parameter, instead of each one fetching it separately.
+        """
+        return self.__get_inventory()
+
     def filter_categories_with_active_drops(
-        self, categories: List[str], order="ORDER", drops_enabled: bool = True
+        self,
+        categories: List[str],
+        order="ORDER",
+        drops_enabled: bool = True,
+        inventory: dict | None = None,
     ) -> List[str]:
         if not categories:
             return []
@@ -2158,7 +2173,8 @@ class Twitch(object):
 
         category_slug = self.__category_slug
 
-        inventory = self.__get_inventory()
+        if inventory is None:
+            inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
             logger.warning(
                 "Unable to load drops inventory; skipping category stream discovery",
@@ -2239,6 +2255,7 @@ class Twitch(object):
         limit: int | None = None,
         pinned_category_slugs: set | None = None,
         pin_active: bool = True,
+        inventory: dict | None = None,
     ) -> List[str]:
         """Return game slugs with an active incomplete drop campaign,
         unfiltered by any configured category list. Used by the
@@ -2252,11 +2269,17 @@ class Twitch(object):
         intentional: it exists to avoid retiring/re-picking an already
         watched wildcard streamer just because a closer-to-expiring campaign
         bumped its category out of the top-N on a re-sort.
+
+        `inventory`: pass the already-fetched inventory (e.g. from
+        get_drops_inventory()) when a caller is also calling
+        filter_categories_with_active_drops in the same discovery pass, so
+        the inventory GraphQL request isn't made twice in one cycle.
         """
         if drops_enabled is False:
             return []
 
-        inventory = self.__get_inventory()
+        if inventory is None:
+            inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
             logger.warning(
                 "Unable to load drops inventory; skipping wildcard category discovery",

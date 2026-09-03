@@ -436,6 +436,9 @@ def test_web_config_lists_support_drag_and_drop_reordering():
     assert "Sortable.create(containerEl" in make_sortable_fn
     assert "handle: '.drag-handle'" in make_sortable_fn
     assert "ghostClass: 'sortable-ghost'" in make_sortable_fn
+    # Dropping a row back where it started still fires onEnd -- must not
+    # save when nothing actually moved.
+    assert "evt.oldIndex !== evt.newIndex" in make_sortable_fn
 
     streamers_fn = script.split("function renderConfiguredStreamers", 1)[1].split(
         "\nfunction renderConfiguredCategories", 1
@@ -462,6 +465,22 @@ def test_web_config_lists_support_drag_and_drop_reordering():
     )[0]
     assert "order:" in save_sources_fn
     assert "data('source-row')" in save_sources_fn
+
+
+def test_failed_config_update_resyncs_from_server():
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
+    update_web_config_fn = script.split("function updateWebConfig", 1)[1].split(
+        "\nfunction saveStreamerSettings", 1
+    )[0]
+    fail_branch = update_web_config_fn.split(").fail(function (xhr) {", 1)[1].split(
+        "}).always(", 1
+    )[0]
+
+    # A failed write (e.g. a dropped reorder) must not leave the DOM showing
+    # an order/state that was never actually saved.
+    assert "loadWebConfig();" in fail_branch
 
 
 def test_notification_forms_do_not_nest_two_column_grids():

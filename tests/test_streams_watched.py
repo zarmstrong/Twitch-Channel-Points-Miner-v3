@@ -743,8 +743,11 @@ def test_wildcard_category_one_per_cycle_prefers_soonest_expiring(monkeypatch):
         },
     )
 
-    # Only one wildcard-discovered stream is watched per cycle, same as the
-    # preferred-category safety net, but tracked independently.
+    # Only one discovered stream is watched per cycle, whether it's a
+    # preferred-category or wildcard pick (see
+    # test_preferred_category_wins_shared_discovered_slot_over_wildcard for
+    # the cross-tier case) -- among two wildcard candidates competing for
+    # that single shared slot, the soonest-expiring one wins.
     assert posted == ["https://spade.test/sooner-deadline"]
 
 

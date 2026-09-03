@@ -200,11 +200,18 @@ class FakeTwitch:
         self.eligible_categories = eligible_categories
         self.wildcard_categories = wildcard_categories
         self.wildcard_calls = []
+        self.filter_calls = []
+        self.inventory_fetch_count = 0
         self.selectors = []
         self.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
         self.discovered_open_drop_campaigns = None
 
-    def filter_categories_with_active_drops(self, categories, **_kwargs):
+    def get_drops_inventory(self):
+        self.inventory_fetch_count += 1
+        return {"fetched": self.inventory_fetch_count}
+
+    def filter_categories_with_active_drops(self, categories, **kwargs):
+        self.filter_calls.append(kwargs)
         return self.eligible_categories
 
     def get_category_slugs(self, categories):
@@ -298,6 +305,50 @@ def test_wildcard_discovery_runs_and_tags_streamers_once_preferred_is_exhausted(
     assert [streamer.username for streamer in miner.streamers] == ["wild-game-streamer"]
     assert miner.streamers[0].from_category is True
     assert miner.streamers[0].from_wildcard_category is True
+
+
+def test_refresh_fetches_drops_inventory_once_and_shares_it_with_wildcard_pass():
+    # Both filter_categories_with_active_drops and
+    # get_wildcard_categories_with_active_drops need the drops inventory;
+    # the miner should fetch it once per refresh and pass the same object to
+    # both instead of each fetching it independently over GraphQL.
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=["wild-game"])
+    miner = _bare_miner(twitch)
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["preferred-game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+    )
+
+    assert twitch.inventory_fetch_count == 1
+    assert twitch.filter_calls[0]["inventory"] == {"fetched": 1}
+    assert twitch.wildcard_calls[0]["inventory"] == {"fetched": 1}
+
+
+def test_refresh_skips_inventory_fetch_when_drops_disabled():
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["preferred-game"],
+        [],
+        False,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+    )
+
+    assert twitch.inventory_fetch_count == 0
 
 
 def test_wildcard_disabled_retires_previously_discovered_wildcard_streamers():

@@ -1176,7 +1176,14 @@ function makeSortable(containerEl, onEnd) {
     return Sortable.create(containerEl, {
         handle: '.drag-handle',
         ghostClass: 'sortable-ghost',
-        onEnd: onEnd
+        onEnd: function (evt) {
+            // Dropping a row back where it started still fires onEnd; skip
+            // the save so a no-op drag doesn't rewrite config.py or pop a
+            // "order was updated" toast.
+            if (onEnd && evt.oldIndex !== evt.newIndex) {
+                onEnd(evt);
+            }
+        }
     });
 }
 
@@ -1381,6 +1388,12 @@ function updateWebConfig(payload, successMessage, button) {
     }).fail(function (xhr) {
         showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
             ? xhr.responseJSON.error : 'Unable to update configuration.', true);
+        // The write didn't take effect server-side (e.g. a failed drag
+        // reorder), but the DOM may already reflect the attempted change
+        // (SortableJS moves the row before onEnd fires). Resync from the
+        // server so the displayed order doesn't silently diverge from
+        // config.py's actual contents.
+        loadWebConfig();
     }).always(function () {
         if (button) button.prop('disabled', false);
     });

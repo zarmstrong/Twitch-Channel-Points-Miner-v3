@@ -361,6 +361,11 @@ or `auto_mine_badge_drops`; move it earlier only if you deliberately want
 wildcard-discovered streams to win watch slots over those sources when both
 are eligible at once.
 
+The web config dashboard's "Stream sources" list mirrors this setting: each
+row is a source with an on/off checkbox, and rows can be dragged into the
+order you want `streamer_source_priority` to end up in. Saving writes both
+the enabled sources and their order back to `config.py` in one step.
+
 See [Settings](#settings) for the available priority, logger, streamer, and bet
 objects. Keep credentials and integration tokens only in your private
 `config/config.py`.
@@ -561,7 +566,9 @@ reward.
 
 `CategoryCampaignOrder.ORDER` preserves the order in `categories`.
 `CategoryCampaignOrder.EXPIRATION` prioritizes categories whose viable campaigns
-expire soonest, helping time-sensitive Drops get selected first.
+expire soonest, helping time-sensitive Drops get selected first. With `ORDER`
+selected, the web config dashboard's "Configured categories" list can be
+reordered by dragging rows, same as `STREAMERS`.
 
 If Twitch's campaign sources do not list any campaign for a configured game, the
 miner uses the shared `twitch-drops.json` gist as a third-priority fallback.
