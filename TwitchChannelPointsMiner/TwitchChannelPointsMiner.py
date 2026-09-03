@@ -1749,13 +1749,26 @@ class TwitchChannelPointsMiner:
         )
 
         # Wildcard discovery only runs once the preferred category list is
-        # exhausted this cycle -- if a preferred category is eligible again
-        # (or wildcard_categories has been turned off), the wildcard pass
-        # below deliberately stands down and its reconcile call retires any
-        # previously discovered wildcard streamers, same as disabling
-        # `categories` retires category streamers today.
+        # exhausted this cycle -- if a preferred category is eligible again,
+        # the wildcard pass below deliberately stands down (this is the
+        # existing traffic safeguard and is unchanged). Standing down is
+        # transient: it means "not evaluated this cycle", not "gone". The
+        # wildcard-scoped reconcile/order calls below are skipped for that
+        # specific case, so already-tracked wildcard streamers are left
+        # completely alone (same connections, same tracking) rather than
+        # retired on the basis of an empty discovery list that was never
+        # actually populated. Watch-slot priority arbitration already ranks
+        # CATEGORIES above WILDCARD_CATEGORIES, so a still-tracked wildcard
+        # stream simply loses contested slots to a preferred one without
+        # needing to be torn down. They're only retired by a genuine
+        # discovery pass that re-evaluates the full eligible set and finds
+        # them actually gone -- or immediately, below, if wildcard_categories
+        # itself has been turned off (that reconcile still runs unconditionally,
+        # same "off means off" semantics as disabling `categories`).
+        wildcard_discovery_ran = wildcard_categories and eligible_categories == []
+        wildcard_standing_down = wildcard_categories and not wildcard_discovery_ran
         wildcard_discovered_usernames = []
-        if wildcard_categories and eligible_categories == []:
+        if wildcard_discovery_ran:
             pinned_category_slugs = {
                 self.twitch.get_game_name_slug(streamer.stream.game_name())
                 for streamer in self.streamers
@@ -1791,10 +1804,13 @@ class TwitchChannelPointsMiner:
         # are initialized so the minute watcher cannot observe a partial refresh.
         self.__reconcile_category_streamers(discovered_usernames, wildcard=False)
         self.__order_category_streamers(discovered_usernames, wildcard=False)
-        self.__reconcile_category_streamers(
-            wildcard_discovered_usernames, wildcard=True
-        )
-        self.__order_category_streamers(wildcard_discovered_usernames, wildcard=True)
+        if not wildcard_standing_down:
+            self.__reconcile_category_streamers(
+                wildcard_discovered_usernames, wildcard=True
+            )
+            self.__order_category_streamers(
+                wildcard_discovered_usernames, wildcard=True
+            )
 
         if added > 0 and self.sync_campaigns_thread is None:
             self.sync_campaigns_thread = threading.Thread(

@@ -195,6 +195,21 @@ class FakeWebSocketsPool:
         self.removed.append(streamer.username)
 
 
+class FakeIrcChat:
+    def __init__(self):
+        self.stopped = False
+        self.joined = False
+
+    def is_alive(self):
+        return True
+
+    def stop(self):
+        self.stopped = True
+
+    def join(self, timeout=None):
+        self.joined = True
+
+
 class FakeTwitch:
     def __init__(self, eligible_categories, wildcard_categories):
         self.eligible_categories = eligible_categories
@@ -216,6 +231,9 @@ class FakeTwitch:
 
     def get_category_slugs(self, categories):
         return {category for category in categories}
+
+    def get_game_name_slug(self, game_name):
+        return (game_name or "").lower().replace(" ", "-")
 
     def get_wildcard_categories_with_active_drops(self, **kwargs):
         self.wildcard_calls.append(kwargs)
@@ -278,6 +296,158 @@ def test_wildcard_discovery_only_runs_when_preferred_categories_exhausted():
     assert all(
         streamer.from_wildcard_category is False for streamer in miner.streamers
     )
+
+
+def test_standdown_does_not_retire_existing_wildcard_streamer_in_unrelated_game():
+    # Regression test for the review-identified bug: a preferred category
+    # (gameA) becoming eligible must not retire a wildcard streamer tracked
+    # in a completely unrelated game (gameX) whose own campaign was never
+    # re-evaluated this cycle.
+    twitch = FakeTwitch(eligible_categories=["gameA"], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    gamex = Streamer("gamex-streamer", from_category=True, from_wildcard_category=True)
+    gamex.is_online = True
+    gamex.stream.game = {"name": "GameX", "displayName": "GameX"}
+    gamex.irc_chat = FakeIrcChat()
+    miner.streamers = [gamex]
+    miner.original_streamers = [10]
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["gameA", "gameB"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+    # Discovery correctly stood down (the traffic safeguard, unchanged)...
+    assert twitch.wildcard_calls == []
+    # ...but the previously-tracked wildcard streamer must survive untouched
+    # (gameA legitimately gained its own preferred-category streamer too --
+    # that's expected and irrelevant to gameX's fate).
+    assert gamex in miner.streamers
+    assert gamex.from_wildcard_category is True
+    assert gamex.from_category is True
+    assert "gamex-streamer" not in miner.ws_pool.removed
+    assert gamex.irc_chat.stopped is False
+
+
+def test_real_wildcard_discovery_still_retires_genuinely_closed_streamer():
+    # Regression guard: confirm the stand-down fix didn't disable legitimate
+    # cleanup. This cycle preferred categories are genuinely exhausted, a
+    # real wildcard discovery pass runs, and it no longer includes gameX at
+    # all -- gameX must still be retired in this case.
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=["still-open-game"])
+    miner = _bare_miner(twitch)
+    gamex = Streamer("gamex-streamer", from_category=True, from_wildcard_category=True)
+    gamex.is_online = True
+    gamex.stream.game = {"name": "GameX", "displayName": "GameX"}
+    gamex.irc_chat = FakeIrcChat()
+    miner.streamers = [gamex]
+    miner.original_streamers = [10]
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["gameA"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+    assert len(twitch.wildcard_calls) == 1
+    assert "gamex-streamer" not in [
+        streamer.username for streamer in miner.streamers
+    ]
+    assert miner.ws_pool.removed == ["gamex-streamer"]
+    assert gamex.irc_chat.stopped is True
+
+
+def test_wildcard_streamer_survives_transient_standdown_then_resumes():
+    # Full scenario from the review narrative: (a) wildcard discovers and
+    # tracks gameX while preferred categories are idle; (b) a preferred
+    # category becomes eligible for one cycle -- gameX must survive
+    # untouched, not rediscovered; (c) the preferred category closes again
+    # -- wildcard discovery resumes and gameX is still the same tracked
+    # instance, confirming it was never actually dropped in step (b).
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=["gamex"])
+    miner = _bare_miner(twitch)
+    refresh_kwargs = dict(
+        wildcard_categories=True,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+    # (a) idle preferred categories -> wildcard discovers and tracks gameX.
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["gameA"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        **refresh_kwargs,
+    )
+    assert [streamer.username for streamer in miner.streamers] == ["gamex-streamer"]
+    tracked = miner.streamers[0]
+    assert tracked.from_wildcard_category is True
+
+    # (b) gameA becomes eligible for one cycle -> wildcard stands down, but
+    # gameX must not be retired.
+    twitch.eligible_categories = ["gameA"]
+    twitch.wildcard_calls = []
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["gameA"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        **refresh_kwargs,
+    )
+    # gameA being eligible legitimately adds its own preferred streamer, but
+    # gameX (still the same tracked instance) must survive alongside it,
+    # untouched, rather than being retired or replaced.
+    assert twitch.wildcard_calls == []
+    assert tracked in miner.streamers
+    assert tracked.from_wildcard_category is True
+    assert "gamex-streamer" not in miner.ws_pool.removed
+
+    # (c) gameA closes again -> wildcard discovery resumes and finds gameX
+    # still tracked, without having rediscovered it from scratch.
+    twitch.eligible_categories = []
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["gameA"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        **refresh_kwargs,
+    )
+    assert len(twitch.wildcard_calls) == 1
+    assert tracked in miner.streamers
+    assert "gamex-streamer" not in miner.ws_pool.removed
 
 
 def test_wildcard_discovery_runs_and_tags_streamers_once_preferred_is_exhausted():
