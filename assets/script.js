@@ -1153,9 +1153,7 @@ function renderWebConfig(config) {
     $('#category-sort').val(config.category.sort);
     $('#category-refresh').val(config.category.refresh_interval_hours);
     $('#category-drops-enabled').prop('checked', config.category.drops_enabled);
-    Object.keys(config.sources || {}).forEach(function (source) {
-        $(`[data-source="${source}"]`).prop('checked', config.sources[source]);
-    });
+    renderSourceSettings(config.sources || {}, config.source_order || []);
     $('#console-log-level').val(config.logging.console_level);
     $('#file-log-level').val(config.logging.file_level);
     $('#daily-report-enabled').prop('checked', config.logging.daily_report);
@@ -1167,8 +1165,32 @@ function renderWebConfig(config) {
     renderNotificationSettings(config);
 }
 
+var configuredStreamersSortable = null;
+var configuredCategoriesSortable = null;
+var sourceSettingsSortable = null;
+
+// Creates a Sortable instance once per container (re-rendering only
+// replaces the container's children, not the container element itself, so
+// re-running Sortable.create on every render would stack duplicate
+// instances on the same DOM node).
+function makeSortable(containerEl, onEnd) {
+    return Sortable.create(containerEl, {
+        handle: '.drag-handle',
+        ghostClass: 'sortable-ghost',
+        onEnd: onEnd
+    });
+}
+
 function renderConfiguredStreamers(streamers) {
     var container = $('#configured-streamers').empty();
+    if (!configuredStreamersSortable) {
+        configuredStreamersSortable = makeSortable(container[0], function () {
+            var reordered = $('#configured-streamers .config-streamer').map(function () {
+                return $(this).data('username');
+            }).get();
+            updateWebConfig({ action: 'reorder_streamers', usernames: reordered }, 'Streamer order was updated.');
+        });
+    }
     if (!streamers.length) {
         container.append($('<span>').addClass('config-empty').text('No streamers configured.'));
         return;
@@ -1177,6 +1199,7 @@ function renderConfiguredStreamers(streamers) {
         var settings = streamer.settings || {};
         var item = $('<details>').addClass('config-item config-streamer').attr('data-username', streamer.username);
         var summary = $('<summary>');
+        summary.append($('<span>').addClass('drag-handle icon is-small').attr('aria-hidden', 'true').html('<i class="fas fa-grip-vertical"></i>'));
         summary.append($('<strong>').text(streamer.username));
         summary.append($('<span>').addClass('icon is-small').html('<i class="fas fa-cog" aria-hidden="true"></i>'));
         item.append(summary);
@@ -1215,37 +1238,65 @@ function renderConfiguredStreamers(streamers) {
             updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
         }
     });
+    // Prevent a plain click (no drag) on the handle from toggling the
+    // enclosing <details> row open/closed via its <summary> ancestor.
+    $('#configured-streamers .drag-handle').off('click').on('click', function (event) {
+        event.preventDefault();
+    });
 }
 
 function renderConfiguredCategories(categories) {
     var container = $('#configured-categories').empty();
+    if (!configuredCategoriesSortable) {
+        configuredCategoriesSortable = makeSortable(container[0], function () {
+            var reordered = $('#configured-categories .config-item-name').map(function () {
+                return $(this).text();
+            }).get();
+            updateWebConfig({ action: 'reorder_categories', categories: reordered }, 'Category order was updated.');
+        });
+    }
     if (!categories.length) {
         container.append($('<span>').addClass('config-empty').text('No categories configured.'));
         return;
     }
-    categories.forEach(function (category, index) {
+    categories.forEach(function (category) {
         var row = $('<div>').addClass('config-item config-category');
+        row.append($('<span>').addClass('drag-handle icon is-small').attr('aria-hidden', 'true').html('<i class="fas fa-grip-vertical"></i>'));
         row.append($('<span>').addClass('config-item-name').text(category));
         var actions = $('<div>').addClass('config-item-actions');
-        actions.append($('<button>').addClass('button is-small move-category-up').attr({ type: 'button', disabled: index === 0, title: 'Move up', 'aria-label': `Move ${category} up` }).html('↑'));
-        actions.append($('<button>').addClass('button is-small move-category-down').attr({ type: 'button', disabled: index === categories.length - 1, title: 'Move down', 'aria-label': `Move ${category} down` }).html('↓'));
         actions.append($('<button>').addClass('button is-small is-danger remove-category').attr('type', 'button').text('Remove'));
-        row.append(actions).attr('data-index', index);
+        row.append(actions);
         container.append(row);
     });
-    $('.move-category-up, .move-category-down').off('click').on('click', function () {
-        var index = Number($(this).closest('.config-category').data('index'));
-        var destination = index + ($(this).hasClass('move-category-up') ? -1 : 1);
-        var reordered = categories.slice();
-        [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
-        updateWebConfig({ action: 'reorder_categories', categories: reordered }, 'Category order was updated.');
-    });
     $('.remove-category').off('click').on('click', function () {
-        var index = Number($(this).closest('.config-category').data('index'));
-        var category = categories[index];
+        var category = $(this).closest('.config-category').find('.config-item-name').text();
         if (window.confirm(`Remove ${category} from the miner configuration?`)) {
             updateWebConfig({ action: 'remove', kind: 'categories', value: category }, `${category} was removed.`);
         }
+    });
+}
+
+var SOURCE_LABELS = {
+    streamers: 'Explicit streamers',
+    followers: 'Followed channels',
+    categories: 'Categories',
+    badges: 'Badge campaigns',
+    wildcard_categories: 'Wildcard categories'
+};
+
+function renderSourceSettings(sources, sourceOrder) {
+    var container = $('#source-settings-list').empty();
+    if (!sourceSettingsSortable) {
+        sourceSettingsSortable = makeSortable(container[0]);
+    }
+    var order = sourceOrder.length ? sourceOrder : Object.keys(SOURCE_LABELS);
+    order.forEach(function (source) {
+        var row = $('<div>').addClass('config-item config-source').attr('data-source-row', source);
+        row.append($('<span>').addClass('drag-handle icon is-small').attr('aria-hidden', 'true').html('<i class="fas fa-grip-vertical"></i>'));
+        var label = $('<label>').addClass('checkbox').text(` ${SOURCE_LABELS[source] || source}`);
+        label.prepend($('<input>').attr({ type: 'checkbox', 'data-source': source }).prop('checked', sources[source] === true));
+        row.append(label);
+        container.append(row);
     });
 }
 
@@ -1348,8 +1399,11 @@ function saveSourceSettings(event) {
     event.preventDefault();
     var values = {};
     $('[data-source]').each(function () { values[$(this).data('source')] = $(this).prop('checked'); });
+    var order = $('#source-settings-list .config-source').map(function () {
+        return $(this).data('source-row');
+    }).get();
     var button = $(this).find('button[type="submit"]');
-    updateWebConfig({ action: 'update_sources', values: values }, 'Stream sources were saved. Restart the miner to apply them.', button);
+    updateWebConfig({ action: 'update_sources', values: values, order: order }, 'Stream sources were saved. Restart the miner to apply them.', button);
 }
 
 function saveLoggingSettings(event) {

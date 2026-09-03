@@ -372,6 +372,14 @@ login string or a `Streamer(...)` object when that channel needs custom
 `StreamerSettings`. Use an empty list when mining exclusively from followed
 channels or category discovery.
 
+List order is a real priority control, not just a display preference:
+`Priority.ORDER`'s tie-break and the final watch-slot selection both key off
+each streamer's position in this list, so an earlier entry wins a contested
+watch slot over a later one when nothing else distinguishes them. The web
+config dashboard's "Configured streamers" list can be reordered by dragging
+rows (via the handle icon); that writes straight back to this list's order in
+`config.py`.
+
 Streamer settings follow this precedence: settings on an individual `Streamer`,
 then the default `streamer_settings` in `MINER_CONFIG`, then project defaults.
 Plain strings in `STREAMERS` use the configured defaults.

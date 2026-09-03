@@ -458,6 +458,27 @@ body.header-hidden .top-controls-row {
     color: #687080;
 }
 
+.drag-handle {
+    cursor: grab;
+    color: #9099a8;
+    padding: 0 4px;
+    flex: none;
+}
+
+.drag-handle:active {
+    cursor: grabbing;
+}
+
+.sortable-ghost {
+    opacity: 0.4;
+}
+
+.config-source {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .notification-settings {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

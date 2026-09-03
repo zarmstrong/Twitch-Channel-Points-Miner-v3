@@ -414,8 +414,49 @@ def test_config_ui_exposes_requested_management_controls():
     assert "update_updates" in script
     assert "interval_hours: startupOnly ? undefined" in script
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
-    assert "'aria-label': `Move ${category} up`" in script
-    assert "'aria-label': `Move ${category} down`" in script
+    assert "reorder_streamers" in script
+    assert "Sortable.create" in script
+
+
+def test_web_config_lists_support_drag_and_drop_reordering():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+
+    assert "sortablejs" in template.lower()
+
+    make_sortable_fn = script.split("function makeSortable", 1)[1].split(
+        "\nfunction renderConfiguredStreamers", 1
+    )[0]
+    assert "Sortable.create(containerEl" in make_sortable_fn
+    assert "handle: '.drag-handle'" in make_sortable_fn
+    assert "ghostClass: 'sortable-ghost'" in make_sortable_fn
+
+    streamers_fn = script.split("function renderConfiguredStreamers", 1)[1].split(
+        "\nfunction renderConfiguredCategories", 1
+    )[0]
+    assert "makeSortable(container[0]" in streamers_fn
+    assert "action: 'reorder_streamers'" in streamers_fn
+
+    categories_fn = script.split("function renderConfiguredCategories", 1)[1].split(
+        "\nvar SOURCE_LABELS", 1
+    )[0]
+    assert "makeSortable(container[0]" in categories_fn
+    assert "action: 'reorder_categories'" in categories_fn
+    # The up/down buttons are gone -- reordering is drag-only.
+    assert "move-category-up" not in script
+    assert "move-category-down" not in script
+
+    sources_fn = script.split("function renderSourceSettings", 1)[1].split(
+        "\nfunction showConfigMessage", 1
+    )[0]
+    assert "makeSortable(container[0]" in sources_fn
+
+    save_sources_fn = script.split("function saveSourceSettings", 1)[1].split(
+        "\nfunction saveLoggingSettings", 1
+    )[0]
+    assert "order:" in save_sources_fn
+    assert "data('source-row')" in save_sources_fn
 
 
 def test_notification_forms_do_not_nest_two_column_grids():

@@ -36,6 +36,17 @@ CATEGORY_SORTS = {
 CHAT_PRESENCES = {"ALWAYS", "NEVER", "ONLINE", "OFFLINE"}
 LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 SOURCE_NAMES = {"streamers", "followers", "categories", "badges", "wildcard_categories"}
+# Ordered UI-name -> StreamerSource enum-name mapping, shared between the
+# read side (building source_order) and the write side (update_sources) so
+# the two can't silently drift out of sync.
+SOURCE_ENUM_BY_NAME = {
+    "streamers": "STREAMERS",
+    "followers": "FOLLOWERS",
+    "categories": "CATEGORIES",
+    "badges": "BADGES",
+    "wildcard_categories": "WILDCARD_CATEGORIES",
+}
+DEFAULT_SOURCE_ORDER = tuple(SOURCE_ENUM_BY_NAME)
 NOTIFICATION_SCHEMAS = {
     "telegram": {
         "fields": ("chat_id", "message_thread_id", "disable_notification", "events"),
@@ -271,6 +282,13 @@ def _base_web_config(config_path):
         "wildcard_categories": "WILDCARD_CATEGORIES" in source_priority
         and bool(mine.get("wildcard_categories", False)),
     }
+    ui_name_by_enum = {enum: name for name, enum in SOURCE_ENUM_BY_NAME.items()}
+    source_order = [
+        ui_name_by_enum[member]
+        for member in source_priority
+        if member in ui_name_by_enum
+    ]
+    source_order += [name for name in DEFAULT_SOURCE_ORDER if name not in source_order]
     notifications = {}
     for provider, schema in NOTIFICATION_SCHEMAS.items():
         configured = logger_settings.get(provider)
@@ -316,6 +334,7 @@ def _base_web_config(config_path):
             "drops_enabled": mine.get("category_drops_enabled", True),
         },
         "sources": sources,
+        "source_order": source_order,
         "logging": {
             "console_level": logger_settings.get("console_level", "INFO"),
             "file_level": logger_settings.get("file_level", "DEBUG"),
@@ -840,6 +859,13 @@ def _valid_managed_category(value):
     )
 
 
+def _require_reorder_is_permutation(new_order, current_names, item_label):
+    if sorted(map(str.lower, new_order)) != sorted(map(str.lower, current_names)):
+        raise ConfigEditError(
+            f"{item_label} order must contain every configured {item_label.lower()}."
+        )
+
+
 def _runtime_notification_events(values):
     from TwitchChannelPointsMiner.classes.Settings import Events
 
@@ -918,13 +944,23 @@ def _update_managed_web_config(config_path, payload):
             not _valid_managed_category(item) for item in categories
         ):
             raise ConfigEditError("Invalid category order.")
-        if sorted(map(str.lower, categories)) != sorted(
-            map(str.lower, current["categories"])
-        ):
-            raise ConfigEditError(
-                "Category order must contain every configured category."
-            )
+        _require_reorder_is_permutation(categories, current["categories"], "Category")
         _write_config_categories(config_path, categories)
+    elif action == "reorder_streamers":
+        usernames = payload.get("usernames")
+        if not isinstance(usernames, list) or any(
+            not isinstance(item, str) for item in usernames
+        ):
+            raise ConfigEditError("Invalid streamer order.")
+        current_usernames = [item["username"] for item in current["streamers"]]
+        _require_reorder_is_permutation(usernames, current_usernames, "Streamer")
+        by_username = {
+            item["username"].lower(): item["username"] for item in current["streamers"]
+        }
+        reordered = [
+            {"username": by_username[username.lower()]} for username in usernames
+        ]
+        _write_streamers(config_path, reordered)
     elif action == "update_streamer":
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")
@@ -982,25 +1018,39 @@ def _update_managed_web_config(config_path, payload):
             or any(not isinstance(value, bool) for value in values.values())
         ):
             raise ConfigEditError("Invalid stream source controls.")
-        source_names = {
-            "streamers": "STREAMERS",
-            "followers": "FOLLOWERS",
-            "categories": "CATEGORIES",
-            "badges": "BADGES",
-            "wildcard_categories": "WILDCARD_CATEGORIES",
-        }
+        order = payload.get("order")
+        if order is not None and (
+            not isinstance(order, list) or sorted(order) != sorted(SOURCE_NAMES)
+        ):
+            raise ConfigEditError("Invalid stream source order.")
+        source_names = SOURCE_ENUM_BY_NAME
         source = Path(config_path).read_text(encoding="utf-8")
         miner = _simple_value(_assignment(ast.parse(source), "MINER_CONFIG")) or {}
         priority = list(
             miner.get("streamer_source_priority")
             or ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES", "WILDCARD_CATEGORIES")
         )
-        for name, enabled in values.items():
-            member = source_names[name]
-            if enabled and member not in priority:
-                priority.append(member)
-            elif not enabled and member in priority:
-                priority.remove(member)
+        if order is not None:
+            # A single payload carries both enablement and position: rebuild
+            # the priority list from the posted order, falling back to each
+            # source's currently-saved enabled state for any name this
+            # particular payload didn't include in `values` (mirroring how a
+            # `values`-only payload is already allowed to be partial).
+            currently_enabled = {
+                name: source_names[name] in priority for name in SOURCE_NAMES
+            }
+            priority = [
+                source_names[name]
+                for name in order
+                if values.get(name, currently_enabled[name]) is True
+            ]
+        else:
+            for name, enabled in values.items():
+                member = source_names[name]
+                if enabled and member not in priority:
+                    priority.append(member)
+                elif not enabled and member in priority:
+                    priority.remove(member)
         _ensure_config_import(
             config_path,
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
