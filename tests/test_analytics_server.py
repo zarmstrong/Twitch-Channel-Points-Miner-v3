@@ -364,18 +364,23 @@ def test_dark_theme_keeps_config_panel_headings_readable():
     assert "#config-panel .input::placeholder" in stylesheet
 
 
-def test_successful_config_message_fades_after_ten_seconds():
-    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
-        encoding="utf-8"
-    )
-    show_message = script.split("function showConfigMessage", 1)[1].split(
-        "function loadWebConfig", 1
-    )[0]
+def test_config_messages_render_as_dismissible_toasts():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
 
-    assert "if (!isError)" in show_message
-    assert "clearTimeout(configMessageTimeout);" in show_message
-    assert "$('#config-message').fadeOut(250);" in show_message
-    assert "}, 10000);" in show_message
+    assert 'id="toast-container"' in template
+    assert "config-message" not in template
+    assert "configMessageTimeout" not in script
+
+    show_message = script.split("function showConfigMessage", 1)[1].split(
+        "\nfunction loadWebConfig", 1
+    )[0]
+    assert "$('#toast-container').append(toast);" in show_message
+    assert "toast-close" in show_message
+    # Success toasts auto-dismiss; errors persist until the user closes them.
+    auto_dismiss_branch = show_message.split("if (!isError)", 1)[1]
+    assert "setTimeout(dismiss, 5000);" in auto_dismiss_branch
 
 
 def test_config_ui_exposes_requested_management_controls():

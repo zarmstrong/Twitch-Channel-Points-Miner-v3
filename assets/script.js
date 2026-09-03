@@ -112,7 +112,6 @@ var analyticsDeleteInProgress = false;
 var pointsLoaded = false;
 var dropsLoaded = false;
 var configLoaded = false;
-var configMessageTimeout = null;
 var webConfigState = null;
 
 function showAnalyticsLoadError(message, details) {
@@ -1300,22 +1299,41 @@ function renderSourceSettings(sources, sourceOrder) {
     });
 }
 
+// Renders save/error feedback as a stack of temporary toasts (top-right,
+// position: fixed) instead of a single notification the user has to scroll
+// down to see. Multiple toasts can be visible at once; each manages its own
+// dismiss timer/animation independently.
 function showConfigMessage(message, isError) {
-    if (configMessageTimeout !== null) {
-        clearTimeout(configMessageTimeout);
-        configMessageTimeout = null;
-    }
-    $('#config-message')
-        .stop(true, true)
+    var toast = $('<div>')
+        .addClass('toast notification')
         .toggleClass('is-danger', isError)
         .toggleClass('is-success', !isError)
-        .text(message)
-        .show();
+        .attr('role', isError ? 'alert' : 'status');
+    toast.append($('<span>').addClass('toast-message').text(message));
+    var closeButton = $('<button>')
+        .addClass('toast-close')
+        .attr({ type: 'button', 'aria-label': 'Dismiss notification' })
+        .html('&times;');
+    toast.append(closeButton);
+
+    var dismissed = false;
+    function dismiss() {
+        if (dismissed) return;
+        dismissed = true;
+        toast.removeClass('toast-visible');
+        setTimeout(function () { toast.remove(); }, 200);
+    }
+    closeButton.on('click', dismiss);
+
+    $('#toast-container').append(toast);
+    requestAnimationFrame(function () {
+        toast.addClass('toast-visible');
+    });
+
+    // Success toasts clear themselves; errors stay until dismissed so a
+    // problem the user needs to act on can't silently disappear unread.
     if (!isError) {
-        configMessageTimeout = setTimeout(function () {
-            $('#config-message').fadeOut(250);
-            configMessageTimeout = null;
-        }, 10000);
+        setTimeout(dismiss, 5000);
     }
 }
 

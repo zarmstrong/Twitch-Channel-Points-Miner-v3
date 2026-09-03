@@ -30,6 +30,7 @@
 </head>
 
 <body style="height: 100vh;">
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
     <div class="container has-text-centered" style="height: 100vh;">
         <div class="columns" id="header">
             <div class="column has-text-right">
@@ -328,7 +329,6 @@
                 <p class="config-help">Credentials are write-only. Saved credentials are shown only as “configured” and are never sent to the browser. Notification changes require a restart.</p>
                 <div id="notification-settings" class="notification-settings"></div>
             </div>
-            <div id="config-message" class="notification" role="status" style="display: none;"></div>
             <p class="config-reload-note">Dashboard changes are written directly to <code>config.py</code>. Streamer additions/removals and category list changes reload automatically; other settings take effect after restart.</p>
         </div>
         <div class="columns">
