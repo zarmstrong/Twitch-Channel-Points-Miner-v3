@@ -1782,10 +1782,11 @@ class TwitchChannelPointsMiner:
             self.sync_campaigns_thread.name = "Sync campaigns/inventory"
             self.sync_campaigns_thread.start()
 
+        unique_wildcard_discovered = len(dict.fromkeys(wildcard_discovered_usernames))
         logger.log(
             category_log_level,
             f"Category refresh complete: {len(eligible_categories)} active categories, "
-            f"{len(wildcard_discovered_usernames)} wildcard streamer(s) discovered, "
+            f"{unique_wildcard_discovered} wildcard streamer(s) discovered, "
             f"{added} new streamers",
             extra={"emoji": ":white_check_mark:", "category_log": True},
         )

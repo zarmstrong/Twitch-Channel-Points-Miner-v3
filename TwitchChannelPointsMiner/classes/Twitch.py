@@ -2143,7 +2143,9 @@ class Twitch(object):
         normalization logic.
         """
         return {
-            slug for category in categories if (slug := self.__category_slug(category))
+            slug
+            for category in categories or []
+            if (slug := self.__category_slug(category))
         }
 
     def filter_categories_with_active_drops(

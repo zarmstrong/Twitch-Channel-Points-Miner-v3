@@ -35,6 +35,12 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
     return twitch
 
 
+def test_get_category_slugs_treats_none_as_empty():
+    twitch = object.__new__(Twitch)
+
+    assert twitch.get_category_slugs(None) == set()
+
+
 def test_get_wildcard_categories_returns_full_set_sorted_by_expiration(monkeypatch):
     deadlines = {
         "slow-game": datetime(2099, 1, 1),
