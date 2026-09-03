@@ -2,12 +2,12 @@ import json
 import logging
 import os
 import secrets
+import time
 from datetime import datetime
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 
 from flask import Flask, Response, cli, render_template, request
-from werkzeug.serving import WSGIRequestHandler
 
 from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
@@ -24,6 +24,47 @@ logger = logging.getLogger(__name__)
 
 MAX_LOG_TAIL_BYTES = 1024 * 1024
 UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
+RESPONSE_CACHE_TTL_SECONDS = 10.0
+
+
+class TTLResponseCache:
+    """Thread-safe TTL cache for expensive dashboard JSON responses.
+
+    The analytics dashboard polls /streamers and /json_all every few seconds;
+    both re-read and re-parse every (ever-growing) streamer analytics file on
+    each request. Behind a reverse proxy that burst of work competes with the
+    miner's own threads and can stall responses until the proxy times out.
+    Serving a cached response for a short window keeps polling cheap without
+    any user-visible staleness beyond a few seconds.
+    """
+
+    def __init__(self, ttl_seconds=RESPONSE_CACHE_TTL_SECONDS):
+        self.ttl_seconds = ttl_seconds
+        self._entries = {}
+        self._mutex = Lock()
+
+    def get(self, key):
+        if self.ttl_seconds <= 0:
+            return None
+        with self._mutex:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            expires_at, payload = entry
+            if expires_at <= time.monotonic():
+                self._entries.pop(key, None)
+                return None
+            return payload
+
+    def set(self, key, payload):
+        if self.ttl_seconds <= 0:
+            return
+        with self._mutex:
+            self._entries[key] = (time.monotonic() + self.ttl_seconds, payload)
+
+    def clear(self):
+        with self._mutex:
+            self._entries.clear()
 
 
 def _is_number(value):
@@ -244,19 +285,21 @@ def get_streamer_summary(streamer):
 
 
 def json_all():
-    return Response(
-        json.dumps(
-            [
-                {
-                    "name": streamer.strip(".json"),
-                    "data": read_json(streamer, return_response=False),
-                }
-                for streamer in streamers_available()
-            ]
-        ),
-        status=200,
-        mimetype="application/json",
+    cached = response_cache.get("json_all")
+    if cached is not None:
+        return Response(cached, status=200, mimetype="application/json")
+
+    payload = json.dumps(
+        [
+            {
+                "name": streamer.strip(".json"),
+                "data": read_json(streamer, return_response=False),
+            }
+            for streamer in streamers_available()
+        ]
     )
+    response_cache.set("json_all", payload)
+    return Response(payload, status=200, mimetype="application/json")
 
 
 def drops_by_category():
@@ -329,6 +372,10 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
 
 
 def streamers():
+    cached = response_cache.get("streamers")
+    if cached is not None:
+        return Response(cached, status=200, mimetype="application/json")
+
     available = sorted(streamers_available())
     response = []
     for streamer in available:
@@ -339,7 +386,9 @@ def streamers():
         Settings.analytics_path,
         len(response),
     )
-    return Response(json.dumps(response), status=200, mimetype="application/json")
+    payload = json.dumps(response)
+    response_cache.set("streamers", payload)
+    return Response(payload, status=200, mimetype="application/json")
 
 
 def delete_streamer_analytics(streamer):
@@ -372,6 +421,7 @@ def delete_streamer_analytics(streamer):
             )
 
     logger.info(f"Deleted analytics data in '{filename}'")
+    response_cache.clear()
     return Response(status=204)
 
 
@@ -492,15 +542,7 @@ def check_assets():
         )
 
 
-class AnalyticsWSGIRequestHandler(WSGIRequestHandler):
-    def log_error(self, format, *args):
-        message = format % args if args else format
-
-        # Ignore TLS handshake bytes sent to the plain HTTP analytics endpoint.
-        if "Bad request version" in message and "\\x" in message:
-            return
-
-        super().log_error(format, *args)
+response_cache = TTLResponseCache()
 
 
 class AnalyticsServer(Thread):
@@ -531,6 +573,7 @@ class AnalyticsServer(Thread):
         self.days_ago = days_ago
         self.username = username
         self.password = password
+        self.response_cache = response_cache
 
         if host not in {"127.0.0.1", "localhost", "::1"} and not password:
             raise ValueError("Analytics exposed beyond localhost requires a password")
@@ -667,10 +710,13 @@ class AnalyticsServer(Thread):
             f"Analytics running on http://{self.host}:{self.port}/",
             extra={"emoji": ":globe_with_meridians:"},
         )
-        self.app.run(
+        # Production WSGI server instead of Flask's development server.
+        from waitress import serve
+
+        serve(
+            self.app,
             host=self.host,
             port=self.port,
-            threaded=True,
-            debug=False,
-            request_handler=AnalyticsWSGIRequestHandler,
+            threads=8,
+            ident=None,
         )
