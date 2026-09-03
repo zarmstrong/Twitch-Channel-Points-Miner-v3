@@ -12,7 +12,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-CONFIG_VERSION = 7
+CONFIG_VERSION = 8
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -79,6 +79,7 @@ CONFIG_STREAMER_SOURCE_ADDITIONS = (
     "StreamerSource.FOLLOWERS",
     "StreamerSource.CATEGORIES",
     "StreamerSource.BADGES",
+    "StreamerSource.WILDCARD_CATEGORIES",
 )
 MINER_CONFIG_DEFAULTS = (
     ("claim_drops_startup", "False"),
@@ -111,6 +112,10 @@ MINE_CONFIG_DEFAULTS = (
     ("drop_badge_refresh_interval_hours", "1"),
     ("auto_mine_badge_drops", "False"),
     ("badge_drop_streamer_limit", "1"),
+    ("wildcard_categories", "False"),
+    ("wildcard_category_limit", "10"),
+    ("wildcard_category_streamer_limit", "1"),
+    ("wildcard_category_pin_active", "True"),
 )
 ANALYTICS_CONFIG_DEFAULTS = (
     ("host", '"127.0.0.1"'),
@@ -487,7 +492,7 @@ def migrate_config_source(source, source_name="config.py"):
         missing_miner_options.append(
             "'streamer_source_priority': [StreamerSource.STREAMERS, "
             "StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES, "
-            "StreamerSource.BADGES]"
+            "StreamerSource.BADGES, StreamerSource.WILDCARD_CATEGORIES]"
         )
         if not _name_is_defined(tree, "StreamerSource"):
             required_imports.append(
@@ -894,7 +899,8 @@ def convert_runner_source(source, source_name="run.py"):
                 (
                     "streamer_source_priority",
                     "[StreamerSource.STREAMERS, StreamerSource.FOLLOWERS, "
-                    "StreamerSource.CATEGORIES, StreamerSource.BADGES]",
+                    "StreamerSource.CATEGORIES, StreamerSource.BADGES, "
+                    "StreamerSource.WILDCARD_CATEGORIES]",
                 ),
             ),
         ),

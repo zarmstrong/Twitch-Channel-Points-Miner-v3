@@ -35,7 +35,7 @@ CATEGORY_SORTS = {
 }
 CHAT_PRESENCES = {"ALWAYS", "NEVER", "ONLINE", "OFFLINE"}
 LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-SOURCE_NAMES = {"streamers", "followers", "categories", "badges"}
+SOURCE_NAMES = {"streamers", "followers", "categories", "badges", "wildcard_categories"}
 NOTIFICATION_SCHEMAS = {
     "telegram": {
         "fields": ("chat_id", "message_thread_id", "disable_notification", "events"),
@@ -259,7 +259,7 @@ def _base_web_config(config_path):
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     ]
     source_priority = miner.get("streamer_source_priority") or list(
-        ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES")
+        ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES", "WILDCARD_CATEGORIES")
     )
     sources = {
         "streamers": "STREAMERS" in source_priority,
@@ -268,6 +268,8 @@ def _base_web_config(config_path):
         "categories": "CATEGORIES" in source_priority and bool(categories),
         "badges": "BADGES" in source_priority
         and bool(mine.get("auto_mine_badge_drops", False)),
+        "wildcard_categories": "WILDCARD_CATEGORIES" in source_priority
+        and bool(mine.get("wildcard_categories", False)),
     }
     notifications = {}
     for provider, schema in NOTIFICATION_SCHEMAS.items():
@@ -985,12 +987,13 @@ def _update_managed_web_config(config_path, payload):
             "followers": "FOLLOWERS",
             "categories": "CATEGORIES",
             "badges": "BADGES",
+            "wildcard_categories": "WILDCARD_CATEGORIES",
         }
         source = Path(config_path).read_text(encoding="utf-8")
         miner = _simple_value(_assignment(ast.parse(source), "MINER_CONFIG")) or {}
         priority = list(
             miner.get("streamer_source_priority")
-            or ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES")
+            or ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES", "WILDCARD_CATEGORIES")
         )
         for name, enabled in values.items():
             member = source_names[name]
@@ -1016,6 +1019,8 @@ def _update_managed_web_config(config_path, payload):
             mine_values["followers"] = repr(values["followers"])
         if "badges" in values:
             mine_values["auto_mine_badge_drops"] = repr(values["badges"])
+        if "wildcard_categories" in values:
+            mine_values["wildcard_categories"] = repr(values["wildcard_categories"])
         if mine_values:
             _set_dict_items(config_path, "MINE_CONFIG", mine_values)
     elif action == "update_logging":

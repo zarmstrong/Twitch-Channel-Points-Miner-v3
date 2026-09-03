@@ -82,6 +82,7 @@ def test_streamer_source_priority_default_is_immutable():
         StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
+        StreamerSource.WILDCARD_CATEGORIES,
     )
 
 
@@ -91,6 +92,7 @@ def _watch_streamer(
     drops_eligible=False,
     from_badge_campaign=False,
     from_followers=False,
+    from_wildcard_category=False,
     favorite=False,
     points=0,
     points_limit=None,
@@ -116,6 +118,7 @@ def _watch_streamer(
         from_category=from_category,
         from_badge_campaign=from_badge_campaign,
         from_followers=from_followers,
+        from_wildcard_category=from_wildcard_category,
         channel_points=points,
         offline_at=0,
         stream=stream,
@@ -157,6 +160,7 @@ def _run_one_watch_iteration(
     }
     twitch.category_campaign_deadlines = category_campaign_deadlines or {}
     twitch.last_category_drop_selection = None
+    twitch.last_wildcard_category_drop_selection = None
     twitch.twitchdrops_app_campaigns = {}
     twitch.drop_inventory_progress = drop_inventory_progress or {}
     twitch.drop_inventory_progress_updated_at = (
@@ -683,6 +687,67 @@ def test_badge_source_can_be_given_first_priority(monkeypatch):
     assert posted == ["https://spade.test/badge"]
 
 
+def test_preferred_category_wins_shared_discovered_slot_over_wildcard(monkeypatch):
+    # Twitch only accrues Drops progress on one watched stream regardless of
+    # source, so the preferred-category and wildcard-category tiers share a
+    # single discovered-stream slot per cycle rather than getting one each --
+    # otherwise the second slot would be wasted from a Drops perspective.
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("preferred", True, True),
+            _watch_streamer("wildcard", True, True, from_wildcard_category=True),
+        ],
+        streams_watched=2,
+    )
+
+    assert posted == ["https://spade.test/preferred"]
+
+
+def test_freed_wildcard_slot_backfills_with_explicit_streamer(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("preferred", True, True),
+            _watch_streamer("wildcard", True, True, from_wildcard_category=True),
+            _watch_streamer("explicit"),
+        ],
+        streams_watched=2,
+    )
+
+    assert sorted(posted) == [
+        "https://spade.test/explicit",
+        "https://spade.test/preferred",
+    ]
+
+
+def test_wildcard_category_one_per_cycle_prefers_soonest_expiring(monkeypatch):
+    slow_game = _watch_streamer(
+        "later-deadline", from_category=True, drops_eligible=True,
+        from_wildcard_category=True,
+    )
+    slow_game.stream.game_name = lambda: "Slow Game"
+    urgent_game = _watch_streamer(
+        "sooner-deadline", from_category=True, drops_eligible=True,
+        from_wildcard_category=True,
+    )
+    urgent_game.stream.game_name = lambda: "Urgent Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [slow_game, urgent_game],
+        streams_watched=2,
+        category_campaign_deadlines={
+            "slow-game": datetime(2099, 1, 1),
+            "urgent-game": datetime(2020, 1, 1),
+        },
+    )
+
+    # Only one wildcard-discovered stream is watched per cycle, same as the
+    # preferred-category safety net, but tracked independently.
+    assert posted == ["https://spade.test/sooner-deadline"]
+
+
 def test_follower_source_can_be_prioritized_over_explicit_streamers(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
@@ -739,6 +804,17 @@ def test_source_priority_appends_omitted_sources():
         StreamerSource.STREAMERS,
         StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
+        StreamerSource.WILDCARD_CATEGORIES,
+    ]
+
+
+def test_source_priority_default_order_sorts_wildcard_last():
+    assert _normalize_streamer_source_priority([]) == [
+        StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+        StreamerSource.WILDCARD_CATEGORIES,
     ]
 
 

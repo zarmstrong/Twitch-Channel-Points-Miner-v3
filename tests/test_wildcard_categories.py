@@ -1,0 +1,349 @@
+import logging
+import threading
+from datetime import datetime
+from types import SimpleNamespace
+
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+
+
+def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
+    """A Twitch instance with the campaign-fetch internals stubbed out so
+    get_wildcard_categories_with_active_drops's own exclude/limit/pin/sort
+    logic can be exercised directly, independent of campaign JSON parsing
+    (already covered for the shared helper by test_twitch_drop_claim.py).
+    """
+    twitch = object.__new__(Twitch)
+    twitch.category_campaign_deadlines = {}
+
+    def fake_active_drop_category_slugs_from_campaigns(
+        self, inventory, requested_category_slugs
+    ):
+        if requested_slugs_seen is not None:
+            requested_slugs_seen.append(requested_category_slugs)
+        return dict(deadlines), set(deadlines)
+
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {"present": True})
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        fake_active_drop_category_slugs_from_campaigns,
+    )
+    return twitch
+
+
+def test_get_wildcard_categories_returns_full_set_sorted_by_expiration(monkeypatch):
+    deadlines = {
+        "slow-game": datetime(2099, 1, 1),
+        "urgent-game": datetime(2020, 1, 1),
+        "mid-game": datetime(2050, 1, 1),
+    }
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops()
+
+    assert result == ["urgent-game", "mid-game", "slow-game"]
+
+
+def test_get_wildcard_categories_unfiltered_request_is_passed_through(monkeypatch):
+    seen = []
+    twitch = _bare_twitch(monkeypatch, {"game": datetime(2099, 1, 1)}, seen)
+
+    twitch.get_wildcard_categories_with_active_drops()
+
+    assert seen == [None]
+
+
+def test_get_wildcard_categories_excludes_configured_category_slugs(monkeypatch):
+    deadlines = {
+        "excluded-game": datetime(2020, 1, 1),
+        "other-game": datetime(2050, 1, 1),
+    }
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        exclude_category_slugs={"excluded-game"}
+    )
+
+    assert result == ["other-game"]
+
+
+def test_get_wildcard_categories_drops_enabled_false_returns_empty(monkeypatch):
+    twitch = _bare_twitch(monkeypatch, {"game": datetime(2099, 1, 1)})
+
+    assert twitch.get_wildcard_categories_with_active_drops(drops_enabled=False) == []
+
+
+def test_get_wildcard_categories_limit_throttles_new_additions(monkeypatch):
+    deadlines = {
+        "first": datetime(2020, 1, 1),
+        "second": datetime(2021, 1, 1),
+        "third": datetime(2022, 1, 1),
+        "fourth": datetime(2023, 1, 1),
+    }
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        limit=2, pin_active=False
+    )
+
+    assert result == ["first", "second"]
+
+
+def test_get_wildcard_categories_pin_keeps_tracked_slug_past_top_n(monkeypatch):
+    # "pinned" would fall outside the top 2 soonest-expiring slugs on a
+    # straight re-sort, but pinning must keep it because it's still eligible.
+    # Room for one new addition remains (limit=2, one pinned slug), and
+    # "first" is the soonest-expiring of the unpinned candidates.
+    deadlines = {
+        "first": datetime(2020, 1, 1),
+        "second": datetime(2021, 1, 1),
+        "pinned": datetime(2099, 1, 1),
+    }
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        limit=2, pinned_category_slugs={"pinned"}, pin_active=True
+    )
+
+    assert set(result) == {"pinned", "first"}
+
+
+def test_get_wildcard_categories_pin_can_exceed_limit(monkeypatch):
+    # Three already-tracked (pinned) categories against a limit of 2: pinning
+    # only throttles *new* additions, so the returned count intentionally
+    # exceeds `limit` here rather than evicting a pinned category.
+    deadlines = {
+        "pin-a": datetime(2030, 1, 1),
+        "pin-b": datetime(2040, 1, 1),
+        "pin-c": datetime(2050, 1, 1),
+        "brand-new": datetime(2020, 1, 1),
+    }
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        limit=2,
+        pinned_category_slugs={"pin-a", "pin-b", "pin-c"},
+        pin_active=True,
+    )
+
+    assert set(result) == {"pin-a", "pin-b", "pin-c"}
+    assert len(result) > 2
+
+
+def test_get_wildcard_categories_pin_inactive_drops_slug_outside_top_n(monkeypatch):
+    deadlines = {
+        "first": datetime(2020, 1, 1),
+        "second": datetime(2021, 1, 1),
+        "would-be-pinned": datetime(2099, 1, 1),
+    }
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        limit=2, pinned_category_slugs={"would-be-pinned"}, pin_active=False
+    )
+
+    assert result == ["first", "second"]
+
+
+def test_get_wildcard_categories_pinned_slug_no_longer_eligible_is_dropped(monkeypatch):
+    # The pinned category's campaign genuinely closed -- it's no longer in
+    # the eligible set at all, so pinning cannot resurrect it.
+    deadlines = {"still-open": datetime(2020, 1, 1)}
+    twitch = _bare_twitch(monkeypatch, deadlines)
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        pinned_category_slugs={"closed-campaign"}, pin_active=True
+    )
+
+    assert result == ["still-open"]
+
+
+def test_get_wildcard_categories_replaces_rather_than_merges_deadlines(monkeypatch):
+    # The unfiltered fetch is always a superset of what a same-cycle preferred
+    # pass could have found (wildcard only triggers once that pass found
+    # nothing), so it must replace category_campaign_deadlines rather than
+    # merge into it -- a merge would let a closed campaign's stale deadline
+    # linger forever whenever `categories` is empty and this is the only
+    # per-cycle source.
+    twitch = _bare_twitch(monkeypatch, {"still-open": datetime(2099, 1, 1)})
+    twitch.category_campaign_deadlines = {"closed-campaign": datetime(2020, 1, 1)}
+
+    twitch.get_wildcard_categories_with_active_drops()
+
+    assert twitch.category_campaign_deadlines == {"still-open": datetime(2099, 1, 1)}
+
+
+class FakeWebSocketsPool:
+    def __init__(self):
+        self.topics = []
+        self.removed = []
+
+    def submit(self, topic):
+        self.topics.append(topic)
+
+    def remove_streamer_topics(self, streamer):
+        self.removed.append(streamer.username)
+
+
+class FakeTwitch:
+    def __init__(self, eligible_categories, wildcard_categories):
+        self.eligible_categories = eligible_categories
+        self.wildcard_categories = wildcard_categories
+        self.wildcard_calls = []
+        self.selectors = []
+        self.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
+        self.discovered_open_drop_campaigns = None
+
+    def filter_categories_with_active_drops(self, categories, **_kwargs):
+        return self.eligible_categories
+
+    def get_category_slugs(self, categories):
+        return {category for category in categories}
+
+    def get_wildcard_categories_with_active_drops(self, **kwargs):
+        self.wildcard_calls.append(kwargs)
+        return self.wildcard_categories
+
+    def get_live_streamers_for_category(self, selector, **kwargs):
+        self.selectors.append((selector, kwargs))
+        return [f"{selector}-streamer"]
+
+    def get_channel_id(self, username):
+        return f"id-{username}"
+
+    def load_channel_points_context(self, streamer):
+        return None
+
+    def check_streamer_online(self, streamer):
+        streamer.is_online = True
+
+
+def _bare_miner(twitch):
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.username = "testuser"
+    miner.twitch = twitch
+    miner.streamers = []
+    miner.original_streamers = []
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+    return miner
+
+
+def test_wildcard_discovery_only_runs_when_preferred_categories_exhausted():
+    twitch = FakeTwitch(eligible_categories=["preferred-game"], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["preferred-game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+    assert twitch.wildcard_calls == []
+    assert [streamer.username for streamer in miner.streamers] == [
+        "preferred-game-streamer"
+    ]
+    assert all(
+        streamer.from_wildcard_category is False for streamer in miner.streamers
+    )
+
+
+def test_wildcard_discovery_runs_and_tags_streamers_once_preferred_is_exhausted():
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=["wild-game"])
+    miner = _bare_miner(twitch)
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["preferred-game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+        wildcard_category_limit=5,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+    assert len(twitch.wildcard_calls) == 1
+    assert twitch.wildcard_calls[0]["limit"] == 5
+    assert twitch.wildcard_calls[0]["exclude_category_slugs"] == {"preferred-game"}
+    assert [streamer.username for streamer in miner.streamers] == ["wild-game-streamer"]
+    assert miner.streamers[0].from_category is True
+    assert miner.streamers[0].from_wildcard_category is True
+
+
+def test_wildcard_disabled_retires_previously_discovered_wildcard_streamers():
+    twitch = FakeTwitch(eligible_categories=["preferred-game"], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    stale_wildcard = Streamer(
+        "stale-wild", from_category=True, from_wildcard_category=True
+    )
+    miner.streamers = [stale_wildcard]
+    miner.original_streamers = [10]
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["preferred-game"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=False,
+    )
+
+    assert "stale-wild" not in [s.username for s in miner.streamers]
+    assert "stale-wild" in miner.ws_pool.removed
+
+
+def test_reconcile_scoped_to_wildcard_does_not_evict_preferred_streamers():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    preferred = Streamer("preferred", from_category=True)
+    wildcard = Streamer("wild", from_category=True, from_wildcard_category=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+    miner.ws_pool = FakeWebSocketsPool()
+
+    # A wildcard-scoped reconcile with an empty discovery list must only
+    # retire the wildcard streamer, not the preferred-category one.
+    miner._TwitchChannelPointsMiner__reconcile_category_streamers([], wildcard=True)
+
+    assert [s.username for s in miner.streamers] == ["preferred"]
+    assert miner.ws_pool.removed == ["wild"]
+
+
+def test_reconcile_scoped_to_preferred_does_not_evict_wildcard_streamers():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    preferred = Streamer("preferred", from_category=True)
+    wildcard = Streamer("wild", from_category=True, from_wildcard_category=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+    miner.ws_pool = FakeWebSocketsPool()
+
+    miner._TwitchChannelPointsMiner__reconcile_category_streamers([], wildcard=False)
+
+    assert [s.username for s in miner.streamers] == ["wild"]
+    assert miner.ws_pool.removed == ["preferred"]

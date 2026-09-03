@@ -17,7 +17,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     test_web_notification as send_web_notification_test,
     web_config,
 )
-from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.Settings import Settings, StreamerSource
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
@@ -113,6 +113,7 @@ def test_managed_web_config_updates_release_check_settings(tmp_path):
         "interval_hours": 12,
         "startup_only": False,
     }
+
     loaded = _load_config(config)
     assert loaded.MINER_CONFIG["update_check"] is False
     assert loaded.MINER_CONFIG["update_check_interval_hours"] == 12
@@ -132,6 +133,37 @@ def test_managed_web_config_updates_release_check_settings(tmp_path):
     loaded = _load_config(config)
     assert loaded.MINER_CONFIG["update_check"] is True
     assert loaded.MINER_CONFIG["update_check_interval_hours"] == math.inf
+
+
+def test_managed_web_config_updates_wildcard_category_source(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"wildcard_categories": True}},
+    )
+
+    assert result["sources"]["wildcard_categories"] is True
+    loaded = _load_config(config)
+    assert (
+        StreamerSource.WILDCARD_CATEGORIES
+        in loaded.MINER_CONFIG["streamer_source_priority"]
+    )
+    assert loaded.MINE_CONFIG["wildcard_categories"] is True
+
+    result = update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"wildcard_categories": False}},
+    )
+
+    assert result["sources"]["wildcard_categories"] is False
+    loaded = _load_config(config)
+    assert (
+        StreamerSource.WILDCARD_CATEGORIES
+        not in loaded.MINER_CONFIG["streamer_source_priority"]
+    )
+    assert loaded.MINE_CONFIG["wildcard_categories"] is False
 
 
 def test_managed_web_config_reads_math_inf_as_startup_only(tmp_path):
