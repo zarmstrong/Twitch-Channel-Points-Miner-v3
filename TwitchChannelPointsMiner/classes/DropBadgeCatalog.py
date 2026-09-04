@@ -289,6 +289,83 @@ class DropBadgeCatalog:
                     count += 1
         return count
 
+    def confirmed_badge_rewards(self):
+        """Return the catalog identities needed to recognize badge Drops."""
+        rewards = []
+        seen = set()
+
+        def add_reward(game_slug, game_name, campaign_name, drop):
+            if not isinstance(drop, dict):
+                return
+            classification = drop.get("badge_classification") or {}
+            if classification.get("status") != "BADGE":
+                return
+            badge_names = {
+                str(match.get(key) or "").strip()
+                for match in classification.get("matches", []) or []
+                if isinstance(match, dict)
+                for key in ("title", "set_id")
+                if str(match.get(key) or "").strip()
+            }
+            reward_name = str(drop.get("name") or "").strip()
+            if reward_name:
+                badge_names.add(reward_name)
+            if not badge_names:
+                return
+            requirement = str(drop.get("requirement") or "").strip()
+            watch_eligible = (
+                requirement.casefold().startswith("watch ") if requirement else None
+            )
+            identity = (
+                str(game_slug or "").strip().casefold(),
+                reward_name.casefold(),
+                tuple(sorted(name.casefold() for name in badge_names)),
+            )
+            if identity in seen:
+                return
+            seen.add(identity)
+            rewards.append(
+                {
+                    "game_slug": str(game_slug or "").strip(),
+                    "game": str(game_name or "").strip(),
+                    "campaign": str(campaign_name or "").strip(),
+                    "reward_name": reward_name,
+                    "badge_names": sorted(badge_names),
+                    "watch_eligible": watch_eligible,
+                }
+            )
+
+        for record in self.state["campaigns"].values():
+            if not isinstance(record, dict):
+                continue
+            campaign = record.get("campaign")
+            if not isinstance(campaign, dict):
+                continue
+            for drop in campaign.get("drops", []) or []:
+                add_reward(
+                    record.get("game_slug"),
+                    record.get("game"),
+                    campaign.get("name"),
+                    drop,
+                )
+
+        # The top-level game report also contains badge rewards that are not
+        # watch-time campaign rewards, such as badges requiring a subscription.
+        # Twitch may still expose those inside timeBasedDrops; retain their
+        # requirement here so watch eligibility can reject them.
+        for game_slug, record in self.state["games"].items():
+            report = record.get("report") if isinstance(record, dict) else None
+            if not isinstance(report, dict):
+                continue
+            for drop in report.get("drops", []) or []:
+                add_reward(
+                    game_slug,
+                    report.get("game"),
+                    drop.get("campaign") if isinstance(drop, dict) else None,
+                    drop,
+                )
+        return rewards
+
     def _prune_stale_state(self, indexed_slugs):
         now = _now()
 

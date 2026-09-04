@@ -430,18 +430,23 @@ def test_dark_theme_keeps_config_panel_headings_readable():
     assert "#config-panel .input::placeholder" in stylesheet
 
 
-def test_successful_config_message_fades_after_ten_seconds():
-    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
-        encoding="utf-8"
-    )
-    show_message = script.split("function showConfigMessage", 1)[1].split(
-        "function loadWebConfig", 1
-    )[0]
+def test_config_messages_render_as_dismissible_toasts():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
 
-    assert "if (!isError)" in show_message
-    assert "clearTimeout(configMessageTimeout);" in show_message
-    assert "$('#config-message').fadeOut(250);" in show_message
-    assert "}, 10000);" in show_message
+    assert 'id="toast-container"' in template
+    assert "config-message" not in template
+    assert "configMessageTimeout" not in script
+
+    show_message = script.split("function showConfigMessage", 1)[1].split(
+        "\nfunction loadWebConfig", 1
+    )[0]
+    assert "$('#toast-container').append(toast);" in show_message
+    assert "toast-close" in show_message
+    # Success toasts auto-dismiss; errors persist until the user closes them.
+    auto_dismiss_branch = show_message.split("if (!isError)", 1)[1]
+    assert "setTimeout(dismiss, 5000);" in auto_dismiss_branch
 
 
 def test_config_ui_exposes_requested_management_controls():
@@ -480,8 +485,68 @@ def test_config_ui_exposes_requested_management_controls():
     assert "update_updates" in script
     assert "interval_hours: startupOnly ? undefined" in script
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
-    assert "'aria-label': `Move ${category} up`" in script
-    assert "'aria-label': `Move ${category} down`" in script
+    assert "reorder_streamers" in script
+    assert "Sortable.create" in script
+
+
+def test_web_config_lists_support_drag_and_drop_reordering():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+
+    assert "sortablejs" in template.lower()
+
+    make_sortable_fn = script.split("function makeSortable", 1)[1].split(
+        "\nfunction renderConfiguredStreamers", 1
+    )[0]
+    assert "Sortable.create(containerEl" in make_sortable_fn
+    assert "handle: '.drag-handle'" in make_sortable_fn
+    assert "ghostClass: 'sortable-ghost'" in make_sortable_fn
+    # Dropping a row back where it started still fires onEnd -- must not
+    # save when nothing actually moved.
+    assert "evt.oldIndex !== evt.newIndex" in make_sortable_fn
+
+    streamers_fn = script.split("function renderConfiguredStreamers", 1)[1].split(
+        "\nfunction renderConfiguredCategories", 1
+    )[0]
+    assert "makeSortable(container[0]" in streamers_fn
+    assert "action: 'reorder_streamers'" in streamers_fn
+
+    categories_fn = script.split("function renderConfiguredCategories", 1)[1].split(
+        "\nvar SOURCE_LABELS", 1
+    )[0]
+    assert "makeSortable(container[0]" in categories_fn
+    assert "action: 'reorder_categories'" in categories_fn
+    # The up/down buttons are gone -- reordering is drag-only.
+    assert "move-category-up" not in script
+    assert "move-category-down" not in script
+
+    sources_fn = script.split("function renderSourceSettings", 1)[1].split(
+        "\nfunction showConfigMessage", 1
+    )[0]
+    assert "makeSortable(container[0]" in sources_fn
+
+    save_sources_fn = script.split("function saveSourceSettings", 1)[1].split(
+        "\nfunction saveLoggingSettings", 1
+    )[0]
+    assert "order:" in save_sources_fn
+    assert "data('source-row')" in save_sources_fn
+
+
+def test_failed_config_update_resyncs_from_server():
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
+    update_web_config_fn = script.split("function updateWebConfig", 1)[1].split(
+        "\nfunction saveStreamerSettings", 1
+    )[0]
+    fail_branch = update_web_config_fn.split(").fail(function (xhr) {", 1)[1].split(
+        "}).always(", 1
+    )[0]
+
+    # A failed write (e.g. a dropped reorder) must not leave the DOM showing
+    # an order/state that was never actually saved.
+    assert "loadWebConfig();" in fail_branch
 
 
 def test_notification_forms_do_not_nest_two_column_grids():

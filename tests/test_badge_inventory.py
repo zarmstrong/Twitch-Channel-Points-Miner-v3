@@ -420,6 +420,81 @@ def test_non_badge_reward_name_does_not_complete_fallback_campaign(monkeypatch):
     assert "the-elder-scrolls-online" in twitch.twitchdrops_app_campaigns
 
 
+def test_full_fallback_catalog_evaluates_every_indexed_game(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "urgent-game",
+                "game": "Urgent Game",
+                "url": "https://twitchdrops.app/game/urgent-game",
+            },
+            {
+                "slug": "later-game",
+                "game": "Later Game",
+                "url": "https://twitchdrops.app/game/later-game",
+            },
+        ],
+    )
+
+    def scrape(self, category):
+        slug = str(category).rstrip("/").rsplit("/", 1)[-1]
+        deadline = {
+            "urgent-game": "2050-01-01T00:00:00Z",
+            "later-game": "2099-01-01T00:00:00Z",
+        }[slug]
+        return {
+            "game": slug.replace("-", " ").title(),
+            "campaigns": [
+                {
+                    "name": f"{slug} campaign",
+                    "starts_at": "2020-01-01T00:00:00Z",
+                    "ends_at": deadline,
+                    "channels": [],
+                    "drops": [{"name": f"{slug} reward"}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(TwitchDropsAppScraper, "scrape", scrape)
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(None, set())
+
+    assert deadlines == {
+        "urgent-game": datetime(2050, 1, 1),
+        "later-game": datetime(2099, 1, 1),
+    }
+    assert twitch.twitchdrops_app_deadlines == deadlines
+    assert twitch.twitchdrops_app_catalog_complete is True
+
+
+def test_failed_full_fallback_catalog_is_still_marked_attempted(monkeypatch):
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: (_ for _ in ()).throw(ValueError("unavailable")),
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(None, set())
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_deadlines == {}
+    assert twitch.twitchdrops_app_catalog_complete is True
+
+
 def test_current_campaign_award_completes_non_badge_fallback(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {

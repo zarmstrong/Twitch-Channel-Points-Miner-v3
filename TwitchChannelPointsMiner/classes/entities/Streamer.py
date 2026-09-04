@@ -87,6 +87,7 @@ class Streamer(object):
         "from_followers",
         "from_category",
         "from_badge_campaign",
+        "from_wildcard_category",
         "explicitly_configured",
         "channel_id",
         "settings",
@@ -118,11 +119,13 @@ class Streamer(object):
         explicitly_configured=False,
         from_badge_campaign=False,
         from_followers=False,
+        from_wildcard_category=False,
     ):
         self.username: str = username.lower().strip()
         self.from_followers = from_followers
         self.from_category = from_category
         self.from_badge_campaign = from_badge_campaign
+        self.from_wildcard_category = from_wildcard_category
         self.explicitly_configured = explicitly_configured
         self.channel_id: str = ""
         self.settings = settings

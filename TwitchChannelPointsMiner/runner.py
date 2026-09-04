@@ -134,6 +134,19 @@ def _watch_config(path, miner, initial_config, interval):
         for streamer in initial_config.STREAMERS
     }
     live_categories = initial_config.MINE_CONFIG.setdefault("categories", [])
+    wildcard_mine_defaults = {
+        "wildcard_categories": False,
+        "wildcard_category_limit": 10,
+        "wildcard_category_streamer_limit": 1,
+        "wildcard_category_pin_active": True,
+    }
+    for key, default in wildcard_mine_defaults.items():
+        initial_config.MINE_CONFIG.setdefault(key, default)
+    hot_reload_mine_keys = ("categories", *wildcard_mine_defaults)
+    live_wildcard_settings = tuple(
+        initial_config.MINE_CONFIG.get(key, default)
+        for key, default in wildcard_mine_defaults.items()
+    )
     restart_snapshot = {
         "miner": _freeze(initial_config.MINER_CONFIG),
         "analytics": _freeze(initial_config.ANALYTICS_CONFIG),
@@ -141,7 +154,7 @@ def _watch_config(path, miner, initial_config, interval):
             {
                 key: value
                 for key, value in initial_config.MINE_CONFIG.items()
-                if key != "categories"
+                if key not in hot_reload_mine_keys
             }
         ),
     }
@@ -182,8 +195,20 @@ def _watch_config(path, miner, initial_config, interval):
             )
 
             updated_categories = list(updated.MINE_CONFIG.get("categories", []))
-            if updated_categories != live_categories:
+            updated_wildcard_settings = tuple(
+                updated.MINE_CONFIG.get(key, default)
+                for key, default in wildcard_mine_defaults.items()
+            )
+            if (
+                updated_categories != live_categories
+                or updated_wildcard_settings != live_wildcard_settings
+            ):
                 live_categories[:] = updated_categories
+                for key, default in wildcard_mine_defaults.items():
+                    initial_config.MINE_CONFIG[key] = updated.MINE_CONFIG.get(
+                        key, default
+                    )
+                live_wildcard_settings = updated_wildcard_settings
                 miner.refresh_categories(initial_config.MINE_CONFIG)
 
             updated_restart_snapshot = {
@@ -193,7 +218,7 @@ def _watch_config(path, miner, initial_config, interval):
                     {
                         key: value
                         for key, value in updated.MINE_CONFIG.items()
-                        if key != "categories"
+                        if key not in hot_reload_mine_keys
                     }
                 ),
             }
