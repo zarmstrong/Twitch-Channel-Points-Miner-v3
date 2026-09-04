@@ -746,6 +746,7 @@ class TwitchChannelPointsMiner:
                 discovery_inventory = self.twitch.get_drops_inventory()
 
             eligible_categories = []
+            all_category_usernames = []
             if categories:
                 eligible_categories = self.twitch.filter_categories_with_active_drops(
                     categories,
@@ -761,7 +762,6 @@ class TwitchChannelPointsMiner:
                         extra={"emoji": ":sleeping:", "category_log": True},
                     )
 
-                all_category_usernames = []
                 for category in eligible_categories:
                     all_category_usernames.extend(
                         self.twitch.get_live_streamers_for_category(
@@ -778,12 +778,15 @@ class TwitchChannelPointsMiner:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
 
-            # Once the preferred category list is empty or fully farmed (no
-            # eligible categories left), optionally fall back to every other
-            # category with an active incomplete drop campaign. This is its
-            # own opt-in, lowest-default-priority StreamerSource tier -- see
-            # streamer_source_priority -- not a silent extension of CATEGORIES.
-            if self.wildcard_categories and eligible_categories == []:
+            # Fall back to every other category with an active incomplete
+            # drop campaign once the preferred pass leaves capacity idle --
+            # not only when no preferred category has an active campaign at
+            # all, but also when one does but yielded no live channel this
+            # cycle (e.g. the only eligible category has zero live streamers
+            # right now). This is its own opt-in, lowest-default-priority
+            # StreamerSource tier -- see streamer_source_priority -- not a
+            # silent extension of CATEGORIES.
+            if self.wildcard_categories and not all_category_usernames:
                 wildcard_eligible_categories = (
                     self.twitch.get_wildcard_categories_with_active_drops(
                         exclude_category_slugs=self.twitch.get_category_slugs(
@@ -1748,24 +1751,29 @@ class TwitchChannelPointsMiner:
             discovered_usernames, blacklist, category_chat, wildcard=False
         )
 
-        # Wildcard discovery only runs once the preferred category list is
-        # exhausted this cycle -- if a preferred category is eligible again,
-        # the wildcard pass below deliberately stands down (this is the
-        # existing traffic safeguard and is unchanged). Standing down is
-        # transient: it means "not evaluated this cycle", not "gone". The
-        # wildcard-scoped reconcile/order calls below are skipped for that
-        # specific case, so already-tracked wildcard streamers are left
-        # completely alone (same connections, same tracking) rather than
-        # retired on the basis of an empty discovery list that was never
-        # actually populated. Watch-slot priority arbitration already ranks
-        # CATEGORIES above WILDCARD_CATEGORIES, so a still-tracked wildcard
-        # stream simply loses contested slots to a preferred one without
-        # needing to be torn down. They're only retired by a genuine
-        # discovery pass that re-evaluates the full eligible set and finds
-        # them actually gone -- or immediately, below, if wildcard_categories
-        # itself has been turned off (that reconcile still runs unconditionally,
-        # same "off means off" semantics as disabling `categories`).
-        wildcard_discovery_ran = wildcard_categories and eligible_categories == []
+        # Wildcard discovery only runs once the preferred pass leaves
+        # capacity idle this cycle -- not only when no preferred category has
+        # an active campaign at all, but also when one does but produced no
+        # live streamer (e.g. the only eligible category has zero live
+        # channels right now). If the preferred pass DID produce at least one
+        # streamer, the wildcard pass below deliberately stands down (this is
+        # the existing traffic safeguard and is unchanged in spirit, just
+        # retargeted at actual idle capacity instead of category eligibility
+        # alone). Standing down is transient: it means "not evaluated this
+        # cycle", not "gone". The wildcard-scoped reconcile/order calls below
+        # are skipped for that specific case, so already-tracked wildcard
+        # streamers are left completely alone (same connections, same
+        # tracking) rather than retired on the basis of an empty discovery
+        # list that was never actually populated. Watch-slot priority
+        # arbitration already ranks CATEGORIES above WILDCARD_CATEGORIES, so
+        # a still-tracked wildcard stream simply loses contested slots to a
+        # preferred one without needing to be torn down. They're only retired
+        # by a genuine discovery pass that re-evaluates the full eligible set
+        # and finds them actually gone -- or immediately, below, if
+        # wildcard_categories itself has been turned off (that reconcile
+        # still runs unconditionally, same "off means off" semantics as
+        # disabling `categories`).
+        wildcard_discovery_ran = wildcard_categories and not discovered_usernames
         wildcard_standing_down = wildcard_categories and not wildcard_discovery_ran
         wildcard_discovered_usernames = []
         if wildcard_discovery_ran:

@@ -211,9 +211,14 @@ class FakeIrcChat:
 
 
 class FakeTwitch:
-    def __init__(self, eligible_categories, wildcard_categories):
+    def __init__(self, eligible_categories, wildcard_categories, empty_categories=()):
         self.eligible_categories = eligible_categories
         self.wildcard_categories = wildcard_categories
+        # Categories that are eligible (an active campaign exists) but have
+        # zero live matching channels right now -- lets tests reproduce "a
+        # preferred category is technically eligible but produced no
+        # streamer this cycle" without needing real campaign/stream data.
+        self.empty_categories = set(empty_categories)
         self.wildcard_calls = []
         self.filter_calls = []
         self.inventory_fetch_count = 0
@@ -241,6 +246,8 @@ class FakeTwitch:
 
     def get_live_streamers_for_category(self, selector, **kwargs):
         self.selectors.append((selector, kwargs))
+        if selector in self.empty_categories:
+            return []
         return [f"{selector}-streamer"]
 
     def get_channel_id(self, username):
@@ -270,7 +277,9 @@ def _bare_miner(twitch):
     return miner
 
 
-def test_wildcard_discovery_only_runs_when_preferred_categories_exhausted():
+def test_wildcard_discovery_only_runs_when_preferred_pass_finds_a_streamer():
+    # The preferred pass here has an eligible category AND finds a live
+    # streamer for it -- capacity isn't idle, so wildcard must stand down.
     twitch = FakeTwitch(eligible_categories=["preferred-game"], wildcard_categories=[])
     miner = _bare_miner(twitch)
 
@@ -296,6 +305,41 @@ def test_wildcard_discovery_only_runs_when_preferred_categories_exhausted():
     assert all(
         streamer.from_wildcard_category is False for streamer in miner.streamers
     )
+
+
+def test_wildcard_discovery_runs_when_eligible_category_has_no_live_streamer():
+    # Reproduces the real-world case: a preferred category has an active
+    # campaign (so eligible_categories is non-empty) but zero live matching
+    # channels this cycle -- capacity is genuinely idle, so wildcard must
+    # still trigger even though no preferred category was "exhausted" in the
+    # old (campaign-eligibility-only) sense.
+    twitch = FakeTwitch(
+        eligible_categories=["pokemon-go"],
+        wildcard_categories=["some-other-game"],
+        empty_categories={"pokemon-go"},
+    )
+    miner = _bare_miner(twitch)
+
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        ["pokemon-go"],
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=True,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+    assert len(twitch.wildcard_calls) == 1
+    assert [streamer.username for streamer in miner.streamers] == [
+        "some-other-game-streamer"
+    ]
+    assert miner.streamers[0].from_wildcard_category is True
 
 
 def test_standdown_does_not_retire_existing_wildcard_streamer_in_unrelated_game():

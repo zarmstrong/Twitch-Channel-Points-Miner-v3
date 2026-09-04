@@ -351,8 +351,8 @@ each rule. For example, `Priority.DROPS` can reserve a slot for an active
 category campaign before `Priority.ORDER` fills remaining slots with configured
 streamers.
 
-`StreamerSource.WILDCARD_CATEGORIES` is only ever populated once `categories`
-is empty or fully farmed for the cycle (see
+`StreamerSource.WILDCARD_CATEGORIES` is only ever populated once the
+preferred `categories` pass leaves capacity idle for the cycle (see
 [Wildcard category fallback](#wildcard-category-fallback)) -- reordering it
 only changes how it competes for a watch slot against `CATEGORIES`/`BADGES`
 *when it has something to offer*, it does not make it activate any earlier.
@@ -613,12 +613,18 @@ have `claim_drops=True`. This feature is disabled by default.
 
 ##### Wildcard category fallback
 
-`wildcard_categories` is a separate opt-in fallback for when `categories` is
-empty or every configured category has been fully farmed (no eligible, active
-incomplete campaign left this refresh cycle). Once that happens, and only
-then, the miner discovers live channels for *every other* category with an
-active incomplete Drop campaign -- filling otherwise idle watch capacity
-without you having to enumerate every game yourself.
+`wildcard_categories` is a separate opt-in fallback for when `categories`
+leaves watch capacity idle this cycle -- either because `categories` is
+empty, none of your configured categories currently have an active
+incomplete campaign, or one does but produced zero live matching channels
+right now (a real campaign with nobody streaming it isn't useful capacity
+either). Once that happens, and only then, the miner discovers live channels
+for *every other* category with an active incomplete Drop campaign -- filling
+otherwise idle watch capacity without you having to enumerate every game
+yourself. If a long `categories` list yields at least one live streamer this
+cycle, wildcard stands down even if most of the list was campaign-free --
+the trigger is "did the preferred pass produce anything to watch," not "was
+every single configured category checked off."
 
 ```python
 MINE_CONFIG = {
@@ -632,7 +638,7 @@ MINE_CONFIG = {
 
 | Option | Default | Description |
 |---|---:|---|
-| `wildcard_categories` | `False` | Enable the fallback. Only activates once `categories` has no eligible categories left this cycle. |
+| `wildcard_categories` | `False` | Enable the fallback. Only activates once the preferred `categories` pass produces zero live streamers this cycle. |
 | `wildcard_category_limit` | `10` | Maximum distinct wildcard categories added per refresh cycle. With `wildcard_category_pin_active=True`, an already-tracked wildcard category doesn't count against this cap, so the effective tracked count can exceed it -- that throttles new additions only, it does not cap the total. |
 | `wildcard_category_streamer_limit` | `1` | Live channels pulled per wildcard category. Kept small by default since this is best-effort filler, not a curated list. |
 | `wildcard_category_pin_active` | `True` | Keep an already-tracked wildcard category even if a re-sort by campaign expiration pushes it out of the top `wildcard_category_limit`, as long as its campaign is still active. Prevents pointlessly retiring and re-picking a streamer between refreshes. Set to `False` for a strict top-N-by-expiration set every cycle. |
@@ -711,7 +717,7 @@ MINE_CONFIG = {
 | A removed category still affects selection | Refresh only adds streamers; restart the miner to remove already-loaded category channels. |
 | Category messages are missing | Set `category_log_level=logging.INFO` or `logging.DEBUG` and ensure the logger/console threshold permits that level. |
 | Analytics omit channel point changes | Set `track_category_streamer_points=True`; it defaults to `False` for category-only channels. |
-| Wildcard categories never activate | They only run once `categories` has no eligible category left this cycle (or `categories` is empty). Confirm `wildcard_categories=True` and that your preferred categories are actually exhausted, e.g. via `print_open_drop_campaigns_on_load=True`. |
+| Wildcard categories never activate | They only run once the preferred `categories` pass produces zero live streamers this cycle -- a long `categories` list with even one currently-live match will keep wildcard standing down. Confirm `wildcard_categories=True`, and check whether any configured category currently has a live matching channel, e.g. via `print_open_drop_campaigns_on_load=True` and `category_log_level=logging.DEBUG`. |
 | A wildcard channel keeps getting swapped out | Set `wildcard_category_pin_active=True` (the default) so an already-tracked wildcard category isn't dropped just for falling out of the top `wildcard_category_limit` on a re-sort. |
 
 A channel eligible for both `auto_mine_badge_drops` and
