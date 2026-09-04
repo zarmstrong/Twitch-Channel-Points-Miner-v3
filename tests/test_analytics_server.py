@@ -13,6 +13,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     filter_datas,
     get_streamer_summary,
     seek_log_start,
+    streamers_available,
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
@@ -79,6 +80,19 @@ def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     assert len(calls) == 1
 
     analytics_module.response_cache.clear()
+
+
+def test_streamers_available_excludes_now_watching_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "example.json").write_text(
+        '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
+    )
+    (tmp_path / "now_watching.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "drops_by_category.json").write_text(
+        '{"drops": []}', encoding="utf-8"
+    )
+
+    assert streamers_available() == ["example.json"]
 
 
 def test_now_watching_endpoint_missing_file_returns_empty_list(monkeypatch, tmp_path):
