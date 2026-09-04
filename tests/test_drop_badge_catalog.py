@@ -299,6 +299,67 @@ def test_eligible_badge_campaigns_only_returns_active_unearned_watch_badges(
     assert owned == []
 
 
+def test_eligible_badge_campaigns_excludes_campaign_matched_by_completion_signature(
+    tmp_path,
+):
+    """Reproduces the Infinity Nikki case from issue #119: a Drop-campaign
+    chat badge Twitch already awarded is never returned by AvailableBadges,
+    so badge-name matching alone can never mark the campaign as owned. A
+    completed-campaign signature (built from the authenticated inventory's
+    completedRewardCampaigns, matched by game/campaign name and end time
+    instead of by ID) must be enough to exclude it on its own.
+    """
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(get_auth_token=lambda: "token"),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession(),
+    )
+    now = datetime.now(timezone.utc)
+    ends_at = now + timedelta(hours=1)
+    badge_drop = {
+        "name": "Infinity Nikki Badge",
+        "requirement": "Watch 1h",
+        "badge_classification": {"status": "BADGE"},
+    }
+    catalog.state["campaigns"] = {
+        "infinity-nikki-campaign": {
+            "game_slug": "infinity-nikki",
+            "game": "Infinity Nikki",
+            "source_group": "campaigns",
+            "campaign": {
+                "name": "Infinity Nikki Drops Campaign",
+                "starts_at": (now - timedelta(hours=1)).isoformat(),
+                "ends_at": ends_at.isoformat(),
+                "drops": [copy.deepcopy(badge_drop)],
+            },
+        },
+    }
+
+    # owned_badge_names is empty, mirroring the reporter's 19-badge
+    # AvailableBadges list, which never contains this already-earned badge.
+    without_signature = catalog.eligible_badge_campaigns()
+    assert [record["game_slug"] for record in without_signature] == [
+        "infinity-nikki"
+    ]
+
+    matching_signature = {("infinity-nikki", "infinity nikki drops campaign", ends_at.timestamp())}
+    with_signature = catalog.eligible_badge_campaigns(
+        completed_campaign_signatures=matching_signature
+    )
+    assert with_signature == []
+
+    # A completed campaign that doesn't name-match any catalog record must
+    # not affect unrelated records' eligibility.
+    unrelated_signature = {("other-game", "some other campaign", ends_at.timestamp())}
+    still_eligible = catalog.eligible_badge_campaigns(
+        completed_campaign_signatures=unrelated_signature
+    )
+    assert [record["game_slug"] for record in still_eligible] == [
+        "infinity-nikki"
+    ]
+
+
 def test_confirmed_badge_rewards_exposes_catalog_identities(tmp_path):
     catalog = DropBadgeCatalog(
         SimpleNamespace(get_auth_token=lambda: "token"),

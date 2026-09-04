@@ -512,8 +512,36 @@ class DropBadgeCatalog:
             "path": str(self.path),
         }
 
-    def eligible_badge_campaigns(self, owned_badge_names=None):
+    @staticmethod
+    def _matches_completed_campaign(
+        record, campaign, ends_at, completed_campaign_signatures
+    ):
+        if ends_at is None:
+            return False
+        game_slug = str(record.get("game_slug") or "").strip().casefold()
+        campaign_name = str(campaign.get("name") or "").strip().casefold()
+        if not game_slug or not campaign_name:
+            return False
+
+        ends_at_epoch = ends_at.timestamp()
+        for (
+            signature_game_slug,
+            signature_campaign_name,
+            signature_ends_at,
+        ) in completed_campaign_signatures:
+            if (
+                game_slug == signature_game_slug
+                and campaign_name == signature_campaign_name
+                and abs(ends_at_epoch - signature_ends_at) <= 1
+            ):
+                return True
+        return False
+
+    def eligible_badge_campaigns(
+        self, owned_badge_names=None, completed_campaign_signatures=None
+    ):
         owned_badge_names = owned_badge_names or set()
+        completed_campaign_signatures = completed_campaign_signatures or set()
         now = _now()
         eligible = []
         for record in self.state["campaigns"].values():
@@ -525,6 +553,11 @@ class DropBadgeCatalog:
             if starts_at is not None and starts_at > now:
                 continue
             if ends_at is not None and ends_at <= now:
+                continue
+
+            if completed_campaign_signatures and self._matches_completed_campaign(
+                record, campaign, ends_at, completed_campaign_signatures
+            ):
                 continue
 
             missing_badge_drops = []
