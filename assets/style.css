@@ -215,6 +215,19 @@ body.header-hidden .top-controls-row {
     padding-top: 12px;
 }
 
+.now-watching-box {
+    padding: 10px 16px;
+    margin-bottom: 12px;
+}
+
+.now-watching-entry {
+    font-size: 14px;
+}
+
+.now-watching-entry + .now-watching-entry {
+    margin-top: 4px;
+}
+
 @media (max-width: 1024px) {
     .top-controls-row {
         align-items: flex-start;

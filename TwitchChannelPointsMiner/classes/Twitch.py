@@ -3728,6 +3728,10 @@ class Twitch(object):
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
 
+                self.__save_now_watching_analytics(
+                    streamers_snapshot, streamers_watching, streamer_source
+                )
+
                 self.__log_watched_streamers(streamers_snapshot, streamers_watching)
 
                 for index in streamers_watching:
@@ -5065,6 +5069,46 @@ class Twitch(object):
                 category,
             ]
         )
+
+    def __save_now_watching_analytics(
+        self, streamers_snapshot, streamers_watching, streamer_source
+    ):
+        if getattr(Settings, "enable_analytics", False) is not True:
+            return
+
+        entries = []
+        for index in streamers_watching:
+            streamer = streamers_snapshot[index]
+            source = streamer_source(index)
+            if source == StreamerSource.BADGES:
+                reason = "badge"
+            elif source in (
+                StreamerSource.CATEGORIES,
+                StreamerSource.WILDCARD_CATEGORIES,
+            ):
+                reason = "drops"
+            else:
+                reason = "points"
+
+            game = streamer.stream.game or {}
+            game_name = (game.get("displayName") or game.get("name")) if game else None
+
+            entries.append(
+                {
+                    "username": streamer.username,
+                    "reason": reason,
+                    "game": game_name,
+                    "channel_points": streamer.channel_points,
+                }
+            )
+
+        analytics_file = os.path.join(Settings.analytics_path, "now_watching.json")
+        temp_file = analytics_file + ".temp"
+
+        with self.analytics_mutex:
+            with open(temp_file, "w", encoding="utf-8") as temp_handle:
+                json.dump(entries, temp_handle, indent=4)
+            os.replace(temp_file, analytics_file)
 
     def __save_drop_claim_analytics(
         self,

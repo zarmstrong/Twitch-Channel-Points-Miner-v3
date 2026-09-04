@@ -81,6 +81,100 @@ def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     analytics_module.response_cache.clear()
 
 
+def test_now_watching_endpoint_missing_file_returns_empty_list(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/now_watching")
+
+    assert response.status_code == 200
+    assert json_module.loads(response.get_data(as_text=True)) == []
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_round_trips_well_formed_file(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    entries = [
+        {"username": "alice", "reason": "drops", "game": "Foo", "channel_points": 10},
+        {"username": "bob", "reason": "points", "game": None, "channel_points": 5},
+    ]
+    (tmp_path / "now_watching.json").write_text(
+        json_module.dumps(entries), encoding="utf-8"
+    )
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/now_watching")
+
+    assert response.status_code == 200
+    assert json_module.loads(response.get_data(as_text=True)) == entries
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_malformed_json_degrades_to_empty_list(
+    monkeypatch, tmp_path
+):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "now_watching.json").write_text("not json", encoding="utf-8")
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/now_watching")
+
+    assert response.status_code == 200
+    assert json_module.loads(response.get_data(as_text=True)) == []
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    entries = [{"username": "alice", "reason": "badge", "game": "Foo", "channel_points": 1}]
+    now_watching_file = tmp_path / "now_watching.json"
+    now_watching_file.write_text(json_module.dumps(entries), encoding="utf-8")
+    analytics_module.response_cache.clear()
+
+    calls = []
+    original_open = open
+
+    def counting_open(path, *args, **kwargs):
+        if str(path) == str(now_watching_file):
+            calls.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(analytics_module, "open", counting_open, raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    first = client.get("/now_watching")
+    second = client.get("/now_watching")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert json_module.loads(first.get_data(as_text=True)) == entries
+    assert json_module.loads(second.get_data(as_text=True)) == entries
+    # Second request must be served from cache without re-reading the file.
+    assert len(calls) == 1
+
+    analytics_module.response_cache.clear()
+
+
 def test_bounded_log_start_caps_legacy_request_without_tail_bytes():
     file_size = MAX_LOG_TAIL_BYTES * 10
 
@@ -339,6 +433,23 @@ def test_points_tab_reapplies_annotations_after_becoming_visible():
     assert "switchDashboardTab(savedDashboardTab);" in script
     assert "!chartRendered || $('#points-panel').is(':hidden')" in script
     assert 'pointSeries = response["series"] || [];' in script
+
+
+def test_now_watching_widget_jumps_to_drops_tab_on_click():
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function getNowWatching()" in script
+    assert "function renderNowWatching(entries)" in script
+    assert "'./now_watching'" in script
+
+    render_now_watching = script.split("function renderNowWatching", 1)[1].split(
+        "function getNowWatching", 1
+    )[0]
+
+    assert "switchDashboardTab('drops');" in render_now_watching
+    assert "changeDropCategory(entry.game);" in render_now_watching
 
 
 def test_points_chart_translates_logger_month_token_for_apexcharts():

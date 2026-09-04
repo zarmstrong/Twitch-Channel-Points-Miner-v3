@@ -345,6 +345,32 @@ def drops_by_category():
     )
 
 
+def now_watching():
+    cached = response_cache.get("now_watching")
+    if cached is not None:
+        return Response(cached, status=200, mimetype="application/json")
+
+    now_watching_file = os.path.join(Settings.analytics_path, "now_watching.json")
+    entries = []
+    if os.path.isfile(now_watching_file):
+        try:
+            with open(now_watching_file, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, list):
+                entries = data
+        except (json.JSONDecodeError, OSError) as error:
+            logger.error(
+                "Unable to read analytics Now Watching file '%s': %s",
+                now_watching_file,
+                error,
+            )
+            entries = []
+
+    payload = json.dumps(entries)
+    response_cache.set("now_watching", payload)
+    return Response(payload, status=200, mimetype="application/json")
+
+
 def index(refresh=5, days_ago=7, log_poll_interval=5):
     assets_folder = get_assets_folder()
     asset_version = max(
@@ -692,6 +718,9 @@ class AnalyticsServer(Thread):
             "drops_by_category",
             drops_by_category,
             methods=["GET"],
+        )
+        self.app.add_url_rule(
+            "/now_watching", "now_watching", now_watching, methods=["GET"]
         )
         self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
         self.app.add_url_rule(

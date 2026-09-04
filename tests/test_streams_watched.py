@@ -1,7 +1,9 @@
 import importlib
 import inspect
+import json
 import logging
 from datetime import datetime
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +17,7 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _normalize_streams_watched,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
-from TwitchChannelPointsMiner.classes.Settings import Priority, StreamerSource
+from TwitchChannelPointsMiner.classes.Settings import Priority, Settings, StreamerSource
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
@@ -148,6 +150,7 @@ def _run_one_watch_iteration(
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
+    twitch.analytics_mutex = Lock()
     twitch.user_agent = "test-agent"
     twitch.completed_drop_campaigns = set()
     twitch.category_campaign_eligibility = {
@@ -252,6 +255,71 @@ def test_minute_watcher_prioritizes_favorites(monkeypatch):
     )
 
     assert posted == ["https://spade.test/favorite"]
+
+
+def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("badge-streamer", from_badge_campaign=True),
+            _watch_streamer(
+                "category-streamer", from_category=True, drops_eligible=True
+            ),
+            _watch_streamer("points-streamer"),
+        ],
+        streams_watched=3,
+        priority=[Priority.ORDER],
+        source_priority=[
+            StreamerSource.BADGES,
+            StreamerSource.CATEGORIES,
+            StreamerSource.STREAMERS,
+        ],
+    )
+
+    now_watching_file = tmp_path / "now_watching.json"
+    assert now_watching_file.is_file()
+    entries = json.loads(now_watching_file.read_text(encoding="utf-8"))
+    entries_by_username = {entry["username"]: entry for entry in entries}
+
+    assert entries_by_username["badge-streamer"]["reason"] == "badge"
+    assert entries_by_username["category-streamer"]["reason"] == "drops"
+    assert entries_by_username["points-streamer"]["reason"] == "points"
+    assert entries_by_username["badge-streamer"]["game"] == "badge-streamer"
+
+
+def test_minute_watcher_writes_empty_now_watching_when_nothing_watched(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [],
+        streams_watched=1,
+    )
+
+    now_watching_file = tmp_path / "now_watching.json"
+    assert now_watching_file.is_file()
+    assert json.loads(now_watching_file.read_text(encoding="utf-8")) == []
+
+
+def test_minute_watcher_skips_now_watching_when_analytics_disabled(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Settings, "enable_analytics", False)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("points-streamer")],
+        streams_watched=1,
+    )
+
+    assert not (tmp_path / "now_watching.json").exists()
 
 
 def test_minute_watcher_retries_once_on_connection_error(monkeypatch, caplog):
