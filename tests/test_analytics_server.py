@@ -48,6 +48,24 @@ def test_ttl_response_cache_clear_drops_all_entries():
     assert cache.get("b") is None
 
 
+def test_ttl_response_cache_sweeps_expired_entries_on_set():
+    # A caller that varies its key per-request (e.g. keying on a file's
+    # mtime, as /now_watching does) must not accumulate one entry forever -
+    # once its old key has expired, the next unrelated set() call should
+    # sweep it away rather than leaving it for a get() that will never come.
+    cache = TTLResponseCache(ttl_seconds=0.05)
+
+    cache.set("now_watching:1", "a")
+    time.sleep(0.06)
+    cache.set("now_watching:2", "b")
+    cache.set("unrelated", "c")
+
+    assert len(cache._entries) == 2
+    assert "now_watching:1" not in cache._entries
+    assert cache.get("now_watching:2") == "b"
+    assert cache.get("unrelated") == "c"
+
+
 def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     import json as json_module
 

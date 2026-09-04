@@ -60,7 +60,22 @@ class TTLResponseCache:
         if self.ttl_seconds <= 0:
             return
         with self._mutex:
-            self._entries[key] = (time.monotonic() + self.ttl_seconds, payload)
+            # Callers that vary their key per-request (e.g. keying on a
+            # file's mtime so a change is visible immediately instead of
+            # waiting out the TTL) would otherwise accumulate one entry per
+            # write forever, since an expired key is only ever swept when
+            # that exact key is re-fetched. Sweep expired entries here too
+            # so such callers stay bounded.
+            now = time.monotonic()
+            expired = [
+                existing_key
+                for existing_key, (expires_at, _payload) in self._entries.items()
+                if expires_at <= now
+            ]
+            for existing_key in expired:
+                self._entries.pop(existing_key, None)
+
+            self._entries[key] = (now + self.ttl_seconds, payload)
 
     def clear(self):
         with self._mutex:
