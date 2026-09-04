@@ -14,7 +14,7 @@ import string
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from secrets import choice, token_hex
 from threading import BoundedSemaphore, Event, Lock
@@ -2187,6 +2187,50 @@ class Twitch(object):
         parameter, instead of each one fetching it separately.
         """
         return self.__get_inventory()
+
+    def completed_badge_campaign_signatures(self, inventory: dict) -> set:
+        """Build (game_slug, campaign_name, ends_at_epoch) signatures for
+        campaigns the authenticated account has already completed.
+
+        Twitch's AvailableBadges query omits already-claimed Drop-campaign
+        chat badges entirely, so badge-name matching alone can never
+        recognize those campaigns as owned. completedRewardCampaigns in the
+        authenticated inventory is available to every user (unlike the
+        opt-in analytics history __fallback_reward_was_captured relies on)
+        and carries the real game name, campaign name and end time, so it
+        can be joined against DropBadgeCatalog's scraped campaign records by
+        those human-readable fields instead of by ID (the scraper's
+        campaign "id" is a locally computed hash, not Twitch's real
+        campaign ID, and can never match self.completed_drop_campaigns).
+        """
+        signatures = set()
+        if not isinstance(inventory, dict):
+            return signatures
+
+        for completed_record in inventory.get("completedRewardCampaigns", []) or []:
+            if not isinstance(completed_record, dict):
+                continue
+            campaign = completed_record.get("campaign")
+            if not isinstance(campaign, dict):
+                campaign = completed_record
+
+            game = campaign.get("game") or {}
+            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            campaign_name = str(campaign.get("name") or "").strip().casefold()
+            ends_at = self.__parse_twitch_datetime(
+                campaign.get("endAt") or campaign.get("endsAt")
+            )
+            if not game_name or not campaign_name or ends_at is None:
+                continue
+
+            game_slug = self.__slugify(game_name)
+            if not game_slug:
+                continue
+
+            ends_at_epoch = ends_at.replace(tzinfo=timezone.utc).timestamp()
+            signatures.add((game_slug, campaign_name, ends_at_epoch))
+
+        return signatures
 
     def filter_categories_with_active_drops(
         self,

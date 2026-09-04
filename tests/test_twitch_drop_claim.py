@@ -809,6 +809,47 @@ def test_completed_reward_campaign_ids_suppress_stale_campaigns(monkeypatch):
     assert twitch.completed_drop_campaigns == {"campaign-1", "campaign-2"}
 
 
+def test_completed_badge_campaign_signatures_matches_by_name_and_end_time(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    inventory = {
+        "completedRewardCampaigns": [
+            {
+                "campaign": {
+                    "id": "twitch-real-id-1",
+                    "game": {"displayName": "Infinity Nikki"},
+                    "name": "Infinity Nikki Drops Campaign",
+                    "endAt": "2026-08-01T13:58:17.429Z",
+                }
+            },
+            # Missing end time: must not produce a signature, mirroring
+            # __fallback_reward_was_captured's strictness (no exact-equality
+            # fallback when tolerance-based comparison can't be done).
+            {
+                "campaign": {
+                    "id": "twitch-real-id-2",
+                    "game": {"displayName": "No End Time Game"},
+                    "name": "Some Campaign",
+                }
+            },
+        ]
+    }
+
+    signatures = twitch.completed_badge_campaign_signatures(inventory)
+
+    assert len(signatures) == 1
+    (game_slug, campaign_name, ends_at_epoch), = signatures
+    assert game_slug == "infinity-nikki"
+    assert campaign_name == "infinity nikki drops campaign"
+    from datetime import datetime, timezone
+
+    expected_epoch = datetime(
+        2026, 8, 1, 13, 58, 17, 429000, tzinfo=timezone.utc
+    ).timestamp()
+    assert abs(ends_at_epoch - expected_epoch) < 0.01
+
+
 def test_all_claimed_inventory_drops_confirm_campaign_completion(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     data = campaign_data()

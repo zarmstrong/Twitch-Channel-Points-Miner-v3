@@ -14,8 +14,9 @@ from TwitchChannelPointsMiner.classes.Settings import Settings
 
 
 class FakeCatalog:
-    def eligible_badge_campaigns(self, owned_badges):
+    def eligible_badge_campaigns(self, owned_badges, completed_campaign_signatures=None):
         assert owned_badges == {"owned badge"}
+        assert completed_campaign_signatures == {"a-signature"}
         return [
             {
                 "game_slug": "all-channel-game",
@@ -59,6 +60,10 @@ class FakeTwitch:
 
     def get_drops_inventory(self):
         return {"present": True}
+
+    def completed_badge_campaign_signatures(self, inventory):
+        assert inventory == {"present": True}
+        return {"a-signature"}
 
     def get_channel_id(self, username):
         return f"id-{username}"
@@ -189,7 +194,7 @@ def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
             return result
 
     class EmptyCatalog:
-        def eligible_badge_campaigns(self, owned_badges):
+        def eligible_badge_campaigns(self, owned_badges, completed_campaign_signatures=None):
             return []
 
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
@@ -220,6 +225,46 @@ def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
     assert miner.streamers == []
     assert miner.original_streamers == []
     assert miner.ws_pool.removed == ["stale"]
+
+
+def test_auto_mine_badge_campaigns_falls_back_when_inventory_fetch_fails():
+    class NoInventoryTwitch(FakeTwitch):
+        def get_drops_inventory(self):
+            raise RuntimeError("inventory unavailable")
+
+        def completed_badge_campaign_signatures(self, inventory):
+            raise AssertionError(
+                "should not be called when inventory fetch fails"
+            )
+
+    class RecordingCatalog:
+        def eligible_badge_campaigns(self, owned_badges, completed_campaign_signatures=None):
+            assert owned_badges == {"owned badge"}
+            assert completed_campaign_signatures == set()
+            return []
+
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.username = "testuser"
+    miner.twitch = NoInventoryTwitch()
+    miner.streamers = []
+    miner.original_streamers = []
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.drop_badge_catalog = RecordingCatalog()
+    miner.badge_drop_streamer_limit = 2
+    miner.badge_drop_category_chat = ChatPresence.NEVER
+    miner.badge_drop_category_sort = "VIEWERS_DESC"
+    miner.badge_drop_blacklist = set()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == []
 
 
 def test_category_discovery_keeps_point_baselines_aligned():
