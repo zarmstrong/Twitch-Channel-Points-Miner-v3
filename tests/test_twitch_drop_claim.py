@@ -207,6 +207,39 @@ def test_authoritative_channel_campaign_result_blocks_wrong_game(monkeypatch):
     )
 
 
+def test_wildcard_external_campaign_requires_matching_twitch_campaign(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = advertised_campaign()
+    campaign["name"] = "Different Campaign"
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[campaign], campaigns_available=True
+        )
+    )
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [
+            {
+                "id": "external-campaign",
+                "name": "Expected Campaign",
+                "channels": [],
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+    )
+    streamer = category_streamer()
+    streamer.from_wildcard_category = True
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
 def test_channel_allowlisted_in_authoritative_campaign_survives_empty_channel_query(
     monkeypatch,
 ):
@@ -317,9 +350,7 @@ def test_drops_description_is_none_once_channel_check_confirmed_zero_campaigns(
     # description - the live per-channel check already ruled this channel out.
     twitch.discovered_open_drop_campaigns = [advertised_campaign()]
 
-    assert (
-        twitch._Twitch__streamer_drops_description(category_streamer()) is None
-    )
+    assert twitch._Twitch__streamer_drops_description(category_streamer()) is None
 
 
 def test_drops_description_uses_global_catalog_without_a_channel_check_yet(
@@ -391,8 +422,7 @@ def test_campaign_deadline_logs_include_game_name(monkeypatch, caplog):
         in caplog.text
     )
     assert (
-        "Not enough time for [Warframe] Prime Time #493 - Long Reward:"
-        in caplog.text
+        "Not enough time for [Warframe] Prime Time #493 - Long Reward:" in caplog.text
     )
 
 
@@ -420,6 +450,203 @@ def test_claiming_final_drop_waits_for_inventory_confirmation(monkeypatch):
 
     assert twitch.claim_drop(drop, campaign=campaign) is True
     assert twitch.completed_drop_campaigns == set()
+
+
+def test_owned_badge_is_removed_from_advertised_campaign(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.available_badge_names = {"wardog"}
+    twitch.drop_badge_rewards = [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "WARDOGS Beta & Launch",
+            "reward_name": "WARDOG",
+            "badge_names": ["WARDOG", "wardog"],
+            "watch_eligible": True,
+        }
+    ]
+    data = campaign_data()
+    data["game"] = {"displayName": "WARDOGS"}
+    data["name"] = "WARDOGS Beta & Launch"
+    data["timeBasedDrops"][0]["name"] = "WARDOG"
+    data["timeBasedDrops"][0]["benefitEdges"] = [{"benefit": {"name": "WARDOG"}}]
+    campaign = Campaign(data)
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {})
+
+    synced = twitch._Twitch__sync_campaigns([campaign])
+
+    assert synced[0].drops == []
+
+
+def test_unearned_badge_remains_in_advertised_campaign(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.available_badge_names = {"some other badge"}
+    twitch.drop_badge_rewards = [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "WARDOGS Beta & Launch",
+            "reward_name": "WARDOG",
+            "badge_names": ["WARDOG", "wardog"],
+            "watch_eligible": True,
+        }
+    ]
+    data = campaign_data()
+    data["game"] = {"displayName": "WARDOGS"}
+    data["name"] = "WARDOGS Beta & Launch"
+    data["timeBasedDrops"][0]["name"] = "WARDOG"
+    campaign = Campaign(data)
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {})
+
+    synced = twitch._Twitch__sync_campaigns([campaign])
+
+    assert [drop.name for drop in synced[0].drops] == ["WARDOG"]
+
+
+def test_subscription_badge_is_not_treated_as_watch_eligible(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.available_badge_names = set()
+    twitch.drop_badge_rewards = [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "",
+            "reward_name": "WARLORD",
+            "badge_names": ["WARLORD", "warlord"],
+            "watch_eligible": False,
+        }
+    ]
+    data = campaign_data()
+    data["game"] = {"displayName": "WARDOGS"}
+    data["name"] = "WARDOGS Beta & Launch"
+    data["timeBasedDrops"][0]["name"] = "WARLORD"
+    data["timeBasedDrops"][0]["benefitEdges"] = [{"benefit": {"name": "WARLORD"}}]
+    campaign = Campaign(data)
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {})
+
+    synced = twitch._Twitch__sync_campaigns([campaign])
+
+    assert synced[0].drops == []
+
+
+def test_wardogs_campaign_with_owned_and_subscription_badges_is_ineligible(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.available_badge_names = {"wardog"}
+    twitch.drop_badge_rewards = [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "WARDOGS Beta & Launch",
+            "reward_name": "WARDOG",
+            "badge_names": ["WARDOG", "wardog"],
+            "watch_eligible": True,
+        },
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "",
+            "reward_name": "WARLORD",
+            "badge_names": ["WARLORD", "warlord"],
+            "watch_eligible": False,
+        },
+    ]
+    data = campaign_data()
+    data["game"] = {"displayName": "WARDOGS"}
+    data["name"] = "WARDOGS Beta & Launch"
+    data["timeBasedDrops"][0]["name"] = "WARDOG"
+    data["timeBasedDrops"][0]["benefitEdges"] = [{"benefit": {"name": "WARDOG"}}]
+    warlord = dict(data["timeBasedDrops"][0])
+    warlord.update(
+        {
+            "id": "drop-2",
+            "name": "WARLORD",
+            "benefitEdges": [{"benefit": {"name": "WARLORD"}}],
+        }
+    )
+    data["timeBasedDrops"].append(warlord)
+    campaign = Campaign(data)
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {})
+
+    synced = twitch._Twitch__sync_campaigns([campaign])
+
+    assert synced[0].drops == []
+
+
+def test_owned_badge_filter_preserves_other_campaign_rewards(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.available_badge_names = {"wardog"}
+    twitch.drop_badge_rewards = [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "WARDOGS Beta & Launch",
+            "reward_name": "WARDOG",
+            "badge_names": ["WARDOG", "wardog"],
+            "watch_eligible": True,
+        }
+    ]
+    data = campaign_data()
+    data["game"] = {"displayName": "WARDOGS"}
+    data["name"] = "WARDOGS Beta & Launch"
+    data["timeBasedDrops"][0]["name"] = "WARDOG"
+    ordinary_drop = dict(data["timeBasedDrops"][0])
+    ordinary_drop.update(
+        {
+            "id": "drop-2",
+            "name": "Ordinary Reward",
+            "benefitEdges": [{"benefit": {"name": "Ordinary Reward"}}],
+        }
+    )
+    data["timeBasedDrops"].append(ordinary_drop)
+    campaign = Campaign(data)
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {})
+
+    synced = twitch._Twitch__sync_campaigns([campaign])
+
+    assert [drop.name for drop in synced[0].drops] == ["Ordinary Reward"]
+
+
+def test_drop_eligibility_rechecks_badges_learned_after_campaign_sync(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.available_badge_names = {"wardog"}
+    twitch.drop_badge_rewards = []
+    data = campaign_data()
+    data["game"] = {"displayName": "WARDOGS"}
+    data["name"] = "WARDOGS Beta & Launch"
+    data["timeBasedDrops"][0]["name"] = "WARDOG"
+    campaign = Campaign(data)
+    stream = SimpleNamespace(
+        campaigns=[campaign],
+        campaigns_ids=[campaign.id],
+        game_name=lambda: "WARDOGS",
+    )
+    streamer = SimpleNamespace(
+        username="followed-channel",
+        from_category=False,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=stream,
+        drops_condition=lambda: any(item.drops for item in stream.campaigns),
+    )
+
+    assert twitch._Twitch__drops_condition(streamer) is True
+
+    twitch.drop_badge_rewards = [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "WARDOGS Beta & Launch",
+            "reward_name": "WARDOG",
+            "badge_names": ["WARDOG", "wardog"],
+            "watch_eligible": True,
+        }
+    ]
+
+    assert twitch._Twitch__drops_condition(streamer) is False
+    assert campaign.drops == []
 
 
 def test_completed_campaign_overrides_category_eligibility(monkeypatch):
@@ -558,12 +785,8 @@ def test_bulk_inventory_claim_waits_for_refreshed_inventory(monkeypatch):
         "isClaimed": False,
     }
     inventory = {"dropCampaignsInProgress": [data]}
-    monkeypatch.setattr(
-        Twitch, "_Twitch__get_inventory", lambda self: inventory
-    )
-    twitch_module = importlib.import_module(
-        "TwitchChannelPointsMiner.classes.Twitch"
-    )
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: inventory)
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
     monkeypatch.setattr(twitch_module.time, "sleep", lambda seconds: None)
 
     twitch.claim_all_drops_from_inventory()
@@ -649,14 +872,12 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     )
     dashboard_campaigns.clear()
 
-    deadlines, twitch_games = (
-        twitch._Twitch__active_drop_category_slugs_from_campaigns(
-            {
-                "dropCampaignsInProgress": [],
-                "completedRewardCampaigns": [{"id": "campaign-1"}],
-            },
-            {"example-game"},
-        )
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {
+            "dropCampaignsInProgress": [],
+            "completedRewardCampaigns": [{"id": "campaign-1"}],
+        },
+        {"example-game"},
     )
 
     assert deadlines == {}
@@ -753,11 +974,9 @@ def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
         lambda self, inventory: (set(), set()),
     )
 
-    deadlines, twitch_games = (
-        twitch._Twitch__active_drop_category_slugs_from_campaigns(
-            {"completedRewardCampaigns": [{"id": "campaign-1"}]},
-            {"example-game"},
-        )
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"completedRewardCampaigns": [{"id": "campaign-1"}]},
+        {"example-game"},
     )
 
     assert detail_requests == [{"id": "campaign-1"}]
@@ -802,11 +1021,9 @@ def test_full_completed_inventory_campaign_prevents_fallback_resurrection(monkey
         "rewards": [{"name": "Frog Hoodie"}],
     }
 
-    deadlines, twitch_games = (
-        twitch._Twitch__active_drop_category_slugs_from_campaigns(
-            {"completedRewardCampaigns": [completed_campaign]},
-            {"minecraft"},
-        )
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"completedRewardCampaigns": [completed_campaign]},
+        {"minecraft"},
     )
 
     assert detail_requests == []
@@ -853,11 +1070,9 @@ def test_wrapped_completed_inventory_campaign_prevents_fallback_resurrection(
         }
     }
 
-    deadlines, twitch_games = (
-        twitch._Twitch__active_drop_category_slugs_from_campaigns(
-            {"completedRewardCampaigns": [completed_record]},
-            {"warhounds"},
-        )
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"completedRewardCampaigns": [completed_record]},
+        {"warhounds"},
     )
 
     assert deadlines == {}

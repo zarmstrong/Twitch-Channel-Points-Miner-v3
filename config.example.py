@@ -211,7 +211,7 @@ MINE_CONFIG = {
     'drop_badge_refresh_interval_hours': 1,
     'auto_mine_badge_drops': False,
     'badge_drop_streamer_limit': 1,
-    'wildcard_categories': False,               # Once the 'categories' pass leaves capacity idle this cycle (no eligible category, or an eligible one with no live channel), fall back to every other category with an active incomplete drop campaign. Opt-in; see StreamerSource.WILDCARD_CATEGORIES in streamer_source_priority above for where it ranks (lowest by default).
+    'wildcard_categories': False,               # Once the 'categories' pass leaves capacity idle this cycle (no eligible category, or an eligible one with no live channel), fall back to every other category with an active incomplete drop campaign. Twitch campaign data is supplemented by the external Drops catalog; external-only candidates must still be confirmed on a live Twitch channel. Opt-in; see StreamerSource.WILDCARD_CATEGORIES in streamer_source_priority above for where it ranks (lowest by default).
     'wildcard_category_limit': 10,              # Cap on distinct wildcard categories added per refresh cycle. With pinning on (below), already-tracked wildcard categories don't count against this cap, so the effective tracked total can exceed it -- that's expected, not a bug.
     'wildcard_category_streamer_limit': 1,      # Streamers pulled per wildcard category (kept small: this is best-effort filler, not a curated list).
     'wildcard_category_pin_active': True,       # Keep an already-tracked wildcard category even if it falls out of the top wildcard_category_limit on a re-sort, as long as its campaign is still active. Prevents needless streamer churn between refresh cycles.

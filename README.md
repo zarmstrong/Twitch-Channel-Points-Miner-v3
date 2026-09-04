@@ -626,6 +626,16 @@ cycle, wildcard stands down even if most of the list was campaign-free --
 the trigger is "did the preferred pass produce anything to watch," not "was
 every single configured category checked off."
 
+Wildcard candidate discovery merges Twitch's account-scoped campaign data with
+the bundled external Drops catalog because Twitch can omit public campaigns from
+the account response. Twitch remains authoritative for every game it does
+expose, so a completed or ineligible Twitch campaign is never resurrected by the
+external catalog. Games found only in the external catalog are provisional: a
+selected live channel must advertise the matching campaign through Twitch before
+the miner permits it into the watch pool. The remaining candidates are ranked by
+their earliest incomplete Drop deadline before the wildcard limit and pinning
+rules are applied.
+
 ```python
 MINE_CONFIG = {
     "categories": ["warframe", "diablo-iv"],

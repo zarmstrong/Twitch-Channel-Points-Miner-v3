@@ -679,6 +679,9 @@ class TwitchChannelPointsMiner:
                 self.drop_badge_catalog = DropBadgeCatalog(
                     self.twitch.twitch_login, Settings.config_path
                 )
+                self.twitch.drop_badge_rewards = (
+                    self.drop_badge_catalog.confirmed_badge_rewards()
+                )
                 drop_badge_refresh_seconds = (
                     max(float(drop_badge_refresh_interval_hours), 1) * 60 * 60
                     if drop_badge_refresh_interval_hours > 0
@@ -753,6 +756,7 @@ class TwitchChannelPointsMiner:
                     order=category_campaign_order,
                     drops_enabled=category_drops_enabled,
                     inventory=discovery_inventory,
+                    include_all_fallback=self.wildcard_categories,
                 )
 
                 if categories and eligible_categories == []:
@@ -797,6 +801,7 @@ class TwitchChannelPointsMiner:
                         pinned_category_slugs=set(),
                         pin_active=self.wildcard_category_pin_active,
                         inventory=discovery_inventory,
+                        refresh_external_catalog=not bool(categories),
                     )
                 )
                 all_wildcard_category_usernames = []
@@ -1282,6 +1287,9 @@ class TwitchChannelPointsMiner:
             return
         try:
             result = self.drop_badge_catalog.sync()
+            self.twitch.drop_badge_rewards = (
+                self.drop_badge_catalog.confirmed_badge_rewards()
+            )
         except Exception as error:
             logger.warning(
                 f"Unable to refresh Drop badge catalog: {error}",
@@ -1735,6 +1743,7 @@ class TwitchChannelPointsMiner:
             order=campaign_order,
             drops_enabled=drops_enabled,
             inventory=discovery_inventory,
+            include_all_fallback=wildcard_categories,
         )
         discovered_usernames = []
         for category in eligible_categories:
@@ -1792,6 +1801,7 @@ class TwitchChannelPointsMiner:
                     pinned_category_slugs=pinned_category_slugs,
                     pin_active=wildcard_category_pin_active,
                     inventory=discovery_inventory,
+                    refresh_external_catalog=not bool(categories),
                 )
             )
             for category in wildcard_eligible_categories:

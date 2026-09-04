@@ -18,6 +18,9 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
     """
     twitch = object.__new__(Twitch)
     twitch.category_campaign_deadlines = {}
+    twitch.category_log_level = logging.DEBUG
+    twitch.twitchdrops_app_deadlines = {}
+    twitch.twitchdrops_app_catalog_complete = True
 
     def fake_active_drop_category_slugs_from_campaigns(
         self, inventory, requested_category_slugs
@@ -31,6 +34,11 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
         Twitch,
         "_Twitch__active_drop_category_slugs_from_campaigns",
         fake_active_drop_category_slugs_from_campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs: {},
     )
     return twitch
 
@@ -181,6 +189,83 @@ def test_get_wildcard_categories_replaces_rather_than_merges_deadlines(monkeypat
     twitch.get_wildcard_categories_with_active_drops()
 
     assert twitch.category_campaign_deadlines == {"still-open": datetime(2099, 1, 1)}
+
+
+def test_wildcard_ranks_external_missing_campaign_ahead_of_later_twitch_campaigns(
+    monkeypatch,
+):
+    twitch = _bare_twitch(
+        monkeypatch,
+        {
+            "dead-by-daylight": datetime(2099, 1, 1),
+            "special-events": datetime(2099, 2, 1),
+        },
+    )
+    twitch.twitchdrops_app_catalog_complete = False
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs: {
+            "urgent-external-game": datetime(2050, 1, 1)
+        },
+    )
+
+    result = twitch.get_wildcard_categories_with_active_drops()
+
+    assert result == [
+        "urgent-external-game",
+        "dead-by-daylight",
+        "special-events",
+    ]
+    assert twitch.category_campaign_deadlines == {
+        "urgent-external-game": datetime(2050, 1, 1),
+        "dead-by-daylight": datetime(2099, 1, 1),
+        "special-events": datetime(2099, 2, 1),
+    }
+
+
+def test_wildcard_does_not_override_twitch_authoritative_deadline(monkeypatch):
+    twitch = _bare_twitch(
+        monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
+    )
+    twitch.twitchdrops_app_catalog_complete = False
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs: {
+            "dead-by-daylight": datetime(2020, 1, 1),
+            "external-game": datetime(2050, 1, 1),
+        },
+    )
+
+    result = twitch.get_wildcard_categories_with_active_drops()
+
+    assert result == ["external-game", "dead-by-daylight"]
+    assert twitch.category_campaign_deadlines["dead-by-daylight"] == datetime(
+        2099, 1, 1
+    )
+
+
+def test_wildcard_reuses_preloaded_external_catalog(monkeypatch):
+    twitch = _bare_twitch(
+        monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
+    )
+    twitch.twitchdrops_app_deadlines = {
+        "urgent-external-game": datetime(2050, 1, 1)
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs: pytest.fail(
+            "the preloaded full catalog should be reused"
+        ),
+    )
+
+    result = twitch.get_wildcard_categories_with_active_drops(
+        refresh_external_catalog=False
+    )
+
+    assert result == ["urgent-external-game", "dead-by-daylight"]
 
 
 class FakeWebSocketsPool:
@@ -543,7 +628,9 @@ def test_refresh_fetches_drops_inventory_once_and_shares_it_with_wildcard_pass()
 
     assert twitch.inventory_fetch_count == 1
     assert twitch.filter_calls[0]["inventory"] == {"fetched": 1}
+    assert twitch.filter_calls[0]["include_all_fallback"] is True
     assert twitch.wildcard_calls[0]["inventory"] == {"fetched": 1}
+    assert twitch.wildcard_calls[0]["refresh_external_catalog"] is False
 
 
 def test_refresh_skips_inventory_fetch_when_drops_disabled():
