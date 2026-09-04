@@ -573,7 +573,6 @@ class AnalyticsServer(Thread):
         self.days_ago = days_ago
         self.username = username
         self.password = password
-        self.response_cache = response_cache
 
         if host not in {"127.0.0.1", "localhost", "::1"} and not password:
             raise ValueError("Analytics exposed beyond localhost requires a password")
