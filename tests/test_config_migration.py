@@ -140,12 +140,85 @@ ANALYTICS_CONFIG = None
         namespace["StreamerSource"].CATEGORIES,
         namespace["StreamerSource"].BADGES,
         namespace["StreamerSource"].FOLLOWERS,
+        namespace["StreamerSource"].WILDCARD_CATEGORIES,
     ]
     for name, _ in MINER_CONFIG_DEFAULTS:
         assert name in namespace["MINER_CONFIG"]
     assert namespace["MINE_CONFIG"]["followers"] is True
     for name, _ in MINE_CONFIG_DEFAULTS:
         assert name in namespace["MINE_CONFIG"]
+
+
+def test_version_seven_migration_adds_wildcard_categories_and_source_last():
+    source = '''\
+CONFIG_VERSION = 7
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+MINER_CONFIG = {
+    "username": "alice",
+    "streamer_source_priority": [
+        StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+    ],
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 7
+    assert new_version == CONFIG_VERSION
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["streamer_source_priority"] == [
+        namespace["StreamerSource"].STREAMERS,
+        namespace["StreamerSource"].FOLLOWERS,
+        namespace["StreamerSource"].CATEGORIES,
+        namespace["StreamerSource"].BADGES,
+        namespace["StreamerSource"].WILDCARD_CATEGORIES,
+    ]
+    for name, _ in MINE_CONFIG_DEFAULTS:
+        assert name in namespace["MINE_CONFIG"]
+    assert namespace["MINE_CONFIG"]["wildcard_categories"] is False
+    assert namespace["MINE_CONFIG"]["wildcard_category_limit"] == 10
+    assert namespace["MINE_CONFIG"]["wildcard_category_streamer_limit"] == 1
+    assert namespace["MINE_CONFIG"]["wildcard_category_pin_active"] is True
+
+
+def test_version_seven_migration_appends_wildcard_last_to_custom_priority():
+    source = '''\
+CONFIG_VERSION = 7
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+MINER_CONFIG = {
+    "username": "alice",
+    "streamer_source_priority": [
+        StreamerSource.BADGES,
+        StreamerSource.CATEGORIES,
+        StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
+    ],
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, _, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["streamer_source_priority"] == [
+        namespace["StreamerSource"].BADGES,
+        namespace["StreamerSource"].CATEGORIES,
+        namespace["StreamerSource"].STREAMERS,
+        namespace["StreamerSource"].FOLLOWERS,
+        namespace["StreamerSource"].WILDCARD_CATEGORIES,
+    ]
 
 
 def test_migration_preserves_aliased_priority_enum_prefixes():
@@ -175,10 +248,12 @@ ANALYTICS_CONFIG = None
         namespace["SS"].BADGES,
         namespace["SS"].FOLLOWERS,
         namespace["SS"].CATEGORIES,
+        namespace["SS"].WILDCARD_CATEGORIES,
     ]
     assert migrated.count("P.FAVORITE") == 1
     assert "SS.FOLLOWERS" in migrated
     assert "SS.CATEGORIES" in migrated
+    assert "SS.WILDCARD_CATEGORIES" in migrated
 
 
 def test_version_two_migration_normalizes_logger_settings():
@@ -281,6 +356,7 @@ ANALYTICS_CONFIG = {"port": 6000}
         namespace["StreamerSource"].FOLLOWERS,
         namespace["StreamerSource"].CATEGORIES,
         namespace["StreamerSource"].BADGES,
+        namespace["StreamerSource"].WILDCARD_CATEGORIES,
     ]
     for name in LOGGER_NOTIFICATION_SETTINGS:
         assert f"# {name}=" in migrated
@@ -698,6 +774,7 @@ def test_convert_runner_source_preserves_configuration_expressions():
             namespace["StreamerSource"].FOLLOWERS,
             namespace["StreamerSource"].CATEGORIES,
             namespace["StreamerSource"].BADGES,
+            namespace["StreamerSource"].WILDCARD_CATEGORIES,
         ],
     }
     assert namespace["STREAMERS"] == ["channel_one", "channel_two"]

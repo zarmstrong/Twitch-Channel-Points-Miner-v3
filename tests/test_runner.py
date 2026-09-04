@@ -105,6 +105,54 @@ def test_config_watcher_refreshes_restart_snapshots(monkeypatch, caplog):
     assert len(warnings) == 1
 
 
+def test_config_watcher_preserves_wildcard_defaults_when_keys_missing(
+    monkeypatch, caplog
+):
+    # A hand-edited or older reloaded config can omit the wildcard_* keys
+    # entirely. Falling back to `.get(key)` (None) instead of the documented
+    # default would silently disable the wildcard_category_limit throttle.
+    initial = SimpleNamespace(
+        STREAMERS=[],
+        MINER_CONFIG={"setting": "same"},
+        ANALYTICS_CONFIG=None,
+        MINE_CONFIG={"categories": ["one"]},
+    )
+    updated = SimpleNamespace(
+        STREAMERS=[],
+        MINER_CONFIG={"setting": "same"},
+        ANALYTICS_CONFIG=None,
+        MINE_CONFIG={"categories": ["one", "two"]},
+    )
+    refreshed_with = []
+    miner = SimpleNamespace(
+        running=True,
+        ws_pool=object(),
+        add_streamers=lambda _items: None,
+        remove_streamers=lambda _items: None,
+        refresh_categories=lambda config: refreshed_with.append(dict(config)),
+    )
+    digests = iter((b"initial", b"first-update"))
+    loads = []
+
+    monkeypatch.setattr(runner, "_config_digest", lambda _path: next(digests))
+    monkeypatch.setattr(runner.time, "sleep", lambda _interval: None)
+
+    def load(_path):
+        loads.append(True)
+        miner.running = False
+        return updated
+
+    monkeypatch.setattr(runner, "_load_config", load)
+
+    runner._watch_config("config.py", miner, initial, 1)
+
+    assert len(refreshed_with) == 1
+    assert refreshed_with[0]["wildcard_categories"] is False
+    assert refreshed_with[0]["wildcard_category_limit"] == 10
+    assert refreshed_with[0]["wildcard_category_streamer_limit"] == 1
+    assert refreshed_with[0]["wildcard_category_pin_active"] is True
+
+
 def test_main_still_converts_existing_legacy_runner(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -358,7 +406,7 @@ ANALYTICS_CONFIG = None
 
     assert [
         source.name for source in loaded.MINER_CONFIG["streamer_source_priority"]
-    ] == ["STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES"]
+    ] == ["STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES", "WILDCARD_CATEGORIES"]
 
 
 def test_load_config_still_rejects_user_config_missing_streamer_source_import(

@@ -12,6 +12,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.42.0"></script>
     <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.css" rel="stylesheet" />
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.6.1/css/bulma.css" rel="stylesheet" />
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet"
@@ -29,6 +30,7 @@
 </head>
 
 <body style="height: 100vh;">
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
     <div class="container has-text-centered" style="height: 100vh;">
         <div class="columns" id="header">
             <div class="column has-text-right">
@@ -279,12 +281,9 @@
                 <div class="column">
                     <div class="box config-box">
                         <h3 class="title is-5">Stream sources</h3>
-                        <p class="config-help">Choose which discovery sources are active after restart.</p>
+                        <p class="config-help">Choose which discovery sources are active after restart. Drag to reorder; order sets which source wins a watch slot first.</p>
                         <form id="source-settings-form" class="config-toggle-grid">
-                            <label class="checkbox"><input data-source="streamers" type="checkbox"> Explicit streamers</label>
-                            <label class="checkbox"><input data-source="followers" type="checkbox"> Followed channels</label>
-                            <label class="checkbox"><input data-source="categories" type="checkbox"> Categories</label>
-                            <label class="checkbox"><input data-source="badges" type="checkbox"> Badge campaigns</label>
+                            <div id="source-settings-list" class="config-items"></div>
                             <button class="button is-link" type="submit">Save sources</button>
                         </form>
                     </div>
@@ -329,7 +328,6 @@
                 <p class="config-help">Credentials are write-only. Saved credentials are shown only as “configured” and are never sent to the browser. Notification changes require a restart.</p>
                 <div id="notification-settings" class="notification-settings"></div>
             </div>
-            <div id="config-message" class="notification" role="status" style="display: none;"></div>
             <p class="config-reload-note">Dashboard changes are written directly to <code>config.py</code>. Streamer additions/removals and category list changes reload automatically; other settings take effect after restart.</p>
         </div>
         <div class="columns">

@@ -17,7 +17,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     test_web_notification as send_web_notification_test,
     web_config,
 )
-from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.Settings import Settings, StreamerSource
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
@@ -113,6 +113,7 @@ def test_managed_web_config_updates_release_check_settings(tmp_path):
         "interval_hours": 12,
         "startup_only": False,
     }
+
     loaded = _load_config(config)
     assert loaded.MINER_CONFIG["update_check"] is False
     assert loaded.MINER_CONFIG["update_check_interval_hours"] == 12
@@ -132,6 +133,141 @@ def test_managed_web_config_updates_release_check_settings(tmp_path):
     loaded = _load_config(config)
     assert loaded.MINER_CONFIG["update_check"] is True
     assert loaded.MINER_CONFIG["update_check_interval_hours"] == math.inf
+
+
+def test_managed_web_config_updates_wildcard_category_source(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"wildcard_categories": True}},
+    )
+
+    assert result["sources"]["wildcard_categories"] is True
+    loaded = _load_config(config)
+    assert (
+        StreamerSource.WILDCARD_CATEGORIES
+        in loaded.MINER_CONFIG["streamer_source_priority"]
+    )
+    assert loaded.MINE_CONFIG["wildcard_categories"] is True
+
+    result = update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"wildcard_categories": False}},
+    )
+
+    assert result["sources"]["wildcard_categories"] is False
+    loaded = _load_config(config)
+    assert (
+        StreamerSource.WILDCARD_CATEGORIES
+        not in loaded.MINER_CONFIG["streamer_source_priority"]
+    )
+    assert loaded.MINE_CONFIG["wildcard_categories"] is False
+
+
+def test_managed_web_config_reorders_streamers_without_touching_settings(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {"action": "reorder_streamers", "usernames": ["two", "one"]},
+    )
+
+    assert [item["username"] for item in result["streamers"]] == ["two", "one"]
+    one_settings = next(
+        item["settings"]
+        for item in result["streamers"]
+        if item["username"] == "one"
+    )
+    assert one_settings["favorite"] is True
+    loaded = _load_config(config)
+    assert [
+        getattr(streamer, "username", streamer) for streamer in loaded.STREAMERS
+    ] == ["two", "one"]
+
+
+def test_managed_web_config_rejects_incomplete_streamer_order(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match="must contain every configured streamer"):
+        update_managed_web_config(
+            config,
+            {"action": "reorder_streamers", "usernames": ["one"]},
+        )
+
+
+def test_managed_web_config_rejects_streamer_order_with_unknown_username(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match="must contain every configured streamer"):
+        update_managed_web_config(
+            config,
+            {"action": "reorder_streamers", "usernames": ["one", "two", "extra"]},
+        )
+
+
+def test_managed_web_config_update_sources_enables_and_reorders_in_one_call(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_sources",
+            "values": {"wildcard_categories": True},
+            "order": [
+                "wildcard_categories",
+                "streamers",
+                "followers",
+                "categories",
+                "badges",
+            ],
+        },
+    )
+
+    assert result["sources"]["wildcard_categories"] is True
+    assert result["source_order"][0] == "wildcard_categories"
+    loaded = _load_config(config)
+    priority = loaded.MINER_CONFIG["streamer_source_priority"]
+    assert priority[0] == StreamerSource.WILDCARD_CATEGORIES
+    assert loaded.MINE_CONFIG["wildcard_categories"] is True
+
+
+def test_managed_web_config_update_sources_without_order_keeps_legacy_behavior(
+    tmp_path,
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"followers": True}},
+    )
+
+    # Baseline priority is [STREAMERS, CATEGORIES]; the legacy no-order path
+    # appends the newly-enabled source at the end rather than rebuilding
+    # from a posted order.
+    assert result["sources"]["followers"] is True
+    assert result["source_order"].index("followers") == 2
+
+
+def test_managed_web_config_rejects_incomplete_source_order(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError, match="Invalid stream source order"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_sources",
+                "values": {},
+                "order": ["streamers", "followers"],
+            },
+        )
 
 
 def test_managed_web_config_reads_math_inf_as_startup_only(tmp_path):

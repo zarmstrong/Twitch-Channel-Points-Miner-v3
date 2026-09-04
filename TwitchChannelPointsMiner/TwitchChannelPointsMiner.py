@@ -95,6 +95,7 @@ def _normalize_streamer_source_priority(source_priority):
         StreamerSource.FOLLOWERS,
         StreamerSource.CATEGORIES,
         StreamerSource.BADGES,
+        StreamerSource.WILDCARD_CATEGORIES,
     ]
     if not isinstance(source_priority, (list, tuple)):
         logger.error(
@@ -135,6 +136,15 @@ def _normalize_drop_progress_stall_minutes(minutes):
         "using the default value 10"
     )
     return 10.0
+
+
+def _normalize_wildcard_category_positive_int(value, name, default):
+    if type(value) is int and not isinstance(value, bool) and value > 0:
+        return value
+    logger.error(
+        f"{name} must be a positive integer; using the default value {default}"
+    )
+    return default
 
 
 def _normalize_update_check_interval(interval):
@@ -297,6 +307,10 @@ class TwitchChannelPointsMiner:
         "badge_drop_category_chat",
         "badge_drop_category_sort",
         "badge_drop_blacklist",
+        "wildcard_categories",
+        "wildcard_category_limit",
+        "wildcard_category_streamer_limit",
+        "wildcard_category_pin_active",
         "watch_streak_cache",
         "daily_report_date",
         "daily_report_streamers",
@@ -328,6 +342,7 @@ class TwitchChannelPointsMiner:
             StreamerSource.FOLLOWERS,
             StreamerSource.CATEGORIES,
             StreamerSource.BADGES,
+            StreamerSource.WILDCARD_CATEGORIES,
         ),
         update_check: bool = True,
         update_check_interval_hours: int | float = 24,
@@ -441,6 +456,10 @@ class TwitchChannelPointsMiner:
         self.badge_drop_category_chat = None
         self.badge_drop_category_sort = "VIEWERS_DESC"
         self.badge_drop_blacklist = set()
+        self.wildcard_categories = False
+        self.wildcard_category_limit = 10
+        self.wildcard_category_streamer_limit = 1
+        self.wildcard_category_pin_active = True
 
         if not hasattr(Settings, "config_path"):
             Settings.config_path = os.path.abspath(
@@ -552,6 +571,10 @@ class TwitchChannelPointsMiner:
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
         badge_drop_streamer_limit: int = 1,
+        wildcard_categories: bool = False,
+        wildcard_category_limit: int = 10,
+        wildcard_category_streamer_limit: int = 1,
+        wildcard_category_pin_active: bool = True,
     ):
         self.run(
             streamers=streamers,
@@ -576,6 +599,10 @@ class TwitchChannelPointsMiner:
             drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
             auto_mine_badge_drops=auto_mine_badge_drops,
             badge_drop_streamer_limit=badge_drop_streamer_limit,
+            wildcard_categories=wildcard_categories,
+            wildcard_category_limit=wildcard_category_limit,
+            wildcard_category_streamer_limit=wildcard_category_streamer_limit,
+            wildcard_category_pin_active=wildcard_category_pin_active,
         )
 
     def run(
@@ -602,6 +629,10 @@ class TwitchChannelPointsMiner:
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
         badge_drop_streamer_limit: int = 1,
+        wildcard_categories: bool = False,
+        wildcard_category_limit: int = 10,
+        wildcard_category_streamer_limit: int = 1,
+        wildcard_category_pin_active: bool = True,
     ):
         if self.running:
             logger.error("You can't start multiple sessions of this instance!")
@@ -630,11 +661,26 @@ class TwitchChannelPointsMiner:
             self.badge_drop_blacklist = {
                 str(username).lower().strip() for username in blacklist
             }
+            self.wildcard_categories = wildcard_categories is True
+            self.wildcard_category_limit = _normalize_wildcard_category_positive_int(
+                wildcard_category_limit, "wildcard_category_limit", 10
+            )
+            self.wildcard_category_streamer_limit = (
+                _normalize_wildcard_category_positive_int(
+                    wildcard_category_streamer_limit,
+                    "wildcard_category_streamer_limit",
+                    1,
+                )
+            )
+            self.wildcard_category_pin_active = wildcard_category_pin_active is True
 
             drop_badge_refresh_seconds = 0
             if drop_badge_catalog is True:
                 self.drop_badge_catalog = DropBadgeCatalog(
                     self.twitch.twitch_login, Settings.config_path
+                )
+                self.twitch.drop_badge_rewards = (
+                    self.drop_badge_catalog.confirmed_badge_rewards()
                 )
                 drop_badge_refresh_seconds = (
                     max(float(drop_badge_refresh_interval_hours), 1) * 60 * 60
@@ -665,6 +711,7 @@ class TwitchChannelPointsMiner:
             streamers_name: list = []
             streamers_dict: dict = {}
             category_usernames = set()
+            wildcard_category_usernames = set()
             follower_usernames = set()
             explicitly_configured_usernames = set()
 
@@ -691,11 +738,24 @@ class TwitchChannelPointsMiner:
                         streamers_dict[username] = username.lower().strip()
                         follower_usernames.add(username)
 
+            # Fetch the drops inventory once and share it between the
+            # preferred and wildcard passes below (both would otherwise
+            # independently fetch it via GraphQL when wildcard triggers this
+            # cycle). Matches each function's own early return when
+            # category_drops_enabled is False, so this never fetches
+            # something neither pass would have needed.
+            discovery_inventory = None
+            if category_drops_enabled and (categories or self.wildcard_categories):
+                discovery_inventory = self.twitch.get_drops_inventory()
+
+            eligible_categories = []
+            all_category_usernames = []
             if categories:
                 eligible_categories = self.twitch.filter_categories_with_active_drops(
                     categories,
                     order=category_campaign_order,
                     drops_enabled=category_drops_enabled,
+                    inventory=discovery_inventory,
                 )
 
                 if categories and eligible_categories == []:
@@ -705,7 +765,6 @@ class TwitchChannelPointsMiner:
                         extra={"emoji": ":sleeping:", "category_log": True},
                     )
 
-                all_category_usernames = []
                 for category in eligible_categories:
                     all_category_usernames.extend(
                         self.twitch.get_live_streamers_for_category(
@@ -722,6 +781,45 @@ class TwitchChannelPointsMiner:
                         streamers_name.append(username)
                         streamers_dict[username] = username.lower().strip()
 
+            # Fall back to every other category with an active incomplete
+            # drop campaign once the preferred pass leaves capacity idle --
+            # not only when no preferred category has an active campaign at
+            # all, but also when one does but yielded no live channel this
+            # cycle (e.g. the only eligible category has zero live streamers
+            # right now). This is its own opt-in, lowest-default-priority
+            # StreamerSource tier -- see streamer_source_priority -- not a
+            # silent extension of CATEGORIES.
+            if self.wildcard_categories and not all_category_usernames:
+                wildcard_eligible_categories = (
+                    self.twitch.get_wildcard_categories_with_active_drops(
+                        exclude_category_slugs=self.twitch.get_category_slugs(
+                            categories
+                        ),
+                        drops_enabled=category_drops_enabled,
+                        limit=self.wildcard_category_limit,
+                        pinned_category_slugs=set(),
+                        pin_active=self.wildcard_category_pin_active,
+                        inventory=discovery_inventory,
+                        refresh_external_catalog=True,
+                    )
+                )
+                all_wildcard_category_usernames = []
+                for category in wildcard_eligible_categories:
+                    all_wildcard_category_usernames.extend(
+                        self.twitch.get_live_streamers_for_category(
+                            category,
+                            drops_enabled=category_drops_enabled,
+                            limit=self.wildcard_category_streamer_limit,
+                            sort_by=category_sort,
+                        )
+                    )
+
+                for username in all_wildcard_category_usernames:
+                    wildcard_category_usernames.add(username)
+                    if username not in streamers_dict and username not in blacklist:
+                        streamers_name.append(username)
+                        streamers_dict[username] = username.lower().strip()
+
             streamers_name = _unique_streamer_names(streamers_name)
             logger.info(
                 f"Loading data for {len(streamers_name)} streamers. Please wait...",
@@ -731,11 +829,16 @@ class TwitchChannelPointsMiner:
             def build_streamer(username):
                 time.sleep(random.uniform(0.15, 0.35))
                 is_follower_streamer = username in follower_usernames
+                is_wildcard_category_streamer = (
+                    username in wildcard_category_usernames
+                    and username not in explicitly_configured_usernames
+                    and is_follower_streamer is False
+                )
                 is_category_streamer = (
                     username in category_usernames
                     and username not in explicitly_configured_usernames
                     and is_follower_streamer is False
-                )
+                ) or is_wildcard_category_streamer
                 streamer = (
                     streamers_dict[username]
                     if isinstance(streamers_dict[username], Streamer) is True
@@ -749,6 +852,7 @@ class TwitchChannelPointsMiner:
                         ),
                         from_followers=is_follower_streamer,
                         from_category=is_category_streamer,
+                        from_wildcard_category=is_wildcard_category_streamer,
                         explicitly_configured=(
                             username in explicitly_configured_usernames
                         ),
@@ -1002,7 +1106,7 @@ class TwitchChannelPointsMiner:
                             )
 
                 if (
-                    categories
+                    (categories or self.wildcard_categories)
                     and next_category_refresh_at is not None
                     and time.time() >= next_category_refresh_at
                 ):
@@ -1016,6 +1120,14 @@ class TwitchChannelPointsMiner:
                             campaign_order=category_campaign_order,
                             category_chat=category_chat,
                             category_log_level=category_log_level,
+                            wildcard_categories=self.wildcard_categories,
+                            wildcard_category_limit=self.wildcard_category_limit,
+                            wildcard_category_streamer_limit=(
+                                self.wildcard_category_streamer_limit
+                            ),
+                            wildcard_category_pin_active=(
+                                self.wildcard_category_pin_active
+                            ),
                         )
                     effective_category_refresh_seconds = (
                         min(category_refresh_interval_seconds, 5 * 60)
@@ -1174,6 +1286,9 @@ class TwitchChannelPointsMiner:
             return
         try:
             result = self.drop_badge_catalog.sync()
+            self.twitch.drop_badge_rewards = (
+                self.drop_badge_catalog.confirmed_badge_rewards()
+            )
         except Exception as error:
             logger.warning(
                 f"Unable to refresh Drop badge catalog: {error}",
@@ -1428,8 +1543,15 @@ class TwitchChannelPointsMiner:
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 
-    def __reconcile_category_streamers(self, discovered_usernames):
-        """Retire category-only channels absent from the latest discovery."""
+    def __reconcile_category_streamers(self, discovered_usernames, wildcard=False):
+        """Retire category-only channels absent from the latest discovery.
+
+        Scoped by `wildcard` so a preferred-category refresh only retires
+        preferred-category streamers, and a wildcard refresh only retires
+        wildcard-discovered ones -- the two discovery passes run independently
+        and must not evict each other's streamers just for being absent from
+        the other pass's discovery list.
+        """
         discovered = {
             str(username).lower().strip()
             for username in discovered_usernames
@@ -1444,12 +1566,17 @@ class TwitchChannelPointsMiner:
                 if index < len(self.original_streamers)
                 else streamer.channel_points
             )
-            if streamer.from_category is not True or streamer.username in discovered:
+            in_scope = (
+                streamer.from_category is True
+                and streamer.from_wildcard_category is wildcard
+            )
+            if not in_scope or streamer.username in discovered:
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
 
             streamer.from_category = False
+            streamer.from_wildcard_category = False
             if (
                 streamer.explicitly_configured
                 or streamer.from_followers
@@ -1468,12 +1595,13 @@ class TwitchChannelPointsMiner:
         self.streamers[:] = retained
         self.original_streamers[:] = retained_baselines
         if removed:
+            label = "Wildcard category" if wildcard else "Category"
             logger.info(
-                "Category refresh retired stale Drop streamers: " + ", ".join(removed),
+                f"{label} refresh retired stale Drop streamers: " + ", ".join(removed),
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 
-    def __order_category_streamers(self, discovered_usernames):
+    def __order_category_streamers(self, discovered_usernames, wildcard=False):
         """Match category streamer priority to the latest discovery order."""
         if len(self.original_streamers) < len(self.streamers):
             self.original_streamers.extend(
@@ -1493,7 +1621,9 @@ class TwitchChannelPointsMiner:
         category_indexes = [
             index
             for index, streamer in enumerate(self.streamers)
-            if streamer.from_category is True and streamer.username in priority
+            if streamer.from_category is True
+            and streamer.from_wildcard_category is wildcard
+            and streamer.username in priority
         ]
         ordered = sorted(
             (
@@ -1506,44 +1636,9 @@ class TwitchChannelPointsMiner:
             self.streamers[index] = streamer
             self.original_streamers[index] = baseline
 
-    def __refresh_category_streamers(
-        self,
-        categories,
-        blacklist,
-        drops_enabled,
-        limit,
-        sort_by,
-        campaign_order,
-        category_chat,
-        category_log_level,
+    def __add_discovered_category_streamers(
+        self, discovered_usernames, blacklist, category_chat, wildcard=False
     ):
-        logger.log(
-            category_log_level,
-            "Refreshing configured categories and drop campaigns",
-            extra={
-                "emoji": ":arrows_counterclockwise:",
-                "category_log": True,
-            },
-        )
-
-        # Force live campaign discovery to run again instead of reusing startup data.
-        self.twitch.discovered_open_drop_campaigns = None
-        eligible_categories = self.twitch.filter_categories_with_active_drops(
-            categories,
-            order=campaign_order,
-            drops_enabled=drops_enabled,
-        )
-        discovered_usernames = []
-        for category in eligible_categories:
-            discovered_usernames.extend(
-                self.twitch.get_live_streamers_for_category(
-                    category,
-                    drops_enabled=drops_enabled,
-                    limit=limit,
-                    sort_by=sort_by,
-                )
-            )
-
         existing_usernames = {streamer.username for streamer in self.streamers}
         blacklist_usernames = {str(username).lower().strip() for username in blacklist}
         added = 0
@@ -1561,6 +1656,7 @@ class TwitchChannelPointsMiner:
                         else None
                     ),
                     from_category=True,
+                    from_wildcard_category=wildcard,
                 )
                 streamer.channel_id = self.twitch.get_channel_id(username)
                 streamer.settings = set_default_settings(
@@ -1605,11 +1701,132 @@ class TwitchChannelPointsMiner:
                     f"Streamer {username} does not exist",
                     extra={"emoji": ":cry:"},
                 )
+        return added
+
+    def __refresh_category_streamers(
+        self,
+        categories,
+        blacklist,
+        drops_enabled,
+        limit,
+        sort_by,
+        campaign_order,
+        category_chat,
+        category_log_level,
+        wildcard_categories=False,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    ):
+        logger.log(
+            category_log_level,
+            "Refreshing configured categories and drop campaigns",
+            extra={
+                "emoji": ":arrows_counterclockwise:",
+                "category_log": True,
+            },
+        )
+
+        # Force live campaign discovery to run again instead of reusing startup data.
+        self.twitch.discovered_open_drop_campaigns = None
+        # Fetch the drops inventory once and share it between the preferred
+        # and wildcard passes below, instead of each independently fetching
+        # it via GraphQL when wildcard triggers this cycle. Matches each
+        # function's own early return when drops_enabled is False, so this
+        # never fetches something neither pass would have needed.
+        discovery_inventory = None
+        if drops_enabled and (categories or wildcard_categories):
+            discovery_inventory = self.twitch.get_drops_inventory()
+        eligible_categories = self.twitch.filter_categories_with_active_drops(
+            categories,
+            order=campaign_order,
+            drops_enabled=drops_enabled,
+            inventory=discovery_inventory,
+        )
+        discovered_usernames = []
+        for category in eligible_categories:
+            discovered_usernames.extend(
+                self.twitch.get_live_streamers_for_category(
+                    category,
+                    drops_enabled=drops_enabled,
+                    limit=limit,
+                    sort_by=sort_by,
+                )
+            )
+
+        added = self.__add_discovered_category_streamers(
+            discovered_usernames, blacklist, category_chat, wildcard=False
+        )
+
+        # Wildcard discovery only runs once the preferred pass leaves
+        # capacity idle this cycle -- not only when no preferred category has
+        # an active campaign at all, but also when one does but produced no
+        # live streamer (e.g. the only eligible category has zero live
+        # channels right now). If the preferred pass DID produce at least one
+        # streamer, the wildcard pass below deliberately stands down (this is
+        # the existing traffic safeguard and is unchanged in spirit, just
+        # retargeted at actual idle capacity instead of category eligibility
+        # alone). Standing down is transient: it means "not evaluated this
+        # cycle", not "gone". The wildcard-scoped reconcile/order calls below
+        # are skipped for that specific case, so already-tracked wildcard
+        # streamers are left completely alone (same connections, same
+        # tracking) rather than retired on the basis of an empty discovery
+        # list that was never actually populated. Watch-slot priority
+        # arbitration already ranks CATEGORIES above WILDCARD_CATEGORIES, so
+        # a still-tracked wildcard stream simply loses contested slots to a
+        # preferred one without needing to be torn down. They're only retired
+        # by a genuine discovery pass that re-evaluates the full eligible set
+        # and finds them actually gone -- or immediately, below, if
+        # wildcard_categories itself has been turned off (that reconcile
+        # still runs unconditionally, same "off means off" semantics as
+        # disabling `categories`).
+        wildcard_discovery_ran = wildcard_categories and not discovered_usernames
+        wildcard_standing_down = wildcard_categories and not wildcard_discovery_ran
+        wildcard_discovered_usernames = []
+        if wildcard_discovery_ran:
+            pinned_category_slugs = {
+                self.twitch.get_game_name_slug(streamer.stream.game_name())
+                for streamer in self.streamers
+                if streamer.from_wildcard_category is True
+                and streamer.is_online
+                and streamer.stream.game_name()
+            }
+            wildcard_eligible_categories = (
+                self.twitch.get_wildcard_categories_with_active_drops(
+                    exclude_category_slugs=self.twitch.get_category_slugs(categories),
+                    drops_enabled=drops_enabled,
+                    limit=wildcard_category_limit,
+                    pinned_category_slugs=pinned_category_slugs,
+                    pin_active=wildcard_category_pin_active,
+                    inventory=discovery_inventory,
+                    refresh_external_catalog=True,
+                )
+            )
+            for category in wildcard_eligible_categories:
+                wildcard_discovered_usernames.extend(
+                    self.twitch.get_live_streamers_for_category(
+                        category,
+                        drops_enabled=drops_enabled,
+                        limit=wildcard_category_streamer_limit,
+                        sort_by=sort_by,
+                    )
+                )
+
+        added += self.__add_discovered_category_streamers(
+            wildcard_discovered_usernames, blacklist, category_chat, wildcard=True
+        )
 
         # Keep the previous category set available while replacement channels
         # are initialized so the minute watcher cannot observe a partial refresh.
-        self.__reconcile_category_streamers(discovered_usernames)
-        self.__order_category_streamers(discovered_usernames)
+        self.__reconcile_category_streamers(discovered_usernames, wildcard=False)
+        self.__order_category_streamers(discovered_usernames, wildcard=False)
+        if not wildcard_standing_down:
+            self.__reconcile_category_streamers(
+                wildcard_discovered_usernames, wildcard=True
+            )
+            self.__order_category_streamers(
+                wildcard_discovered_usernames, wildcard=True
+            )
 
         if added > 0 and self.sync_campaigns_thread is None:
             self.sync_campaigns_thread = threading.Thread(
@@ -1619,9 +1836,12 @@ class TwitchChannelPointsMiner:
             self.sync_campaigns_thread.name = "Sync campaigns/inventory"
             self.sync_campaigns_thread.start()
 
+        unique_wildcard_discovered = len(dict.fromkeys(wildcard_discovered_usernames))
         logger.log(
             category_log_level,
-            f"Category refresh complete: {len(eligible_categories)} active categories, {added} new streamers",
+            f"Category refresh complete: {len(eligible_categories)} active categories, "
+            f"{unique_wildcard_discovered} wildcard streamer(s) discovered, "
+            f"{added} new streamers",
             extra={"emoji": ":white_check_mark:", "category_log": True},
         )
 
@@ -1735,6 +1955,24 @@ class TwitchChannelPointsMiner:
     def refresh_categories(self, mine_config):
         """Apply the current configured category list to a running miner."""
         with self.config_reload_lock:
+            self.wildcard_categories = (
+                mine_config.get("wildcard_categories", False) is True
+            )
+            self.wildcard_category_limit = _normalize_wildcard_category_positive_int(
+                mine_config.get("wildcard_category_limit", 10),
+                "wildcard_category_limit",
+                10,
+            )
+            self.wildcard_category_streamer_limit = (
+                _normalize_wildcard_category_positive_int(
+                    mine_config.get("wildcard_category_streamer_limit", 1),
+                    "wildcard_category_streamer_limit",
+                    1,
+                )
+            )
+            self.wildcard_category_pin_active = (
+                mine_config.get("wildcard_category_pin_active", True) is True
+            )
             self.__refresh_category_streamers(
                 categories=mine_config.get("categories", []),
                 blacklist=mine_config.get("blacklist", []),
@@ -1746,6 +1984,12 @@ class TwitchChannelPointsMiner:
                 ),
                 category_chat=mine_config.get("category_chat"),
                 category_log_level=mine_config.get("category_log_level", logging.INFO),
+                wildcard_categories=self.wildcard_categories,
+                wildcard_category_limit=self.wildcard_category_limit,
+                wildcard_category_streamer_limit=(
+                    self.wildcard_category_streamer_limit
+                ),
+                wildcard_category_pin_active=self.wildcard_category_pin_active,
             )
 
     def end(self, signum, frame):

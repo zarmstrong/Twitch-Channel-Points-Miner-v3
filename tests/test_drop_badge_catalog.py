@@ -19,14 +19,18 @@ class FakeResponse:
         return None
 
     def json(self):
-        return self.payload if self.payload is not None else {
-            "sets": [
-                {
-                    "set_id": "example-badge",
-                    "versions": [{"id": "1", "title": "Example Badge"}],
-                }
-            ]
-        }
+        return (
+            self.payload
+            if self.payload is not None
+            else {
+                "sets": [
+                    {
+                        "set_id": "example-badge",
+                        "versions": [{"id": "1", "title": "Example Badge"}],
+                    }
+                ]
+            }
+        )
 
 
 class FakeSession:
@@ -120,10 +124,7 @@ def test_fetch_badges_rejects_non_object_json(tmp_path):
 
 
 def test_badge_matching_accepts_safe_title_variants():
-    assert (
-        badge_match_reason("Blue LED", "Example Game", "Blue LED")
-        == "exact_title"
-    )
+    assert badge_match_reason("Blue LED", "Example Game", "Blue LED") == "exact_title"
     assert (
         badge_match_reason("Blue LED Badge", "Example Game", "Blue LED")
         == "exact_title_ignoring_badge_suffix"
@@ -174,9 +175,12 @@ def test_sync_persists_catalog_and_only_scrapes_changed_games(tmp_path):
     assert first["scraped_games"] == 1
     assert first["confirmed_badge_rewards"] == 1
     assert len(first["new_campaigns"]) == 1
-    assert first["new_campaigns"][0]["campaign"]["drops"][0][
-        "badge_classification"
-    ]["status"] == "BADGE"
+    assert (
+        first["new_campaigns"][0]["campaign"]["drops"][0]["badge_classification"][
+            "status"
+        ]
+        == "BADGE"
+    )
     assert second["scraped_games"] == 0
     assert second["new_campaigns"] == []
     assert second["confirmed_badge_rewards"] == 1
@@ -293,3 +297,82 @@ def test_eligible_badge_campaigns_only_returns_active_unearned_watch_badges(
     assert [record["game_slug"] for record in eligible] == ["example-game"]
     assert eligible[0]["eligible_drops"][0]["name"] == "Example Badge"
     assert owned == []
+
+
+def test_confirmed_badge_rewards_exposes_catalog_identities(tmp_path):
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(get_auth_token=lambda: "token"),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession(),
+    )
+    catalog.state["campaigns"] = {
+        "wardogs": {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": {
+                "name": "WARDOGS Beta & Launch",
+                "drops": [
+                    {
+                        "name": "WARDOG",
+                        "requirement": "Watch 30m",
+                        "badge_classification": {
+                            "status": "BADGE",
+                            "matches": [
+                                {
+                                    "set_id": "wardog",
+                                    "title": "WARDOG",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "name": "Ordinary Reward",
+                        "badge_classification": {"status": "UNKNOWN"},
+                    },
+                ],
+            },
+        }
+    }
+    catalog.state["games"] = {
+        "wardogs": {
+            "report": {
+                "game": "WARDOGS",
+                "drops": [
+                    {
+                        "name": "WARLORD",
+                        "requirement": "1 sub",
+                        "campaign": None,
+                        "badge_classification": {
+                            "status": "BADGE",
+                            "matches": [
+                                {
+                                    "set_id": "warlord",
+                                    "title": "WARLORD",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        }
+    }
+
+    assert catalog.confirmed_badge_rewards() == [
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "WARDOGS Beta & Launch",
+            "reward_name": "WARDOG",
+            "badge_names": ["WARDOG", "wardog"],
+            "watch_eligible": True,
+        },
+        {
+            "game_slug": "wardogs",
+            "game": "WARDOGS",
+            "campaign": "",
+            "reward_name": "WARLORD",
+            "badge_names": ["WARLORD", "warlord"],
+            "watch_eligible": False,
+        },
+    ]

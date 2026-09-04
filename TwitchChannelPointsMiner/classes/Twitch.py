@@ -98,6 +98,8 @@ class Twitch(object):
         "twitchdrops_app_campaigns",
         "twitchdrops_app_game_names",
         "twitchdrops_app_upcoming_starts",
+        "twitchdrops_app_deadlines",
+        "twitchdrops_app_catalog_complete",
         "active_drop_campaigns",
         "advertised_drop_campaigns",
         "campaign_channel_ids",
@@ -106,10 +108,12 @@ class Twitch(object):
         "category_campaign_eligibility_lock",
         "category_campaign_deadlines",
         "last_category_drop_selection",
+        "last_wildcard_category_drop_selection",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "campaign_game_slugs",
         "available_badge_names",
+        "drop_badge_rewards",
         "restart_requested",
         "gql",
     ]
@@ -165,6 +169,8 @@ class Twitch(object):
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
+        self.twitchdrops_app_deadlines = {}
+        self.twitchdrops_app_catalog_complete = False
         self.active_drop_campaigns = {}
         self.advertised_drop_campaigns = {}
         self.campaign_channel_ids = {}
@@ -172,10 +178,12 @@ class Twitch(object):
         self.category_campaign_eligibility = {}
         self.category_campaign_deadlines = {}
         self.last_category_drop_selection = None
+        self.last_wildcard_category_drop_selection = None
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.campaign_game_slugs = {}
         self.available_badge_names = None
+        self.drop_badge_rewards = []
         self.restart_requested = Event()
 
     def __request_authentication_restart(self):
@@ -1469,8 +1477,17 @@ class Twitch(object):
     def __active_drop_category_slugs_from_campaigns(
         self,
         inventory: dict,
-        requested_category_slugs: set,
+        requested_category_slugs: set | None,
     ) -> Tuple[Dict[str, datetime], set[str]]:
+        # requested_category_slugs of None means "unfiltered" -- every open
+        # campaign's game is treated as requested. Used by wildcard category
+        # discovery to evaluate the full active-campaign catalog instead of
+        # just the user's configured category list.
+        def _slug_requested(slug):
+            if not slug:
+                return False
+            return requested_category_slugs is None or slug in requested_category_slugs
+
         active_deadlines = {}
         active_campaigns = {}
         twitch_category_slugs = set()
@@ -1502,7 +1519,7 @@ class Twitch(object):
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             if (
-                self.__slugify(game_name) in requested_category_slugs
+                _slug_requested(self.__slugify(game_name))
                 and self.__is_open_drop_campaign(campaign) is True
             ):
                 campaigns_by_id[str(campaign_id)] = copy.deepcopy(campaign)
@@ -1533,7 +1550,7 @@ class Twitch(object):
                 continue
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
-            if game_name and self.__slugify(game_name) in requested_category_slugs:
+            if game_name and _slug_requested(self.__slugify(game_name)):
                 campaigns_to_refresh.append(campaign)
 
         campaign_channel_ids = getattr(self, "campaign_channel_ids", {})
@@ -1629,7 +1646,7 @@ class Twitch(object):
             if game_slug:
                 self.campaign_game_slugs[campaign_id] = game_slug
                 twitch_category_slugs.add(game_slug)
-            matches_configured_category = game_slug in requested_category_slugs
+            matches_configured_category = _slug_requested(game_slug)
             evaluation = {
                 "campaign": campaign.get("name"),
                 "campaign_id": campaign_id,
@@ -1642,7 +1659,7 @@ class Twitch(object):
                     if isinstance(drop, dict)
                 ],
             }
-            if game_slug not in requested_category_slugs:
+            if not _slug_requested(game_slug):
                 evaluation["active_incomplete"] = None
                 evaluation["skip_reason"] = (
                     "missing_game_metadata"
@@ -1689,11 +1706,17 @@ class Twitch(object):
         return active_deadlines, twitch_category_slugs
 
     def __twitchdrops_app_fallback(self, categories, known_category_slugs):
+        catalog_complete = categories is None
         deadlines = {}
         twitch_authoritative_slugs = set(known_category_slugs)
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
+        self.twitchdrops_app_deadlines = {}
+        # "Complete" means a full-catalog attempt was made for this discovery
+        # cycle, including an empty result when the external source failed. It
+        # prevents the wildcard pass from immediately repeating the same fetch.
+        self.twitchdrops_app_catalog_complete = catalog_complete
         scraper = TwitchDropsAppScraper(timeout=20)
         now = datetime.utcnow()
         # Inventory benefit names are not campaign-scoped.  Games commonly reuse
@@ -1731,8 +1754,16 @@ class Twitch(object):
             for alias in aliases - {""}:
                 indexed_by_slug[alias] = game
 
+        requested_categories = list(categories or [])
+        if catalog_complete:
+            requested_categories = [
+                game.get("slug") or game.get("game")
+                for game in indexed_games
+                if isinstance(game, dict) and (game.get("slug") or game.get("game"))
+            ]
+
         configured_matches = []
-        for category in categories:
+        for category in requested_categories:
             category_name, _ = self.__split_category_streamer_selector(category)
             normalized = self.__normalize_category(category_name)
             requested_slug = self.__slugify(normalized.replace("-", " "))
@@ -1745,12 +1776,19 @@ class Twitch(object):
                 f"{indexed_game.get('starts_at') or 'unknown start'} -> "
                 f"{indexed_game.get('ends_at') or 'unknown end'})"
             )
-        logger.debug(
-            "Twitch Drops gist matches for configured games: "
-            + (", ".join(configured_matches) if configured_matches else "none"),
-            extra={"emoji": ":mag:", "category_log": True},
-        )
-        for category in categories:
+        if catalog_complete:
+            logger.debug(
+                "Twitch Drops gist wildcard catalog: "
+                f"{len(configured_matches)} indexed active or upcoming games",
+                extra={"emoji": ":mag:", "category_log": True},
+            )
+        else:
+            logger.debug(
+                "Twitch Drops gist matches for configured games: "
+                + (", ".join(configured_matches) if configured_matches else "none"),
+                extra={"emoji": ":mag:", "category_log": True},
+            )
+        for category in requested_categories:
             category_name, _ = self.__split_category_streamer_selector(category)
             normalized = self.__normalize_category(category_name)
             requested_slug = self.__slugify(normalized.replace("-", " "))
@@ -1919,6 +1957,8 @@ class Twitch(object):
                     extra={"emoji": ":globe_with_meridians:"},
                 )
 
+        self.twitchdrops_app_deadlines = dict(deadlines)
+        self.twitchdrops_app_catalog_complete = catalog_complete
         return deadlines
 
     def next_upcoming_drop_start(self) -> Optional[datetime]:
@@ -2113,20 +2153,57 @@ class Twitch(object):
         badge_names = self.__get_available_badge_names(refresh=refresh)
         return badge_names if self.available_badge_names is not None else None
 
+    def __category_slug(self, category):
+        category_name, _ = self.__split_category_streamer_selector(category)
+        normalized_category = self.__normalize_category(category_name)
+        return self.__slugify(normalized_category.replace("-", " "))
+
+    def get_game_name_slug(self, game_name: str) -> str:
+        """Slugify a stream's raw game display name, matching the slugging
+        campaign discovery uses internally (distinct from get_category_slugs,
+        which additionally normalizes user-typed config category strings).
+        """
+        return self.__slugify(game_name or "")
+
+    def get_category_slugs(self, categories: List[str]) -> set[str]:
+        """Slugify a configured category list the same way category discovery
+        does internally. Lets callers (e.g. wildcard category discovery)
+        exclude the user's preferred categories without duplicating the
+        normalization logic.
+        """
+        return {
+            slug
+            for category in categories or []
+            if (slug := self.__category_slug(category))
+        }
+
+    def get_drops_inventory(self) -> dict:
+        """Fetch the authenticated account's drops inventory.
+
+        Exposed publicly (unlike __get_inventory) so a caller that needs it
+        for both filter_categories_with_active_drops and
+        get_wildcard_categories_with_active_drops in the same discovery pass
+        can fetch it once and pass it to both via their `inventory`
+        parameter, instead of each one fetching it separately.
+        """
+        return self.__get_inventory()
+
     def filter_categories_with_active_drops(
-        self, categories: List[str], order="ORDER", drops_enabled: bool = True
+        self,
+        categories: List[str],
+        order="ORDER",
+        drops_enabled: bool = True,
+        inventory: dict | None = None,
     ) -> List[str]:
         if not categories:
             return []
         if drops_enabled is False:
             return categories
 
-        def category_slug(category):
-            category_name, _ = self.__split_category_streamer_selector(category)
-            normalized_category = self.__normalize_category(category_name)
-            return self.__slugify(normalized_category.replace("-", " "))
+        category_slug = self.__category_slug
 
-        inventory = self.__get_inventory()
+        if inventory is None:
+            inventory = self.__get_inventory()
         if not isinstance(inventory, dict) or inventory == {}:
             logger.warning(
                 "Unable to load drops inventory; skipping category stream discovery",
@@ -2199,6 +2276,123 @@ class Twitch(object):
             )
 
         return filtered_categories
+
+    def get_wildcard_categories_with_active_drops(
+        self,
+        exclude_category_slugs: set | None = None,
+        drops_enabled: bool = True,
+        limit: int | None = None,
+        pinned_category_slugs: set | None = None,
+        pin_active: bool = True,
+        inventory: dict | None = None,
+        refresh_external_catalog: bool = True,
+    ) -> List[str]:
+        """Return game slugs with an active incomplete drop campaign,
+        unfiltered by any configured category list. Used by the
+        wildcard-categories fallback once the preferred category list has no
+        eligible categories left this cycle.
+
+        pinned_category_slugs (when pin_active is True) are kept regardless
+        of the expiration sort/limit as long as they're still eligible --
+        limit only throttles how many *new* slugs get added, so the returned
+        count can exceed `limit` while pinned campaigns remain open. This is
+        intentional: it exists to avoid retiring/re-picking an already
+        watched wildcard streamer just because a closer-to-expiring campaign
+        bumped its category out of the top-N on a re-sort.
+
+        `inventory`: pass the already-fetched inventory (e.g. from
+        get_drops_inventory()) when a caller is also calling
+        filter_categories_with_active_drops in the same discovery pass, so
+        the inventory GraphQL request isn't made twice in one cycle.
+
+        `refresh_external_catalog`: set False only when the preferred-category
+        pass already loaded the complete external catalog in this discovery
+        cycle. The cached deadlines then avoid downloading/parsing it twice.
+        """
+        if drops_enabled is False:
+            return []
+
+        if inventory is None:
+            inventory = self.__get_inventory()
+        if not isinstance(inventory, dict) or inventory == {}:
+            logger.warning(
+                "Unable to load drops inventory; skipping wildcard category discovery",
+                extra={"emoji": ":warning:"},
+            )
+            return []
+
+        # No requested_category_slugs filter (None): evaluate every campaign
+        # Twitch exposes rather than only the configured category list. Twitch's
+        # account-scoped responses can still omit public campaigns, so merge the
+        # full external catalog below while keeping every Twitch-observed game
+        # authoritative for completion and eligibility.
+        (
+            active_category_deadlines,
+            twitch_category_slugs,
+        ) = self.__active_drop_category_slugs_from_campaigns(inventory, None)
+        twitch_candidate_count = len(active_category_deadlines)
+        if refresh_external_catalog or not getattr(
+            self, "twitchdrops_app_catalog_complete", False
+        ):
+            fallback_deadlines = self.__twitchdrops_app_fallback(
+                None, twitch_category_slugs
+            )
+        else:
+            fallback_deadlines = dict(getattr(self, "twitchdrops_app_deadlines", {}))
+        external_additions = {
+            game_slug: deadline
+            for game_slug, deadline in fallback_deadlines.items()
+            if game_slug not in twitch_category_slugs
+        }
+        active_category_deadlines.update(external_additions)
+        # Replace, not merge: this call always evaluates every open campaign
+        # unfiltered, so it's already a superset of whatever the preferred-
+        # category pass could have found this cycle (which ran first and, by
+        # the time wildcard discovery triggers, found nothing -- eligible
+        # preferred categories are exactly what makes wildcard discovery not
+        # trigger). A merge would let a closed campaign's deadline linger
+        # forever when `categories` is empty and this is the only per-cycle
+        # source -- category_campaign_deadlines would otherwise never shrink.
+        self.category_campaign_deadlines = dict(active_category_deadlines)
+
+        exclude = exclude_category_slugs or set()
+        eligible = {
+            slug: deadline
+            for slug, deadline in active_category_deadlines.items()
+            if slug not in exclude
+        }
+        pinned = (pinned_category_slugs or set()) if pin_active else set()
+
+        still_pinned = [slug for slug in pinned if slug in eligible]
+        remaining = sorted(
+            (slug for slug in eligible if slug not in still_pinned),
+            key=lambda slug: eligible[slug],
+        )
+        if limit is not None:
+            room = max(limit - len(still_pinned), 0)
+            remaining = remaining[:room]
+
+        ranked = sorted(eligible, key=lambda slug: eligible[slug])
+
+        def describe_deadline(slug):
+            deadline = eligible[slug]
+            if deadline == datetime.max:
+                return f"{slug} (no known deadline)"
+            minutes_left = max((deadline - datetime.utcnow()).total_seconds() / 60, 0)
+            return f"{slug} ({minutes_left:.0f}m)"
+
+        top_candidates = ", ".join(describe_deadline(slug) for slug in ranked[:5])
+        self.__log_category(
+            "Wildcard candidate catalog: "
+            f"{twitch_candidate_count} Twitch, "
+            f"{len(external_additions)} external additions, "
+            f"{len(set(active_category_deadlines).intersection(exclude))} "
+            "configured exclusions; top by expiration: "
+            f"{top_candidates or 'none'}",
+            extra={"emoji": ":mag:"},
+        )
+
+        return still_pinned + remaining
 
     def __describe_campaigns(self, campaigns):
         labels = []
@@ -2327,13 +2521,23 @@ class Twitch(object):
         if getattr(streamer, "from_category", False) is True:
             return False
 
+        # The badge catalog refreshes independently from the 30-minute campaign
+        # sync. Re-apply ownership here so a newly cataloged badge campaign does
+        # not remain Drop-eligible until that much slower cycle runs again.
+        self.__remove_ineligible_badge_drops(streamer.stream.campaigns)
         if streamer.drops_condition() is True:
             return True
 
         return False
 
     def __log_category_drop_pick(
-        self, streamers, chosen_index, candidate_indexes, category_expiration
+        self,
+        streamers,
+        chosen_index,
+        candidate_indexes,
+        category_expiration,
+        label="category",
+        state_attr="last_category_drop_selection",
     ):
         chosen_username = (
             streamers[chosen_index].username if chosen_index is not None else None
@@ -2343,9 +2547,9 @@ class Twitch(object):
         # fold whether there were any candidates into the dedup key so that
         # transitioning between those two situations still logs once.
         selection_state = (chosen_username, bool(candidate_indexes))
-        if selection_state == getattr(self, "last_category_drop_selection", None):
+        if selection_state == getattr(self, state_attr, None):
             return
-        self.last_category_drop_selection = selection_state
+        setattr(self, state_attr, selection_state)
 
         def describe(index):
             streamer = streamers[index]
@@ -2372,7 +2576,7 @@ class Twitch(object):
                 # a watch slot this cycle (other sources/priorities filled it) -
                 # distinct from there being no eligible campaign at all.
                 logger.info(
-                    f"{Fore.YELLOW}{len(candidate_indexes)} category-discovered "
+                    f"{Fore.YELLOW}{len(candidate_indexes)} {label}-discovered "
                     "drop stream(s) eligible but no watch slot free this cycle "
                     f"({describe_candidates()}){Fore.RESET}",
                     extra={"emoji": ":warning:", "event": Events.DROP_STATUS},
@@ -2383,7 +2587,7 @@ class Twitch(object):
             f"soonest-expiring of {len(candidate_indexes)} eligible campaigns "
             f"({describe_candidates()})"
             if len(candidate_indexes) > 1
-            else "only eligible campaign-drops stream currently live"
+            else f"only eligible {label} drops stream currently live"
         )
         logger.info(
             f"{Fore.CYAN}Selected {streamers[chosen_index].username} for drops: "
@@ -2395,6 +2599,8 @@ class Twitch(object):
         def watch_reason(streamer):
             if getattr(streamer, "from_badge_campaign", False) is True:
                 return "badge drop"
+            if getattr(streamer, "from_wildcard_category", False) is True:
+                return "wildcard campaign drops"
             if getattr(streamer, "from_category", False) is True:
                 return "campaign drops"
             return "streamer"
@@ -3205,6 +3411,7 @@ class Twitch(object):
                     StreamerSource.FOLLOWERS,
                     StreamerSource.CATEGORIES,
                     StreamerSource.BADGES,
+                    StreamerSource.WILDCARD_CATEGORIES,
                 ]
                 normalized_source_priority = []
                 for source in source_priority or default_source_priority:
@@ -3224,6 +3431,13 @@ class Twitch(object):
                         is True
                     ):
                         return StreamerSource.BADGES
+                    if (
+                        getattr(
+                            streamers_snapshot[index], "from_wildcard_category", False
+                        )
+                        is True
+                    ):
+                        return StreamerSource.WILDCARD_CATEGORIES
                     if (
                         getattr(streamers_snapshot[index], "from_category", False)
                         is True
@@ -3260,6 +3474,13 @@ class Twitch(object):
                 # a time, below) - order them so whichever campaign is closest
                 # to expiring is always the one considered/selected first.
                 indexes_by_source[StreamerSource.CATEGORIES].sort(
+                    key=category_expiration
+                )
+                # Wildcard-discovered streams get the same soonest-expiring-first
+                # ordering as preferred categories, but as an independent tier --
+                # see the safety net below, which caps each tier at one watch
+                # slot per cycle separately so neither can crowd out the other.
+                indexes_by_source[StreamerSource.WILDCARD_CATEGORIES].sort(
                     key=category_expiration
                 )
 
@@ -3363,35 +3584,88 @@ class Twitch(object):
                     ),
                 )[:max_watch_amount]
 
-                # Safety net: never watch more than one category-discovered streamer
-                # in the same loop iteration. When several qualified this cycle,
-                # keep whichever campaign is closest to expiring.
+                def _is_preferred_category(index):
+                    streamer = streamers_snapshot[index]
+                    return (
+                        getattr(streamer, "from_category", False) is True
+                        and getattr(streamer, "from_wildcard_category", False)
+                        is not True
+                    )
+
+                def _is_wildcard_category(index):
+                    return (
+                        getattr(
+                            streamers_snapshot[index], "from_wildcard_category", False
+                        )
+                        is True
+                    )
+
+                # Safety net: never watch more than one discovered ("not
+                # explicitly chosen by the user") Drops stream per cycle in
+                # total, across the preferred-category and wildcard-category
+                # tiers combined. Twitch only accrues Drops progress on one of
+                # the (up to two) watched streams regardless of source, so
+                # letting each tier keep its own slot would waste a slot that
+                # could otherwise go to an explicit/follower stream. When a
+                # preferred-category candidate exists this cycle, it wins the
+                # shared slot over a wildcard one, matching their relative
+                # source_priority; only when there's no preferred-category
+                # candidate does the soonest-expiring wildcard one get it.
                 category_candidates = [
                     index
                     for index in streamers_watching
-                    if getattr(streamers_snapshot[index], "from_category", False)
-                    is True
+                    if _is_preferred_category(index)
                 ]
-                preferred_category_index = (
+                best_category_index = (
                     min(category_candidates, key=category_expiration)
                     if category_candidates
                     else None
                 )
                 self.__log_category_drop_pick(
                     streamers_snapshot,
-                    preferred_category_index,
+                    best_category_index,
                     indexes_by_source[StreamerSource.CATEGORIES],
                     category_expiration,
+                )
+
+                wildcard_category_candidates = [
+                    index
+                    for index in streamers_watching
+                    if _is_wildcard_category(index)
+                ]
+                best_wildcard_category_index = (
+                    min(wildcard_category_candidates, key=category_expiration)
+                    if wildcard_category_candidates
+                    else None
+                )
+                kept_discovered_index = (
+                    best_category_index
+                    if best_category_index is not None
+                    else best_wildcard_category_index
+                )
+                self.__log_category_drop_pick(
+                    streamers_snapshot,
+                    # None (rather than best_wildcard_category_index) whenever
+                    # a preferred-category pick already took the shared slot,
+                    # so this logs "eligible but no free slot" instead of
+                    # falsely reporting the wildcard pick as watched.
+                    (
+                        best_wildcard_category_index
+                        if best_category_index is None
+                        else None
+                    ),
+                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
+                    category_expiration,
+                    label="wildcard category",
+                    state_attr="last_wildcard_category_drop_selection",
                 )
 
                 filtered_streamers_watching = []
                 for index in streamers_watching:
                     if (
-                        getattr(streamers_snapshot[index], "from_category", False)
-                        is True
-                    ):
-                        if index != preferred_category_index:
-                            continue
+                        _is_preferred_category(index) or _is_wildcard_category(index)
+                    ) and index != kept_discovered_index:
+                        continue
                     filtered_streamers_watching.append(index)
 
                 # If multiple discovered streams occupied the initial selection,
@@ -3401,10 +3675,7 @@ class Twitch(object):
                         break
                     if index in filtered_streamers_watching:
                         continue
-                    if (
-                        getattr(streamers_snapshot[index], "from_category", False)
-                        is True
-                    ):
+                    if _is_preferred_category(index) or _is_wildcard_category(index):
                         continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
@@ -3795,6 +4066,7 @@ class Twitch(object):
         game_slug = self.__slugify(streamer.stream.game_name() or "")
         if game_slug == "":
             return []
+        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
 
         advertised_campaigns = []
         (
@@ -3851,6 +4123,22 @@ class Twitch(object):
                 self.advertised_drop_campaigns[str(campaign["id"])]
                 for campaign in advertised_campaigns
             ]
+            if (
+                getattr(streamer, "from_wildcard_category", False) is True
+                and fallback_campaigns
+            ):
+                expected_names = {
+                    str(campaign.get("name") or "").strip().casefold()
+                    for campaign in fallback_campaigns
+                    if str(campaign.get("name") or "").strip()
+                }
+                if expected_names:
+                    advertised_campaigns = [
+                        campaign
+                        for campaign in advertised_campaigns
+                        if str(campaign.get("name") or "").strip().casefold()
+                        in expected_names
+                    ]
             self.__log_drop_check_json(
                 f"Twitch channel campaigns for '{streamer.username}'",
                 [
@@ -3859,6 +4147,23 @@ class Twitch(object):
                 ],
                 level=logging.DEBUG,
             )
+
+            if (
+                getattr(streamer, "from_wildcard_category", False) is True
+                and fallback_campaigns
+                and not advertised_campaigns
+            ):
+                with self.__eligibility_lock():
+                    self.category_campaign_eligibility[
+                        (game_slug, streamer.username)
+                    ] = (0, len(fallback_campaigns))
+                self.__log_drop_check(
+                    f"Skipping provisional wildcard channel "
+                    f"'{streamer.username}' for {streamer.stream.game_name()}: "
+                    "Twitch advertised a different campaign",
+                    level=logging.DEBUG,
+                )
+                return []
 
             if getattr(streamer, "from_category", False) is True:
                 completed_drop_ids = set()
@@ -3892,7 +4197,6 @@ class Twitch(object):
 
             return [str(campaign["id"]) for campaign in advertised_campaigns]
 
-        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
         # Campaign-restricted categories (e.g. Pokémon GO) resolve their
         # allow-listed channels from Twitch's own authoritative campaign data
         # rather than the external gist index, so that index stays empty for
@@ -3913,6 +4217,28 @@ class Twitch(object):
             for campaign in authoritative_campaigns
             if campaign.get("channels")
         )
+        if (
+            getattr(streamer, "from_wildcard_category", False) is True
+            and fallback_campaigns
+            and not allowlisted_elsewhere
+        ):
+            # External-only wildcard campaigns are provisional discoveries.
+            # Unlike a category the user explicitly requested, they must not
+            # enter the watch pool unless Twitch advertises the campaign on the
+            # selected live channel. The advertised-campaign branch above has
+            # already returned when that verification succeeded.
+            with self.__eligibility_lock():
+                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
+                    0,
+                    len(fallback_campaigns),
+                )
+            self.__log_drop_check(
+                f"Skipping provisional wildcard channel '{streamer.username}' "
+                f"for {streamer.stream.game_name()}: Twitch did not advertise "
+                "the external campaign on that channel",
+                level=logging.DEBUG,
+            )
+            return []
         if campaign_data_available:
             if getattr(streamer, "from_category", False) is not True or (
                 fallback_campaigns == [] and not allowlisted_elsewhere
@@ -4490,6 +4816,116 @@ class Twitch(object):
 
         return result
 
+    @staticmethod
+    def __drop_reward_names(drop):
+        names = {
+            str(value or "").strip()
+            for value in (getattr(drop, "name", None), getattr(drop, "benefit", None))
+            if str(value or "").strip()
+        }
+        for edge in getattr(drop, "benefit_edges", []) or []:
+            benefit = edge.get("benefit") if isinstance(edge, dict) else None
+            if not isinstance(benefit, dict):
+                continue
+            name = str(benefit.get("name") or "").strip()
+            if name:
+                names.add(name)
+        return names
+
+    def __drop_badge_skip_reason(self, campaign, drop):
+        owned_badges = getattr(self, "available_badge_names", None)
+        badge_rewards = getattr(self, "drop_badge_rewards", []) or []
+        if not badge_rewards:
+            return None
+
+        campaign_game = getattr(campaign, "game", None) or {}
+        game_name = campaign_game.get("displayName") or campaign_game.get("name") or ""
+        game_slug = self.__slugify(game_name)
+        campaign_name = str(getattr(campaign, "name", "") or "").strip().casefold()
+        live_reward_names = self.__drop_reward_names(drop)
+
+        for reward in badge_rewards:
+            if not isinstance(reward, dict):
+                continue
+            catalog_game_slug = self.__slugify(
+                reward.get("game_slug") or reward.get("game") or ""
+            )
+            catalog_campaign_name = str(reward.get("campaign") or "").strip().casefold()
+            same_game = (
+                bool(game_slug)
+                and bool(catalog_game_slug)
+                and game_slug == catalog_game_slug
+            )
+            same_campaign = (
+                bool(campaign_name)
+                and bool(catalog_campaign_name)
+                and campaign_name == catalog_campaign_name
+            )
+            if not (same_game or same_campaign):
+                continue
+
+            catalog_badge_names = {
+                str(name or "").strip()
+                for name in reward.get("badge_names", []) or []
+                if str(name or "").strip()
+            }
+            reward_name = str(reward.get("reward_name") or "").strip()
+            if reward_name:
+                catalog_badge_names.add(reward_name)
+            if not catalog_badge_names:
+                continue
+
+            recognized_badge = any(
+                self.__reward_name_is_owned(
+                    live_reward_name, catalog_badge_names, game_name
+                )
+                for live_reward_name in live_reward_names
+            )
+            if recognized_badge is not True:
+                continue
+
+            if reward.get("watch_eligible") is False:
+                return "non-watch badge"
+
+            if owned_badges and any(
+                self.__reward_name_is_owned(catalog_badge_name, owned_badges, game_name)
+                for catalog_badge_name in catalog_badge_names
+            ):
+                return "owned badge"
+
+        return None
+
+    def __remove_ineligible_badge_drops(self, campaigns):
+        if (
+            getattr(self, "drop_badge_rewards", [])
+            and getattr(self, "available_badge_names", None) is None
+        ):
+            # The catalog can be enabled without category or automatic badge
+            # discovery, so campaign sync may be the first feature that needs
+            # the account's badge inventory. This method caches successful
+            # results and leaves rewards untouched when Twitch cannot provide it.
+            self.get_earned_badge_names()
+        for campaign in campaigns:
+            removed = [
+                (drop, reason)
+                for drop in campaign.drops
+                for reason in [self.__drop_badge_skip_reason(campaign, drop)]
+                if reason is not None
+            ]
+            if not removed:
+                continue
+            removed_drops = [drop for drop, _ in removed]
+            campaign.drops = [
+                drop for drop in campaign.drops if drop not in removed_drops
+            ]
+            self.__log_drop_check(
+                f"campaign {campaign.id} ignored ineligible badge rewards: "
+                + ", ".join(
+                    sorted(f"{drop.name} ({reason})" for drop, reason in removed)
+                ),
+                level=logging.DEBUG,
+            )
+
     def __sync_campaigns(self, campaigns):
         self.__log_drop_check("sync cycle: checking inventory for drop progress")
         # We need the inventory only for get the real updated value/progress
@@ -4558,6 +4994,7 @@ class Twitch(object):
                         campaign_name_override=campaign_name_override,
                         category_name_override=category_name_override,
                     )
+        self.__remove_ineligible_badge_drops(campaigns)
         return campaigns
 
     @staticmethod

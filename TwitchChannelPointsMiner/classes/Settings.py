@@ -19,6 +19,7 @@ class StreamerSource(Enum):
     FOLLOWERS = auto()
     CATEGORIES = auto()
     BADGES = auto()
+    WILDCARD_CATEGORIES = auto()
 
 
 class FollowersOrder(Enum):

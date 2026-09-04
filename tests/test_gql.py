@@ -1400,6 +1400,36 @@ def test_category_streamer_keeps_fallback_eligibility_when_twitch_omits_campaign
     assert twitch.category_campaign_eligibility[("djs", "example-dj")] == (1, 1)
 
 
+def test_wildcard_streamer_requires_twitch_to_advertise_external_campaign():
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            get_available_drops=lambda channel_id: SimpleNamespace(
+                campaigns=[], campaigns_available=True
+            )
+        )
+    )
+    twitch.log_drop_checks = False
+    twitch.category_campaign_eligibility = {("djs", "example-dj"): (1, 1)}
+    twitch.twitchdrops_app_campaigns = {
+        "djs": [{"id": "fallback-campaign", "channels": [], "game_name": "DJs"}]
+    }
+    twitch.active_drop_campaigns = {}
+    twitch.discovered_open_drop_campaigns = []
+    streamer = SimpleNamespace(
+        channel_id="channel-1",
+        username="example-dj",
+        from_category=True,
+        from_wildcard_category=True,
+        from_badge_campaign=False,
+        stream=SimpleNamespace(game_name=lambda: "DJs"),
+    )
+
+    campaign_ids = twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert campaign_ids == []
+    assert twitch.category_campaign_eligibility[("djs", "example-dj")] == (0, 1)
+
+
 def test_category_streamer_honors_empty_twitch_campaign_response_without_fallback():
     twitch = twitch_with_gql(
         SimpleNamespace(
