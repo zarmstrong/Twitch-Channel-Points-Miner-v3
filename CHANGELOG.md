@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.17.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.2...3.17.0) (2026-09-04)
+
+
+### Features
+
+* **analytics:** show current watch status on dashboard ([#95](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/95)) ([#122](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/122)) ([152fbf5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/152fbf5f1a15852131973f0bd0ec7cfe6b5a1bc4))
+
+
+### Bug Fixes
+
+* **badges:** ignore owned and non-watch badge rewards ([282766d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/282766d94a841f23c3858c9262a07cc646d6ed44))
+* **drops:** recognize already-earned badge Drop campaigns via completed inventory ([#121](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/121)) ([9e329ec](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9e329ec9ea823f8736878d12bc7dc32b43806f1d))
+
+
+### Performance Improvements
+
+* **analytics:** replace Flask dev server with waitress and cache heavy JSON endpoints ([#118](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/118)) ([af34ef5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/af34ef511c01354dfb6b9a1330006ac6094d72ab))
+
 ## [3.16.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.1...3.16.2) (2026-09-02)
 
 
