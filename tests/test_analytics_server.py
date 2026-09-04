@@ -1,4 +1,5 @@
 import re
+import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     AnalyticsServer,
     MAX_LOG_TAIL_BYTES,
+    TTLResponseCache,
     UPDATE_DISMISSAL_COOKIE,
     bounded_log_start,
     filter_datas,
@@ -13,6 +15,70 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     seek_log_start,
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
+
+
+def test_ttl_response_cache_expires_after_ttl():
+    cache = TTLResponseCache(ttl_seconds=0.05)
+
+    cache.set("key", "payload")
+    assert cache.get("key") == "payload"
+
+    time.sleep(0.06)
+    assert cache.get("key") is None
+
+
+def test_ttl_response_cache_disabled_with_zero_ttl():
+    cache = TTLResponseCache(ttl_seconds=0)
+
+    cache.set("key", "payload")
+
+    assert cache.get("key") is None
+
+
+def test_ttl_response_cache_clear_drops_all_entries():
+    cache = TTLResponseCache(ttl_seconds=60)
+
+    cache.set("a", "1")
+    cache.set("b", "2")
+    cache.clear()
+
+    assert cache.get("a") is None
+    assert cache.get("b") is None
+
+
+def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "example.json").write_text(
+        '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
+    )
+    analytics_module.response_cache.clear()
+    calls = []
+    original_summary = analytics_module.get_streamer_summary
+
+    def counting_summary(streamer):
+        calls.append(streamer)
+        return original_summary(streamer)
+
+    monkeypatch.setattr(analytics_module, "get_streamer_summary", counting_summary)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    first = client.get("/streamers")
+    second = client.get("/streamers")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert json_module.loads(first.get_data(as_text=True)) == json_module.loads(
+        second.get_data(as_text=True)
+    )
+    # Second request must be served from cache without re-reading files.
+    assert len(calls) == 1
+
+    analytics_module.response_cache.clear()
 
 
 def test_bounded_log_start_caps_legacy_request_without_tail_bytes():
