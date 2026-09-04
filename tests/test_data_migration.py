@@ -40,6 +40,19 @@ def test_migrate_analytics_directory_versions_existing_files(tmp_path):
     assert migrate_analytics_directory(tmp_path) == 0
 
 
+def test_migrate_analytics_directory_skips_now_watching_file(tmp_path):
+    now_watching_file = tmp_path / "now_watching.json"
+    now_watching_file.write_text(
+        json.dumps([{"username": "alice", "reason": "points"}]), encoding="utf-8"
+    )
+
+    assert migrate_analytics_directory(tmp_path) == 0
+
+    assert json.loads(now_watching_file.read_text(encoding="utf-8")) == [
+        {"username": "alice", "reason": "points"}
+    ]
+
+
 def test_migrate_analytics_directory_rejects_future_versions(tmp_path):
     path = tmp_path / "channel.json"
     path.write_text(
