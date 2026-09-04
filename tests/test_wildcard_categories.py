@@ -653,6 +653,45 @@ def test_refresh_fetches_drops_inventory_once_and_shares_it_with_wildcard_pass()
     assert twitch.wildcard_calls[0]["refresh_external_catalog"] is True
 
 
+def test_hot_reload_updates_periodic_wildcard_settings():
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+
+    miner.refresh_categories(
+        {
+            "categories": [],
+            "wildcard_categories": True,
+            "wildcard_category_limit": 4,
+            "wildcard_category_streamer_limit": 2,
+            "wildcard_category_pin_active": False,
+        }
+    )
+
+    assert miner.wildcard_categories is True
+    assert miner.wildcard_category_limit == 4
+    assert miner.wildcard_category_streamer_limit == 2
+    assert miner.wildcard_category_pin_active is False
+    assert twitch.wildcard_calls[0]["limit"] == 4
+    assert twitch.wildcard_calls[0]["pin_active"] is False
+
+
+def test_hot_reload_normalizes_invalid_wildcard_limits():
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+
+    miner.refresh_categories(
+        {
+            "categories": [],
+            "wildcard_categories": True,
+            "wildcard_category_limit": None,
+            "wildcard_category_streamer_limit": 0,
+        }
+    )
+
+    assert miner.wildcard_category_limit == 10
+    assert miner.wildcard_category_streamer_limit == 1
+
+
 def test_refresh_skips_inventory_fetch_when_drops_disabled():
     twitch = FakeTwitch(eligible_categories=[], wildcard_categories=[])
     miner = _bare_miner(twitch)

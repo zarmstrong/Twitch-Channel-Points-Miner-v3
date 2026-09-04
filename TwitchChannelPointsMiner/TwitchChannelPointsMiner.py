@@ -1955,6 +1955,24 @@ class TwitchChannelPointsMiner:
     def refresh_categories(self, mine_config):
         """Apply the current configured category list to a running miner."""
         with self.config_reload_lock:
+            self.wildcard_categories = (
+                mine_config.get("wildcard_categories", False) is True
+            )
+            self.wildcard_category_limit = _normalize_wildcard_category_positive_int(
+                mine_config.get("wildcard_category_limit", 10),
+                "wildcard_category_limit",
+                10,
+            )
+            self.wildcard_category_streamer_limit = (
+                _normalize_wildcard_category_positive_int(
+                    mine_config.get("wildcard_category_streamer_limit", 1),
+                    "wildcard_category_streamer_limit",
+                    1,
+                )
+            )
+            self.wildcard_category_pin_active = (
+                mine_config.get("wildcard_category_pin_active", True) is True
+            )
             self.__refresh_category_streamers(
                 categories=mine_config.get("categories", []),
                 blacklist=mine_config.get("blacklist", []),
@@ -1966,14 +1984,12 @@ class TwitchChannelPointsMiner:
                 ),
                 category_chat=mine_config.get("category_chat"),
                 category_log_level=mine_config.get("category_log_level", logging.INFO),
-                wildcard_categories=mine_config.get("wildcard_categories", False),
-                wildcard_category_limit=mine_config.get("wildcard_category_limit", 10),
-                wildcard_category_streamer_limit=mine_config.get(
-                    "wildcard_category_streamer_limit", 1
+                wildcard_categories=self.wildcard_categories,
+                wildcard_category_limit=self.wildcard_category_limit,
+                wildcard_category_streamer_limit=(
+                    self.wildcard_category_streamer_limit
                 ),
-                wildcard_category_pin_active=mine_config.get(
-                    "wildcard_category_pin_active", True
-                ),
+                wildcard_category_pin_active=self.wildcard_category_pin_active,
             )
 
     def end(self, signum, frame):
