@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from io import BytesIO
@@ -13,6 +14,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     filter_datas,
     get_streamer_summary,
     seek_log_start,
+    streamers_available,
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
@@ -46,6 +48,24 @@ def test_ttl_response_cache_clear_drops_all_entries():
     assert cache.get("b") is None
 
 
+def test_ttl_response_cache_sweeps_expired_entries_on_set():
+    # A caller that varies its key per-request (e.g. keying on a file's
+    # mtime, as /now_watching does) must not accumulate one entry forever -
+    # once its old key has expired, the next unrelated set() call should
+    # sweep it away rather than leaving it for a get() that will never come.
+    cache = TTLResponseCache(ttl_seconds=0.05)
+
+    cache.set("now_watching:1", "a")
+    time.sleep(0.06)
+    cache.set("now_watching:2", "b")
+    cache.set("unrelated", "c")
+
+    assert len(cache._entries) == 2
+    assert "now_watching:1" not in cache._entries
+    assert cache.get("now_watching:2") == "b"
+    assert cache.get("unrelated") == "c"
+
+
 def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     import json as json_module
 
@@ -77,6 +97,147 @@ def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     )
     # Second request must be served from cache without re-reading files.
     assert len(calls) == 1
+
+    analytics_module.response_cache.clear()
+
+
+def test_streamers_available_excludes_now_watching_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "example.json").write_text(
+        '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
+    )
+    (tmp_path / "now_watching.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "drops_by_category.json").write_text(
+        '{"drops": []}', encoding="utf-8"
+    )
+
+    assert streamers_available() == ["example.json"]
+
+
+def test_now_watching_endpoint_missing_file_returns_empty_list(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/now_watching")
+
+    assert response.status_code == 200
+    assert json_module.loads(response.get_data(as_text=True)) == []
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_round_trips_well_formed_file(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    entries = [
+        {"username": "alice", "reason": "drops", "game": "Foo", "channel_points": 10},
+        {"username": "bob", "reason": "points", "game": None, "channel_points": 5},
+    ]
+    (tmp_path / "now_watching.json").write_text(
+        json_module.dumps(entries), encoding="utf-8"
+    )
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/now_watching")
+
+    assert response.status_code == 200
+    assert json_module.loads(response.get_data(as_text=True)) == entries
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_malformed_json_degrades_to_empty_list(
+    monkeypatch, tmp_path
+):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "now_watching.json").write_text("not json", encoding="utf-8")
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/now_watching")
+
+    assert response.status_code == 200
+    assert json_module.loads(response.get_data(as_text=True)) == []
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    entries = [{"username": "alice", "reason": "badge", "game": "Foo", "channel_points": 1}]
+    now_watching_file = tmp_path / "now_watching.json"
+    now_watching_file.write_text(json_module.dumps(entries), encoding="utf-8")
+    analytics_module.response_cache.clear()
+
+    calls = []
+    original_open = open
+
+    def counting_open(path, *args, **kwargs):
+        if str(path) == str(now_watching_file):
+            calls.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(analytics_module, "open", counting_open, raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    first = client.get("/now_watching")
+    second = client.get("/now_watching")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert json_module.loads(first.get_data(as_text=True)) == entries
+    assert json_module.loads(second.get_data(as_text=True)) == entries
+    # Second request must be served from cache without re-reading the file.
+    assert len(calls) == 1
+
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_serves_fresh_data_after_file_update(
+    monkeypatch, tmp_path
+):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    now_watching_file = tmp_path / "now_watching.json"
+    now_watching_file.write_text(
+        json_module.dumps([{"username": "alice"}]), encoding="utf-8"
+    )
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    first = client.get("/now_watching")
+    assert json_module.loads(first.get_data(as_text=True)) == [{"username": "alice"}]
+
+    # Simulate the miner overwriting the file with a new mtime - the cache
+    # is keyed on mtime specifically so this must not be served stale even
+    # though the shared TTL has not expired.
+    updated_mtime = os.path.getmtime(now_watching_file) + 5
+    now_watching_file.write_text(
+        json_module.dumps([{"username": "bob"}]), encoding="utf-8"
+    )
+    os.utime(now_watching_file, (updated_mtime, updated_mtime))
+
+    second = client.get("/now_watching")
+    assert json_module.loads(second.get_data(as_text=True)) == [{"username": "bob"}]
 
     analytics_module.response_cache.clear()
 
@@ -339,6 +500,27 @@ def test_points_tab_reapplies_annotations_after_becoming_visible():
     assert "switchDashboardTab(savedDashboardTab);" in script
     assert "!chartRendered || $('#points-panel').is(':hidden')" in script
     assert 'pointSeries = response["series"] || [];' in script
+
+
+def test_now_watching_widget_jumps_to_drops_tab_on_click():
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function getNowWatching()" in script
+    assert "function renderNowWatching(entries)" in script
+    assert "'./now_watching'" in script
+
+    render_now_watching = script.split("function renderNowWatching", 1)[1].split(
+        "function getNowWatching", 1
+    )[0]
+
+    assert "switchDashboardTab('drops');" in render_now_watching
+    assert "changeDropCategory(entry.game);" in render_now_watching
+    # A drops/badge entry with no known game (entry.game is null) must not
+    # be wired to changeDropCategory(null), which would corrupt the saved
+    # Drops-tab category selection.
+    assert "&& entry.game)" in render_now_watching
 
 
 def test_points_chart_translates_logger_month_token_for_apexcharts():

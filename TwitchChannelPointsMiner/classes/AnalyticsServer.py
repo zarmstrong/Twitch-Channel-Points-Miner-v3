@@ -60,7 +60,22 @@ class TTLResponseCache:
         if self.ttl_seconds <= 0:
             return
         with self._mutex:
-            self._entries[key] = (time.monotonic() + self.ttl_seconds, payload)
+            # Callers that vary their key per-request (e.g. keying on a
+            # file's mtime so a change is visible immediately instead of
+            # waiting out the TTL) would otherwise accumulate one entry per
+            # write forever, since an expired key is only ever swept when
+            # that exact key is re-fetched. Sweep expired entries here too
+            # so such callers stay bounded.
+            now = time.monotonic()
+            expired = [
+                existing_key
+                for existing_key, (expires_at, _payload) in self._entries.items()
+                if expires_at <= now
+            ]
+            for existing_key in expired:
+                self._entries.pop(existing_key, None)
+
+            self._entries[key] = (now + self.ttl_seconds, payload)
 
     def clear(self):
         with self._mutex:
@@ -111,7 +126,7 @@ def get_assets_folder():
 
 def streamers_available():
     path = Settings.analytics_path
-    excluded_files = {"drops_by_category.json"}
+    excluded_files = {"drops_by_category.json", "now_watching.json"}
     available = [
         f
         for f in os.listdir(path)
@@ -343,6 +358,42 @@ def drops_by_category():
         status=200,
         mimetype="application/json",
     )
+
+
+def now_watching():
+    now_watching_file = os.path.join(Settings.analytics_path, "now_watching.json")
+    try:
+        mtime = os.path.getmtime(now_watching_file)
+    except OSError:
+        mtime = None
+
+    # Key the cache by the file's mtime (rather than a fixed key) so a
+    # write from the miner is visible on the very next poll instead of
+    # waiting out the shared cache's TTL - this endpoint is polled on the
+    # fast log-tail cadence specifically to reflect live state.
+    cache_key = f"now_watching:{mtime}"
+    cached = response_cache.get(cache_key)
+    if cached is not None:
+        return Response(cached, status=200, mimetype="application/json")
+
+    entries = []
+    if mtime is not None:
+        try:
+            with open(now_watching_file, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, list):
+                entries = data
+        except (json.JSONDecodeError, OSError) as error:
+            logger.error(
+                "Unable to read analytics Now Watching file '%s': %s",
+                now_watching_file,
+                error,
+            )
+            entries = []
+
+    payload = json.dumps(entries)
+    response_cache.set(cache_key, payload)
+    return Response(payload, status=200, mimetype="application/json")
 
 
 def index(refresh=5, days_ago=7, log_poll_interval=5):
@@ -692,6 +743,9 @@ class AnalyticsServer(Thread):
             "drops_by_category",
             drops_by_category,
             methods=["GET"],
+        )
+        self.app.add_url_rule(
+            "/now_watching", "now_watching", now_watching, methods=["GET"]
         )
         self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
         self.app.add_url_rule(

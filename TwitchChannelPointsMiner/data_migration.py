@@ -9,6 +9,11 @@ from pathlib import Path
 
 ANALYTICS_DATA_VERSION = 1
 
+# Rewritten wholesale every watch cycle, never durable user data, so it
+# carries no "version" field and is exempt from the versioned-JSON-object
+# migration below.
+UNVERSIONED_ANALYTICS_FILES = {"now_watching.json"}
+
 
 class DataMigrationError(ValueError):
     pass
@@ -75,7 +80,9 @@ def migrate_analytics_directory(directory):
     candidates = [
         file_path
         for file_path in sorted(path.glob("*.json"))
-        if not file_path.is_symlink() and file_path.is_file()
+        if not file_path.is_symlink()
+        and file_path.is_file()
+        and file_path.name not in UNVERSIONED_ANALYTICS_FILES
     ]
     return sum(
         _migrate_json_file(file_path, ANALYTICS_DATA_VERSION)

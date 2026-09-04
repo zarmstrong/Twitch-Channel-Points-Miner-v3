@@ -332,6 +332,7 @@ $(document).ready(function () {
     $('#sorting-by').text(sortBy);
     getStreamers();
     getDropsByCategory();
+    getNowWatching();
 
     updateAnnotations();
     toggleDarkMode();
@@ -724,6 +725,60 @@ function clearAnnotations() {
             chart.removeAnnotation(annotation['id'])
         })
     chart.clearAnnotations();
+}
+
+var nowWatchingRefreshTimeout = null;
+
+function renderNowWatching(entries) {
+    var list = $('#now-watching-list');
+    list.empty();
+
+    if (!entries || entries.length === 0) {
+        list.text('Not currently watching anything.');
+        return;
+    }
+
+    entries.forEach(function (entry) {
+        var line = $('<div class="now-watching-entry"></div>');
+
+        if ((entry.reason === 'drops' || entry.reason === 'badge') && entry.game) {
+            var label = entry.reason === 'badge' ? 'Badge campaign' : 'Drops';
+            var link = $('<a href="#"></a>').text(
+                `Currently watching ${entry.username} for ${label} — ${entry.game}`
+            );
+            link.on('click', function (e) {
+                e.preventDefault();
+                switchDashboardTab('drops');
+                changeDropCategory(entry.game);
+            });
+            line.append(link);
+        } else if (entry.reason === 'drops' || entry.reason === 'badge') {
+            var label2 = entry.reason === 'badge' ? 'Badge campaign' : 'Drops';
+            line.text(`Currently watching ${entry.username} for ${label2}`);
+        } else {
+            line.text(
+                `Currently watching ${entry.username} for points (${entry.channel_points})`
+            );
+        }
+
+        list.append(line);
+    });
+}
+
+function getNowWatching() {
+    $.getJSON('./now_watching', function (response) {
+        renderNowWatching(response);
+        if (nowWatchingRefreshTimeout) {
+            clearTimeout(nowWatchingRefreshTimeout);
+        }
+        nowWatchingRefreshTimeout = setTimeout(getNowWatching, logPollInterval);
+    }).fail(function () {
+        renderNowWatching([]);
+        if (nowWatchingRefreshTimeout) {
+            clearTimeout(nowWatchingRefreshTimeout);
+        }
+        nowWatchingRefreshTimeout = setTimeout(getNowWatching, logPollInterval);
+    });
 }
 
 function getDropsByCategory() {

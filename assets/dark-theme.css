@@ -38,6 +38,15 @@ a:hover {
     background-color: #2B2D3E;
 }
 
+.now-watching-box {
+    color: #fff;
+    background-color: #2B2D3E;
+}
+
+.now-watching-box a {
+    color: #f9826c;
+}
+
 #drops-box .title {
     color: #fff;
 }
