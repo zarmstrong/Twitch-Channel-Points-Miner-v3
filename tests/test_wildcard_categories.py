@@ -71,6 +71,26 @@ def test_get_wildcard_categories_unfiltered_request_is_passed_through(monkeypatc
     assert seen == [None]
 
 
+def test_preferred_filter_keeps_external_catalog_scoped(monkeypatch):
+    twitch = _bare_twitch(
+        monkeypatch, {"preferred-game": datetime(2099, 1, 1)}
+    )
+    fallback_requests = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs: fallback_requests.append(categories)
+        or {},
+    )
+
+    result = twitch.filter_categories_with_active_drops(
+        ["preferred-game"], inventory={"present": True}
+    )
+
+    assert result == ["preferred-game"]
+    assert fallback_requests == [["preferred-game"]]
+
+
 def test_get_wildcard_categories_excludes_configured_category_slugs(monkeypatch):
     deadlines = {
         "excluded-game": datetime(2020, 1, 1),
@@ -628,9 +648,9 @@ def test_refresh_fetches_drops_inventory_once_and_shares_it_with_wildcard_pass()
 
     assert twitch.inventory_fetch_count == 1
     assert twitch.filter_calls[0]["inventory"] == {"fetched": 1}
-    assert twitch.filter_calls[0]["include_all_fallback"] is True
+    assert "include_all_fallback" not in twitch.filter_calls[0]
     assert twitch.wildcard_calls[0]["inventory"] == {"fetched": 1}
-    assert twitch.wildcard_calls[0]["refresh_external_catalog"] is False
+    assert twitch.wildcard_calls[0]["refresh_external_catalog"] is True
 
 
 def test_refresh_skips_inventory_fetch_when_drops_disabled():

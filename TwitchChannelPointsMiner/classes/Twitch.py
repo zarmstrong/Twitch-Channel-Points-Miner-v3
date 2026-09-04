@@ -2194,7 +2194,6 @@ class Twitch(object):
         order="ORDER",
         drops_enabled: bool = True,
         inventory: dict | None = None,
-        include_all_fallback: bool = False,
     ) -> List[str]:
         if not categories:
             return []
@@ -2224,7 +2223,7 @@ class Twitch(object):
         )
         twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         fallback_deadlines = self.__twitchdrops_app_fallback(
-            None if include_all_fallback else categories,
+            categories,
             twitch_category_slugs,
         )
         # The external campaign index fills gaps when Twitch does not expose a

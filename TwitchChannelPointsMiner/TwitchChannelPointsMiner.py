@@ -756,7 +756,6 @@ class TwitchChannelPointsMiner:
                     order=category_campaign_order,
                     drops_enabled=category_drops_enabled,
                     inventory=discovery_inventory,
-                    include_all_fallback=self.wildcard_categories,
                 )
 
                 if categories and eligible_categories == []:
@@ -801,7 +800,7 @@ class TwitchChannelPointsMiner:
                         pinned_category_slugs=set(),
                         pin_active=self.wildcard_category_pin_active,
                         inventory=discovery_inventory,
-                        refresh_external_catalog=not bool(categories),
+                        refresh_external_catalog=True,
                     )
                 )
                 all_wildcard_category_usernames = []
@@ -1743,7 +1742,6 @@ class TwitchChannelPointsMiner:
             order=campaign_order,
             drops_enabled=drops_enabled,
             inventory=discovery_inventory,
-            include_all_fallback=wildcard_categories,
         )
         discovered_usernames = []
         for category in eligible_categories:
@@ -1801,7 +1799,7 @@ class TwitchChannelPointsMiner:
                     pinned_category_slugs=pinned_category_slugs,
                     pin_active=wildcard_category_pin_active,
                     inventory=discovery_inventory,
-                    refresh_external_catalog=not bool(categories),
+                    refresh_external_catalog=True,
                 )
             )
             for category in wildcard_eligible_categories:
