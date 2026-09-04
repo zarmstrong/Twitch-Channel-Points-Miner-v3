@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from io import BytesIO
@@ -185,6 +186,40 @@ def test_now_watching_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     assert json_module.loads(second.get_data(as_text=True)) == entries
     # Second request must be served from cache without re-reading the file.
     assert len(calls) == 1
+
+    analytics_module.response_cache.clear()
+
+
+def test_now_watching_endpoint_serves_fresh_data_after_file_update(
+    monkeypatch, tmp_path
+):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    now_watching_file = tmp_path / "now_watching.json"
+    now_watching_file.write_text(
+        json_module.dumps([{"username": "alice"}]), encoding="utf-8"
+    )
+    analytics_module.response_cache.clear()
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    first = client.get("/now_watching")
+    assert json_module.loads(first.get_data(as_text=True)) == [{"username": "alice"}]
+
+    # Simulate the miner overwriting the file with a new mtime - the cache
+    # is keyed on mtime specifically so this must not be served stale even
+    # though the shared TTL has not expired.
+    updated_mtime = os.path.getmtime(now_watching_file) + 5
+    now_watching_file.write_text(
+        json_module.dumps([{"username": "bob"}]), encoding="utf-8"
+    )
+    os.utime(now_watching_file, (updated_mtime, updated_mtime))
+
+    second = client.get("/now_watching")
+    assert json_module.loads(second.get_data(as_text=True)) == [{"username": "bob"}]
 
     analytics_module.response_cache.clear()
 
@@ -464,6 +499,10 @@ def test_now_watching_widget_jumps_to_drops_tab_on_click():
 
     assert "switchDashboardTab('drops');" in render_now_watching
     assert "changeDropCategory(entry.game);" in render_now_watching
+    # A drops/badge entry with no known game (entry.game is null) must not
+    # be wired to changeDropCategory(null), which would corrupt the saved
+    # Drops-tab category selection.
+    assert "&& entry.game)" in render_now_watching
 
 
 def test_points_chart_translates_logger_month_token_for_apexcharts():

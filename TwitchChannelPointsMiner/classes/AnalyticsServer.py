@@ -346,13 +346,23 @@ def drops_by_category():
 
 
 def now_watching():
-    cached = response_cache.get("now_watching")
+    now_watching_file = os.path.join(Settings.analytics_path, "now_watching.json")
+    try:
+        mtime = os.path.getmtime(now_watching_file)
+    except OSError:
+        mtime = None
+
+    # Key the cache by the file's mtime (rather than a fixed key) so a
+    # write from the miner is visible on the very next poll instead of
+    # waiting out the shared cache's TTL - this endpoint is polled on the
+    # fast log-tail cadence specifically to reflect live state.
+    cache_key = f"now_watching:{mtime}"
+    cached = response_cache.get(cache_key)
     if cached is not None:
         return Response(cached, status=200, mimetype="application/json")
 
-    now_watching_file = os.path.join(Settings.analytics_path, "now_watching.json")
     entries = []
-    if os.path.isfile(now_watching_file):
+    if mtime is not None:
         try:
             with open(now_watching_file, "r", encoding="utf-8") as file:
                 data = json.load(file)
@@ -367,7 +377,7 @@ def now_watching():
             entries = []
 
     payload = json.dumps(entries)
-    response_cache.set("now_watching", payload)
+    response_cache.set(cache_key, payload)
     return Response(payload, status=200, mimetype="application/json")
 
 

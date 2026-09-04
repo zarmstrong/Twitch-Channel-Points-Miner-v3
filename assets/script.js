@@ -741,11 +741,10 @@ function renderNowWatching(entries) {
     entries.forEach(function (entry) {
         var line = $('<div class="now-watching-entry"></div>');
 
-        if (entry.reason === 'drops' || entry.reason === 'badge') {
+        if ((entry.reason === 'drops' || entry.reason === 'badge') && entry.game) {
             var label = entry.reason === 'badge' ? 'Badge campaign' : 'Drops';
-            var gameText = entry.game ? ` — ${entry.game}` : '';
             var link = $('<a href="#"></a>').text(
-                `Currently watching ${entry.username} for ${label}${gameText}`
+                `Currently watching ${entry.username} for ${label} — ${entry.game}`
             );
             link.on('click', function (e) {
                 e.preventDefault();
@@ -753,6 +752,9 @@ function renderNowWatching(entries) {
                 changeDropCategory(entry.game);
             });
             line.append(link);
+        } else if (entry.reason === 'drops' || entry.reason === 'badge') {
+            var label2 = entry.reason === 'badge' ? 'Badge campaign' : 'Drops';
+            line.text(`Currently watching ${entry.username} for ${label2}`);
         } else {
             line.text(
                 `Currently watching ${entry.username} for points (${entry.channel_points})`
