@@ -1336,7 +1336,24 @@ class TwitchChannelPointsMiner:
                     extra={"emoji": ":warning:", "category_log": True},
                 )
                 return
-            campaigns = self.drop_badge_catalog.eligible_badge_campaigns(owned_badges)
+
+            completed_campaign_signatures = set()
+            try:
+                inventory = self.twitch.get_drops_inventory()
+                completed_campaign_signatures = (
+                    self.twitch.completed_badge_campaign_signatures(inventory)
+                )
+            except Exception as error:
+                logger.warning(
+                    "Unable to fetch the account's Drops inventory for badge "
+                    f"campaign completion checks: {error}",
+                    extra={"emoji": ":warning:", "category_log": True},
+                )
+
+            campaigns = self.drop_badge_catalog.eligible_badge_campaigns(
+                owned_badges,
+                completed_campaign_signatures=completed_campaign_signatures,
+            )
         except Exception as error:
             logger.warning(
                 f"Unable to determine eligible badge Drop campaigns: {error}",
