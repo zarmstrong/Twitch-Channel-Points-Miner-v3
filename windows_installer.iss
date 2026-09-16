@@ -192,7 +192,8 @@ begin
   begin
     StringChangeEx(ConfigText, '''enable_analytics'': False,',
       '''enable_analytics'': True,', True);
-    ConfigText := ConfigText + #13#10 +
+    // Keep one assignment so runtime and AST-based config readers agree.
+    StringChangeEx(ConfigText, 'ANALYTICS_CONFIG = None',
       '# --- Added by the installer: enables the embedded dashboard ---' + #13#10 +
       '# Change these values (or set enable_analytics back to False) any time.' + #13#10 +
       'ANALYTICS_CONFIG = {' + #13#10 +
@@ -202,7 +203,7 @@ begin
       '    ''days_ago'': 7,' + #13#10 +
       '    ''password'': ''' + GeneratePassword(24) + ''',' + #13#10 +
       '    ''log_poll_interval'': 5,' + #13#10 +
-      '}' + #13#10;
+      '}', True);
   end;
 
   ConfigBytes := AnsiString(ConfigText);
