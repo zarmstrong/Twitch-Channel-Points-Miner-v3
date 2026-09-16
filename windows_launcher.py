@@ -2,7 +2,6 @@
 
 """Windows executable entry point for Twitch Channel Points Miner."""
 
-import ast
 import ctypes  # cross-platform stdlib module; only .windll is Windows-only (guarded below)
 import json
 import logging
@@ -58,10 +57,8 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (  # noqa: E402
 )
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
-    _assignment,
-    _dict_item,
-    _simple_value,
     enable_analytics_dashboard,
+    read_config_literal,
 )
 from TwitchChannelPointsMiner.runner import main as runner_main  # noqa: E402
 
@@ -323,25 +320,17 @@ def _matches_template_defaults(source):
     unexpectedly), layered on top of the provenance check in
     ensure_windows_analytics_defaults() - it is not, by itself, a safe
     substitute for that check. Parsed with config_editor.py's existing
-    AST helpers rather than a second, parallel implementation.
+    public literal reader rather than a second, parallel implementation.
     """
+
     try:
-        tree = ast.parse(source)
+        missing = object()
+        return (
+            read_config_literal(source, "MINER_CONFIG", "enable_analytics") is False
+            and read_config_literal(source, "ANALYTICS_CONFIG", default=missing) is None
+        )
     except SyntaxError:
         return False
-
-    enable_analytics_node = _dict_item(
-        _assignment(tree, "MINER_CONFIG"), "enable_analytics"
-    )
-    if enable_analytics_node is None:
-        return False
-    if _simple_value(enable_analytics_node) is not False:
-        return False
-
-    analytics_config_node = _assignment(tree, "ANALYTICS_CONFIG")
-    if analytics_config_node is None:
-        return False
-    return _simple_value(analytics_config_node) is None
 
 
 def _needs_username(config_path):
@@ -355,10 +344,11 @@ def _needs_username(config_path):
     hide either an untouched template or a deliberate choice.
     """
     try:
-        tree = ast.parse(config_path.read_text(encoding="utf-8"))
+        username = read_config_literal(
+            config_path.read_text(encoding="utf-8"), "MINER_CONFIG", "username"
+        )
     except (OSError, SyntaxError):
         return False
-    username = _simple_value(_dict_item(_assignment(tree, "MINER_CONFIG"), "username"))
     return (
         not isinstance(username, str)
         or not username.strip()
@@ -1691,6 +1681,10 @@ def main():
             )
         elif dashboard_info:
             webbrowser.open(_dashboard_url_with_bypass(dashboard_info["url"]))
+        if miner_thread_handle.thread is not None:
+            # There is no GUI event loop to keep the process alive now.
+            # Wait for mining to end, including in a windowed build with no stdin.
+            miner_thread_handle.thread.join()
         pause_for_first_run()
     else:
         if is_first_shell_launch:

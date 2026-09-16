@@ -27,6 +27,7 @@ from TwitchChannelPointsMiner.config_editor import (
     load_web_overrides,
     migrate_web_config,
     read_managed_web_config,
+    read_config_literal,
     set_miner_username,
     update_managed_web_config,
 )
@@ -934,8 +935,50 @@ def test_enable_analytics_dashboard_requires_analytics_config_assignment(tmp_pat
         encoding="utf-8",
     )
 
+    original = config.read_bytes()
     with pytest.raises(ConfigEditError, match="ANALYTICS_CONFIG"):
         enable_analytics_dashboard(config, password="secret")
+    assert config.read_bytes() == original
+
+
+def test_enable_analytics_dashboard_leaves_invalid_python_unchanged(tmp_path):
+    config = tmp_path / "config.py"
+    original = b'MINER_CONFIG = {"enable_analytics": False}\nANALYTICS_CONFIG = {\n'
+    config.write_bytes(original)
+    with pytest.raises(SyntaxError):
+        enable_analytics_dashboard(config, password="secret")
+    assert config.read_bytes() == original
+
+
+def test_read_config_literal_distinguishes_none_from_missing_and_expressions():
+    missing = object()
+    assert (
+        read_config_literal(
+            "ANALYTICS_CONFIG = None", "ANALYTICS_CONFIG", default=missing
+        )
+        is None
+    )
+    assert read_config_literal("", "ANALYTICS_CONFIG", default=missing) is missing
+    assert (
+        read_config_literal(
+            "ANALYTICS_CONFIG = load_settings()", "ANALYTICS_CONFIG", default=missing
+        )
+        is missing
+    )
+    assert (
+        read_config_literal(
+            "MINER_CONFIG = {'enable_analytics': False}",
+            "MINER_CONFIG",
+            "enable_analytics",
+        )
+        is False
+    )
+    assert (
+        read_config_literal(
+            "MINER_CONFIG = {}", "MINER_CONFIG", "username", default=missing
+        )
+        is missing
+    )
 
 
 def test_set_miner_username_preserves_formatting_and_comments(tmp_path):

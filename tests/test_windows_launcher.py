@@ -814,11 +814,14 @@ def test_main_leaves_existing_config_untouched_on_upgrade_launch(tmp_path, monke
     assert shell_calls == [(None, "config")]
 
 
-def test_main_falls_back_to_browser_when_shell_launch_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("analytics_enabled", [True, False])
+def test_main_falls_back_to_browser_when_shell_launch_fails(
+    tmp_path, monkeypatch, analytics_enabled
+):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text(
-        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}, 'enable_analytics': True}}\n"
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}, 'enable_analytics': {analytics_enabled!r}}}\n"
         "STREAMERS = []\n"
         "MINE_CONFIG = {}\n"
         "ANALYTICS_CONFIG = {'host': '127.0.0.1', 'port': 5000}\n",
@@ -826,17 +829,38 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(tmp_path, monkeypatc
     )
     opened = []
     paused = []
+    joins = []
+
+    class MinerThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            joins.append(timeout)
+
+    monkeypatch.setattr(windows_launcher.threading, "Thread", MinerThread)
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(
         windows_launcher,
         "launch_shell",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no WebView2 runtime")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("no WebView2 runtime")
+        ),
     )
-    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
-    monkeypatch.setattr(windows_launcher, "pause_for_first_run", lambda: paused.append(True))
+    monkeypatch.setattr(
+        windows_launcher.webbrowser, "open", lambda url: opened.append(url)
+    )
+    monkeypatch.setattr(
+        windows_launcher, "pause_for_first_run", lambda: paused.append(True)
+    )
     monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
 
     assert windows_launcher.main() == 0
@@ -844,8 +868,13 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(tmp_path, monkeypatc
     # Same auth-bypass token every other dashboard-URL path attaches (main()
     # generates a fresh one per run - see SHELL_BYPASS_TOKEN_ENV_VAR - so this
     # fallback shouldn't be the one place that prompts for Basic Auth.
-    assert len(opened) == 1
-    assert opened[0].startswith("http://127.0.0.1:5000/?shell_token=")
+    if analytics_enabled:
+        assert len(opened) == 1
+        assert opened[0].startswith("http://127.0.0.1:5000/?shell_token=")
+    else:
+        assert opened == []
+    # The unbounded join keeps the daemon miner alive without a GUI or stdin.
+    assert joins[0] is None
     assert paused == [True]
 
 

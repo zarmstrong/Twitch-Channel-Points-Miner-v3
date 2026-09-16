@@ -218,6 +218,22 @@ def _simple_value(node):
     return None
 
 
+def read_config_literal(source, assignment_name, key=None, default=None):
+    """Read a literal config value without executing the configuration.
+
+    Optionally select a key from a literal dictionary assignment. Missing
+    values and non-literal expressions return default; invalid Python raises
+    SyntaxError so callers can distinguish an unreadable configuration.
+    """
+    node = _assignment(ast.parse(source), assignment_name)
+    if key is not None:
+        node = _dict_item(node, key)
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError):
+        return default
+
+
 def _base_web_config(config_path):
     from TwitchChannelPointsMiner.classes.Settings import Events
 
@@ -743,14 +759,17 @@ def enable_analytics_dashboard(
     rather than overwriting host/port/password with fresh defaults); only
     replaces it when it is still unset (e.g. `ANALYTICS_CONFIG = None`).
     """
-    _set_dict_items(config_path, "MINER_CONFIG", {"enable_analytics": "True"})
-
     source = Path(config_path).read_text(encoding="utf-8")
     analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
     if analytics_config_node is None:
         raise ConfigEditError("ANALYTICS_CONFIG assignment not found in config.py.")
+    _set_dict_items(config_path, "MINER_CONFIG", {"enable_analytics": "True"})
     if isinstance(analytics_config_node, ast.Dict):
         return
+
+    # The MINER_CONFIG edit may have shifted the assignment's source offsets.
+    source = Path(config_path).read_text(encoding="utf-8")
+    analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
 
     rendered = (
         "{\n"
