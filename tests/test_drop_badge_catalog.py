@@ -154,6 +154,14 @@ def test_badge_matching_normalizes_roman_numerals():
     )
 
 
+def test_badge_matching_does_not_reinterpret_a_lone_numeral_letter():
+    # Regression test: a title that is *just* "V" (or "I"/"X") has no other
+    # word to disambiguate it from a genuine sequel-numeral use, so it must
+    # not be reinterpreted as a digit and coincidentally matched against an
+    # unrelated badge title that also happens to reduce to the same digit.
+    assert badge_match_reason("V", "V", "5") is None
+
+
 def test_badge_matching_rejects_unrelated_badge_words():
     assert (
         badge_match_reason(

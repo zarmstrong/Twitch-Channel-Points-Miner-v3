@@ -1518,6 +1518,14 @@ class Twitch(object):
             if existing is None or (
                 not existing.get("timeBasedDrops") and campaign.get("timeBasedDrops")
             ):
+                if existing is not None:
+                    # Don't let a later source's record for the same id (e.g.
+                    # helix, with no earn-mechanism field of its own) silently
+                    # drop the reward-campaign tag an earlier source set.
+                    campaign.setdefault(
+                        "_is_reward_campaign",
+                        existing.get("_is_reward_campaign", False),
+                    )
                 campaigns_by_id[campaign_id] = campaign
 
         advertised_campaigns = getattr(self, "advertised_drop_campaigns", {})
@@ -5140,9 +5148,17 @@ class Twitch(object):
                 if not isinstance(progress, dict):
                     continue
                 campaign_ref = campaigns_by_id.get(progress.get("id"))
+                # sync_drops() below only claims a drop if its id is already
+                # present in campaign_ref.drops - a drop added to the campaign
+                # after campaign_ref was built, or one earlier filtered out by
+                # __remove_ineligible_badge_drops, is not in there and would
+                # otherwise be silently skipped by both this and the fallback
+                # below. Snapshot which ids it actually covers before it runs.
+                campaign_tracked_drop_ids = set()
 
                 if campaign_ref is not None:
                     campaign_ref.in_inventory = True
+                    campaign_tracked_drop_ids = {drop.id for drop in campaign_ref.drops}
                     campaign_ref.sync_drops(
                         progress.get("timeBasedDrops", []), self.claim_drop
                     )
@@ -5165,12 +5181,14 @@ class Twitch(object):
                         is_claimed = drop_self.get("isClaimed") is True
                         drop_instance_id = drop_self.get("dropInstanceID")
                         # campaign_ref.sync_drops() above already attempts to claim
-                        # any matching drop it tracks, so only fall back to claiming
-                        # here when we have no local campaign to have done that.
+                        # any drop it actually tracks, so only fall back to
+                        # claiming here when this specific drop wasn't one of
+                        # them - either there's no local campaign at all, or the
+                        # campaign exists but doesn't (yet) track this drop id.
                         is_claimable = (
                             (is_claimed is False)
                             and (drop_instance_id is not None)
-                            and (campaign_ref is None)
+                            and (drop_dict.get("id") not in campaign_tracked_drop_ids)
                         )
                         if is_claimable is True:
                             try:

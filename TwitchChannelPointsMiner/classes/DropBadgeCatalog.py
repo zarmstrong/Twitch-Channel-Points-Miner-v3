@@ -59,6 +59,12 @@ _ROMAN_TO_ARABIC = {
 
 def _words(value):
     raw_words = re.findall(r"[a-z0-9]+", str(value or "").casefold())
+    # Only reinterpret i/v/x as digits when there's at least one other word
+    # for context - a title that is *just* one of those letters has nothing
+    # to disambiguate it from a genuine single-letter title, and converting
+    # it anyway would risk a coincidental match against an unrelated badge.
+    if len(raw_words) <= 1:
+        return raw_words
     return [_ROMAN_TO_ARABIC.get(word, word) for word in raw_words]
 
 

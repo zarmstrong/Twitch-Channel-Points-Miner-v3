@@ -905,10 +905,10 @@ def test_ensure_windows_analytics_defaults_enables_dashboard_when_just_created(t
     assert "'enable_analytics': True," in updated
     assert "'enable_analytics': False," not in updated
     assert f"'password': {password!r}" in updated
-    # The original (now-shadowed) None assignment is left in place; only a
-    # second, later assignment is appended - simpler and more robust than
-    # rewriting the commented-out example block in place.
-    assert updated.count("ANALYTICS_CONFIG") == 2
+    # Delegates to config_editor.enable_analytics_dashboard(), which replaces
+    # the existing ANALYTICS_CONFIG = None assignment in place via the AST
+    # editor rather than appending a second, shadowing assignment.
+    assert updated.count("ANALYTICS_CONFIG") == 1
 
 
 def test_ensure_windows_analytics_defaults_never_applied_when_not_just_created(tmp_path):
@@ -1878,6 +1878,50 @@ def test_stop_miner_gracefully_swallows_end_s_trailing_sys_exit():
     handle.set_miner(_FakeMiner(raises=SystemExit(0)))
 
     windows_launcher._stop_miner_gracefully(handle)  # must not propagate
+
+
+def test_stop_miner_gracefully_waits_for_miner_during_startup_race(monkeypatch):
+    # Regression test: is_alive() reports True the instant the thread
+    # starts, well before runner_main() finishes config load and campaign
+    # construction and calls on_miner_ready() to populate .miner. A quit
+    # confirmed in that window must wait rather than silently skip graceful
+    # shutdown just because .miner isn't set yet.
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=True)
+    miner = _FakeMiner()
+
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        handle.set_miner(miner)
+
+    monkeypatch.setattr(windows_launcher.time, "sleep", fake_sleep)
+
+    windows_launcher._stop_miner_gracefully(handle)
+
+    assert sleep_calls
+    assert miner.calls == [(None, None)]
+
+
+def test_stop_miner_gracefully_gives_up_if_thread_dies_before_miner_is_set(
+    monkeypatch,
+):
+    # If the thread exits (e.g. a startup RuntimeError) before ever calling
+    # on_miner_ready(), waiting forever would hang the close handler - give
+    # up as soon as the thread itself is no longer alive.
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=False)
+
+    monkeypatch.setattr(
+        windows_launcher.time,
+        "sleep",
+        lambda seconds: (_ for _ in ()).throw(
+            AssertionError("must not wait once the thread is no longer alive")
+        ),
+    )
+
+    windows_launcher._stop_miner_gracefully(handle)  # must not raise or hang
 
 
 def test_run_miner_thread_reports_a_runtime_error_instead_of_crashing_silently(

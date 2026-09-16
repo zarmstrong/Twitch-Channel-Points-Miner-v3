@@ -26,6 +26,23 @@ MAX_LOG_TAIL_BYTES = 1024 * 1024
 UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
 RESPONSE_CACHE_TTL_SECONDS = 10.0
 
+# Extensions the static-file route serves without authentication (see
+# require_authentication() below) - the assets folder this route reads from
+# also holds full page templates, which must not be exempted the same way.
+_STATIC_BYPASS_EXTENSIONS = {
+    ".css",
+    ".js",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+}
+
 # Set by windows_launcher.py, which runs the AnalyticsServer thread inside
 # the same process as its own trusted desktop shell - never by Docker or a
 # plain source checkout. Lets the shell's own embedded dashboard skip the
@@ -812,7 +829,9 @@ class AnalyticsServer(Thread):
 
         @self.app.before_request
         def require_authentication():
-            if request.endpoint == "static":
+            if request.endpoint == "static" and (
+                os.path.splitext(request.path)[1].lower() in _STATIC_BYPASS_EXTENSIONS
+            ):
                 # CSS/JS/images powering the UI itself, not account data -
                 # gating these behind auth has no security benefit and
                 # breaks any client that can't repeat credentials on every
@@ -823,6 +842,12 @@ class AnalyticsServer(Thread):
                 # same-origin requests there - leaving the page structure to
                 # load (its own request carries the token) while every
                 # style/script/image 401s and silently fails to apply.
+                #
+                # Scoped to a known-safe extension allowlist rather than the
+                # whole /static/<path> route: static_folder/template_folder
+                # are the same assets directory, which also holds full page
+                # templates (charts.html, windows_shell.html) - those must
+                # still go through the checks below like any other page.
                 return None
             if self.password is None:
                 if request.path.startswith("/config"):

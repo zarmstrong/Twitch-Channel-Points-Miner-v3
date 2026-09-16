@@ -500,6 +500,7 @@
     var dateFormat = {{ dateFormat | tojson }};
     var updateDismissalCookie = {{ updateDismissalCookie | tojson }};
 </script>
+<script type="text/javascript" src="{{url_for('static', filename='tail_buffer.js', v=assetVersion)}}"></script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js', v=assetVersion)}}"></script>
 <script>
     if (typeof window.jQuery === 'undefined' || typeof window.ApexCharts === 'undefined') {

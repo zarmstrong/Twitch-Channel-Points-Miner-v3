@@ -56,7 +56,13 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (  # noqa: E402
     BUILD_COMMIT_ENV_VAR,
     SHELL_BYPASS_TOKEN_ENV_VAR,
 )
-from TwitchChannelPointsMiner.config_editor import _assignment, _dict_item, _simple_value
+from TwitchChannelPointsMiner.config_editor import (
+    ConfigEditError,
+    _assignment,
+    _dict_item,
+    _simple_value,
+    enable_analytics_dashboard,
+)
 from TwitchChannelPointsMiner.runner import main as runner_main  # noqa: E402
 
 DEFAULT_ANALYTICS_PORT = 54455
@@ -67,9 +73,6 @@ DEFAULT_ANALYTICS_PORT = 54455
 # high, uncommon port is only the default for a *newly created* config -
 # users can still change it in ANALYTICS_CONFIG at any time, and an existing
 # config that already has a 'port' value keeps it untouched.
-# Used only for the literal text edit in ensure_windows_analytics_defaults()
-# below, never as a safety gate - see that function's docstring for why.
-_ANALYTICS_DISABLED_MARKER = "'enable_analytics': False,"
 _PLACEHOLDER_USERNAME = "your-twitch-username"
 _TRAY_ICON_FILE = "twitch-miner.ico"
 _AUTOSTART_VALUE_NAME = "TwitchChannelPointsMiner"
@@ -402,28 +405,18 @@ def ensure_windows_analytics_defaults(config_path, just_created):
         return None
 
     password = secrets.token_urlsafe(18)
-    updated = source.replace(_ANALYTICS_DISABLED_MARKER, "'enable_analytics': True,", 1)
-    if updated == source:
-        # _matches_template_defaults confirmed enable_analytics is False,
-        # but this exact literal text wasn't found to replace (e.g. a
-        # different quote or spacing style) - bail out rather than append an
-        # ANALYTICS_CONFIG block that nothing would actually turn on.
+    try:
+        # Same AST-based writer the shell's "enable the dashboard?" prompt
+        # and Settings tab use for an existing config, rather than a second,
+        # parallel text-patching implementation of the same ANALYTICS_CONFIG
+        # shape (see enable_analytics_dashboard's docstring).
+        enable_analytics_dashboard(config_path, password, port=DEFAULT_ANALYTICS_PORT)
+    except (ConfigEditError, OSError, SyntaxError):
+        # _matches_template_defaults confirmed enable_analytics is False and
+        # ANALYTICS_CONFIG is unset, but the template's exact shape wasn't
+        # what the AST writer expected (e.g. it changed) - bail out rather
+        # than leave a half-written config.
         return None
-    updated += (
-        "\n"
-        "# --- Added by the Windows launcher on first run ---\n"
-        "# Powers the embedded dashboard shown in the desktop window. Change\n"
-        "# these values (or set enable_analytics back to False) any time.\n"
-        "ANALYTICS_CONFIG = {\n"
-        "    'host': '127.0.0.1',\n"
-        f"    'port': {DEFAULT_ANALYTICS_PORT},\n"
-        "    'refresh': 5,\n"
-        "    'days_ago': 7,\n"
-        f"    'password': {password!r},\n"
-        "    'log_poll_interval': 5,\n"
-        "}\n"
-    )
-    config_path.write_text(updated, encoding="utf-8")
     return password
 
 
@@ -1244,7 +1237,19 @@ def _stop_miner_gracefully(miner_thread_handle):
     """
     miner = getattr(miner_thread_handle, "miner", None)
     if miner is None:
-        return
+        # The miner thread reports itself alive as soon as it starts, but
+        # doesn't populate `.miner` until on_miner_ready() fires - after
+        # config load and campaign construction. A quit confirmed in that
+        # window would otherwise abandon the thread with no graceful
+        # shutdown at all; wait briefly for it instead of giving up at once.
+        deadline = time.monotonic() + 15
+        while miner is None and time.monotonic() < deadline:
+            if not miner_thread_handle.is_alive():
+                return
+            time.sleep(0.1)
+            miner = getattr(miner_thread_handle, "miner", None)
+        if miner is None:
+            return
     try:
         miner.end(None, None)
     except SystemExit:
@@ -1301,6 +1306,14 @@ def launch_shell(
     shell_html = bundled_file(os.path.join("assets", "windows_shell.html")).read_text(
         encoding="utf-8"
     )
+    # windows_shell.html is loaded below via html=..., a raw string with no
+    # base URL a <script src> could resolve against - inline the tail-buffer
+    # helper shared with the dashboard's Logs tab (assets/script.js) directly
+    # into its one inline <script> block instead of duplicating its logic.
+    tail_buffer_js = bundled_file(os.path.join("assets", "tail_buffer.js")).read_text(
+        encoding="utf-8"
+    )
+    shell_html = shell_html.replace("<script>", f"<script>\n{tail_buffer_js}", 1)
     window = webview.create_window(
         f"Twitch Channel Points Miner - {__version__}",
         html=shell_html,

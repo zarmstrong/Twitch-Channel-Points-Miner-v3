@@ -286,6 +286,20 @@ def test_static_assets_are_served_without_authentication():
     assert response.status_code == 200
 
 
+def test_static_html_templates_still_require_authentication():
+    # Regression test: the same assets folder backing the static route above
+    # also holds full page templates (charts.html, windows_shell.html) -
+    # unlike CSS/JS/images, these must not be exempted from auth just
+    # because Flask happens to serve them through the "static" endpoint too.
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().get(
+        server.app.static_url_path + "/charts.html"
+    )
+
+    assert response.status_code == 401
+
+
 def test_dashboard_shows_version_update_banner_and_footer(monkeypatch):
     monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
     monkeypatch.setattr(Settings, "latest_release_version", "3.8.0", raising=False)

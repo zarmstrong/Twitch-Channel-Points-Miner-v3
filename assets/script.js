@@ -144,14 +144,10 @@ var initialLogTailBytes = 128 * 1024;
 // the first real response arrives - cleared on that first response instead
 // of staying glued above the real tail forever.
 var logPlaceholderCleared = false;
-// Every poll used to append a brand-new text node with no upper bound, so a
-// long-running session (this tab keeps polling in the background even when
-// not the active one) accumulated the whole log's worth of DOM text nodes -
-// megabytes of retained content and, on Chromium/WebView2, gigabytes of
-// process memory after several hours. Keeping only the tail bounds it the
-// same way the server already bounds a single response (MAX_LOG_TAIL_BYTES).
-var logText = '';
+// See assets/tail_buffer.js for why this is bounded rather than an
+// ever-growing string.
 var LOG_DISPLAY_MAX_CHARS = 1024 * 1024;
+var logTailBuffer = createTailBuffer(LOG_DISPLAY_MAX_CHARS);
 
 // Load a recent tail first, then request only entries appended after it.
 // Lazily started the first time the Logs tab is opened, then keeps polling
@@ -159,17 +155,13 @@ var LOG_DISPLAY_MAX_CHARS = 1024 * 1024;
 function getLog() {
     $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
         if (!logPlaceholderCleared) {
-            logText = '';
+            logTailBuffer = createTailBuffer(LOG_DISPLAY_MAX_CHARS);
             logPlaceholderCleared = true;
         }
         // Logs contain Twitch-controlled text (for example prediction
         // titles), so never interpret them as HTML - .text() sets it as a
         // single text node rather than parsing markup.
-        logText += data;
-        if (logText.length > LOG_DISPLAY_MAX_CHARS) {
-            logText = logText.slice(logText.length - LOG_DISPLAY_MAX_CHARS);
-        }
-        $("#log-content").text(logText);
+        $("#log-content").text(logTailBuffer.append(data));
         // Scroll to the bottom of the log content
         $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
 

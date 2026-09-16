@@ -577,6 +577,74 @@ def test_claiming_final_drop_waits_for_inventory_confirmation(monkeypatch):
     assert twitch.completed_drop_campaigns == set()
 
 
+def test_sync_campaigns_fallback_claims_drop_not_tracked_by_campaign_ref(monkeypatch):
+    # Regression test: campaign_ref.sync_drops() only claims a drop whose id
+    # is already present in campaign_ref.drops - a drop added to the
+    # campaign after campaign_ref was built, or one earlier filtered out by
+    # __remove_ineligible_badge_drops, is not in there. The fallback right
+    # after sync_drops must still claim it rather than skip it just because
+    # the campaign itself is tracked.
+    twitch = bare_twitch(monkeypatch)
+    campaign = Campaign(campaign_data())
+    campaign.drops = []  # Simulates the drop no longer being tracked locally.
+
+    claimed = []
+    monkeypatch.setattr(
+        Twitch,
+        "claim_drop",
+        lambda self, drop, **kwargs: claimed.append(drop.id) or True,
+    )
+
+    progress = campaign_data()
+    progress["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"dropCampaignsInProgress": [progress]},
+    )
+
+    twitch._Twitch__sync_campaigns([campaign])
+
+    assert claimed == ["drop-1"]
+
+
+def test_sync_campaigns_does_not_double_claim_tracked_drop(monkeypatch):
+    # The double-claim fix this fallback guard exists for: a drop
+    # campaign_ref.sync_drops() already claimed must not be claimed again
+    # by the fallback loop right after it.
+    twitch = bare_twitch(monkeypatch)
+    campaign = Campaign(campaign_data())
+
+    claimed = []
+    monkeypatch.setattr(
+        Twitch,
+        "claim_drop",
+        lambda self, drop, **kwargs: claimed.append(drop.id) or True,
+    )
+
+    progress = campaign_data()
+    progress["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"dropCampaignsInProgress": [progress]},
+    )
+
+    twitch._Twitch__sync_campaigns([campaign])
+
+    assert claimed == ["drop-1"]
+
+
 def test_owned_badge_is_removed_from_advertised_campaign(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     twitch.available_badge_names = {"wardog"}
@@ -1048,6 +1116,49 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
 
     assert deadlines == {}
     assert twitch_games == {"example-game"}
+
+
+def test_reward_campaign_tag_survives_initial_merge_with_untagged_source(monkeypatch):
+    # Regression test: the initial dashboard+raw_query+helix merge replaces
+    # an existing campaigns_by_id entry wholesale whenever the incoming one
+    # has timeBasedDrops and the existing one doesn't, with no carry-over of
+    # _is_reward_campaign - silently un-excluding a purchase-gated reward
+    # campaign if a later, untagged source (e.g. helix) reports the same id.
+    twitch = bare_twitch(monkeypatch)
+
+    reward_campaign = campaign_data()
+    reward_campaign["timeBasedDrops"] = []
+    reward_campaign["_is_reward_campaign"] = True
+
+    helix_campaign = campaign_data()  # Same id, has timeBasedDrops, no tag.
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, status="OPEN": []
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([reward_campaign], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([helix_campaign], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": []}, {"example-game"}
+    )
+
+    assert "campaign-1" in twitch.reward_campaign_ids
 
 
 def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
