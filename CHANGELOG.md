@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.17.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.17.0...3.17.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **config:** validate analytics assignment before enabling the dashboard ([b9d9631](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b9d9631f9d1727ba8f3231ce170731c448695a05))
+
 ## [3.17.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.2...3.17.0) (2026-09-04)
 
 
