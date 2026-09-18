@@ -46,7 +46,7 @@ class Drop(object):
                 benefit_names.append(name)
         self.benefit = ", ".join(benefit_names)
         self.item_art_url = self.__extract_item_art_url(self.benefit_edges)
-        self.minutes_required = dict["requiredMinutesWatched"]
+        self.minutes_required = dict["requiredMinutesWatched"] or 0
 
         self.has_preconditions_met = None  # [True, False], None we don't know
         self.current_minutes_watched = 0

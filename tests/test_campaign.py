@@ -51,6 +51,44 @@ def test_clear_drops_removes_claimed_and_inactive_drops():
     assert campaign.drops == []
 
 
+def test_has_watchable_drops_reflects_progress_and_claim_state():
+    campaign = Campaign(campaign_data())
+
+    assert campaign.has_watchable_drops() is True
+
+    campaign.drops[0].current_minutes_watched = 10
+    campaign.drops[1].current_minutes_watched = 4
+    assert campaign.has_watchable_drops() is True
+
+    campaign.drops[1].current_minutes_watched = 10
+    assert campaign.has_watchable_drops() is False
+
+    campaign.drops[1].is_claimed = True
+    campaign.drops[1].current_minutes_watched = 0
+    assert campaign.has_watchable_drops() is False
+
+    campaign.drops[1].is_claimed = False
+    campaign.drops[1].dt_match = False
+    assert campaign.has_watchable_drops() is False
+
+
+def test_has_watchable_drops_treats_null_required_minutes_as_zero():
+    # Twitch can return requiredMinutesWatched: null for some drops (other
+    # call sites in Twitch.py defensively do `.get(...) or 0` on the same raw
+    # field). Without a fallback, current_minutes_watched (0) < None raises
+    # TypeError inside has_watchable_drops instead of treating the drop as
+    # trivially already watched enough.
+    data = campaign_data()
+    data["timeBasedDrops"][0]["requiredMinutesWatched"] = None
+    campaign = Campaign(data)
+
+    assert campaign.drops[0].minutes_required == 0
+    assert campaign.has_watchable_drops() is True
+
+    campaign.drops[1].current_minutes_watched = 10
+    assert campaign.has_watchable_drops() is False
+
+
 def test_sync_drops_updates_matching_drop_and_invokes_claim_callback():
     campaign = Campaign(campaign_data())
     claimed = []
