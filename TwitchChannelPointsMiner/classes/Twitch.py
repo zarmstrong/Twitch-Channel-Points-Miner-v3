@@ -3763,11 +3763,12 @@ class Twitch(object):
                 # tiers combined. Twitch only accrues Drops progress on one of
                 # the (up to two) watched streams regardless of source, so
                 # letting each tier keep its own slot would waste a slot that
-                # could otherwise go to an explicit/follower stream. When a
-                # preferred-category candidate exists this cycle, it wins the
-                # shared slot over a wildcard one, matching their relative
-                # source_priority; only when there's no preferred-category
-                # candidate does the soonest-expiring wildcard one get it.
+                # could otherwise go to an explicit/follower stream. When
+                # candidates exist in both tiers this cycle, the shared slot
+                # goes to whichever tier the user ranks higher in
+                # source_priority (see kept_discovered_index below) - only
+                # when just one tier has a candidate does that one get it
+                # unconditionally.
                 category_candidates = [
                     index
                     for index in streamers_watching
@@ -3795,20 +3796,32 @@ class Twitch(object):
                     if wildcard_category_candidates
                     else None
                 )
-                kept_discovered_index = (
-                    best_category_index
-                    if best_category_index is not None
-                    else best_wildcard_category_index
-                )
+                # The shared slot goes to whichever tier the user ranks higher
+                # in streamer_source_priority (CATEGORIES before
+                # WILDCARD_CATEGORIES by default) - not a hardcoded
+                # preference for categories, so a user who has deliberately
+                # reordered wildcard categories ahead of preferred ones gets
+                # that honored here too.
+                if best_category_index is None:
+                    kept_discovered_index = best_wildcard_category_index
+                elif best_wildcard_category_index is None:
+                    kept_discovered_index = best_category_index
+                elif (
+                    source_rank[StreamerSource.WILDCARD_CATEGORIES]
+                    < source_rank[StreamerSource.CATEGORIES]
+                ):
+                    kept_discovered_index = best_wildcard_category_index
+                else:
+                    kept_discovered_index = best_category_index
                 self.__log_category_drop_pick(
                     streamers_snapshot,
-                    # None (rather than best_wildcard_category_index) whenever
-                    # a preferred-category pick already took the shared slot,
-                    # so this logs "eligible but no free slot" instead of
-                    # falsely reporting the wildcard pick as watched.
+                    # None (rather than best_wildcard_category_index) unless
+                    # the wildcard pick actually took the shared slot, so this
+                    # logs "eligible but no free slot" instead of falsely
+                    # reporting the wildcard pick as watched.
                     (
                         best_wildcard_category_index
-                        if best_category_index is None
+                        if kept_discovered_index == best_wildcard_category_index
                         else None
                     ),
                     indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],

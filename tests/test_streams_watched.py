@@ -2,7 +2,7 @@ import importlib
 import inspect
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from types import SimpleNamespace
 
@@ -770,6 +770,35 @@ def test_preferred_category_wins_shared_discovered_slot_over_wildcard(monkeypatc
     )
 
     assert posted == ["https://spade.test/preferred"]
+
+
+def test_wildcard_category_wins_shared_slot_when_ranked_above_preferred(monkeypatch):
+    # The shared discovered-Drops slot (only one of category/wildcard is ever
+    # watched per cycle) must go to whichever tier the user ranks higher in
+    # streamer_source_priority, not a hardcoded "category always wins"
+    # preference - kept_discovered_index previously ignored source_rank
+    # entirely, even though its own comment claimed otherwise. The category
+    # candidate is given the more urgent deadline here specifically to prove
+    # the winner is determined by source_priority, not by soonest-to-expire,
+    # when both tiers have a candidate.
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("preferred", True, True),
+            _watch_streamer("wildcard", True, True, from_wildcard_category=True),
+        ],
+        streams_watched=2,
+        source_priority=[
+            StreamerSource.WILDCARD_CATEGORIES,
+            StreamerSource.CATEGORIES,
+        ],
+        category_campaign_deadlines={
+            "preferred": datetime.utcnow() + timedelta(minutes=1),
+            "wildcard": datetime.utcnow() + timedelta(minutes=60),
+        },
+    )
+
+    assert posted == ["https://spade.test/wildcard"]
 
 
 def test_freed_wildcard_slot_backfills_with_explicit_streamer(monkeypatch):
