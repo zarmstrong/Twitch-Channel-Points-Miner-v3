@@ -542,6 +542,76 @@ def test_current_campaign_award_completes_non_badge_fallback(monkeypatch):
     assert twitch.twitchdrops_app_campaigns == {}
 
 
+def test_completed_reward_campaign_signature_completes_fallback_despite_stale_award(
+    monkeypatch,
+):
+    """A once-only cosmetic reward earned long before this campaign's gist-
+    reported window must not keep the campaign "incomplete" forever:
+    completedRewardCampaigns in the authenticated inventory is authoritative
+    account-completion evidence and must short-circuit the lastAwardedAt/
+    window heuristic __fallback_reward_was_awarded otherwise relies on.
+    """
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+    twitch = bare_twitch(gql)
+    # Earned well before this gist-reported campaign window -- on its own,
+    # __fallback_reward_was_awarded would reject this as stale/unrelated.
+    twitch.awarded_game_event_drops["reward-1"] = {
+        "id": "reward-1",
+        "name": "Corrupted Creeper Cape",
+        "lastAwardedAt": "2020-01-01T12:00:00Z",
+    }
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "minecraft",
+                "game": "Minecraft",
+                "url": "https://twitchdrops.app/game/minecraft",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Minecraft",
+            "campaigns": [
+                {
+                    "name": "Corrupted Creeper Cape",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "Corrupted Creeper Cape"}],
+                }
+            ],
+        },
+    )
+    inventory = {
+        "completedRewardCampaigns": [
+            {
+                "campaign": {
+                    "name": "Corrupted Creeper Cape",
+                    "endAt": "2099-01-01T00:00:00Z",
+                    "game": {"displayName": "Minecraft"},
+                }
+            }
+        ]
+    }
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["minecraft"], set(), inventory
+    )
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
+
+
 def test_old_same_named_award_does_not_complete_new_fallback_campaign():
     twitch = bare_twitch(SimpleNamespace())
     twitch.awarded_game_event_drops["old-reward"] = {

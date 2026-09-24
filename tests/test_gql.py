@@ -1292,7 +1292,7 @@ def test_category_filter_does_not_resurrect_completed_twitch_category(monkeypatc
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: fallback_calls.append(known_slugs)
+        lambda self, categories, known_slugs, inventory=None: fallback_calls.append(known_slugs)
         or {"two-point-museum": datetime(2099, 1, 1)},
     )
     monkeypatch.setattr(
@@ -1320,7 +1320,7 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
         lambda self, inventory, requested: ({}, set()),
     )
 
-    def fallback(self, categories, known_slugs):
+    def fallback(self, categories, known_slugs, inventory=None):
         known_slugs.add("two-point-museum")
         return {"two-point-museum": datetime(2099, 1, 1)}
 
@@ -1354,7 +1354,7 @@ def test_category_filter_preserves_unconfigured_wildcard_deadlines(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {},
+        lambda self, categories, known_slugs, inventory=None: {},
     )
 
     assert twitch.filter_categories_with_active_drops(["inventory-game"]) == [
@@ -1395,7 +1395,7 @@ def test_category_filter_prunes_requested_category_whose_campaign_ended(monkeypa
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {},
+        lambda self, categories, known_slugs, inventory=None: {},
     )
 
     twitch.filter_categories_with_active_drops(["ended-game"])
@@ -1442,7 +1442,7 @@ def test_category_filter_orders_campaigns_across_inventory_and_fallback(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {"fallback-game": datetime(2099, 1, 1)},
+        lambda self, categories, known_slugs, inventory=None: {"fallback-game": datetime(2099, 1, 1)},
     )
 
     assert (
@@ -1468,7 +1468,7 @@ def test_wildcard_catalog_keeps_external_gist_candidates_despite_slug_mutation(
         ),
     )
 
-    def fallback(self, categories, known_slugs):
+    def fallback(self, categories, known_slugs, inventory=None):
         known_slugs.add("predecessor")
         return {"predecessor": datetime(2099, 1, 1)}
 

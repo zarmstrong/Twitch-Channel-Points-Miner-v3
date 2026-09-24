@@ -1778,7 +1778,9 @@ class Twitch(object):
 
         return active_deadlines, twitch_category_slugs
 
-    def __twitchdrops_app_fallback(self, categories, known_category_slugs):
+    def __twitchdrops_app_fallback(
+        self, categories, known_category_slugs, inventory=None
+    ):
         catalog_complete = categories is None
         deadlines = {}
         twitch_authoritative_slugs = set(known_category_slugs)
@@ -1799,6 +1801,18 @@ class Twitch(object):
         # account-owned rather than repeatable campaign consumables.
         owned_reward_names = self.__get_available_badge_names(refresh=True)
         captured_drop_history = self.__captured_drop_history()
+        # completedRewardCampaigns is authoritative account-completion evidence
+        # (unlike __fallback_reward_was_awarded's lastAwardedAt-in-window guess,
+        # it does not depend on the reward having been (re)awarded inside this
+        # externally-sourced campaign's date window) but its campaign IDs are
+        # Twitch's own and never match the gist's locally computed IDs, so join
+        # on the same (game, campaign name, end time) signature already used
+        # for badge campaigns.
+        completed_campaign_signatures = (
+            self.completed_badge_campaign_signatures(inventory)
+            if isinstance(inventory, dict)
+            else set()
+        )
         try:
             indexed_games = scraper.scrape_front_page()
         except (ValueError, requests.RequestException) as error:
@@ -1952,24 +1966,32 @@ class Twitch(object):
                     for drop in campaign.get("drops", [])
                     if str(drop.get("name") or "").strip()
                 }
-                missing_drop_names = sorted(
-                    drop_name
-                    for drop_name in drop_names
-                    if not (
-                        self.__reward_name_is_owned(
-                            drop_name,
-                            owned_reward_names,
-                            report.get("game") or category_name,
-                        )
-                        or self.__fallback_reward_was_awarded(drop_name, campaign)
-                        or self.__fallback_reward_was_captured(
-                            drop_name,
-                            campaign,
-                            report.get("game") or category_name,
-                            captured_drop_history,
+                if self.__campaign_matches_completed_signature(
+                    report.get("game") or category_name,
+                    campaign.get("name"),
+                    ends_at,
+                    completed_campaign_signatures,
+                ):
+                    missing_drop_names = []
+                else:
+                    missing_drop_names = sorted(
+                        drop_name
+                        for drop_name in drop_names
+                        if not (
+                            self.__reward_name_is_owned(
+                                drop_name,
+                                owned_reward_names,
+                                report.get("game") or category_name,
+                            )
+                            or self.__fallback_reward_was_awarded(drop_name, campaign)
+                            or self.__fallback_reward_was_captured(
+                                drop_name,
+                                campaign,
+                                report.get("game") or category_name,
+                                captured_drop_history,
+                            )
                         )
                     )
-                )
                 campaign_evaluations.append(
                     {
                         "campaign": campaign.get("name"),
@@ -2305,6 +2327,33 @@ class Twitch(object):
 
         return signatures
 
+    def __campaign_matches_completed_signature(
+        self, game_name, campaign_name, ends_at, completed_campaign_signatures
+    ):
+        """Match an externally sourced campaign against completed_badge_campaign_signatures.
+
+        Joins on (game_slug, campaign_name, ends_at) the same way
+        DropBadgeCatalog._matches_completed_campaign does, since both draw
+        their campaign records from the same externally scraped catalog and
+        neither's campaign "id" is Twitch's real campaign ID.
+        """
+        if ends_at is None or not completed_campaign_signatures:
+            return False
+        game_slug = self.__slugify(game_name)
+        campaign_name = str(campaign_name or "").strip().casefold()
+        if not game_slug or not campaign_name:
+            return False
+
+        ends_at_epoch = ends_at.replace(tzinfo=timezone.utc).timestamp()
+        return any(
+            game_slug == signature_game_slug
+            and campaign_name == signature_campaign_name
+            and abs(ends_at_epoch - signature_ends_at) <= 1
+            for signature_game_slug, signature_campaign_name, signature_ends_at in (
+                completed_campaign_signatures
+            )
+        )
+
     def filter_categories_with_active_drops(
         self,
         categories: List[str],
@@ -2342,6 +2391,7 @@ class Twitch(object):
         fallback_deadlines = self.__twitchdrops_app_fallback(
             categories,
             twitch_category_slugs,
+            inventory,
         )
         # The external campaign index fills gaps when Twitch does not expose a
         # configured game at all.  Once Twitch has evaluated a game, its
@@ -2479,7 +2529,7 @@ class Twitch(object):
             # "Twitch category slugs" and get excluded, silently zeroing out
             # wildcard's external additions every cycle.
             fallback_deadlines = self.__twitchdrops_app_fallback(
-                None, twitch_category_slugs
+                None, twitch_category_slugs, inventory
             )
         else:
             fallback_deadlines = dict(getattr(self, "twitchdrops_app_deadlines", {}))
