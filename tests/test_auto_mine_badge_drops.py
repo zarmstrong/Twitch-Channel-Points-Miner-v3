@@ -176,6 +176,10 @@ def test_badge_ownership_change_retires_only_stale_badge_streamers():
     assert miner.ws_pool.removed == ["stale"]
     assert current.from_badge_campaign is True
     assert configured.from_badge_campaign is False
+    # from_category was only ever True because this was a badge campaign;
+    # retiring the badge must reset it too, or the retained streamer
+    # permanently misclassifies as a real category-discovery streamer.
+    assert configured.from_category is False
 
 
 def test_badge_inventory_failure_preserves_baseline_for_next_refresh():

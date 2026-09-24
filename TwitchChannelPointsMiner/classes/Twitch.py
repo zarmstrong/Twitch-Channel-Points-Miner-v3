@@ -14,10 +14,10 @@ import string
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import choice, token_hex
-from threading import BoundedSemaphore, Event, Lock
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -67,6 +67,8 @@ from TwitchChannelPointsMiner.utils import (
 logger = logging.getLogger(__name__)
 JsonType = Dict[str, Any]
 CHANNEL_POINTS_MAX_CONCURRENCY = 3
+DROP_INVENTORY_FRESHNESS_SECONDS = 180
+PROMPT_CLAIM_DEBOUNCE_SECONDS = 300
 
 
 class Twitch(object):
@@ -109,8 +111,12 @@ class Twitch(object):
         "category_campaign_deadlines",
         "last_category_drop_selection",
         "last_wildcard_category_drop_selection",
+        "last_drop_pick_streamer",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
+        "prompt_claim_lock",
+        "prompt_claim_pass_lock",
+        "prompt_claim_last",
         "campaign_game_slugs",
         "reward_campaign_ids",
         "available_badge_names",
@@ -180,8 +186,12 @@ class Twitch(object):
         self.category_campaign_deadlines = {}
         self.last_category_drop_selection = None
         self.last_wildcard_category_drop_selection = None
+        self.last_drop_pick_streamer = None
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
+        self.prompt_claim_lock = Lock()
+        self.prompt_claim_pass_lock = Lock()
+        self.prompt_claim_last = {}
         self.campaign_game_slugs = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
         # than watch time. Populated from the account-wide campaign
@@ -1146,7 +1156,10 @@ class Twitch(object):
 
         # Twitch can briefly leave a completed campaign in the in-progress
         # collection before moving it to completedRewardCampaigns. All Drops
-        # being explicitly claimed is also authoritative completion evidence.
+        # being explicitly claimed is also authoritative completion evidence,
+        # as is every drop having already accrued its required watch time:
+        # claiming is an inventory call that does not need more watching, so a
+        # fully captured but not-yet-claimed campaign must not stay watchable.
         for campaign in inventory.get("dropCampaignsInProgress", []) or []:
             if not isinstance(campaign, dict):
                 continue
@@ -1157,12 +1170,25 @@ class Twitch(object):
             if all(
                 isinstance(drop, dict)
                 and isinstance(drop.get("self"), dict)
-                and drop["self"].get("isClaimed") is True
+                and self.__inventory_drop_is_done(drop)
                 for drop in drops
             ):
                 completed_ids.add(str(campaign_id))
 
         return completed_ids
+
+    @staticmethod
+    def __inventory_drop_is_done(drop: dict) -> bool:
+        drop_self = drop.get("self")
+        if not isinstance(drop_self, dict):
+            return False
+        if drop_self.get("isClaimed") is True:
+            return True
+        required_minutes = drop.get("requiredMinutesWatched") or 0
+        return (
+            required_minutes > 0
+            and (drop_self.get("currentMinutesWatched") or 0) >= required_minutes
+        )
 
     def __merge_campaign_inventory_progress(
         self, campaign: dict, inventory_campaign: dict
@@ -2329,10 +2355,29 @@ class Twitch(object):
                 if game_slug not in twitch_evaluated_category_slugs
             }
         )
-        # Cache the per-category deadlines so send_minute_watched_events can
-        # arbitrate between simultaneously-live category streams by whichever
-        # campaign is closest to expiring, instead of by discovery order.
-        self.category_campaign_deadlines = dict(active_category_deadlines)
+        # Merge, don't replace: the wildcard pass owns the full-catalog
+        # deadline dict and is skipped whenever this preferred pass finds a
+        # live channel, so replacing here would wipe every wildcard deadline
+        # and the drop pick would flip between real deadlines and "no known
+        # deadline" as the passes alternate. Preserve wildcard entries this
+        # evaluation didn't cover, prune expired ones, and let the fresh
+        # evaluation win for games it did cover. A requested slug absent from
+        # active_category_deadlines was covered by this pass and found to
+        # have no active campaign, so it must not be preserved even though
+        # it's also absent -- otherwise a campaign that just ended keeps its
+        # old deadline until that timestamp elapses on its own.
+        now = datetime.utcnow()
+        preserved_deadlines = {
+            game_slug: deadline
+            for game_slug, deadline in (
+                getattr(self, "category_campaign_deadlines", None) or {}
+            ).items()
+            if deadline > now
+            and game_slug not in active_category_deadlines
+            and game_slug not in requested_category_slugs
+        }
+        preserved_deadlines.update(active_category_deadlines)
+        self.category_campaign_deadlines = preserved_deadlines
         if active_category_deadlines == {}:
             for requested_slug in requested_category_slugs:
                 self.__replace_category_campaign_eligibility(requested_slug, {})
@@ -2666,6 +2711,72 @@ class Twitch(object):
 
         return False
 
+    def __in_progress_drop_needs(self, game_slug):
+        # Minutes still needed on the closest-to-completion in-progress drop
+        # for a game, taken from the latest inventory snapshot. Returns None
+        # when there is no fresh snapshot or no unclaimed incomplete drop, so
+        # absence is authoritative (completed or expired campaign).
+        progress = (getattr(self, "drop_inventory_progress", None) or {}).get(game_slug)
+        if not progress:
+            return None
+        updated_at = getattr(self, "drop_inventory_progress_updated_at", 0)
+        if (
+            not updated_at
+            or (time.time() - updated_at) > DROP_INVENTORY_FRESHNESS_SECONDS
+        ):
+            return None
+        candidates = [
+            (max(required - current, 0), drop_name)
+            for (_, _, _, drop_name, current, required) in progress
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[0])
+
+    def __previous_pick_still_farming(self, streamer):
+        # A transient per-channel eligibility failure (stale or empty Stream
+        # campaign state right after a category refresh rebuilt the streamer
+        # objects) must not silently retire the current drop pick. Keep the
+        # previously picked streamer watchable while its game still has an
+        # in-progress drop in a fresh inventory snapshot and the campaign
+        # deadline has not passed. Authoritative failures (channel offline,
+        # campaign gone from the inventory) are not held.
+        previous = getattr(self, "last_drop_pick_streamer", None)
+        if previous is None or streamer.username != previous:
+            return False
+        if streamer.is_online is not True:
+            return False
+        settings = getattr(streamer, "settings", None)
+        if getattr(settings, "claim_drops", False) is not True:
+            return False
+        if (
+            getattr(streamer, "from_category", False) is not True
+            and getattr(streamer, "from_wildcard_category", False) is not True
+        ):
+            return False
+        stream = getattr(streamer, "stream", None)
+        if stream is None:
+            return False
+        game_slug = self.__slugify(stream.game_name() or "")
+        needs = self.__in_progress_drop_needs(game_slug)
+        if needs is None:
+            return False
+        needs_minutes, _drop_name = needs
+        deadline = (getattr(self, "category_campaign_deadlines", None) or {}).get(
+            game_slug
+        )
+        # No known deadline: hold, mirroring _hold_reason's no-deadline branch
+        # (there is nothing to check feasibility against). With a deadline,
+        # only hold while the in-progress drop can still finish in time --
+        # otherwise this would keep the slot on a channel whose drop
+        # mathematically cannot complete until the deadline passes on its own.
+        if deadline is None:
+            return True
+        if deadline <= datetime.utcnow():
+            return False
+        minutes_to_deadline = (deadline - datetime.utcnow()).total_seconds() / 60
+        return needs_minutes <= minutes_to_deadline
+
     def __log_category_drop_pick(
         self,
         streamers,
@@ -2674,6 +2785,8 @@ class Twitch(object):
         category_expiration,
         label="category",
         state_attr="last_category_drop_selection",
+        reason=None,
+        slotted_candidates=None,
     ):
         chosen_username = (
             streamers[chosen_index].username if chosen_index is not None else None
@@ -2719,15 +2832,69 @@ class Twitch(object):
                 )
             return
 
-        reason = (
-            f"soonest-expiring of {len(candidate_indexes)} eligible campaigns "
-            f"({describe_candidates()})"
-            if len(candidate_indexes) > 1
-            else f"only eligible {label} drops stream currently live"
-        )
+        reason_text = reason
+        if reason_text is None:
+            tier_min_index = (
+                min(candidate_indexes, key=category_expiration)
+                if candidate_indexes
+                else None
+            )
+            if (
+                chosen_index == tier_min_index
+                or slotted_candidates is None
+                or not slotted_candidates
+            ):
+                # The picked stream really is the soonest-expiring of the whole
+                # eligible tier (or slot-allocation details are unknown).
+                reason_text = (
+                    f"soonest-expiring of {len(candidate_indexes)} eligible "
+                    "campaigns "
+                    f"({describe_candidates()})"
+                    if len(candidate_indexes) > 1
+                    else f"only eligible {label} drops stream currently live"
+                )
+            else:
+                slotted = [
+                    index for index in candidate_indexes if index in slotted_candidates
+                ]
+                unslotted = [
+                    index
+                    for index in candidate_indexes
+                    if index not in slotted_candidates
+                ]
+                if len(slotted) > 1:
+                    slotted_labels = [
+                        describe(index)
+                        for index in sorted(slotted, key=category_expiration)
+                    ]
+                    unslotted_best = (
+                        describe(min(unslotted, key=category_expiration))
+                        if unslotted
+                        else "none"
+                    )
+                    reason_text = (
+                        f"soonest-expiring of {len(slotted)} slotted {label} "
+                        f"campaigns ({', '.join(slotted_labels)}); "
+                        f"{len(unslotted)} eligible campaigns not slotted this "
+                        f"cycle (soonest: {unslotted_best})"
+                    )
+                else:
+                    # Only one discovered stream received a watch slot - the
+                    # remaining tier never competed for it this cycle.
+                    unslotted_best = (
+                        describe(min(unslotted, key=category_expiration))
+                        if unslotted
+                        else "none"
+                    )
+                    reason_text = (
+                        f"only slotted {label} candidate ({chosen_username}); "
+                        "soonest-expiring eligible campaign "
+                        f"({unslotted_best}) got no watch slot this cycle "
+                        "(slot allocated by higher priority)"
+                    )
         logger.info(
             f"{Fore.CYAN}Selected {streamers[chosen_index].username} for drops: "
-            f"{reason}{Fore.RESET}",
+            f"{reason_text}{Fore.RESET}",
             extra={"emoji": ":dart:", "event": Events.DROP_STATUS},
         )
 
@@ -3483,6 +3650,7 @@ class Twitch(object):
         streams_watched=2,
         source_priority=None,
         drop_progress_stall_minutes=10,
+        drop_pick_stickiness_minutes=0,
     ):
         while self.running:
             iteration_started_at = time.time()
@@ -3533,6 +3701,14 @@ class Twitch(object):
                         getattr(streamers_snapshot[i], "from_category", False)
                         is not True
                         or self.__drops_condition(streamers_snapshot[i]) is True
+                        # A transient per-channel eligibility failure must not
+                        # exclude the previous drop pick before the rescue
+                        # check below (Priority.DROPS) ever gets to see it -
+                        # without this, __previous_pick_still_farming's
+                        # streamer was already filtered out here and the
+                        # rescue path could never run.
+                        or self.__previous_pick_still_farming(streamers_snapshot[i])
+                        is True
                     )
                     and (
                         streamers_snapshot[i].online_at == 0
@@ -3641,6 +3817,161 @@ class Twitch(object):
                     key=category_expiration
                 )
 
+                # Stickiness: a bare expiration sort hands the tier's watch
+                # slot to whichever campaign happens to be closest to expiring
+                # this cycle, so the watched campaign churns every time
+                # deadlines re-rank by a minute or the discovered channel set
+                # changes. When the previously picked streamer is still
+                # eligible and the best alternative is not more than the
+                # stickiness margin closer to expiring, move the previous pick
+                # to the front of the tier so it keeps the slot (0 disables
+                # the behavior).
+                stickiness_margin = timedelta(
+                    minutes=max(float(drop_pick_stickiness_minutes), 0)
+                )
+                previous_drop_pick = getattr(self, "last_drop_pick_streamer", None)
+
+                def _sticky_order(indexes):
+                    # Returns (indexes, sticky_held): sticky_held is True when
+                    # the previous pick was moved to the front by the margin
+                    # rule, so the final pick log can attribute the choice to
+                    # stickiness instead of plain expiration order. Works on a
+                    # copy: the caller's tier list must stay untouched.
+                    indexes = list(indexes)
+                    if (
+                        not indexes
+                        or stickiness_margin <= timedelta(0)
+                        or previous_drop_pick is None
+                    ):
+                        return indexes, False
+                    previous_index = next(
+                        (
+                            index
+                            for index in indexes
+                            if streamers_snapshot[index].username == previous_drop_pick
+                        ),
+                        None,
+                    )
+                    if previous_index is None:
+                        return indexes, False
+                    best_index = min(indexes, key=category_expiration)
+                    if best_index == previous_index:
+                        return indexes, False
+                    best_deadline = category_expiration(best_index)
+                    previous_deadline = category_expiration(previous_index)
+                    if (
+                        best_deadline < previous_deadline
+                        and (previous_deadline - best_deadline) > stickiness_margin
+                    ):
+                        # The alternative expires sooner by more than the
+                        # margin - let the expiration sort win.
+                        return indexes, False
+                    # The previous pick is at least as urgent (this also
+                    # covers both deadlines being unknown) - keep it.
+                    indexes.remove(previous_index)
+                    indexes.insert(0, previous_index)
+                    return indexes, True
+
+                def _stickiness_hold_reason(previous_index, best_index):
+                    return (
+                        "held by stickiness (margin "
+                        f"{stickiness_margin.total_seconds() / 60:.0f}m): "
+                        f"{streamers_snapshot[previous_index].username} kept "
+                        f"({_deadline_label(category_expiration(previous_index))} "
+                        "vs "
+                        f"{_deadline_label(category_expiration(best_index))} for "
+                        f"{streamers_snapshot[best_index].username})"
+                    )
+
+                def _deadline_label(deadline):
+                    if deadline == datetime.max:
+                        return "no known deadline"
+                    minutes = max(
+                        (deadline - datetime.utcnow()).total_seconds() / 60, 0
+                    )
+                    return f"{minutes:.0f}m left"
+
+                (
+                    indexes_by_source[StreamerSource.CATEGORIES],
+                    category_sticky_held,
+                ) = _sticky_order(indexes_by_source[StreamerSource.CATEGORIES])
+                (
+                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
+                    wildcard_sticky_held,
+                ) = _sticky_order(indexes_by_source[StreamerSource.WILDCARD_CATEGORIES])
+
+                def _hold_reason(index, deadline):
+                    # Why the previously picked streamer must keep the slot:
+                    # its game still has an in-progress drop that can finish
+                    # before the campaign deadline. Returns None when there is
+                    # no such drop (or it can no longer complete in time).
+                    stream = getattr(streamers_snapshot[index], "stream", None)
+                    if stream is None:
+                        return None
+                    needs = self.__in_progress_drop_needs(
+                        self.__slugify(stream.game_name() or "")
+                    )
+                    if needs is None:
+                        return None
+                    needs_minutes, drop_name = needs
+                    if deadline == datetime.max:
+                        return (
+                            f"holding in-progress drop '{drop_name}' "
+                            f"(needs {needs_minutes:.0f}m, no campaign deadline)"
+                        )
+                    minutes_to_deadline = max(
+                        (deadline - datetime.utcnow()).total_seconds() / 60, 0
+                    )
+                    if needs_minutes > minutes_to_deadline:
+                        return None
+                    return (
+                        f"holding in-progress drop '{drop_name}' "
+                        f"(needs {needs_minutes:.0f}m, campaign deadline in "
+                        f"{minutes_to_deadline:.0f}m)"
+                    )
+
+                def _prefer_sticky(candidates, best_index):
+                    # Same margin rule as _sticky_order, applied to the final
+                    # per-tier choice once the watch slots are allocated.
+                    if (
+                        not candidates
+                        or best_index is None
+                        or stickiness_margin <= timedelta(0)
+                    ):
+                        return best_index, None
+                    previous_index = next(
+                        (
+                            index
+                            for index in candidates
+                            if streamers_snapshot[index].username == previous_drop_pick
+                        ),
+                        None,
+                    )
+                    if previous_index is None or previous_index == best_index:
+                        return best_index, None
+                    best_deadline = category_expiration(best_index)
+                    previous_deadline = category_expiration(previous_index)
+                    if best_deadline >= previous_deadline:
+                        # The previous pick is at least as urgent (this also
+                        # covers both deadlines being unknown) - keep it.
+                        return previous_index, None
+                    if (previous_deadline - best_deadline) > stickiness_margin:
+                        # Normally the more urgent campaign wins - but a drop
+                        # that is still being farmed and can finish before its
+                        # deadline is worth more than switching to another
+                        # campaign and restarting its progress from zero.
+                        hold_reason = _hold_reason(previous_index, previous_deadline)
+                        if hold_reason is not None:
+                            return previous_index, hold_reason
+                        return best_index, None
+                    # The previous pick stays within the stickiness margin, so
+                    # it keeps the slot over the more urgent challenger - say
+                    # so, instead of falling back to the soonest-expiring text.
+                    return (
+                        previous_index,
+                        _stickiness_hold_reason(previous_index, best_index),
+                    )
+
                 for prior in priority:
                     if remaining_watch_amount() <= 0:
                         break
@@ -3703,8 +4034,10 @@ class Twitch(object):
 
                         elif prior == Priority.DROPS:
                             for index in available_source_indexes:
+                                streamer = streamers_snapshot[index]
                                 if (
-                                    self.__drops_condition(streamers_snapshot[index])
+                                    self.__drops_condition(streamer) is True
+                                    or self.__previous_pick_still_farming(streamer)
                                     is True
                                 ):
                                     streamers_watching.add(index)
@@ -3741,21 +4074,18 @@ class Twitch(object):
                     ),
                 )[:max_watch_amount]
 
-                def _is_preferred_category(index):
-                    streamer = streamers_snapshot[index]
-                    return (
-                        getattr(streamer, "from_category", False) is True
-                        and getattr(streamer, "from_wildcard_category", False)
-                        is not True
-                    )
-
-                def _is_wildcard_category(index):
-                    return (
-                        getattr(
-                            streamers_snapshot[index], "from_wildcard_category", False
-                        )
-                        is True
-                    )
+                # Tier membership (not the from_category/from_wildcard_category
+                # attributes alone) decides who can win the shared discovered
+                # slot below and who the later trim loop evicts - a
+                # BADGES-source streamer can also carry from_category=True, so
+                # an attribute-only check here let a badge stream win the slot
+                # and then evade the trim loop (which already used tier
+                # membership), silently dropping a genuine category/wildcard
+                # candidate for the whole cycle.
+                preferred_tier = set(indexes_by_source[StreamerSource.CATEGORIES])
+                wildcard_tier = set(
+                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES]
+                )
 
                 # Safety net: never watch more than one discovered ("not
                 # explicitly chosen by the user") Drops stream per cycle in
@@ -3769,33 +4099,77 @@ class Twitch(object):
                 # source_priority (see kept_discovered_index below) - only
                 # when just one tier has a candidate does that one get it
                 # unconditionally.
+
+                # Final choice per tier: min() by expiration, but keep the
+                # previously picked streamer while it is still within the
+                # stickiness margin (the tier ordering above already fronted
+                # it for slot allocation).
                 category_candidates = [
-                    index
-                    for index in streamers_watching
-                    if _is_preferred_category(index)
+                    index for index in streamers_watching if index in preferred_tier
                 ]
                 best_category_index = (
                     min(category_candidates, key=category_expiration)
                     if category_candidates
                     else None
                 )
+                best_category_index, category_hold_reason = _prefer_sticky(
+                    category_candidates, best_category_index
+                )
+                if (
+                    category_hold_reason is None
+                    and category_sticky_held
+                    and best_category_index is not None
+                    and previous_drop_pick is not None
+                    and streamers_snapshot[best_category_index].username
+                    == previous_drop_pick
+                ):
+                    # The tier ordering fronted the previous pick (within the
+                    # stickiness margin) and it won the slot over the more
+                    # urgent tier minimum - attribute the choice correctly.
+                    tier_min_index = min(
+                        indexes_by_source[StreamerSource.CATEGORIES],
+                        key=category_expiration,
+                    )
+                    if best_category_index != tier_min_index:
+                        category_hold_reason = _stickiness_hold_reason(
+                            best_category_index, tier_min_index
+                        )
                 self.__log_category_drop_pick(
                     streamers_snapshot,
                     best_category_index,
                     indexes_by_source[StreamerSource.CATEGORIES],
                     category_expiration,
+                    reason=category_hold_reason,
+                    slotted_candidates=category_candidates,
                 )
 
                 wildcard_category_candidates = [
-                    index
-                    for index in streamers_watching
-                    if _is_wildcard_category(index)
+                    index for index in streamers_watching if index in wildcard_tier
                 ]
                 best_wildcard_category_index = (
                     min(wildcard_category_candidates, key=category_expiration)
                     if wildcard_category_candidates
                     else None
                 )
+                best_wildcard_category_index, wildcard_hold_reason = _prefer_sticky(
+                    wildcard_category_candidates, best_wildcard_category_index
+                )
+                if (
+                    wildcard_hold_reason is None
+                    and wildcard_sticky_held
+                    and best_wildcard_category_index is not None
+                    and previous_drop_pick is not None
+                    and streamers_snapshot[best_wildcard_category_index].username
+                    == previous_drop_pick
+                ):
+                    tier_min_index = min(
+                        indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
+                        key=category_expiration,
+                    )
+                    if best_wildcard_category_index != tier_min_index:
+                        wildcard_hold_reason = _stickiness_hold_reason(
+                            best_wildcard_category_index, tier_min_index
+                        )
                 # The shared slot goes to whichever tier the user ranks higher
                 # in streamer_source_priority (CATEGORIES before
                 # WILDCARD_CATEGORIES by default) - not a hardcoded
@@ -3813,6 +4187,11 @@ class Twitch(object):
                     kept_discovered_index = best_wildcard_category_index
                 else:
                     kept_discovered_index = best_category_index
+                self.last_drop_pick_streamer = (
+                    streamers_snapshot[kept_discovered_index].username
+                    if kept_discovered_index is not None
+                    else None
+                )
                 self.__log_category_drop_pick(
                     streamers_snapshot,
                     # None (rather than best_wildcard_category_index) unless
@@ -3828,12 +4207,19 @@ class Twitch(object):
                     category_expiration,
                     label="wildcard category",
                     state_attr="last_wildcard_category_drop_selection",
+                    reason=wildcard_hold_reason,
+                    slotted_candidates=wildcard_category_candidates,
                 )
 
+                # Only discovered category/wildcard tier members are trimmed
+                # here - membership in the tier lists (preferred_tier /
+                # wildcard_tier, defined above), not the from_category flag
+                # alone, since a BADGES-source streamer can also carry
+                # from_category=True.
                 filtered_streamers_watching = []
                 for index in streamers_watching:
                     if (
-                        _is_preferred_category(index) or _is_wildcard_category(index)
+                        index in preferred_tier or index in wildcard_tier
                     ) and index != kept_discovered_index:
                         continue
                     filtered_streamers_watching.append(index)
@@ -3845,7 +4231,7 @@ class Twitch(object):
                         break
                     if index in filtered_streamers_watching:
                         continue
-                    if _is_preferred_category(index) or _is_wildcard_category(index):
+                    if index in preferred_tier or index in wildcard_tier:
                         continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
@@ -3921,6 +4307,16 @@ class Twitch(object):
                                                 campaign=campaign,
                                                 streamer_username=streamer.username,
                                             )
+                                            if (
+                                                last_saved_minutes
+                                                < drop.minutes_required
+                                                and drop.current_minutes_watched
+                                                >= drop.minutes_required
+                                            ):
+                                                self.__claim_completed_drop_promptly(
+                                                    drop,
+                                                    campaign,
+                                                )
 
                                     # We could add .has_preconditions_met condition inside is_printable
                                     if (
@@ -5629,6 +6025,66 @@ class Twitch(object):
                                 "waiting for inventory completion confirmation"
                             )
 
+    def __claim_completed_drop_promptly(self, drop, campaign):
+        # A drop that just reached 100% needs no more watch time, but waiting
+        # for the next sync cycle (up to 30 minutes) delays the claim and keeps
+        # the campaign in the "watchable" limbo. Claim in the background,
+        # debounced so repeated progress saves cannot spam the claim pass.
+        if drop.minutes_required <= 0 or drop.drop_instance_id is None:
+            return
+        now = time.monotonic()
+        with self.prompt_claim_lock:
+            last = self.prompt_claim_last.get(drop.drop_instance_id)
+            if last is not None and (now - last) < PROMPT_CLAIM_DEBOUNCE_SECONDS:
+                return
+            self.prompt_claim_last[drop.drop_instance_id] = now
+            self.prompt_claim_last = {
+                instance_id: stamp
+                for instance_id, stamp in self.prompt_claim_last.items()
+                if (now - stamp) < PROMPT_CLAIM_DEBOUNCE_SECONDS
+            }
+        Thread(
+            target=self.__run_prompt_claim,
+            args=(drop, campaign),
+            name=f"prompt-claim-{campaign.id}",
+            daemon=True,
+        ).start()
+
+    def __clear_prompt_claim_debounce(self, drop_instance_id):
+        # The debounce entry is written optimistically, before the claim is
+        # known to succeed. The call site (__claim_completed_drop_promptly's
+        # caller) is edge-triggered on drop_progress_last_saved, which
+        # saturates on the same tick that triggers it, so this can't be
+        # re-entered for the same drop - there is no near-term retry through
+        # this path either way. Clearing here just avoids leaving an unusable
+        # entry behind when lock contention or an exception meant nothing was
+        # actually claimed; the real fallback is still the periodic
+        # sync_campaigns claim pass, same as before this debounce existed.
+        with self.prompt_claim_lock:
+            self.prompt_claim_last.pop(drop_instance_id, None)
+
+    def __run_prompt_claim(self, drop, campaign):
+        if not self.prompt_claim_pass_lock.acquire(blocking=False):
+            logger.info(
+                "Prompt claim skipped; an inventory claim pass is already running"
+            )
+            self.__clear_prompt_claim_debounce(drop.drop_instance_id)
+            return
+        try:
+            logger.info(
+                f"Drop '{drop.name}' of campaign '{campaign.name}' reached 100%; "
+                "claiming inventory drops promptly"
+            )
+            self.claim_all_drops_from_inventory()
+        except Exception:
+            logger.error(
+                "Prompt claim after drop capture failed; the sync cycle will retry",
+                exc_info=True,
+            )
+            self.__clear_prompt_claim_debounce(drop.drop_instance_id)
+        finally:
+            self.prompt_claim_pass_lock.release()
+
     def sync_campaigns(self, streamers, chunk_size=3):
         campaigns_update = 0
         campaigns = []
@@ -5646,7 +6102,11 @@ class Twitch(object):
                     campaigns_update = time.time()
 
                     # TEMPORARY AUTO DROP CLAIMING FIX
-                    self.claim_all_drops_from_inventory()
+                    # Share prompt_claim_pass_lock with __run_prompt_claim so a
+                    # background prompt claim and this periodic pass can never
+                    # run claim_all_drops_from_inventory concurrently.
+                    with self.prompt_claim_pass_lock:
+                        self.claim_all_drops_from_inventory()
                     #####################################
 
                     # Expand dashboard campaigns together with exact campaigns
