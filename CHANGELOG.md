@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.17.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.17.0...3.17.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **config:** validate analytics assignment before enabling the dashboard ([b9d9631](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b9d9631f9d1727ba8f3231ce170731c448695a05))
+* **drops:** cap badge-campaign streamers at one watch slot ([#134](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/134)) ([0f72cb2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0f72cb218140da08bc7981ec6a93af055c213ca4))
+* **drops:** detect wildcard campaigns, stop streak churn on discovered channels, and stabilize drop picks ([#126](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/126)) ([d9d4395](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d9d4395869b31163193c7a959c746fe76cf3e6dd))
+* **drops:** filter in-progress drop feasibility by channel eligibility ([#132](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/132)) ([90bf429](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/90bf429cc16fd4bab82e71f41211801503228335))
+* **drops:** honor user-configured source_priority for the shared discovered-Drops slot ([#129](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/129)) ([9bc978d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9bc978da4212f703d233fe2f54eb062ffa633d55))
+* **drops:** let a real challenger deadline break an indefinite hold ([#131](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/131)) ([1cad3f7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1cad3f716adefb9254d7b5ff58fbe0ca5e488520))
+* **drops:** recognize completedRewardCampaigns in gist fallback completion checks ([#130](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/130)) ([f55e8c2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f55e8c233f7288e7f606576c21ff41abd189efc0))
+* **streamer:** stop badge streamers acting as category streamers and rank overlapping tiers by source priority ([#133](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/133)) ([5c2627f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5c2627f15c22789494cdf4e66616ce65871d14c3))
+
 ## [3.17.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.16.2...3.17.0) (2026-09-04)
 
 
