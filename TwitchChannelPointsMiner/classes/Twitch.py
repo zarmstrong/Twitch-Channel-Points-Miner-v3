@@ -1799,7 +1799,10 @@ class Twitch(object):
         # historical award with the same name as completion can suppress a new
         # campaign.  The full badge inventory is safe here because badges are
         # account-owned rather than repeatable campaign consumables.
-        owned_reward_names = self.__get_available_badge_names(refresh=True)
+        owned_reward_names = (
+            self.__get_available_badge_names(refresh=True)
+            | self.__get_viewer_reward_drop_earned_names()
+        )
         captured_drop_history = self.__captured_drop_history()
         # completedRewardCampaigns is authoritative account-completion evidence
         # (unlike __fallback_reward_was_awarded's lastAwardedAt-in-window guess,
@@ -2265,6 +2268,68 @@ class Twitch(object):
         """Return Twitch badge titles currently available to this account."""
         badge_names = self.__get_available_badge_names(refresh=refresh)
         return badge_names if self.available_badge_names is not None else None
+
+    def __get_viewer_reward_drop_earned_names(self):
+        """Return the casefolded names of "Rewards" (watch-to-earn-a-code)
+        items this account has already earned.
+
+        This covers Drops like Minecraft's cape promos that grant a
+        redemption code rather than the item directly: once earned, Twitch
+        can report the campaign's own top-level status as "EXPIRED" (a
+        calendar/global status, not an account one) while dropCampaignsInProgress,
+        gameEventDrops and completedRewardCampaigns from the regular
+        Inventory query carry no record of it at all -- only this dedicated
+        ViewerRewardDropInventory query's per-reward-group self.status /
+        self.earnedReward reflect that the account actually finished it.
+        """
+        earned_names = set()
+        try:
+            response = self.gql.post_gql_request_raw(
+                GQLOperations.ViewerRewardDropInventory["operationName"],
+                copy.deepcopy(GQLOperations.ViewerRewardDropInventory),
+            )
+        except RetryError as error:
+            self.__log_drop_check(
+                f"unable to load viewer reward drop inventory: {error}",
+                level=logging.DEBUG,
+            )
+            return earned_names
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            self.__log_drop_check(
+                f"invalid viewer reward drop inventory response: {error}",
+                level=logging.DEBUG,
+            )
+            return earned_names
+
+        current_user = ((response or {}).get("data") or {}).get("currentUser") or {}
+        campaigns = (current_user.get("inventory") or {}).get(
+            "viewerRewardDropCampaignsInProgress"
+        )
+        for campaign in campaigns or []:
+            if not isinstance(campaign, dict):
+                continue
+            for reward_group in campaign.get("rewardGroups", []) or []:
+                if not isinstance(reward_group, dict):
+                    continue
+                self_edge = reward_group.get("self") or {}
+                if not isinstance(self_edge, dict):
+                    continue
+                if self_edge.get("status") not in ("CLAIMABLE", "CLAIMED"):
+                    continue
+                earned_reward = self_edge.get("earnedReward")
+                if not isinstance(earned_reward, dict):
+                    continue
+                reward_name = str(earned_reward.get("name") or "").strip()
+                if reward_name:
+                    earned_names.add(reward_name.casefold())
+
+        self.__log_drop_check_json(
+            "earned Rewards-campaign names",
+            sorted(earned_names),
+            level=self.category_log_level,
+            category_log=True,
+        )
+        return earned_names
 
     def __category_slug(self, category):
         category_name, _ = self.__split_category_streamer_selector(category)

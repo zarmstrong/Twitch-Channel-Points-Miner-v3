@@ -612,6 +612,153 @@ def test_completed_reward_campaign_signature_completes_fallback_despite_stale_aw
     assert twitch.twitchdrops_app_campaigns == {}
 
 
+def test_earned_viewer_reward_drop_completes_fallback_despite_expired_campaign_status(
+    monkeypatch,
+):
+    """Some Drops grant a redemption code rather than the item directly
+    (e.g. Minecraft cape promos). Once earned, Twitch can report the
+    campaign's own top-level status as "EXPIRED" (a calendar/global status)
+    while dropCampaignsInProgress, gameEventDrops and completedRewardCampaigns
+    from the regular Inventory query carry no record of it at all. Only the
+    ViewerRewardDropInventory query's per-reward-group self.status /
+    self.earnedReward reflects that this account actually finished it, and
+    that must still complete the gist-fallback campaign.
+    """
+
+    def gql_post(operation_name, request_json):
+        if operation_name == "ViewerRewardDropInventory":
+            return {
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "viewerRewardDropCampaignsInProgress": [
+                                {
+                                    "id": "931cf994-acae-45e6-8796-dbc04e98371d",
+                                    "status": "EXPIRED",
+                                    "name": "Corrupted Creeper Cape",
+                                    "rewardGroups": [
+                                        {
+                                            "self": {
+                                                "status": "CLAIMABLE",
+                                                "earnedReward": {
+                                                    "name": "Corrupted Creeper Cape",
+                                                },
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        return {"data": {"currentUser": {"availableBadges": []}}}
+
+    gql = SimpleNamespace(post_gql_request_raw=gql_post)
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "minecraft",
+                "game": "Minecraft",
+                "url": "https://twitchdrops.app/game/minecraft",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Minecraft",
+            "campaigns": [
+                {
+                    "name": "Corrupted Creeper Cape",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "Corrupted Creeper Cape"}],
+                }
+            ],
+        },
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
+
+
+def test_unearned_viewer_reward_drop_does_not_complete_fallback_campaign(monkeypatch):
+    """A reward group still IN_PROGRESS (no earnedReward yet) must not be
+    mistaken for a completed one."""
+
+    def gql_post(operation_name, request_json):
+        if operation_name == "ViewerRewardDropInventory":
+            return {
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "viewerRewardDropCampaignsInProgress": [
+                                {
+                                    "id": "931cf994-acae-45e6-8796-dbc04e98371d",
+                                    "status": "ACTIVE",
+                                    "name": "Corrupted Creeper Cape",
+                                    "rewardGroups": [
+                                        {
+                                            "self": {
+                                                "status": "IN_PROGRESS",
+                                                "earnedReward": None,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        return {"data": {"currentUser": {"availableBadges": []}}}
+
+    gql = SimpleNamespace(post_gql_request_raw=gql_post)
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "minecraft",
+                "game": "Minecraft",
+                "url": "https://twitchdrops.app/game/minecraft",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Minecraft",
+            "campaigns": [
+                {
+                    "name": "Corrupted Creeper Cape",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "Corrupted Creeper Cape"}],
+                }
+            ],
+        },
+    )
+
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
+
+    assert "minecraft" in deadlines
+    assert twitch.twitchdrops_app_campaigns != {}
+
+
 def test_old_same_named_award_does_not_complete_new_fallback_campaign():
     twitch = bare_twitch(SimpleNamespace())
     twitch.awarded_game_event_drops["old-reward"] = {
