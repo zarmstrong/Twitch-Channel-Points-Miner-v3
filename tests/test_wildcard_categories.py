@@ -38,7 +38,7 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {},
+        lambda self, categories, known_slugs, inventory=None: {},
     )
     return twitch
 
@@ -76,12 +76,12 @@ def test_preferred_filter_keeps_external_catalog_scoped(monkeypatch):
         monkeypatch, {"preferred-game": datetime(2099, 1, 1)}
     )
     fallback_requests = []
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: fallback_requests.append(categories)
-        or {},
-    )
+
+    def fallback(self, categories, known_slugs, inventory=None):
+        fallback_requests.append(categories)
+        return {}
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
 
     result = twitch.filter_categories_with_active_drops(
         ["preferred-game"], inventory={"present": True}
@@ -225,7 +225,7 @@ def test_wildcard_ranks_external_missing_campaign_ahead_of_later_twitch_campaign
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {
+        lambda self, categories, known_slugs, inventory=None: {
             "urgent-external-game": datetime(2050, 1, 1)
         },
     )
@@ -252,7 +252,7 @@ def test_wildcard_does_not_override_twitch_authoritative_deadline(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: {
+        lambda self, categories, known_slugs, inventory=None: {
             "dead-by-daylight": datetime(2020, 1, 1),
             "external-game": datetime(2050, 1, 1),
         },
@@ -285,7 +285,7 @@ def test_wildcard_external_addition_survives_fallback_mutating_known_slugs(
     )
     twitch.twitchdrops_app_catalog_complete = False
 
-    def mutating_fallback(self, categories, known_slugs):
+    def mutating_fallback(self, categories, known_slugs, inventory=None):
         known_slugs.add("urgent-external-game")
         return {"urgent-external-game": datetime(2050, 1, 1)}
 
@@ -308,7 +308,7 @@ def test_wildcard_reuses_preloaded_external_catalog(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs: pytest.fail(
+        lambda self, categories, known_slugs, inventory=None: pytest.fail(
             "the preloaded full catalog should be reused"
         ),
     )

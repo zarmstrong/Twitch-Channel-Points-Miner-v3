@@ -147,6 +147,16 @@ class GQLOperations:
             }
         },
     }
+    ViewerRewardDropInventory = {
+        "operationName": "ViewerRewardDropInventory",
+        "variables": {},
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "27e5625f916e910002e293a16fca17a9082848bd48d49c0f8aa34cdfd76ea5e5",
+            }
+        },
+    }
     MakePrediction = {
         "operationName": "MakePrediction",
         "extensions": {
