@@ -99,6 +99,7 @@ def _watch_streamer(
     from_badge_campaign=False,
     from_followers=False,
     from_wildcard_category=False,
+    explicitly_configured=False,
     favorite=False,
     points=0,
     points_limit=None,
@@ -128,6 +129,7 @@ def _watch_streamer(
         from_badge_campaign=from_badge_campaign,
         from_followers=from_followers,
         from_wildcard_category=from_wildcard_category,
+        explicitly_configured=explicitly_configured,
         channel_points=points,
         offline_at=0,
         stream=stream,
@@ -1310,6 +1312,44 @@ def test_drop_pick_transient_hold_excludes_channel_ineligible_campaign(monkeypat
     )
 
     assert posted == ["https://spade.test/challenger"]
+
+
+def test_configured_and_followed_streamer_ranks_as_configured_by_default(monkeypatch):
+    # A streamer the user configured that is also followed belongs to both the
+    # STREAMERS and FOLLOWERS tiers; with the default order (STREAMERS first)
+    # it must rank with the configured streamers, not be pushed behind them.
+    both = _watch_streamer(
+        "configured-and-followed", from_followers=True, explicitly_configured=True
+    )
+    configured = _watch_streamer("configured-only", explicitly_configured=True)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [both, configured],
+        streams_watched=1,
+        priority=[Priority.ORDER],
+    )
+
+    assert posted == ["https://spade.test/configured-and-followed"]
+
+
+def test_configured_and_followed_streamer_follows_user_source_priority(monkeypatch):
+    # With FOLLOWERS ranked above STREAMERS the same overlapping streamer moves
+    # up to the followed tier, even when a plain streamer is listed first.
+    plain = _watch_streamer("plain", explicitly_configured=True)
+    both = _watch_streamer(
+        "configured-and-followed", from_followers=True, explicitly_configured=True
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [plain, both],
+        streams_watched=1,
+        priority=[Priority.ORDER],
+        source_priority=[StreamerSource.FOLLOWERS, StreamerSource.STREAMERS],
+    )
+
+    assert posted == ["https://spade.test/configured-and-followed"]
 
 
 def test_badge_campaign_streamer_does_not_steal_preferred_category_slot(monkeypatch):

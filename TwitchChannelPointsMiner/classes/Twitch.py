@@ -3043,24 +3043,21 @@ class Twitch(object):
             extra={"emoji": ":dart:", "event": Events.DROP_STATUS},
         )
 
-    def __log_watched_streamers(self, streamers, streamers_watching):
-        def watch_reason(streamer):
-            source = discovery_source(streamer)
+    def __log_watched_streamers(self, streamers, streamers_watching, streamer_source):
+        def watch_reason(index):
+            source = streamer_source(index)
             if source == StreamerSource.BADGES:
                 return "badge drop"
             if source == StreamerSource.WILDCARD_CATEGORIES:
                 return "wildcard campaign drops"
             if source == StreamerSource.CATEGORIES:
                 return "campaign drops"
-            if (
-                getattr(streamer, "explicitly_configured", False) is not True
-                and source == StreamerSource.FOLLOWERS
-            ):
+            if source == StreamerSource.FOLLOWERS:
                 return "followed channel"
             return "streamer"
 
         points_streams = [
-            f"{streamers[index].username} ({watch_reason(streamers[index])})"
+            f"{streamers[index].username} ({watch_reason(index)})"
             for index in streamers_watching
         ]
         drops_streams = []
@@ -3090,7 +3087,7 @@ class Twitch(object):
                             f"{game_label} drop campaign '{name}'" for name in names
                         )
                     )
-            reason = watch_reason(streamer)
+            reason = watch_reason(index)
             drops_streams.append(
                 f"{streamer.username} ({reason}; {campaigns})"
                 if campaigns
@@ -3901,7 +3898,7 @@ class Twitch(object):
                 source_priority = normalized_source_priority
 
                 def streamer_source(index):
-                    return discovery_source(streamers_snapshot[index])
+                    return discovery_source(streamers_snapshot[index], source_priority)
 
                 def remaining_watch_amount():
                     return max_watch_amount - len(streamers_watching)
@@ -4372,7 +4369,9 @@ class Twitch(object):
                     streamers_snapshot, streamers_watching, streamer_source
                 )
 
-                self.__log_watched_streamers(streamers_snapshot, streamers_watching)
+                self.__log_watched_streamers(
+                    streamers_snapshot, streamers_watching, streamer_source
+                )
 
                 for index in streamers_watching:
                     # next_iteration = time.time() + 60 / len(streamers_watching)

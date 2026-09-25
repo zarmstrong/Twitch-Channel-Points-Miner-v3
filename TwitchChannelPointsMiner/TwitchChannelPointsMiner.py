@@ -23,7 +23,7 @@ from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
-    discovery_source,
+    discovery_sources,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
@@ -1652,11 +1652,11 @@ class TwitchChannelPointsMiner:
             )
             # Badge-campaign streamers also carry from_category=True but belong
             # to the badge refresh, not to either category discovery pass.
-            in_scope = discovery_source(streamer) == (
+            in_scope = (
                 StreamerSource.WILDCARD_CATEGORIES
                 if wildcard
                 else StreamerSource.CATEGORIES
-            )
+            ) in discovery_sources(streamer)
             if not in_scope or streamer.username in discovered:
                 retained.append(streamer)
                 retained_baselines.append(baseline)
@@ -1704,12 +1704,12 @@ class TwitchChannelPointsMiner:
         category_indexes = [
             index
             for index, streamer in enumerate(self.streamers)
-            if discovery_source(streamer)
-            == (
+            if (
                 StreamerSource.WILDCARD_CATEGORIES
                 if wildcard
                 else StreamerSource.CATEGORIES
             )
+            in discovery_sources(streamer)
             and streamer.username in priority
         ]
         ordered = sorted(

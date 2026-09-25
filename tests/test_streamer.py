@@ -9,6 +9,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
     discovery_source,
+    discovery_sources,
     is_category_tier,
     is_drop_discovered,
 )
@@ -214,3 +215,48 @@ def test_discovery_source_tolerates_stand_ins_missing_flags():
         StreamerSource.CATEGORIES
     )
     assert discovery_source(SimpleNamespace()) == StreamerSource.STREAMERS
+
+
+def test_discovery_sources_lists_every_tier_a_streamer_belongs_to():
+    # from_category is only the CATEGORIES tier when the streamer is not also a
+    # badge or wildcard streamer, which set it as a shared marker.
+    assert discovery_sources(
+        Streamer("b", from_category=True, from_badge_campaign=True)
+    ) == {StreamerSource.BADGES}
+    assert discovery_sources(
+        Streamer("w", from_category=True, from_wildcard_category=True)
+    ) == {StreamerSource.WILDCARD_CATEGORIES}
+    assert discovery_sources(
+        Streamer("both", from_followers=True, explicitly_configured=True)
+    ) == {StreamerSource.FOLLOWERS, StreamerSource.STREAMERS}
+
+
+def test_discovery_source_picks_highest_ranked_of_overlapping_tiers():
+    both = Streamer("both", from_followers=True, explicitly_configured=True)
+
+    # No user ordering supplied: the miner's default puts STREAMERS first.
+    assert discovery_source(both) == StreamerSource.STREAMERS
+    assert (
+        discovery_source(both, [StreamerSource.STREAMERS, StreamerSource.FOLLOWERS])
+        == StreamerSource.STREAMERS
+    )
+    assert (
+        discovery_source(both, [StreamerSource.FOLLOWERS, StreamerSource.STREAMERS])
+        == StreamerSource.FOLLOWERS
+    )
+    # A partial ordering that omits the streamer's tiers still classifies it.
+    assert (
+        discovery_source(both, [StreamerSource.CATEGORIES]) == StreamerSource.STREAMERS
+    )
+
+
+def test_priority_never_turns_a_badge_streamer_into_a_category_streamer():
+    badge = Streamer("b", from_category=True, from_badge_campaign=True)
+
+    assert (
+        discovery_source(
+            badge, [StreamerSource.CATEGORIES, StreamerSource.BADGES]
+        )
+        == StreamerSource.BADGES
+    )
+    assert is_category_tier(badge) is False

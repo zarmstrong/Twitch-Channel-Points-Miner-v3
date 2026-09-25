@@ -20,30 +20,64 @@ from TwitchChannelPointsMiner.utils import _millify
 
 logger = logging.getLogger(__name__)
 
-# from_category is also set on badge-campaign and wildcard streamers, so it
-# can't tell the discovery tiers apart. These groupings name the two questions
-# call sites actually ask.
+# Used to rank a streamer's tiers when the caller has no user-configured
+# streamer_source_priority; mirrors the miner's default order.
+DEFAULT_SOURCE_PRIORITY = (
+    StreamerSource.STREAMERS,
+    StreamerSource.FOLLOWERS,
+    StreamerSource.CATEGORIES,
+    StreamerSource.BADGES,
+    StreamerSource.WILDCARD_CATEGORIES,
+)
 CATEGORY_TIER_SOURCES = frozenset(
     (StreamerSource.CATEGORIES, StreamerSource.WILDCARD_CATEGORIES)
 )
 DROP_DISCOVERY_SOURCES = CATEGORY_TIER_SOURCES | {StreamerSource.BADGES}
 
 
-def discovery_source(streamer):
-    """Return the StreamerSource tier a streamer was discovered through.
+def discovery_sources(streamer):
+    """Return every StreamerSource tier a streamer belongs to.
 
-    Badge campaigns win over wildcard categories, which win over regular
-    categories, then followers. Flags are read with getattr so lightweight
-    stand-ins missing some attributes classify like a real Streamer.
+    from_category is also set on badge-campaign and wildcard streamers, so it
+    only means the regular CATEGORIES tier when neither of those is set.
+    Flags are read with getattr so lightweight stand-ins missing some
+    attributes classify like a real Streamer.
     """
-    if getattr(streamer, "from_badge_campaign", False) is True:
-        return StreamerSource.BADGES
-    if getattr(streamer, "from_wildcard_category", False) is True:
-        return StreamerSource.WILDCARD_CATEGORIES
-    if getattr(streamer, "from_category", False) is True:
-        return StreamerSource.CATEGORIES
+    is_badge = getattr(streamer, "from_badge_campaign", False) is True
+    is_wildcard = getattr(streamer, "from_wildcard_category", False) is True
+    sources = set()
+    if is_badge:
+        sources.add(StreamerSource.BADGES)
+    if is_wildcard:
+        sources.add(StreamerSource.WILDCARD_CATEGORIES)
+    if (
+        getattr(streamer, "from_category", False) is True
+        and not is_badge
+        and not is_wildcard
+    ):
+        sources.add(StreamerSource.CATEGORIES)
     if getattr(streamer, "from_followers", False) is True:
-        return StreamerSource.FOLLOWERS
+        sources.add(StreamerSource.FOLLOWERS)
+    if getattr(streamer, "explicitly_configured", False) is True or not sources:
+        sources.add(StreamerSource.STREAMERS)
+    return frozenset(sources)
+
+
+def discovery_source(streamer, source_priority=None):
+    """Return the single tier a streamer is ranked under.
+
+    A streamer that belongs to several tiers (for example one the user
+    configured that is also followed) is placed in whichever the user ranks
+    highest in streamer_source_priority, so the ordering the user chose
+    applies to overlaps too.
+    """
+    sources = discovery_sources(streamer)
+    for source in source_priority or DEFAULT_SOURCE_PRIORITY:
+        if source in sources:
+            return source
+    for source in DEFAULT_SOURCE_PRIORITY:
+        if source in sources:
+            return source
     return StreamerSource.STREAMERS
 
 
@@ -52,13 +86,16 @@ def is_category_tier(streamer):
 
     Badge-campaign streamers also carry from_category=True but are excluded.
     """
-    return discovery_source(streamer) in CATEGORY_TIER_SOURCES
+    sources = discovery_sources(streamer)
+    return bool(sources & CATEGORY_TIER_SOURCES) and (
+        StreamerSource.BADGES not in sources
+    )
 
 
 def is_drop_discovered(streamer):
-    """True for any streamer found only to farm drops (category, wildcard or
-    badge), as opposed to one the user configured or follows."""
-    return discovery_source(streamer) in DROP_DISCOVERY_SOURCES
+    """True for any streamer found to farm drops (category, wildcard or badge),
+    regardless of which tier the user's priority ranks it under."""
+    return bool(discovery_sources(streamer) & DROP_DISCOVERY_SOURCES)
 
 
 class StreamerSettings(object):
