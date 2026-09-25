@@ -1,5 +1,6 @@
 import importlib
 import logging
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from threading import Event
@@ -1827,9 +1828,90 @@ def test_inventory_progress_cache_tracks_only_incomplete_eligible_drops():
                 "Active reward",
                 5,
                 15,
+                None,
             ),
         )
     }
+
+
+def _restricted_game_inventory():
+    return {
+        "dropCampaignsInProgress": [
+            {
+                "id": "restricted-campaign",
+                "name": "Restricted campaign",
+                "game": {"displayName": "Example Game"},
+                "allow": {"channels": [{"id": "999", "name": "otherstreamer"}]},
+                "timeBasedDrops": [
+                    {
+                        "id": "restricted-drop",
+                        "name": "Restricted reward",
+                        "requiredMinutesWatched": 20,
+                        "self": {
+                            "currentMinutesWatched": 15,
+                            "hasPreconditionsMet": True,
+                            "isClaimed": False,
+                        },
+                    },
+                ],
+            },
+            {
+                "id": "open-campaign",
+                "name": "Open campaign",
+                "game": {"displayName": "Example Game"},
+                "timeBasedDrops": [
+                    {
+                        "id": "open-drop",
+                        "name": "Open reward",
+                        "requiredMinutesWatched": 30,
+                        "self": {
+                            "currentMinutesWatched": 10,
+                            "hasPreconditionsMet": True,
+                            "isClaimed": False,
+                        },
+                    },
+                ],
+            },
+        ]
+    }
+
+
+def test_inventory_progress_cache_captures_channel_allowlist():
+    twitch = twitch_with_gql(SimpleNamespace())
+
+    twitch._Twitch__cache_drop_inventory_progress(_restricted_game_inventory())
+
+    progress = twitch.drop_inventory_progress["example-game"]
+    by_campaign = {entry[0]: entry for entry in progress}
+    assert by_campaign["restricted-campaign"][-1] == ("otherstreamer",)
+    assert by_campaign["open-campaign"][-1] is None
+
+
+def test_in_progress_drop_needs_excludes_channel_ineligible_campaign():
+    # The restricted campaign needs fewer minutes (5m) than the open one
+    # (20m), so an unfiltered lookup would prefer it. A channel that isn't on
+    # its allowlist must not have its feasibility computed from those
+    # numbers - it can only ever contribute to the open campaign.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch._Twitch__cache_drop_inventory_progress(_restricted_game_inventory())
+    twitch.drop_inventory_progress_updated_at = time.time()
+
+    needs = twitch._Twitch__in_progress_drop_needs("example-game", "mystreamer")
+
+    assert needs == (20, "Open reward")
+
+
+def test_in_progress_drop_needs_without_username_is_unfiltered():
+    # A caller that doesn't have a channel handy (no username argument) keeps
+    # the previous behavior: the closest-to-completion drop across every
+    # in-progress campaign for the game, restricted or not.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch._Twitch__cache_drop_inventory_progress(_restricted_game_inventory())
+    twitch.drop_inventory_progress_updated_at = time.time()
+
+    needs = twitch._Twitch__in_progress_drop_needs("example-game")
+
+    assert needs == (5, "Restricted reward")
 
 
 def test_category_search_uses_active_twitch_campaign_allowlist(monkeypatch):

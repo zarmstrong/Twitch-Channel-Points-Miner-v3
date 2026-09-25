@@ -347,6 +347,9 @@ class Twitch(object):
 
             campaign_id = str(campaign.get("id") or "")
             campaign_name = str(campaign.get("name") or "Unknown campaign")
+            allowed_channels = (
+                tuple(sorted(self.__campaign_channel_logins(campaign))) or None
+            )
             for drop in campaign.get("timeBasedDrops", []) or []:
                 if not isinstance(drop, dict):
                     continue
@@ -372,6 +375,7 @@ class Twitch(object):
                         str(drop.get("name") or "Unknown drop"),
                         current_minutes,
                         required_minutes,
+                        allowed_channels,
                     )
                 )
 
@@ -385,7 +389,7 @@ class Twitch(object):
     def __drop_progress_label(progress) -> str:
         labels = [
             f"{campaign_name} / {drop_name} ({current}/{required}m)"
-            for _, campaign_name, _, drop_name, current, required in progress[:3]
+            for _, campaign_name, _, drop_name, current, required, _ in progress[:3]
         ]
         if len(progress) > 3:
             labels.append(f"{len(progress) - 3} more")
@@ -2844,11 +2848,14 @@ class Twitch(object):
 
         return False
 
-    def __in_progress_drop_needs(self, game_slug):
+    def __in_progress_drop_needs(self, game_slug, username=None):
         # Minutes still needed on the closest-to-completion in-progress drop
         # for a game, taken from the latest inventory snapshot. Returns None
         # when there is no fresh snapshot or no unclaimed incomplete drop, so
-        # absence is authoritative (completed or expired campaign).
+        # absence is authoritative (completed or expired campaign). When a
+        # username is given, campaigns restricted to other channels are
+        # excluded - otherwise a restricted campaign's numbers can be picked
+        # over an eligible campaign's for the same game.
         progress = (getattr(self, "drop_inventory_progress", None) or {}).get(game_slug)
         if not progress:
             return None
@@ -2858,9 +2865,12 @@ class Twitch(object):
             or (time.time() - updated_at) > DROP_INVENTORY_FRESHNESS_SECONDS
         ):
             return None
+        login = str(username).strip().lower() if username is not None else None
+        login = login or None
         candidates = [
             (max(required - current, 0), drop_name)
-            for (_, _, _, drop_name, current, required) in progress
+            for (_, _, _, drop_name, current, required, allowed) in progress
+            if allowed is None or login is None or login in allowed
         ]
         if not candidates:
             return None
@@ -2891,7 +2901,7 @@ class Twitch(object):
         if stream is None:
             return False
         game_slug = self.__slugify(stream.game_name() or "")
-        needs = self.__in_progress_drop_needs(game_slug)
+        needs = self.__in_progress_drop_needs(game_slug, streamer.username)
         if needs is None:
             return False
         needs_minutes, _drop_name = needs
@@ -4042,7 +4052,8 @@ class Twitch(object):
                     if stream is None:
                         return None
                     needs = self.__in_progress_drop_needs(
-                        self.__slugify(stream.game_name() or "")
+                        self.__slugify(stream.game_name() or ""),
+                        streamers_snapshot[index].username,
                     )
                     if needs is None:
                         return None
