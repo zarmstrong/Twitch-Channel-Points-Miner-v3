@@ -4342,11 +4342,24 @@ class Twitch(object):
                 # wildcard_tier, defined above), not the from_category flag
                 # alone, since a BADGES-source streamer can also carry
                 # from_category=True.
+                # Badge-campaign streamers are their own tier and never compete
+                # for the shared category/wildcard slot, but they are still
+                # capped at one watched stream: badge discovery keeps adding a
+                # fresh live channel for the same campaign each refresh, so
+                # without a cap two channels for one badge campaign could fill
+                # both watch slots.
+                badge_tier = set(indexes_by_source[StreamerSource.BADGES])
+                kept_badge_index = next(
+                    (index for index in streamers_watching if index in badge_tier),
+                    None,
+                )
                 filtered_streamers_watching = []
                 for index in streamers_watching:
                     if (
                         index in preferred_tier or index in wildcard_tier
                     ) and index != kept_discovered_index:
+                        continue
+                    if index in badge_tier and index != kept_badge_index:
                         continue
                     filtered_streamers_watching.append(index)
 
@@ -4357,7 +4370,11 @@ class Twitch(object):
                         break
                     if index in filtered_streamers_watching:
                         continue
-                    if index in preferred_tier or index in wildcard_tier:
+                    if (
+                        index in preferred_tier
+                        or index in wildcard_tier
+                        or index in badge_tier
+                    ):
                         continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching

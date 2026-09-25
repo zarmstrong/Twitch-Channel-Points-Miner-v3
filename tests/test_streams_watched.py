@@ -1393,6 +1393,38 @@ def test_badge_campaign_streamer_does_not_steal_preferred_category_slot(monkeypa
     }
 
 
+def test_only_one_badge_campaign_streamer_is_watched_per_cycle(monkeypatch):
+    # Badge discovery adds a fresh live channel for the same campaign on each
+    # refresh, so several badge-campaign streamers for one game can be online
+    # at once. Only one may take a watch slot; the other slot goes to the
+    # next non-discovered stream instead of a second badge channel.
+    first_badge = _watch_streamer(
+        "badge-one",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+    second_badge = _watch_streamer(
+        "badge-two",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [first_badge, second_badge, _watch_streamer("explicit")],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.BADGES, StreamerSource.STREAMERS],
+    )
+
+    assert posted == [
+        "https://spade.test/badge-one",
+        "https://spade.test/explicit",
+    ]
+
+
 def test_drop_pick_transient_hold_releases_when_drop_cannot_finish(monkeypatch):
     # The transient-eligibility hold must apply the same feasibility check as
     # the stickiness hold: an in-progress drop that cannot finish before its
