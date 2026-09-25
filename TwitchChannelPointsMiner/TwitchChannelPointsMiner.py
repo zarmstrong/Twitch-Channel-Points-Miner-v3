@@ -23,6 +23,7 @@ from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
+    discovery_sources,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
@@ -1649,10 +1650,13 @@ class TwitchChannelPointsMiner:
                 if index < len(self.original_streamers)
                 else streamer.channel_points
             )
+            # Badge-campaign streamers also carry from_category=True but belong
+            # to the badge refresh, not to either category discovery pass.
             in_scope = (
-                streamer.from_category is True
-                and streamer.from_wildcard_category is wildcard
-            )
+                StreamerSource.WILDCARD_CATEGORIES
+                if wildcard
+                else StreamerSource.CATEGORIES
+            ) in discovery_sources(streamer)
             if not in_scope or streamer.username in discovered:
                 retained.append(streamer)
                 retained_baselines.append(baseline)
@@ -1660,11 +1664,7 @@ class TwitchChannelPointsMiner:
 
             streamer.from_category = False
             streamer.from_wildcard_category = False
-            if (
-                streamer.explicitly_configured
-                or streamer.from_followers
-                or streamer.from_badge_campaign
-            ):
+            if streamer.explicitly_configured or streamer.from_followers:
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
@@ -1704,8 +1704,12 @@ class TwitchChannelPointsMiner:
         category_indexes = [
             index
             for index, streamer in enumerate(self.streamers)
-            if streamer.from_category is True
-            and streamer.from_wildcard_category is wildcard
+            if (
+                StreamerSource.WILDCARD_CATEGORIES
+                if wildcard
+                else StreamerSource.CATEGORIES
+            )
+            in discovery_sources(streamer)
             and streamer.username in priority
         ]
         ordered = sorted(

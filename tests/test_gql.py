@@ -1914,6 +1914,42 @@ def test_in_progress_drop_needs_without_username_is_unfiltered():
     assert needs == (5, "Restricted reward")
 
 
+def test_previous_pick_hold_applies_to_category_tier_not_badge_streamers():
+    # Badge-campaign streamers carry from_category=True too, but their drops
+    # are not the game's category campaigns: the transient-eligibility hold
+    # keyed on the game's in-progress inventory drop must not keep them.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch._Twitch__cache_drop_inventory_progress(_restricted_game_inventory())
+    twitch.drop_inventory_progress_updated_at = time.time()
+    twitch.last_drop_pick_streamer = "mystreamer"
+
+    def streamer(**flags):
+        return SimpleNamespace(
+            username="mystreamer",
+            is_online=True,
+            settings=SimpleNamespace(claim_drops=True),
+            stream=SimpleNamespace(game_name=lambda: "Example Game"),
+            **flags,
+        )
+
+    assert (
+        twitch._Twitch__previous_pick_still_farming(streamer(from_category=True))
+        is True
+    )
+    assert (
+        twitch._Twitch__previous_pick_still_farming(
+            streamer(from_category=True, from_wildcard_category=True)
+        )
+        is True
+    )
+    assert (
+        twitch._Twitch__previous_pick_still_farming(
+            streamer(from_category=True, from_badge_campaign=True)
+        )
+        is False
+    )
+
+
 def test_category_search_uses_active_twitch_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {

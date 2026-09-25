@@ -213,6 +213,31 @@ def test_badge_streamer_uses_special_events_eligibility_across_categories():
     assert twitch._Twitch__category_drops_condition(streamer) is True
 
 
+def test_badge_streamer_that_is_also_configured_still_uses_special_events():
+    # Being a badge streamer is a membership question: ranking it under
+    # STREAMERS or FOLLOWERS (its highest-priority tier) must not skip the
+    # special-events eligibility fallback.
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("special-events", "ewc-channel"): (1, 2)
+    }
+    streamer = SimpleNamespace(
+        username="ewc-channel",
+        from_category=True,
+        from_badge_campaign=True,
+        from_followers=True,
+        explicitly_configured=True,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
 def test_normal_category_streamer_does_not_cross_special_events_categories():
     twitch = bare_twitch(SimpleNamespace())
     twitch.category_campaign_eligibility = {
@@ -231,6 +256,35 @@ def test_normal_category_streamer_does_not_cross_special_events_categories():
     )
 
     assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
+def _category_style_streamer(username, from_badge_campaign):
+    return SimpleNamespace(
+        username=username,
+        from_category=True,
+        from_badge_campaign=from_badge_campaign,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+
+def test_badge_streamer_does_not_resolve_through_game_category_catalog():
+    # An open campaign for the badge streamer's current game says nothing about
+    # its badge campaign, so the category-catalog fallback must not make it
+    # drop-eligible when its special-events eligibility is missing.
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.completed_drop_campaigns = set()
+    twitch.twitchdrops_app_campaigns = {"apex-legends": [{"channels": []}]}
+
+    category = _category_style_streamer("shared-channel", from_badge_campaign=False)
+    badge = _category_style_streamer("shared-channel", from_badge_campaign=True)
+
+    assert twitch._Twitch__category_drops_condition(category) is True
+    assert twitch._Twitch__category_drops_condition(badge) is False
 
 
 def test_available_badges_returns_full_earned_badge_titles():
