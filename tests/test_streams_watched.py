@@ -226,7 +226,7 @@ def _run_one_watch_iteration(
     return posted
 
 
-def _drop_progress(current=5):
+def _drop_progress(current=5, allowed_channels=None):
     return (
         (
             "campaign-1",
@@ -235,6 +235,7 @@ def _drop_progress(current=5):
             "Example drop",
             current,
             15,
+            allowed_channels,
         ),
     )
 
@@ -1142,7 +1143,15 @@ def test_drop_pick_hold_releases_when_drop_cannot_finish(monkeypatch):
         last_drop_pick_streamer="current-pick",
         drop_inventory_progress={
             "current-game": (
-                ("campaign-1", "Example campaign", "drop-1", "Example drop", 0, 220),
+                (
+                    "campaign-1",
+                    "Example campaign",
+                    "drop-1",
+                    "Example drop",
+                    0,
+                    220,
+                    None,
+                ),
             ),
         },
         now=1_700_000_000,
@@ -1252,6 +1261,47 @@ def test_drop_pick_survives_transient_eligibility_failure(monkeypatch):
     )
 
     assert posted == ["https://spade.test/current-pick"]
+
+
+def test_drop_pick_transient_hold_excludes_channel_ineligible_campaign(monkeypatch):
+    # Same transient-eligibility scenario as above, but the only in-progress
+    # drop for the game belongs to a campaign restricted to other channels.
+    # The previous pick's channel cannot contribute to it, so the hold must
+    # not apply - otherwise a channel-restricted campaign's progress could
+    # keep an ineligible channel's watch slot.
+    current = _watch_streamer(
+        "current-pick",
+        from_category=True,
+        from_wildcard_category=True,
+        drops_eligible=True,
+    )
+    current.drops_condition = lambda: False
+    current.stream.game_name = lambda: "Current Game"
+    challenger = _watch_streamer(
+        "challenger",
+        from_category=True,
+        from_wildcard_category=True,
+        drops_eligible=True,
+    )
+    challenger.stream.game_name = lambda: "Challenger Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, challenger],
+        streams_watched=1,
+        priority=[Priority.DROPS],
+        category_campaign_deadlines={"current-game": datetime(2099, 1, 2)},
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={
+            "current-game": _drop_progress(
+                current=10, allowed_channels=("someone-else",)
+            )
+        },
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/challenger"]
 
 
 def test_badge_campaign_streamer_does_not_steal_preferred_category_slot(monkeypatch):
