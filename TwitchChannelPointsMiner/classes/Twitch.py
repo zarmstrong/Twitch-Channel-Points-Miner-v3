@@ -4033,7 +4033,7 @@ class Twitch(object):
                     wildcard_sticky_held,
                 ) = _sticky_order(indexes_by_source[StreamerSource.WILDCARD_CATEGORIES])
 
-                def _hold_reason(index, deadline):
+                def _hold_reason(index, deadline, challenger_deadline):
                     # Why the previously picked streamer must keep the slot:
                     # its game still has an in-progress drop that can finish
                     # before the campaign deadline. Returns None when there is
@@ -4048,6 +4048,11 @@ class Twitch(object):
                         return None
                     needs_minutes, drop_name = needs
                     if deadline == datetime.max:
+                        if challenger_deadline != datetime.max:
+                            # A real, known deadline on the challenger should
+                            # not lose to a hold with nothing to actually
+                            # measure feasibility against.
+                            return None
                         return (
                             f"holding in-progress drop '{drop_name}' "
                             f"(needs {needs_minutes:.0f}m, no campaign deadline)"
@@ -4093,7 +4098,9 @@ class Twitch(object):
                         # that is still being farmed and can finish before its
                         # deadline is worth more than switching to another
                         # campaign and restarting its progress from zero.
-                        hold_reason = _hold_reason(previous_index, previous_deadline)
+                        hold_reason = _hold_reason(
+                            previous_index, previous_deadline, best_deadline
+                        )
                         if hold_reason is not None:
                             return previous_index, hold_reason
                         return best_index, None
