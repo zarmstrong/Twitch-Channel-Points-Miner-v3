@@ -76,12 +76,12 @@ def test_preferred_filter_keeps_external_catalog_scoped(monkeypatch):
         monkeypatch, {"preferred-game": datetime(2099, 1, 1)}
     )
     fallback_requests = []
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs, inventory=None: fallback_requests.append(categories)
-        or {},
-    )
+
+    def fallback(self, categories, known_slugs, inventory=None):
+        fallback_requests.append(categories)
+        return {}
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
 
     result = twitch.filter_categories_with_active_drops(
         ["preferred-game"], inventory={"present": True}

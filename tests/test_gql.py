@@ -1289,12 +1289,11 @@ def test_category_filter_does_not_resurrect_completed_twitch_category(monkeypatc
             "fallback discovery should not inspect awarded benefits"
         ),
     )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs, inventory=None: fallback_calls.append(known_slugs)
-        or {"two-point-museum": datetime(2099, 1, 1)},
-    )
+    def fallback(self, categories, known_slugs, inventory=None):
+        fallback_calls.append(known_slugs)
+        return {"two-point-museum": datetime(2099, 1, 1)}
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
     monkeypatch.setattr(
         Twitch,
         "_Twitch__replace_category_campaign_eligibility",
