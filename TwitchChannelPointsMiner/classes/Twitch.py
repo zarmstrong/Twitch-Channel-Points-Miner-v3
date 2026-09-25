@@ -30,6 +30,7 @@ from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoa
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_source,
+    discovery_sources,
     is_category_tier,
     is_drop_discovered,
 )
@@ -2793,7 +2794,7 @@ class Twitch(object):
         eligibility = self.category_campaign_eligibility.get(
             (game_slug, streamer.username)
         )
-        if eligibility is None and discovery_source(streamer) == StreamerSource.BADGES:
+        if eligibility is None and StreamerSource.BADGES in discovery_sources(streamer):
             eligibility = self.category_campaign_eligibility.get(
                 ("special-events", streamer.username)
             )
@@ -4778,7 +4779,7 @@ class Twitch(object):
                 campaign_game.get("displayName") or campaign_game.get("name") or ""
             )
             if campaign_game_slug != game_slug and not (
-                discovery_source(streamer) == StreamerSource.BADGES
+                StreamerSource.BADGES in discovery_sources(streamer)
                 and campaign_game_slug == "special-events"
             ):
                 continue

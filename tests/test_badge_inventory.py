@@ -213,6 +213,31 @@ def test_badge_streamer_uses_special_events_eligibility_across_categories():
     assert twitch._Twitch__category_drops_condition(streamer) is True
 
 
+def test_badge_streamer_that_is_also_configured_still_uses_special_events():
+    # Being a badge streamer is a membership question: ranking it under
+    # STREAMERS or FOLLOWERS (its highest-priority tier) must not skip the
+    # special-events eligibility fallback.
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.category_campaign_eligibility = {
+        ("special-events", "ewc-channel"): (1, 2)
+    }
+    streamer = SimpleNamespace(
+        username="ewc-channel",
+        from_category=True,
+        from_badge_campaign=True,
+        from_followers=True,
+        explicitly_configured=True,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
 def test_normal_category_streamer_does_not_cross_special_events_categories():
     twitch = bare_twitch(SimpleNamespace())
     twitch.category_campaign_eligibility = {
