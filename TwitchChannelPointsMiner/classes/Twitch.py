@@ -1813,6 +1813,19 @@ class Twitch(object):
             if isinstance(inventory, dict)
             else set()
         )
+        self.__log_drop_check_json(
+            "completedRewardCampaigns signatures available for gist matching",
+            sorted(
+                [
+                    game_slug,
+                    campaign_name,
+                    datetime.utcfromtimestamp(ends_at_epoch).isoformat() + "Z",
+                ]
+                for game_slug, campaign_name, ends_at_epoch in completed_campaign_signatures
+            ),
+            level=logging.DEBUG,
+            category_log=True,
+        )
         try:
             indexed_games = scraper.scrape_front_page()
         except (ValueError, requests.RequestException) as error:
@@ -1998,6 +2011,11 @@ class Twitch(object):
                         "drops": sorted(drop_names),
                         "missing_or_unawarded": missing_drop_names,
                         "fully_collected": bool(drop_names) and not missing_drop_names,
+                        "signature": [
+                            self.__slugify(report.get("game") or category_name),
+                            str(campaign.get("name") or "").strip().casefold(),
+                            ends_at.isoformat() + "Z",
+                        ],
                     }
                 )
                 if drop_names and not missing_drop_names:
