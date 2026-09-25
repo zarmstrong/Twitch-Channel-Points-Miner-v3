@@ -1841,7 +1841,7 @@ def _restricted_game_inventory():
                 "id": "restricted-campaign",
                 "name": "Restricted campaign",
                 "game": {"displayName": "Example Game"},
-                "allow": {"channels": [{"id": "999", "name": "othertreamer"}]},
+                "allow": {"channels": [{"id": "999", "name": "otherstreamer"}]},
                 "timeBasedDrops": [
                     {
                         "id": "restricted-drop",
@@ -1883,7 +1883,7 @@ def test_inventory_progress_cache_captures_channel_allowlist():
 
     progress = twitch.drop_inventory_progress["example-game"]
     by_campaign = {entry[0]: entry for entry in progress}
-    assert by_campaign["restricted-campaign"][-1] == ("othertreamer",)
+    assert by_campaign["restricted-campaign"][-1] == ("otherstreamer",)
     assert by_campaign["open-campaign"][-1] is None
 
 

@@ -347,6 +347,9 @@ class Twitch(object):
 
             campaign_id = str(campaign.get("id") or "")
             campaign_name = str(campaign.get("name") or "Unknown campaign")
+            allowed_channels = (
+                tuple(sorted(self.__campaign_channel_logins(campaign))) or None
+            )
             for drop in campaign.get("timeBasedDrops", []) or []:
                 if not isinstance(drop, dict):
                     continue
@@ -364,9 +367,6 @@ class Twitch(object):
                 if required_minutes <= 0 or current_minutes >= required_minutes:
                     continue
 
-                allowed_channels = (
-                    tuple(sorted(self.__campaign_channel_logins(campaign))) or None
-                )
                 progress_by_game.setdefault(game_slug, []).append(
                     (
                         campaign_id,
@@ -2865,7 +2865,8 @@ class Twitch(object):
             or (time.time() - updated_at) > DROP_INVENTORY_FRESHNESS_SECONDS
         ):
             return None
-        login = str(username).lower() if username is not None else None
+        login = str(username).strip().lower() if username is not None else None
+        login = login or None
         candidates = [
             (max(required - current, 0), drop_name)
             for (_, _, _, drop_name, current, required, allowed) in progress
