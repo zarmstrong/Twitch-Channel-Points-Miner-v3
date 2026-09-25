@@ -1151,6 +1151,64 @@ def test_drop_pick_hold_releases_when_drop_cannot_finish(monkeypatch):
     assert posted == ["https://spade.test/sooner-pick"]
 
 
+def test_drop_pick_hold_yields_to_challenger_with_real_deadline_when_previous_has_none(
+    monkeypatch,
+):
+    # The previous pick's game has an in-progress drop but no known campaign
+    # deadline (absent from category_campaign_deadlines, so it evaluates to
+    # datetime.max). A challenger with a real, known deadline must not lose
+    # to a hold that has nothing to actually measure feasibility against -
+    # otherwise the previous pick could hold the slot indefinitely while a
+    # genuinely urgent campaign expires unclaimed.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, sooner],
+        streams_watched=2,
+        category_campaign_deadlines={
+            "sooner-game": datetime.utcnow() + timedelta(minutes=5),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/sooner-pick"]
+
+
+def test_drop_pick_hold_kept_when_both_previous_and_challenger_have_no_deadline(
+    monkeypatch,
+):
+    # When neither the previous pick nor the challenger has a known campaign
+    # deadline, the previous pick must still keep the slot - a regression
+    # guard for the no-deadline-vs-no-deadline path, unaffected by threading
+    # the challenger's deadline into the hold decision.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    challenger = _watch_streamer(
+        "challenger-pick", from_category=True, drops_eligible=True
+    )
+    challenger.stream.game_name = lambda: "Challenger Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, challenger],
+        streams_watched=2,
+        category_campaign_deadlines={},
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/current-pick"]
+
+
 def test_drop_pick_survives_transient_eligibility_failure(monkeypatch):
     # A category refresh can leave the previously picked streamer with stale,
     # empty per-channel campaign state for a cycle. While its game still has
