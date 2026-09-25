@@ -1,9 +1,18 @@
+from types import SimpleNamespace
+
 import pytest
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
-from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    Streamer,
+    StreamerSettings,
+    discovery_source,
+    is_category_tier,
+    is_drop_discovered,
+)
+from TwitchChannelPointsMiner.classes.Settings import StreamerSource
 
 
 def campaign_data():
@@ -152,3 +161,56 @@ def test_drops_condition_is_false_when_all_drops_are_captured_but_unclaimed():
     streamer.stream.campaigns = [campaign]
 
     assert streamer.drops_condition() is False
+
+
+def test_discovery_source_prefers_badge_then_wildcard_then_category():
+    # Badge and wildcard streamers are built with from_category=True as well,
+    # so the more specific flag must win over the shared one.
+    assert (
+        Streamer(
+            "b", from_category=True, from_badge_campaign=True
+        ).discovery_source()
+        == StreamerSource.BADGES
+    )
+    assert (
+        Streamer(
+            "w", from_category=True, from_wildcard_category=True
+        ).discovery_source()
+        == StreamerSource.WILDCARD_CATEGORIES
+    )
+    assert (
+        Streamer("c", from_category=True).discovery_source()
+        == StreamerSource.CATEGORIES
+    )
+    assert (
+        Streamer("f", from_followers=True).discovery_source()
+        == StreamerSource.FOLLOWERS
+    )
+    assert Streamer("s").discovery_source() == StreamerSource.STREAMERS
+
+
+def test_category_tier_excludes_badge_but_drop_discovered_includes_it():
+    badge = Streamer("b", from_category=True, from_badge_campaign=True)
+    wildcard = Streamer("w", from_category=True, from_wildcard_category=True)
+    category = Streamer("c", from_category=True)
+    followed = Streamer("f", from_followers=True)
+
+    assert [is_category_tier(s) for s in (badge, wildcard, category, followed)] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert [is_drop_discovered(s) for s in (badge, wildcard, category, followed)] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+
+
+def test_discovery_source_tolerates_stand_ins_missing_flags():
+    assert discovery_source(SimpleNamespace(from_category=True)) == (
+        StreamerSource.CATEGORIES
+    )
+    assert discovery_source(SimpleNamespace()) == StreamerSource.STREAMERS

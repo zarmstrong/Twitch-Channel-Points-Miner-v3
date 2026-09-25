@@ -339,7 +339,33 @@ def test_category_refresh_preserves_other_sources_when_category_is_stale():
     assert miner.streamers == [configured, followed, badge]
     assert miner.original_streamers == [10, 20, 30]
     assert miner.ws_pool.removed == []
-    assert all(streamer.from_category is False for streamer in miner.streamers)
+    assert configured.from_category is False
+    assert followed.from_category is False
+    # The badge streamer's from_category marks it as drop-discovered and must
+    # survive a category refresh, which only owns category-tier streamers.
+    assert badge.from_category is True
+    assert badge.from_badge_campaign is True
+
+
+def test_category_refresh_leaves_badge_streamer_flags_when_category_is_stale():
+    # A badge streamer is not part of either category discovery pass, so
+    # neither a regular nor a wildcard refresh may strip its from_category
+    # marker (which keeps it gated by drop eligibility).
+    for wildcard in (False, True):
+        miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+        badge = Streamer("badge", from_category=True, from_badge_campaign=True)
+        miner.streamers = [badge]
+        miner.original_streamers = [30]
+        miner.ws_pool = FakeWebSocketsPool()
+
+        miner._TwitchChannelPointsMiner__reconcile_category_streamers(
+            [], wildcard=wildcard
+        )
+
+        assert miner.streamers == [badge]
+        assert badge.from_category is True
+        assert badge.from_badge_campaign is True
+        assert miner.ws_pool.removed == []
 
 
 def test_category_refresh_reorders_existing_streamers_to_latest_priority():

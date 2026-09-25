@@ -12,6 +12,7 @@ from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoa
 from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPrediction
 from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
+from TwitchChannelPointsMiner.classes.entities.Streamer import is_drop_discovered
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
@@ -281,7 +282,7 @@ class WebSocketsPool:
                     if message.topic == "community-points-user-v1":
                         streamer = ws.streamers[streamer_index]
                         track_points_for_streamer = (
-                            streamer.from_category is not True
+                            not is_drop_discovered(streamer)
                             or streamer.explicitly_configured is True
                             or Settings.track_category_streamer_points is True
                         )

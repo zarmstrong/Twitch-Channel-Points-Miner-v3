@@ -12,12 +12,53 @@ from TwitchChannelPointsMiner.classes.Settings import (
     ANALYTICS_FILE_MUTEX,
     Events,
     Settings,
+    StreamerSource,
 )
 from TwitchChannelPointsMiner.constants import URL
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import _millify
 
 logger = logging.getLogger(__name__)
+
+# from_category is also set on badge-campaign and wildcard streamers, so it
+# can't tell the discovery tiers apart. These groupings name the two questions
+# call sites actually ask.
+CATEGORY_TIER_SOURCES = frozenset(
+    (StreamerSource.CATEGORIES, StreamerSource.WILDCARD_CATEGORIES)
+)
+DROP_DISCOVERY_SOURCES = CATEGORY_TIER_SOURCES | {StreamerSource.BADGES}
+
+
+def discovery_source(streamer):
+    """Return the StreamerSource tier a streamer was discovered through.
+
+    Badge campaigns win over wildcard categories, which win over regular
+    categories, then followers. Flags are read with getattr so lightweight
+    stand-ins missing some attributes classify like a real Streamer.
+    """
+    if getattr(streamer, "from_badge_campaign", False) is True:
+        return StreamerSource.BADGES
+    if getattr(streamer, "from_wildcard_category", False) is True:
+        return StreamerSource.WILDCARD_CATEGORIES
+    if getattr(streamer, "from_category", False) is True:
+        return StreamerSource.CATEGORIES
+    if getattr(streamer, "from_followers", False) is True:
+        return StreamerSource.FOLLOWERS
+    return StreamerSource.STREAMERS
+
+
+def is_category_tier(streamer):
+    """True for real category and wildcard-category discovery streamers.
+
+    Badge-campaign streamers also carry from_category=True but are excluded.
+    """
+    return discovery_source(streamer) in CATEGORY_TIER_SOURCES
+
+
+def is_drop_discovered(streamer):
+    """True for any streamer found only to farm drops (category, wildcard or
+    badge), as opposed to one the user configured or follows."""
+    return discovery_source(streamer) in DROP_DISCOVERY_SOURCES
 
 
 class StreamerSettings(object):
@@ -161,6 +202,9 @@ class Streamer(object):
             if Settings.logger.less
             else self.__repr__()
         )
+
+    def discovery_source(self):
+        return discovery_source(self)
 
     def set_offline(self):
         broadcast_id = self.stream.broadcast_id

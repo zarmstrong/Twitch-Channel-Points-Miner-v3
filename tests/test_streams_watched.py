@@ -104,6 +104,9 @@ def _watch_streamer(
     points_limit=None,
     watch_streak=False,
 ):
+    # Production builds wildcard and badge-campaign streamers with
+    # from_category=True as well; mirror that so the fakes classify the same.
+    from_category = from_category or from_wildcard_category or from_badge_campaign
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
         update_minute_watched=lambda: None,
@@ -274,7 +277,12 @@ def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
     _run_one_watch_iteration(
         monkeypatch,
         [
-            _watch_streamer("badge-streamer", from_badge_campaign=True),
+            _watch_streamer(
+                "badge-streamer",
+                from_category=True,
+                from_badge_campaign=True,
+                drops_eligible=True,
+            ),
             _watch_streamer(
                 "category-streamer", from_category=True, drops_eligible=True
             ),

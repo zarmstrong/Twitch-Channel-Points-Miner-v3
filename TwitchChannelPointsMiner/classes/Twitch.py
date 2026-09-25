@@ -28,6 +28,11 @@ from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    discovery_source,
+    is_category_tier,
+    is_drop_discovered,
+)
 from TwitchChannelPointsMiner.classes.Exceptions import (
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
@@ -428,7 +433,7 @@ class Twitch(object):
             streamer
             for streamer in streamers
             if streamer.is_watching is True
-            and getattr(streamer, "from_category", False) is True
+            and is_category_tier(streamer)
             and self.__drops_condition(streamer) is True
         ]
         for streamer in watched_streamers:
@@ -485,7 +490,7 @@ class Twitch(object):
                 if (
                     candidate.username == streamer.username
                     or candidate.is_online is not True
-                    or getattr(candidate, "from_category", False) is not True
+                    or not is_category_tier(candidate)
                     or self.__slugify(candidate.stream.game_name() or "") != game_slug
                     or self.__drops_condition(candidate) is not True
                     or blocked_until.get(candidate.username, 0) > now
@@ -941,7 +946,7 @@ class Twitch(object):
                 streamer.set_offline()
 
     def __streamer_drops_description(self, streamer):
-        if getattr(streamer, "from_category", False) is not True:
+        if not is_drop_discovered(streamer):
             return None
 
         game_name = streamer.stream.game_name()
@@ -2788,10 +2793,7 @@ class Twitch(object):
         eligibility = self.category_campaign_eligibility.get(
             (game_slug, streamer.username)
         )
-        if (
-            eligibility is None
-            and getattr(streamer, "from_badge_campaign", False) is True
-        ):
+        if eligibility is None and discovery_source(streamer) == StreamerSource.BADGES:
             eligibility = self.category_campaign_eligibility.get(
                 ("special-events", streamer.username)
             )
@@ -2806,7 +2808,10 @@ class Twitch(object):
         if game_slug in getattr(self, "evaluated_category_campaigns", set()):
             return False
 
-        if getattr(streamer, "from_category", False) is not True:
+        # Badge-campaign streamers are excluded: their eligibility is resolved
+        # through the special-events entry above, not the game's category
+        # catalog, which says nothing about the badge campaign.
+        if not is_category_tier(streamer):
             return False
 
         # Category discovery has already removed fully collected campaigns.
@@ -2836,7 +2841,7 @@ class Twitch(object):
         # not fall back to stale Stream campaign objects after a negative refresh.
         if self.__category_drops_condition(streamer) is True:
             return True
-        if getattr(streamer, "from_category", False) is True:
+        if is_drop_discovered(streamer):
             return False
 
         # The badge catalog refreshes independently from the 30-minute campaign
@@ -2892,10 +2897,7 @@ class Twitch(object):
         settings = getattr(streamer, "settings", None)
         if getattr(settings, "claim_drops", False) is not True:
             return False
-        if (
-            getattr(streamer, "from_category", False) is not True
-            and getattr(streamer, "from_wildcard_category", False) is not True
-        ):
+        if not is_category_tier(streamer):
             return False
         stream = getattr(streamer, "stream", None)
         if stream is None:
@@ -3043,15 +3045,16 @@ class Twitch(object):
 
     def __log_watched_streamers(self, streamers, streamers_watching):
         def watch_reason(streamer):
-            if getattr(streamer, "from_badge_campaign", False) is True:
+            source = discovery_source(streamer)
+            if source == StreamerSource.BADGES:
                 return "badge drop"
-            if getattr(streamer, "from_wildcard_category", False) is True:
+            if source == StreamerSource.WILDCARD_CATEGORIES:
                 return "wildcard campaign drops"
-            if getattr(streamer, "from_category", False) is True:
+            if source == StreamerSource.CATEGORIES:
                 return "campaign drops"
             if (
                 getattr(streamer, "explicitly_configured", False) is not True
-                and getattr(streamer, "from_followers", False) is True
+                and source == StreamerSource.FOLLOWERS
             ):
                 return "followed channel"
             return "streamer"
@@ -3822,10 +3825,7 @@ class Twitch(object):
                     if streamers_snapshot[i].is_online is not True:
                         continue
                     stale_after_seconds = (
-                        120
-                        if getattr(streamers_snapshot[i], "from_category", False)
-                        is True
-                        else 600
+                        120 if is_drop_discovered(streamers_snapshot[i]) else 600
                     )
                     if (
                         streamers_snapshot[i].stream.update_elapsed()
@@ -3841,8 +3841,7 @@ class Twitch(object):
                     for i in range(0, len(streamers_snapshot))
                     if streamers_snapshot[i].is_online is True
                     and (
-                        getattr(streamers_snapshot[i], "from_category", False)
-                        is not True
+                        not is_drop_discovered(streamers_snapshot[i])
                         or self.__drops_condition(streamers_snapshot[i]) is True
                         # A transient per-channel eligibility failure must not
                         # exclude the previous drop pick before the rescue
@@ -3902,29 +3901,7 @@ class Twitch(object):
                 source_priority = normalized_source_priority
 
                 def streamer_source(index):
-                    if (
-                        getattr(streamers_snapshot[index], "from_badge_campaign", False)
-                        is True
-                    ):
-                        return StreamerSource.BADGES
-                    if (
-                        getattr(
-                            streamers_snapshot[index], "from_wildcard_category", False
-                        )
-                        is True
-                    ):
-                        return StreamerSource.WILDCARD_CATEGORIES
-                    if (
-                        getattr(streamers_snapshot[index], "from_category", False)
-                        is True
-                    ):
-                        return StreamerSource.CATEGORIES
-                    if (
-                        getattr(streamers_snapshot[index], "from_followers", False)
-                        is True
-                    ):
-                        return StreamerSource.FOLLOWERS
-                    return StreamerSource.STREAMERS
+                    return discovery_source(streamers_snapshot[index])
 
                 def remaining_watch_amount():
                     return max_watch_amount - len(streamers_watching)
@@ -4802,7 +4779,7 @@ class Twitch(object):
                 campaign_game.get("displayName") or campaign_game.get("name") or ""
             )
             if campaign_game_slug != game_slug and not (
-                getattr(streamer, "from_badge_campaign", False) is True
+                discovery_source(streamer) == StreamerSource.BADGES
                 and campaign_game_slug == "special-events"
             ):
                 continue
@@ -4909,7 +4886,7 @@ class Twitch(object):
                 )
                 return []
 
-            if getattr(streamer, "from_category", False) is True:
+            if is_drop_discovered(streamer):
                 completed_drop_ids = set()
                 (
                     awarded_benefit_ids,
@@ -4984,10 +4961,10 @@ class Twitch(object):
             )
             return []
         if campaign_data_available:
-            if getattr(streamer, "from_category", False) is not True or (
+            if not is_drop_discovered(streamer) or (
                 fallback_campaigns == [] and not allowlisted_elsewhere
             ):
-                if getattr(streamer, "from_category", False) is True:
+                if is_drop_discovered(streamer):
                     with self.__eligibility_lock():
                         self.category_campaign_eligibility[
                             (game_slug, streamer.username)
@@ -6366,7 +6343,7 @@ class Twitch(object):
                         game_label = self.__stream_game_label(streamers[i].stream)
                         if (
                             previous_signature != current_signature
-                            and streamers[i].from_category is True
+                            and is_drop_discovered(streamers[i])
                         ):
                             if previous_signature != "" and current_signature == "":
                                 logger.info(

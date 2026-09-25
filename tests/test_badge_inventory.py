@@ -233,6 +233,35 @@ def test_normal_category_streamer_does_not_cross_special_events_categories():
     assert twitch._Twitch__category_drops_condition(streamer) is False
 
 
+def _category_style_streamer(username, from_badge_campaign):
+    return SimpleNamespace(
+        username=username,
+        from_category=True,
+        from_badge_campaign=from_badge_campaign,
+        is_online=True,
+        settings=SimpleNamespace(claim_drops=True),
+        stream=SimpleNamespace(
+            game_name=lambda: "Apex Legends",
+            campaigns_ids=[],
+        ),
+    )
+
+
+def test_badge_streamer_does_not_resolve_through_game_category_catalog():
+    # An open campaign for the badge streamer's current game says nothing about
+    # its badge campaign, so the category-catalog fallback must not make it
+    # drop-eligible when its special-events eligibility is missing.
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.completed_drop_campaigns = set()
+    twitch.twitchdrops_app_campaigns = {"apex-legends": [{"channels": []}]}
+
+    category = _category_style_streamer("shared-channel", from_badge_campaign=False)
+    badge = _category_style_streamer("shared-channel", from_badge_campaign=True)
+
+    assert twitch._Twitch__category_drops_condition(category) is True
+    assert twitch._Twitch__category_drops_condition(badge) is False
+
+
 def test_available_badges_returns_full_earned_badge_titles():
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
