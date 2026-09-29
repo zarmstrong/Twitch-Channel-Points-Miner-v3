@@ -108,6 +108,8 @@ class Twitch(object):
         "twitchdrops_app_upcoming_starts",
         "twitchdrops_app_deadlines",
         "twitchdrops_app_catalog_complete",
+        "twitchdrops_app_campaign_filtered_slugs",
+        "twitch_campaign_names_by_game",
         "active_drop_campaigns",
         "advertised_drop_campaigns",
         "campaign_channel_ids",
@@ -124,6 +126,7 @@ class Twitch(object):
         "prompt_claim_pass_lock",
         "prompt_claim_last",
         "campaign_game_slugs",
+        "campaign_names",
         "reward_campaign_ids",
         "available_badge_names",
         "drop_badge_rewards",
@@ -184,6 +187,13 @@ class Twitch(object):
         self.twitchdrops_app_upcoming_starts = {}
         self.twitchdrops_app_deadlines = {}
         self.twitchdrops_app_catalog_complete = False
+        # Games whose gist campaigns were filtered against the campaigns
+        # Twitch itself reported, so their gist deadlines can be merged
+        # alongside Twitch's own for the same game.
+        self.twitchdrops_app_campaign_filtered_slugs = set()
+        # Normalized names of every campaign Twitch reported per game in the
+        # latest evaluation, including completed ones remembered this session.
+        self.twitch_campaign_names_by_game = {}
         self.active_drop_campaigns = {}
         self.advertised_drop_campaigns = {}
         self.campaign_channel_ids = {}
@@ -199,6 +209,7 @@ class Twitch(object):
         self.prompt_claim_pass_lock = Lock()
         self.prompt_claim_last = {}
         self.campaign_game_slugs = {}
+        self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
         # than watch time. Populated from the account-wide campaign
         # evaluation and consulted by per-channel discovery too, since that
@@ -975,9 +986,9 @@ class Twitch(object):
                 return None
 
         # Combines the external gist catalog with Twitch's own authoritative
-        # campaign data -- the latter is what's populated instead of the
-        # former once Twitch's inventory is treated as authoritative for
-        # this game, and it may include unrestricted campaigns too.
+        # campaign data. The gist side omits every campaign Twitch reported,
+        # so the two lists do not double-count, and Twitch's may include
+        # unrestricted campaigns too.
         candidate_campaigns = list(
             self.twitchdrops_app_campaigns.get(game_slug, [])
         ) + list(getattr(self, "active_drop_campaigns", {}).get(game_slug, []))
@@ -1535,6 +1546,26 @@ class Twitch(object):
         active_deadlines = {}
         active_campaigns = {}
         twitch_category_slugs = set()
+        twitch_campaign_names = {}
+        campaign_names = getattr(self, "campaign_names", None)
+        if campaign_names is None:
+            campaign_names = self.campaign_names = {}
+
+        def _record_twitch_campaign(game_slug, campaign_id, campaign_name=None):
+            # Twitch is authoritative for the campaigns it reports, not for
+            # every campaign of their game: its account-scoped queries can omit
+            # channel-restricted campaigns that the external catalog still
+            # lists. Track names so the gist fallback can skip exactly these.
+            twitch_category_slugs.add(game_slug)
+            name_key = self.__campaign_name_key(
+                campaign_name or campaign_names.get(str(campaign_id))
+            )
+            if campaign_name:
+                campaign_names[str(campaign_id)] = str(campaign_name)
+            names = twitch_campaign_names.setdefault(game_slug, set())
+            if name_key:
+                names.add(name_key)
+
         completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
         self.completed_drop_campaigns.update(completed_campaign_ids)
         dashboard_campaigns = self.__get_drops_dashboard(status="OPEN")
@@ -1565,15 +1596,21 @@ class Twitch(object):
                 campaigns_by_id[campaign_id] = campaign
 
         advertised_campaigns = getattr(self, "advertised_drop_campaigns", {})
-        for campaign_id, campaign in advertised_campaigns.items():
+        for campaign_id, campaign in list(advertised_campaigns.items()):
             if not isinstance(campaign, dict):
+                continue
+            # The channel cache only ever grows during a session. Expire
+            # closed and completed entries so a campaign that was advertised
+            # hours ago is not re-reported as a Twitch campaign every refresh.
+            if (
+                self.__is_open_drop_campaign(campaign) is not True
+                or str(campaign_id) in self.completed_drop_campaigns
+            ):
+                advertised_campaigns.pop(campaign_id, None)
                 continue
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
-            if (
-                _slug_requested(self.__slugify(game_name))
-                and self.__is_open_drop_campaign(campaign) is True
-            ):
+            if _slug_requested(self.__slugify(game_name)):
                 campaigns_by_id[str(campaign_id)] = copy.deepcopy(campaign)
 
         # Newer inventory responses include the complete completed campaign,
@@ -1661,12 +1698,13 @@ class Twitch(object):
         completed_drop_ids = self.__completed_drop_ids_from_inventory(inventory)
         # Completed campaigns can disappear from both the dashboard and the
         # in-progress inventory immediately after their final reward is claimed.
-        # Keep their previously observed game authoritative for this session so
-        # the external campaign catalog cannot resurrect the completed category.
+        # Keep each one authoritative for this session so the external campaign
+        # catalog cannot resurrect it; other campaigns of the same game remain
+        # eligible through the catalog.
         for campaign_id in self.completed_drop_campaigns:
             game_slug = self.campaign_game_slugs.get(str(campaign_id))
             if game_slug:
-                twitch_category_slugs.add(game_slug)
+                _record_twitch_campaign(game_slug, campaign_id)
         awarded_benefit_ids, awarded_benefit_fingerprints = self.__awarded_benefits(
             inventory
         )
@@ -1706,8 +1744,10 @@ class Twitch(object):
                         "skip_reason": "completed_campaign",
                     }
                 )
-                if game_name and is_reward_campaign is not True:
-                    twitch_category_slugs.add(game_slug)
+                if game_slug and is_reward_campaign is not True:
+                    _record_twitch_campaign(
+                        game_slug, campaign_id, campaign.get("name")
+                    )
                 continue
             inventory_campaign = inventory_campaigns.get(campaign_id)
             if inventory_campaign is not None:
@@ -1719,7 +1759,7 @@ class Twitch(object):
                 game_slug = self.__slugify(game_name) if game_name else ""
             if game_slug and is_reward_campaign is not True:
                 self.campaign_game_slugs[campaign_id] = game_slug
-                twitch_category_slugs.add(game_slug)
+                _record_twitch_campaign(game_slug, campaign_id, campaign.get("name"))
             matches_configured_category = _slug_requested(game_slug)
             evaluation = {
                 "campaign": campaign.get("name"),
@@ -1785,8 +1825,13 @@ class Twitch(object):
         )
 
         self.active_drop_campaigns = active_campaigns
+        self.twitch_campaign_names_by_game = twitch_campaign_names
 
         return active_deadlines, twitch_category_slugs
+
+    @staticmethod
+    def __campaign_name_key(name):
+        return " ".join(str(name or "").split()).casefold()
 
     def __twitchdrops_app_fallback(
         self, categories, known_category_slugs, inventory=None
@@ -1794,6 +1839,10 @@ class Twitch(object):
         catalog_complete = categories is None
         deadlines = {}
         twitch_authoritative_slugs = set(known_category_slugs)
+        twitch_campaign_names = (
+            getattr(self, "twitch_campaign_names_by_game", None) or {}
+        )
+        self.twitchdrops_app_campaign_filtered_slugs = set()
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
@@ -1926,13 +1975,24 @@ class Twitch(object):
                     extra={"emoji": ":alarm_clock:", "category_log": True},
                 )
 
+            twitch_reported_names = None
             if requested_slug in twitch_authoritative_slugs:
+                twitch_reported_names = twitch_campaign_names.get(requested_slug)
+                if not twitch_reported_names:
+                    # Without campaign names there is nothing to filter the
+                    # catalog against, so keep the whole game authoritative.
+                    self.__log_category(
+                        f"Skip Twitch Drops gist evaluation for '{category_name}' "
+                        "because Twitch inventory is authoritative",
+                        extra={"emoji": ":white_check_mark:"},
+                    )
+                    continue
                 self.__log_category(
-                    f"Skip Twitch Drops gist evaluation for '{category_name}' "
-                    "because Twitch inventory is authoritative",
-                    extra={"emoji": ":white_check_mark:"},
+                    f"Evaluate Twitch Drops gist for '{category_name}' excluding "
+                    f"{len(twitch_reported_names)} campaign(s) Twitch already reported",
+                    extra={"emoji": ":mag:"},
                 )
-                continue
+                self.twitchdrops_app_campaign_filtered_slugs.add(requested_slug)
 
             try:
                 report = scraper.scrape(indexed_game["url"])
@@ -1992,6 +2052,21 @@ class Twitch(object):
                     for drop in campaign.get("drops", [])
                     if str(drop.get("name") or "").strip()
                 }
+                if (
+                    twitch_reported_names
+                    and self.__campaign_name_key(campaign.get("name"))
+                    in twitch_reported_names
+                ):
+                    # Twitch already evaluated this exact campaign; its verdict
+                    # (active or completed) wins over the external catalog.
+                    campaign_evaluations.append(
+                        {
+                            "campaign": campaign.get("name"),
+                            "drops": sorted(drop_names),
+                            "skip_reason": "reported_by_twitch",
+                        }
+                    )
+                    continue
                 if self.__campaign_matches_completed_signature(
                     report.get("game") or category_name,
                     campaign.get("name"),
@@ -2447,6 +2522,30 @@ class Twitch(object):
             )
         )
 
+    def __merge_fallback_deadlines(
+        self, active_deadlines, fallback_deadlines, twitch_evaluated_slugs
+    ):
+        """Merge gist deadlines into Twitch's and return the ones merged.
+
+        A game Twitch evaluated only accepts a gist deadline when the fallback
+        filtered that game's gist campaigns against the campaigns Twitch
+        reported, so the deadline comes from a campaign Twitch did not expose.
+        """
+        filtered_slugs = (
+            getattr(self, "twitchdrops_app_campaign_filtered_slugs", None) or set()
+        )
+        merged = {}
+        for game_slug, deadline in fallback_deadlines.items():
+            if game_slug in twitch_evaluated_slugs:
+                if game_slug not in filtered_slugs:
+                    continue
+                current = active_deadlines.get(game_slug)
+                if current is not None and current <= deadline:
+                    continue
+            active_deadlines[game_slug] = deadline
+            merged[game_slug] = deadline
+        return merged
+
     def filter_categories_with_active_drops(
         self,
         categories: List[str],
@@ -2488,15 +2587,13 @@ class Twitch(object):
         )
         # The external campaign index fills gaps when Twitch does not expose a
         # configured game at all.  Once Twitch has evaluated a game, its
-        # authenticated inventory is authoritative: merging an external
-        # deadline for the same game can resurrect a campaign that this account
-        # has already completed and keep the miner on a stale category.
-        active_category_deadlines.update(
-            {
-                game_slug: deadline
-                for game_slug, deadline in fallback_deadlines.items()
-                if game_slug not in twitch_evaluated_category_slugs
-            }
+        # authenticated inventory is authoritative for the campaigns it
+        # reported: merging an external deadline for one of those can resurrect
+        # a campaign that this account has already completed.
+        self.__merge_fallback_deadlines(
+            active_category_deadlines,
+            fallback_deadlines,
+            twitch_evaluated_category_slugs,
         )
         # Merge, don't replace: the wildcard pass owns the full-catalog
         # deadline dict and is skipped whenever this preferred pass finds a
@@ -2626,12 +2723,11 @@ class Twitch(object):
             )
         else:
             fallback_deadlines = dict(getattr(self, "twitchdrops_app_deadlines", {}))
-        external_additions = {
-            game_slug: deadline
-            for game_slug, deadline in fallback_deadlines.items()
-            if game_slug not in twitch_evaluated_category_slugs
-        }
-        active_category_deadlines.update(external_additions)
+        external_additions = self.__merge_fallback_deadlines(
+            active_category_deadlines,
+            fallback_deadlines,
+            twitch_evaluated_category_slugs,
+        )
         # Replace, not merge: this call always evaluates every open campaign
         # unfiltered, so it's already a superset of whatever the preferred-
         # category pass could have found this cycle (which ran first and, by
@@ -2816,11 +2912,10 @@ class Twitch(object):
             return False
 
         # Category discovery has already removed fully collected campaigns.
-        # Use its remaining gist campaign data -- and, for campaign-restricted
-        # categories, Twitch's own authoritative allow-list, which is what
-        # gets populated instead of the gist data once Twitch's inventory is
-        # treated as authoritative for this game -- when Twitch's private
-        # campaign query fails to populate Stream.campaigns.
+        # Use its remaining gist campaign data -- which excludes campaigns
+        # Twitch reported -- and, for campaign-restricted categories, Twitch's
+        # own authoritative allow-list when Twitch's private campaign query
+        # fails to populate Stream.campaigns.
         authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
             game_slug, []
         )
