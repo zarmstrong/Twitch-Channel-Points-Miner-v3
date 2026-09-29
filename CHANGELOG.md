@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.18.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.17.1...3.18.0) (2026-09-29)
+
+
+### Documentation
+
+* **changelog:** restore missing 3.17.1 entries from [#127](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/127) ([#136](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/136)) ([c4eed23](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/c4eed2385332c97775203c284531a9d4621d3500))
+
 ## [3.17.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.17.0...3.17.1) (2026-09-29)
 
 
