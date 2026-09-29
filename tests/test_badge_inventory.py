@@ -1045,3 +1045,59 @@ def test_campaign_qualified_unrelated_badge_does_not_match_reward():
         {"unrelated fan festival 2026 eu - moogle chat"},
         "Final Fantasy XIV Online",
     )
+
+
+def test_twitchdrops_app_keeps_campaigns_twitch_did_not_report(monkeypatch):
+    """Twitch reporting one (completed) Rust campaign must not hide the other
+    channel-restricted Rust campaigns only the external catalog lists."""
+    twitch = bare_twitch(
+        SimpleNamespace(
+            post_gql_request_raw=lambda operation, request: {
+                "data": {"currentUser": {"availableBadges": []}}
+            }
+        )
+    )
+    twitch.twitch_campaign_names_by_game = {"rust": {"rust isles facemask"}}
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "rust",
+                "game": "Rust",
+                "url": "https://twitchdrops.app/game/rust",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Rust",
+            "campaigns": [
+                {
+                    "name": "Rust Isles  Facemask",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": ["facemask-streamer"],
+                    "drops": [{"name": "Rust Isles Facemask"}],
+                },
+                {
+                    "name": "Rust Isles Tac Gloves",
+                    "ends_at": "2098-01-01T00:00:00Z",
+                    "channels": ["gloves-streamer"],
+                    "drops": [{"name": "Rust Isles Tac Gloves"}],
+                },
+            ],
+        },
+    )
+
+    known_slugs = {"rust"}
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(["rust"], known_slugs)
+
+    assert deadlines == {"rust": datetime(2098, 1, 1)}
+    assert [
+        campaign["name"] for campaign in twitch.twitchdrops_app_campaigns["rust"]
+    ] == ["Rust Isles Tac Gloves"]
+    assert twitch.twitchdrops_app_campaign_filtered_slugs == {"rust"}

@@ -1306,6 +1306,48 @@ def test_category_filter_does_not_resurrect_completed_twitch_category(monkeypatc
     assert fallback_calls == [{"two-point-museum"}]
 
 
+def test_category_filter_merges_campaign_filtered_fallback_for_twitch_game(
+    monkeypatch,
+):
+    # Twitch reported only a completed Rust campaign, and its Albion campaign
+    # has a later deadline than a campaign Twitch omitted. Once the fallback
+    # filtered each game's gist campaigns against Twitch's, the remaining gist
+    # deadlines are real, unreported campaigns and must be merged.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"gameEventDrops": []},
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        lambda self, inventory, requested: (
+            {"albion-online": datetime(2099, 2, 1)},
+            {"rust", "albion-online"},
+        ),
+    )
+
+    def fallback(self, categories, known_slugs, inventory=None):
+        self.twitchdrops_app_campaign_filtered_slugs = {"rust", "albion-online"}
+        return {
+            "rust": datetime(2099, 1, 1),
+            "albion-online": datetime(2098, 1, 1),
+        }
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
+
+    assert twitch.filter_categories_with_active_drops(["rust", "albion-online"]) == [
+        "rust",
+        "albion-online",
+    ]
+    assert twitch.category_campaign_deadlines["rust"] == datetime(2099, 1, 1)
+    assert twitch.category_campaign_deadlines["albion-online"] == datetime(
+        2098, 1, 1
+    )
+
+
 def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}

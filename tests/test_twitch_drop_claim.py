@@ -1201,6 +1201,63 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     assert twitch_games == {"example-game"}
 
 
+def test_completed_campaign_stays_authoritative_by_name_and_leaves_advertised_cache(
+    monkeypatch,
+):
+    # Regression: a completed campaign that a watched channel advertised
+    # earlier kept being re-injected from the session cache, and its game was
+    # treated as fully authoritative, hiding the game's other gist campaigns
+    # until the miner restarted.
+    twitch = bare_twitch(monkeypatch)
+    twitch.advertised_drop_campaigns = {"campaign-1": advertised_campaign()}
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, **kwargs: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": []}, {"example-game"}
+    )
+    assert twitch.twitch_campaign_names_by_game == {
+        "example-game": {"example campaign"}
+    }
+
+    _, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {
+            "dropCampaignsInProgress": [],
+            "completedRewardCampaigns": [{"id": "campaign-1"}],
+        },
+        {"example-game"},
+    )
+
+    assert twitch.advertised_drop_campaigns == {}
+    assert twitch_games == {"example-game"}
+    assert twitch.twitch_campaign_names_by_game == {
+        "example-game": {"example campaign"}
+    }
+
+
 def test_reward_campaign_tag_survives_initial_merge_with_untagged_source(monkeypatch):
     # Regression test: the initial dashboard+raw_query+helix merge replaces
     # an existing campaigns_by_id entry wholesale whenever the incoming one
