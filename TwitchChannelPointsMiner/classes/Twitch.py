@@ -4882,6 +4882,7 @@ class Twitch(object):
         (
             channel_campaigns,
             campaign_data_available,
+            channel_query_answered,
         ) = self.__get_campaigns_from_channel_id(streamer.channel_id)
         for campaign in channel_campaigns:
             if not isinstance(campaign, dict):
@@ -5113,11 +5114,20 @@ class Twitch(object):
                     level=logging.DEBUG,
                 )
 
+        # Twitch answered this channel's query without advertising any
+        # campaign. A Twitch-sourced campaign with no allow-list then says
+        # nothing about this channel: some campaigns (e.g. per-streamer Rust
+        # item drops) expose no allow-list yet only progress on the channels
+        # whose own query advertises them. Only an explicit allow-list entry
+        # still qualifies. The external gist index is kept as before, since
+        # Twitch can omit its campaigns from the channel query.
+        require_twitch_allowlist = channel_query_answered and is_category_tier(streamer)
+        twitch_campaigns = list(self.discovered_open_drop_campaigns or [])
+        twitch_campaigns.extend(authoritative_campaigns)
         campaign_ids = set()
-        possible_campaigns = list(self.discovered_open_drop_campaigns or [])
-        possible_campaigns.extend(fallback_campaigns)
-        possible_campaigns.extend(authoritative_campaigns)
-        for campaign in possible_campaigns:
+        possible_campaigns = [(campaign, False) for campaign in fallback_campaigns]
+        possible_campaigns.extend((campaign, True) for campaign in twitch_campaigns)
+        for campaign, from_twitch in possible_campaigns:
             if not isinstance(campaign, dict):
                 continue
             game = campaign.get("game") or {}
@@ -5129,13 +5139,26 @@ class Twitch(object):
             )
             if campaign_game_slug not in ("", game_slug):
                 continue
-            channels = {
-                str(login).lower().strip()
-                for login in campaign.get("channels", []) or []
-            }
+            channels = set(self.__campaign_channel_logins(campaign))
             campaign_id = campaign.get("id")
-            if campaign_id and (not channels or streamer.username in channels):
+            if not campaign_id:
+                continue
+            if streamer.username in channels or (
+                not channels and not (from_twitch and require_twitch_allowlist)
+            ):
                 campaign_ids.add(str(campaign_id))
+
+        if require_twitch_allowlist and not campaign_ids:
+            with self.__eligibility_lock():
+                self.category_campaign_eligibility[(game_slug, streamer.username)] = (
+                    0,
+                    0,
+                )
+            self.__log_drop_check(
+                f"Twitch channel '{streamer.username}' advertises no active "
+                f"campaign for {streamer.stream.game_name()}",
+                level=logging.DEBUG,
+            )
         return list(campaign_ids)
 
     def __normalize_advertised_campaign(self, campaign: dict) -> dict:
@@ -5196,24 +5219,30 @@ class Twitch(object):
 
     def __get_campaigns_from_channel_id(
         self, channel_id: str
-    ) -> Tuple[List[dict], bool]:
+    ) -> Tuple[List[dict], bool, bool]:
+        """Return (campaigns, campaign_data_available, query_answered).
+
+        query_answered is True whenever Twitch answered the channel query,
+        including a null campaign list, and False only when the request or
+        its parsing failed.
+        """
         try:
             response = self.gql.get_available_drops(str(channel_id))
-            return response.campaigns, response.campaigns_available
+            return response.campaigns, response.campaigns_available, True
         except RetryError as error:
             self.__log_drop_check(
                 f"unable to load channel-advertised campaigns for {channel_id}: "
                 f"{error}",
                 level=logging.DEBUG,
             )
-            return [], False
+            return [], False, False
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             self.__log_drop_check(
                 f"invalid channel-advertised campaign response for {channel_id}: "
                 f"{error}",
                 level=logging.DEBUG,
             )
-            return [], False
+            return [], False, False
 
     def __get_reward_campaigns_raw_query(self):
         query_variants = [

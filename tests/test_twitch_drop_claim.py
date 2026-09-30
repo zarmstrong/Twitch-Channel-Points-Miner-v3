@@ -4,6 +4,7 @@ from threading import Lock
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
+from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 
 
@@ -464,6 +465,100 @@ def test_unrestricted_authoritative_campaign_does_not_shield_unrelated_channel(
     assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
         0,
         0,
+    )
+
+
+def per_streamer_campaigns_twitch(monkeypatch, available_drops):
+    # Mirrors the Rust Isles campaigns: each item campaign reports no
+    # allow-list, yet Twitch only advertises (and credits) it on one
+    # streamer's channel. Random Drops-enabled channels answer null.
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(get_available_drops=available_drops)
+    twitch.discovered_open_drop_campaigns = [
+        {
+            "id": "dashboard-campaign-1",
+            "name": "Dashboard Campaign",
+            "game": {"displayName": "Example Game"},
+            "allow": {"channels": [{"name": "some-other-channel"}]},
+        }
+    ]
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {"id": "furnace", "name": "Furnace", "channels": []},
+            {"id": "backpack", "name": "Backpack", "channels": []},
+        ]
+    }
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [
+            {"id": "gist-1", "name": "Lg Box", "channels": ["some-other-channel"]}
+        ]
+    }
+    twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (2, 2)
+    return twitch
+
+
+def test_null_channel_query_ignores_unrestricted_twitch_campaigns(monkeypatch):
+    # Regression: after the one allow-listed Rust campaign was claimed, every
+    # random Rust channel still received the remaining per-streamer campaigns
+    # because they expose no allow-list, and hours of watching earned nothing.
+    twitch = per_streamer_campaigns_twitch(
+        monkeypatch,
+        lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
+    )
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
+def test_null_channel_query_keeps_explicit_twitch_allowlist(monkeypatch):
+    twitch = per_streamer_campaigns_twitch(
+        monkeypatch,
+        lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
+    )
+    twitch.active_drop_campaigns["example-game"].append(
+        {"id": "sword", "name": "Sword", "channels": ["drops-channel"]}
+    )
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "sword"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        2,
+        2,
+    )
+
+
+def test_null_channel_query_keeps_unrestricted_gist_campaign(monkeypatch):
+    twitch = per_streamer_campaigns_twitch(
+        monkeypatch,
+        lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
+    )
+    twitch.twitchdrops_app_campaigns["example-game"].append(
+        {"id": "gist-open", "name": "General Drops", "channels": []}
+    )
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "gist-open"
+    ]
+
+
+def test_failed_channel_query_keeps_unrestricted_twitch_campaigns(monkeypatch):
+    # A failed query proves nothing about the channel, so unrestricted
+    # campaigns still apply and existing eligibility is left alone.
+    def available_drops(channel_id):
+        raise RetryError("DropsHighlightService_AvailableDrops", [])
+
+    twitch = per_streamer_campaigns_twitch(monkeypatch, available_drops)
+
+    assert sorted(
+        twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+    ) == ["backpack", "furnace"]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        2,
+        2,
     )
 
 
