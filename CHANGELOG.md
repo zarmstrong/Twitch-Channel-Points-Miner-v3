@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.18.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.18.0...3.18.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **drops:** stop assigning per-streamer campaigns to unrelated channels ([#138](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/138)) ([6eb6c65](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/6eb6c6523be900746b55f6457d369947a835a82a))
+
 ## [3.18.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.17.1...3.18.0) (2026-09-29)
 
 
