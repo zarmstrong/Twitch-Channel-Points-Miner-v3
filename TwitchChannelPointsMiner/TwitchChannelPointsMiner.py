@@ -605,6 +605,7 @@ class TwitchChannelPointsMiner:
         category_refresh_interval_hours: float = 6,
         drop_progress_stall_minutes: float = 10,
         drop_pick_stickiness_minutes: float = 15,
+        category_drops_override_streamers: bool = False,
         drop_badge_catalog: bool = True,
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
@@ -634,6 +635,7 @@ class TwitchChannelPointsMiner:
             category_refresh_interval_hours=category_refresh_interval_hours,
             drop_progress_stall_minutes=drop_progress_stall_minutes,
             drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
+            category_drops_override_streamers=category_drops_override_streamers,
             drop_badge_catalog=drop_badge_catalog,
             drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
             auto_mine_badge_drops=auto_mine_badge_drops,
@@ -665,6 +667,7 @@ class TwitchChannelPointsMiner:
         category_refresh_interval_hours: float = 6,
         drop_progress_stall_minutes: float = 10,
         drop_pick_stickiness_minutes: float = 15,
+        category_drops_override_streamers: bool = False,
         drop_badge_catalog: bool = True,
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
@@ -695,6 +698,12 @@ class TwitchChannelPointsMiner:
                 drop_pick_stickiness_minutes
             )
             Settings.track_category_streamer_points = track_category_streamer_points
+            self.twitch.category_drops_override_streamers = (
+                category_drops_override_streamers is True
+            )
+            self.twitch.configured_category_slugs = self.twitch.get_category_slugs(
+                categories
+            )
             self.auto_mine_badge_drops = auto_mine_badge_drops is True
             self.badge_drop_streamer_limit = _normalize_badge_drop_streamer_limit(
                 badge_drop_streamer_limit
@@ -2053,6 +2062,12 @@ class TwitchChannelPointsMiner:
     def refresh_categories(self, mine_config):
         """Apply the current configured category list to a running miner."""
         with self.config_reload_lock:
+            self.twitch.category_drops_override_streamers = (
+                mine_config.get("category_drops_override_streamers", False) is True
+            )
+            self.twitch.configured_category_slugs = self.twitch.get_category_slugs(
+                mine_config.get("categories", [])
+            )
             self.wildcard_categories = (
                 mine_config.get("wildcard_categories", False) is True
             )

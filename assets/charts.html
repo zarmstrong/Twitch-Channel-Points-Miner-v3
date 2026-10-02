@@ -368,6 +368,9 @@
                         <p class="config-help">Choose which discovery sources are active after restart. Drag to reorder; order sets which source wins a watch slot first.</p>
                         <form id="source-settings-form" class="config-toggle-grid">
                             <div id="source-settings-list" class="config-items"></div>
+                            <label class="checkbox config-checkbox" title="Twitch counts Drops progress on only one channel at a time, so only one Drops stream is watched.">
+                                <input id="category-drops-override-streamers" type="checkbox"> Category Drops override explicit/followed streamer Drops for games not in my category list
+                            </label>
                             <button class="button is-link" type="submit">Save sources</button>
                         </form>
                     </div>
