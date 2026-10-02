@@ -120,6 +120,9 @@ class Twitch(object):
         "last_category_drop_selection",
         "last_wildcard_category_drop_selection",
         "last_drop_pick_streamer",
+        "last_drop_conflict_message",
+        "configured_category_slugs",
+        "category_drops_override_streamers",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "prompt_claim_lock",
@@ -203,6 +206,13 @@ class Twitch(object):
         self.last_category_drop_selection = None
         self.last_wildcard_category_drop_selection = None
         self.last_drop_pick_streamer = None
+        self.last_drop_conflict_message = None
+        # Slugs of the user's configured categories, and whether a
+        # category-tier Drops stream outranks a configured/followed streamer's
+        # Drops stream for a game outside that list (see
+        # send_minute_watched_events).
+        self.configured_category_slugs = set()
+        self.category_drops_override_streamers = False
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.prompt_claim_lock = Lock()
@@ -4408,6 +4418,28 @@ class Twitch(object):
                     kept_discovered_index = best_wildcard_category_index
                 else:
                     kept_discovered_index = best_category_index
+
+                # Badge campaigns are time-based Drops campaigns too, and
+                # Twitch credits Drops progress to only one watched channel at
+                # a time - watching a badge stream next to the discovered
+                # category/wildcard Drops stream splits progress so neither
+                # campaign reliably advances. Keep whichever the user ranks
+                # higher in source_priority; the freed slot is backfilled with
+                # a non-discovered points stream below.
+                badge_tier = set(indexes_by_source[StreamerSource.BADGES])
+                kept_badge_index = next(
+                    (index for index in streamers_watching if index in badge_tier),
+                    None,
+                )
+                if kept_badge_index is not None and kept_discovered_index is not None:
+                    if (
+                        source_rank[StreamerSource.BADGES]
+                        < source_rank[streamer_source(kept_discovered_index)]
+                    ):
+                        kept_discovered_index = None
+                    else:
+                        kept_badge_index = None
+
                 self.last_drop_pick_streamer = (
                     streamers_snapshot[kept_discovered_index].username
                     if kept_discovered_index is not None
@@ -4437,17 +4469,11 @@ class Twitch(object):
                 # wildcard_tier, defined above), not the from_category flag
                 # alone, since a BADGES-source streamer can also carry
                 # from_category=True.
-                # Badge-campaign streamers are their own tier and never compete
-                # for the shared category/wildcard slot, but they are still
-                # capped at one watched stream: badge discovery keeps adding a
-                # fresh live channel for the same campaign each refresh, so
-                # without a cap two channels for one badge campaign could fill
-                # both watch slots.
-                badge_tier = set(indexes_by_source[StreamerSource.BADGES])
-                kept_badge_index = next(
-                    (index for index in streamers_watching if index in badge_tier),
-                    None,
-                )
+                # Badge-campaign streamers are capped at one watched stream
+                # (kept_badge_index, chosen above against the discovered Drops
+                # pick): badge discovery keeps adding a fresh live channel for
+                # the same campaign each refresh, so without a cap two channels
+                # for one badge campaign could fill both watch slots.
                 filtered_streamers_watching = []
                 for index in streamers_watching:
                     if (
@@ -4458,19 +4484,105 @@ class Twitch(object):
                         continue
                     filtered_streamers_watching.append(index)
 
-                # If multiple discovered streams occupied the initial selection,
-                # use any freed slot for an explicitly configured points stream.
+                # Twitch credits Drops progress to only one watched channel at
+                # a time, whatever the source - a configured or followed
+                # streamer playing a Drops game competes with the discovered
+                # Drops pick just like a badge stream does. Keep the single
+                # Drops stream the user ranks highest in source_priority and
+                # evict the rest; their slots are backfilled with points-only
+                # streams below.
+                discovered_tiers = preferred_tier | wildcard_tier | badge_tier
+                drop_stream_cache = {}
+
+                def _is_drop_stream(index):
+                    if index not in drop_stream_cache:
+                        drop_stream_cache[index] = (
+                            index in discovered_tiers
+                            or self.__drops_condition(streamers_snapshot[index]) is True
+                        )
+                    return drop_stream_cache[index]
+
+                override_streamer_drops = (
+                    getattr(self, "category_drops_override_streamers", False) is True
+                )
+                configured_category_slugs = (
+                    getattr(self, "configured_category_slugs", None) or set()
+                )
+
+                def _drop_rank(index):
+                    source = streamer_source(index)
+                    rank = source_rank[source]
+                    if (
+                        override_streamer_drops
+                        and source
+                        in (StreamerSource.STREAMERS, StreamerSource.FOLLOWERS)
+                        and self.__slugify(
+                            streamers_snapshot[index].stream.game_name() or ""
+                        )
+                        not in configured_category_slugs
+                    ):
+                        # category_drops_override_streamers: a configured or
+                        # followed streamer's Drops for a game outside the
+                        # configured category list rank below every
+                        # discovered Drops source.
+                        rank += len(source_rank)
+                    return rank
+
+                drop_streams = [
+                    index
+                    for index in filtered_streamers_watching
+                    if _is_drop_stream(index)
+                ]
+                drop_conflict_message = None
+                if len(drop_streams) > 1:
+                    kept_drop_index = min(drop_streams, key=_drop_rank)
+                    evicted = [
+                        index for index in drop_streams if index != kept_drop_index
+                    ]
+                    filtered_streamers_watching = [
+                        index
+                        for index in filtered_streamers_watching
+                        if index not in evicted
+                    ]
+                    if kept_discovered_index in evicted:
+                        self.last_drop_pick_streamer = None
+                    drop_conflict_message = (
+                        "Drops progress only counts on one channel at a time: "
+                        f"keeping {streamers_snapshot[kept_drop_index].username} "
+                        f"({streamer_source(kept_drop_index).name.lower()}), "
+                        "skipping "
+                        + ", ".join(
+                            f"{streamers_snapshot[index].username} "
+                            f"({streamer_source(index).name.lower()})"
+                            for index in evicted
+                        )
+                    )
+                if drop_conflict_message != getattr(
+                    self, "last_drop_conflict_message", None
+                ):
+                    self.last_drop_conflict_message = drop_conflict_message
+                    if drop_conflict_message is not None:
+                        logger.info(
+                            drop_conflict_message,
+                            extra={"emoji": ":dart:"},
+                        )
+                has_drop_stream = any(
+                    _is_drop_stream(index) for index in filtered_streamers_watching
+                )
+
+                # Use any freed slot for a points-only stream - never another
+                # discovered stream, and never a second Drops stream.
                 for index in streamers_index:
                     if len(filtered_streamers_watching) >= max_watch_amount:
                         break
                     if index in filtered_streamers_watching:
                         continue
-                    if (
-                        index in preferred_tier
-                        or index in wildcard_tier
-                        or index in badge_tier
-                    ):
+                    if index in discovered_tiers:
                         continue
+                    if _is_drop_stream(index):
+                        if has_drop_stream:
+                            continue
+                        has_drop_stream = True
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
 
