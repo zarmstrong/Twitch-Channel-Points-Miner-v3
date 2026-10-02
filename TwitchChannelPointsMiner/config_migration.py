@@ -12,7 +12,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-CONFIG_VERSION = 9
+CONFIG_VERSION = 10
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),

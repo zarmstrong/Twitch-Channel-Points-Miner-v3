@@ -189,6 +189,25 @@ ANALYTICS_CONFIG = None
     assert namespace["MINE_CONFIG"]["wildcard_category_pin_active"] is True
 
 
+def test_version_nine_migration_adds_category_drops_override_streamers():
+    source = """\
+CONFIG_VERSION = 9
+MINER_CONFIG = {"username": "alice"}
+STREAMERS = []
+MINE_CONFIG = {"drop_pick_stickiness_minutes": 15}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 9
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINE_CONFIG"]["drop_pick_stickiness_minutes"] == 15
+    assert namespace["MINE_CONFIG"]["category_drops_override_streamers"] is False
+
+
 def test_version_seven_migration_appends_wildcard_last_to_custom_priority():
     source = '''\
 CONFIG_VERSION = 7
