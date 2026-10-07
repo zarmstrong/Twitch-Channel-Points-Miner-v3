@@ -4365,15 +4365,6 @@ class Twitch(object):
                         category_hold_reason = _stickiness_hold_reason(
                             best_category_index, tier_min_index
                         )
-                self.__log_category_drop_pick(
-                    streamers_snapshot,
-                    best_category_index,
-                    indexes_by_source[StreamerSource.CATEGORIES],
-                    category_expiration,
-                    reason=category_hold_reason,
-                    slotted_candidates=category_candidates,
-                )
-
                 wildcard_category_candidates = [
                     index for index in streamers_watching if index in wildcard_tier
                 ]
@@ -4445,24 +4436,6 @@ class Twitch(object):
                     if kept_discovered_index is not None
                     else None
                 )
-                self.__log_category_drop_pick(
-                    streamers_snapshot,
-                    # None (rather than best_wildcard_category_index) unless
-                    # the wildcard pick actually took the shared slot, so this
-                    # logs "eligible but no free slot" instead of falsely
-                    # reporting the wildcard pick as watched.
-                    (
-                        best_wildcard_category_index
-                        if kept_discovered_index == best_wildcard_category_index
-                        else None
-                    ),
-                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
-                    category_expiration,
-                    label="wildcard category",
-                    state_attr="last_wildcard_category_drop_selection",
-                    reason=wildcard_hold_reason,
-                    slotted_candidates=wildcard_category_candidates,
-                )
 
                 # Only discovered category/wildcard tier members are trimmed
                 # here - membership in the tier lists (preferred_tier /
@@ -4528,17 +4501,58 @@ class Twitch(object):
                         rank += len(source_rank)
                     return rank
 
+                def _drop_campaign_key(index):
+                    # The campaign IDs a stream would earn, or None when that
+                    # is unknown or any campaign is limited to listed
+                    # channels (sharing the game is not enough: per-channel
+                    # campaigns of one game are still separate campaigns).
+                    campaigns = [
+                        campaign
+                        for campaign in getattr(
+                            streamers_snapshot[index].stream, "campaigns", None
+                        )
+                        or []
+                        if campaign.has_watchable_drops()
+                    ]
+                    if not campaigns or any(
+                        getattr(campaign, "channels", None) for campaign in campaigns
+                    ):
+                        return None
+                    return frozenset(campaign.id for campaign in campaigns)
+
+                streak_priority = Priority.STREAK in priority
+
+                def _may_share_drop_slot(index, kept_index):
+                    # Two streams earning exactly the same unrestricted
+                    # campaigns cannot split progress, and a pending watch
+                    # streak (when the user prioritizes streaks) is only a
+                    # few minutes of overlap - both may stay watched.
+                    if streak_priority and index not in discovered_tiers:
+                        if self._has_pending_watch_streak(
+                            streamers_snapshot[index], now
+                        ):
+                            return True
+                    kept_key = _drop_campaign_key(kept_index)
+                    return kept_key is not None and kept_key == _drop_campaign_key(
+                        index
+                    )
+
                 drop_streams = [
                     index
                     for index in filtered_streamers_watching
                     if _is_drop_stream(index)
                 ]
+                kept_drop_index = (
+                    min(drop_streams, key=_drop_rank) if drop_streams else None
+                )
                 drop_conflict_message = None
-                if len(drop_streams) > 1:
-                    kept_drop_index = min(drop_streams, key=_drop_rank)
-                    evicted = [
-                        index for index in drop_streams if index != kept_drop_index
-                    ]
+                evicted = [
+                    index
+                    for index in drop_streams
+                    if index != kept_drop_index
+                    and not _may_share_drop_slot(index, kept_drop_index)
+                ]
+                if evicted:
                     filtered_streamers_watching = [
                         index
                         for index in filtered_streamers_watching
@@ -4566,12 +4580,10 @@ class Twitch(object):
                             drop_conflict_message,
                             extra={"emoji": ":dart:"},
                         )
-                has_drop_stream = any(
-                    _is_drop_stream(index) for index in filtered_streamers_watching
-                )
 
                 # Use any freed slot for a points-only stream - never another
-                # discovered stream, and never a second Drops stream.
+                # discovered stream, and never a second Drops stream unless it
+                # may share the Drops slot with the kept one.
                 for index in streamers_index:
                     if len(filtered_streamers_watching) >= max_watch_amount:
                         break
@@ -4580,11 +4592,45 @@ class Twitch(object):
                     if index in discovered_tiers:
                         continue
                     if _is_drop_stream(index):
-                        if has_drop_stream:
+                        if kept_drop_index is None:
+                            kept_drop_index = index
+                        elif not _may_share_drop_slot(index, kept_drop_index):
                             continue
-                        has_drop_stream = True
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
+
+                # Log the category/wildcard picks only now that every slot
+                # decision is final - a badge or higher-ranked Drops stream can
+                # evict the discovered pick after it was chosen, and reporting
+                # it as watched would be wrong (and would suppress the "no
+                # watch slot free" message on later cycles).
+                final_watched = set(streamers_watching)
+                self.__log_category_drop_pick(
+                    streamers_snapshot,
+                    (
+                        best_category_index
+                        if best_category_index in final_watched
+                        else None
+                    ),
+                    indexes_by_source[StreamerSource.CATEGORIES],
+                    category_expiration,
+                    reason=category_hold_reason,
+                    slotted_candidates=category_candidates,
+                )
+                self.__log_category_drop_pick(
+                    streamers_snapshot,
+                    (
+                        best_wildcard_category_index
+                        if best_wildcard_category_index in final_watched
+                        else None
+                    ),
+                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
+                    category_expiration,
+                    label="wildcard category",
+                    state_attr="last_wildcard_category_drop_selection",
+                    reason=wildcard_hold_reason,
+                    slotted_candidates=wildcard_category_candidates,
+                )
 
                 watched_indexes = set(streamers_watching)
                 for index, streamer in enumerate(streamers_snapshot):
