@@ -47,6 +47,9 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
+from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+    StreamSegmentWatcher,
+)
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
@@ -132,6 +135,7 @@ class Twitch(object):
         "drop_badge_rewards",
         "restart_requested",
         "gql",
+        "stream_segment_watchers",
     ]
 
     def __init__(self, username, user_agent, gql_factory=None):
@@ -220,6 +224,7 @@ class Twitch(object):
         self.available_badge_names = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
+        self.stream_segment_watchers = {}
 
     def __request_authentication_restart(self):
         if self.restart_requested.is_set():
@@ -3881,6 +3886,32 @@ class Twitch(object):
 
         return points_limit >= 0 and channel_points >= points_limit
 
+    def _poll_stream_segments(self, streamer):
+        """Request the watched stream's HLS segments so Twitch counts watch time.
+
+        Twitch only credits Drop progress while a stream's media segments are
+        requested, so this polls the (cached) media playlist and HEADs every
+        new segment. State is kept per streamer and reset when the broadcast
+        changes; missing on lightweight test doubles, where it is a no-op.
+        """
+        watchers = getattr(self, "stream_segment_watchers", None)
+        gql = getattr(self, "gql", None)
+        if watchers is None or gql is None:
+            return
+
+        stream = getattr(streamer, "stream", None)
+        broadcast_id = getattr(stream, "broadcast_id", None)
+        watcher = watchers.get(streamer.username)
+        if watcher is None or not watcher.matches_broadcast(broadcast_id):
+            watcher = StreamSegmentWatcher(
+                streamer.username,
+                gql,
+                self.user_agent,
+                broadcast_id=broadcast_id,
+            )
+            watchers[streamer.username] = watcher
+        watcher.poll()
+
     def send_minute_watched_events(
         self,
         streamers,
@@ -4478,6 +4509,18 @@ class Twitch(object):
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
 
+                # Forget segment watchers for streams that are no longer
+                # watched so a later re-watch starts from a clean playlist.
+                watchers = getattr(self, "stream_segment_watchers", None)
+                if watchers:
+                    watched_usernames = {
+                        streamers_snapshot[index].username
+                        for index in streamers_watching
+                    }
+                    for username in list(watchers):
+                        if username not in watched_usernames:
+                            del watchers[username]
+
                 self.__save_now_watching_analytics(
                     streamers_snapshot, streamers_watching, streamer_source
                 )
@@ -4615,6 +4658,8 @@ class Twitch(object):
                         self.__check_connection_handler(chunk_size)
                     except requests.exceptions.Timeout as e:
                         logger.error(f"Error while trying to send minute watched: {e}")
+
+                    self._poll_stream_segments(streamer)
 
                     self.__chuncked_sleep(
                         next_iteration - time.time(), chunk_size=chunk_size

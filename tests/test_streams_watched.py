@@ -1923,3 +1923,63 @@ def test_category_drop_pick_logs_when_first_candidate_appears_with_no_slot(
     no_slot_messages = [m for m in messages if "eligible but no watch slot free" in m]
     assert len(no_slot_messages) == 1
     assert "late-arrival" in no_slot_messages[0]
+
+
+def test_watch_iteration_polls_stream_segments_for_watched_streamers(monkeypatch):
+    streamers = [
+        _watch_streamer("alpha", explicitly_configured=True),
+        _watch_streamer("bravo", explicitly_configured=True),
+    ]
+    polled = []
+    monkeypatch.setattr(
+        Twitch,
+        "_poll_stream_segments",
+        lambda self, streamer: polled.append(streamer.username),
+    )
+
+    _run_one_watch_iteration(monkeypatch, streamers, streams_watched=2)
+
+    assert polled == ["alpha", "bravo"]
+
+
+def test_poll_stream_segments_manages_watcher_lifecycle(monkeypatch):
+    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+        StreamSegmentWatcher,
+    )
+
+    monkeypatch.setattr(StreamSegmentWatcher, "poll", lambda self, now=None: None)
+    twitch = Twitch.__new__(Twitch)
+    twitch.user_agent = "test-agent"
+    twitch.stream_segment_watchers = {}
+    twitch.gql = SimpleNamespace()
+    streamer = SimpleNamespace(
+        username="alice", stream=SimpleNamespace(broadcast_id="broadcast-1")
+    )
+
+    twitch._poll_stream_segments(streamer)
+    watcher = twitch.stream_segment_watchers["alice"]
+    assert isinstance(watcher, StreamSegmentWatcher)
+    assert watcher.broadcast_id == "broadcast-1"
+
+    # Same broadcast reuses the watcher (and its dedup state).
+    twitch._poll_stream_segments(streamer)
+    assert twitch.stream_segment_watchers["alice"] is watcher
+
+    # A new broadcast resets the watcher.
+    streamer.stream.broadcast_id = "broadcast-2"
+    twitch._poll_stream_segments(streamer)
+    assert twitch.stream_segment_watchers["alice"] is not watcher
+    assert twitch.stream_segment_watchers["alice"].broadcast_id == "broadcast-2"
+
+
+def test_poll_stream_segments_is_noop_without_gql():
+    twitch = Twitch.__new__(Twitch)
+    twitch.user_agent = "test-agent"
+    twitch.stream_segment_watchers = {}
+    streamer = SimpleNamespace(
+        username="alice", stream=SimpleNamespace(broadcast_id="broadcast-1")
+    )
+
+    twitch._poll_stream_segments(streamer)
+
+    assert twitch.stream_segment_watchers == {}
