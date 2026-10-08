@@ -167,6 +167,18 @@ def test_poll_skips_forbidden_playback_token(monkeypatch):
     assert watcher.poll(now=1000) is False
     assert head_calls == []
     assert watcher.media_playlist is None
+    assert watcher.last_failure == "playback access forbidden"
+
+
+def test_poll_records_master_playlist_failure_reason(monkeypatch):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(503))
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is False
+    assert watcher.last_failure == "master playlist HTTP 503"
 
 
 def test_poll_retries_failed_segment_on_next_cycle(monkeypatch):

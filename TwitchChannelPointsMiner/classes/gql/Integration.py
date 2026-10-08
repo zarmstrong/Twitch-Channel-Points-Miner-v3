@@ -383,6 +383,7 @@ class GQL:
             "isLive": True,
             "isVod": False,
             "vodID": "",
+            "platform": "web",
             "playerType": "site",
         }
         return self.post_gql_request_single(

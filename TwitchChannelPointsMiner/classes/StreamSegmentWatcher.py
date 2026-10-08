@@ -58,6 +58,7 @@ class StreamSegmentWatcher(object):
         "segments_failed",
         "polls_failed",
         "reported_stall",
+        "last_failure",
     ]
 
     def __init__(self, username, gql, user_agent, broadcast_id=None):
@@ -75,6 +76,7 @@ class StreamSegmentWatcher(object):
         self.segments_failed = 0
         self.polls_failed = 0
         self.reported_stall = False
+        self.last_failure = None
 
     def matches_broadcast(self, broadcast_id):
         return self.broadcast_id == broadcast_id
@@ -112,11 +114,15 @@ class StreamSegmentWatcher(object):
         if response is None or response.status_code != 200:
             if response is not None:
                 self._forget_playlist_if_expired(response.status_code)
+                self.last_failure = f"media playlist HTTP {response.status_code}"
+            else:
+                self.last_failure = "media playlist request failed"
             self.polls_failed += 1
             return False
 
         segments = self.parse_playlist(response.text, self.media_playlist, master=False)
         if not segments:
+            self.last_failure = "media playlist had no segments"
             self.polls_failed += 1
             return False
 
@@ -129,12 +135,17 @@ class StreamSegmentWatcher(object):
             if status == 200:
                 self._remember(segment)
                 self.segments_requested += 1
+                self.last_failure = None
                 requested = True
                 continue
 
             # Leave a failed segment unseen so it is retried while the
             # rolling playlist window still lists it.
             self.segments_failed += 1
+            if status is None:
+                self.last_failure = "segment request failed"
+            else:
+                self.last_failure = f"segment HTTP {status}"
             if status is not None:
                 self._forget_playlist_if_expired(status)
 
@@ -144,6 +155,7 @@ class StreamSegmentWatcher(object):
         try:
             token = self.gql.get_playback_access_token(self.username)
         except Exception as error:  # RetryError and friends
+            self.last_failure = f"playback token error ({type(error).__name__})"
             logger.debug(
                 "Unable to resolve the playback token for %s (%s)",
                 self.username,
@@ -152,10 +164,12 @@ class StreamSegmentWatcher(object):
             return None
 
         if token is None or not token.value or not token.signature:
+            self.last_failure = "playback token missing"
             return None
 
         authorization = getattr(token, "authorization", None)
         if authorization is not None and getattr(authorization, "is_forbidden", False):
+            self.last_failure = "playback access forbidden"
             logger.debug(
                 "Twitch forbids playback access for %s; skipping segment requests",
                 self.username,
@@ -170,12 +184,19 @@ class StreamSegmentWatcher(object):
 
         response = self._get(master_url, PLAYLIST_TIMEOUT)
         if response is None or response.status_code != 200:
+            if response is not None:
+                self.last_failure = f"master playlist HTTP {response.status_code}"
+            else:
+                self.last_failure = "master playlist request failed"
             return None
 
         variants = self.parse_playlist(response.text, master_url, master=True)
+        if not variants:
+            self.last_failure = "master playlist had no variants"
+            return None
         # The last variant is normally audio-only or the lowest bitrate; only
         # HEAD requests follow it, so the exact choice barely matters.
-        return variants[-1] if variants else None
+        return variants[-1]
 
     @staticmethod
     def parse_playlist(text, base_url, master):
@@ -245,10 +266,12 @@ class StreamSegmentWatcher(object):
         elif not self.reported_stall:
             logger.warning(
                 "No stream segment could be requested for %s (%s failed, "
-                "%s failed polls), so Twitch will not count this watch time",
+                "%s failed polls; last failure: %s), so Twitch will not "
+                "count this watch time",
                 self.username,
                 self.segments_failed,
                 self.polls_failed,
+                self.last_failure or "unknown",
             )
             self.reported_stall = True
 
