@@ -143,11 +143,18 @@ class StreamSegmentWatcher(object):
             # rolling playlist window still lists it.
             self.segments_failed += 1
             if status is None:
+                # A timeout or connection error will most likely repeat for
+                # the remaining segments; stop so the serial watch loop is not
+                # held up for one timeout per segment.
                 self.last_failure = "segment request failed"
-            else:
-                self.last_failure = f"segment HTTP {status}"
-            if status is not None:
-                self._forget_playlist_if_expired(status)
+                break
+
+            self.last_failure = f"segment HTTP {status}"
+            self._forget_playlist_if_expired(status)
+            if self.media_playlist is None:
+                # The signed URLs expired; the rest of this playlist would
+                # fail the same way until it is re-resolved.
+                break
 
         return requested
 
@@ -253,6 +260,7 @@ class StreamSegmentWatcher(object):
                 logger.info(
                     "Stream segment requests are working again for %s",
                     self.username,
+                    extra={"emoji": ":white_check_mark:"},
                 )
                 self.reported_stall = False
             logger.debug(
@@ -272,6 +280,7 @@ class StreamSegmentWatcher(object):
                 self.segments_failed,
                 self.polls_failed,
                 self.last_failure or "unknown",
+                extra={"emoji": ":warning:"},
             )
             self.reported_stall = True
 

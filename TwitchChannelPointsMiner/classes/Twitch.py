@@ -3901,24 +3901,33 @@ class Twitch(object):
         requested, so this polls the (cached) media playlist and HEADs every
         new segment. State is kept per streamer and reset when the broadcast
         changes; missing on lightweight test doubles, where it is a no-op.
+        Unexpected errors are logged and swallowed so they cannot abort the
+        remaining streamers in the watch cycle.
         """
         watchers = getattr(self, "stream_segment_watchers", None)
         gql = getattr(self, "gql", None)
         if watchers is None or gql is None:
             return
 
-        stream = getattr(streamer, "stream", None)
-        broadcast_id = getattr(stream, "broadcast_id", None)
-        watcher = watchers.get(streamer.username)
-        if watcher is None or not watcher.matches_broadcast(broadcast_id):
-            watcher = StreamSegmentWatcher(
-                streamer.username,
-                gql,
-                self.user_agent,
-                broadcast_id=broadcast_id,
+        try:
+            stream = getattr(streamer, "stream", None)
+            broadcast_id = getattr(stream, "broadcast_id", None)
+            watcher = watchers.get(streamer.username)
+            if watcher is None or not watcher.matches_broadcast(broadcast_id):
+                watcher = StreamSegmentWatcher(
+                    streamer.username,
+                    gql,
+                    self.user_agent,
+                    broadcast_id=broadcast_id,
+                )
+                watchers[streamer.username] = watcher
+            watcher.poll()
+        except Exception:
+            logger.warning(
+                f"Unable to request stream segments for {streamer}",
+                exc_info=True,
+                extra={"emoji": ":warning:"},
             )
-            watchers[streamer.username] = watcher
-        watcher.poll()
 
     def send_minute_watched_events(
         self,

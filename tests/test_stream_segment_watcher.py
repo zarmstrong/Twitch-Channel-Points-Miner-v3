@@ -237,3 +237,58 @@ def test_seen_segment_cache_is_bounded(monkeypatch):
     assert len(watcher.seen_order) == SEEN_SEGMENT_LIMIT
     assert "segment-0" not in watcher.seen_segments
     assert f"segment-{SEEN_SEGMENT_LIMIT + 9}" in watcher.seen_segments
+
+
+def test_network_failure_stops_requesting_remaining_segments(monkeypatch):
+    _route_get(monkeypatch, [FakeResponse(200, MEDIA_PLAYLIST)])
+    head_calls = []
+
+    def fake_head(url, **kwargs):
+        head_calls.append(url)
+        raise requests.exceptions.ConnectTimeout()
+
+    monkeypatch.setattr(requests, "head", fake_head)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is False
+    # Only one timeout is paid; the second segment is not attempted.
+    assert head_calls == ["https://cdn.example/hls/example/0.ts"]
+    assert watcher.last_failure == "segment request failed"
+    assert watcher.seen_segments == set()
+
+
+def test_expired_segment_url_stops_requests_and_forgets_playlist(monkeypatch):
+    _route_get(monkeypatch, [FakeResponse(200, MEDIA_PLAYLIST)])
+    head_calls = _patch_head(monkeypatch, status=403)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is False
+    assert head_calls == ["https://cdn.example/hls/example/0.ts"]
+    assert watcher.media_playlist is None
+    assert watcher.last_failure == "segment HTTP 403"
+
+
+def test_stall_and_recovery_logs_carry_emoji(monkeypatch, caplog):
+    _route_get(monkeypatch, [FakeResponse(200, MEDIA_PLAYLIST)])
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example",
+        SimpleNamespace(get_playback_access_token=lambda _u: _token(forbidden=True)),
+        "ua",
+    )
+
+    with caplog.at_level("INFO"):
+        watcher.poll(now=1000)
+        watcher.gql = SimpleNamespace(get_playback_access_token=lambda _u: _token())
+        watcher.poll(now=1300)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    recoveries = [r for r in caplog.records if "working again" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].emoji == ":warning:"
+    assert len(recoveries) == 1
+    assert recoveries[0].emoji == ":white_check_mark:"

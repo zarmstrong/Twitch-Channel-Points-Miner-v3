@@ -2307,3 +2307,32 @@ def test_pending_watch_streak_keeps_a_second_drop_stream_when_streaks_prioritize
         "https://spade.test/category-streamer",
         f"https://spade.test/{second}",
     ]
+
+
+def test_poll_stream_segments_logs_and_swallows_unexpected_errors(
+    monkeypatch, caplog
+):
+    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+        StreamSegmentWatcher,
+    )
+
+    def boom(self, now=None):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(StreamSegmentWatcher, "poll", boom)
+    twitch = Twitch.__new__(Twitch)
+    twitch.user_agent = "test-agent"
+    twitch.stream_segment_watchers = {}
+    twitch.gql = SimpleNamespace()
+    streamer = SimpleNamespace(
+        username="alice", stream=SimpleNamespace(broadcast_id="broadcast-1")
+    )
+
+    with caplog.at_level("WARNING"):
+        twitch._poll_stream_segments(streamer)
+
+    assert any(
+        "Unable to request stream segments" in record.getMessage()
+        and record.exc_info is not None
+        for record in caplog.records
+    )
