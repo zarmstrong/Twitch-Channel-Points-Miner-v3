@@ -29,6 +29,8 @@ SEGMENT_TIMEOUT = (3, 10)
 # A signed playlist URL expires and a restarted stream gets new ones; only
 # re-resolve at most this often after a failed attempt.
 RESOLVE_RETRY_SECONDS = 60
+# Responses meaning the signed playlist (or segment) URL is no longer valid.
+EXPIRED_STATUS_CODES = (401, 403, 404, 410)
 # Report a stall at most this often.
 REPORT_INTERVAL_SECONDS = 300
 # Bound the per-watch memory of already-requested segments.
@@ -100,20 +102,33 @@ class StreamSegmentWatcher(object):
         return requested
 
     def _poll_playlist(self, now):
-        if self.media_playlist is None and now >= self.next_resolve_attempt:
-            # At most once a minute: a failed resolve logs nothing sensitive
-            # and re-uses the cached URL until it actually expires.
-            self.next_resolve_attempt = now + RESOLVE_RETRY_SECONDS
-            self.media_playlist = self._resolve_media_playlist()
-
+        resolved_now = False
         if self.media_playlist is None:
-            self.polls_failed += 1
-            return False
+            if now < self.next_resolve_attempt or not self._resolve(now):
+                self.polls_failed += 1
+                return False
+            resolved_now = True
 
         response = self._get(self.media_playlist, PLAYLIST_TIMEOUT)
+        if (
+            response is not None
+            and response.status_code in EXPIRED_STATUS_CODES
+            and not resolved_now
+        ):
+            # The cached signed URL expired: resolve a fresh one straight away
+            # rather than losing this poll's segments.
+            self.media_playlist = None
+            if not self._resolve(now):
+                self.polls_failed += 1
+                return False
+            resolved_now = True
+            response = self._get(self.media_playlist, PLAYLIST_TIMEOUT)
+
         if response is None or response.status_code != 200:
             if response is not None:
-                self._forget_playlist_if_expired(response.status_code)
+                self._forget_playlist_if_expired(
+                    response.status_code, now, resolved_now
+                )
                 self.last_failure = f"media playlist HTTP {response.status_code}"
             else:
                 self.last_failure = "media playlist request failed"
@@ -132,7 +147,7 @@ class StreamSegmentWatcher(object):
                 continue
 
             status = self._head(segment)
-            if status == 200:
+            if status is not None and 200 <= status < 300:
                 self._remember(segment)
                 self.segments_requested += 1
                 self.last_failure = None
@@ -150,13 +165,28 @@ class StreamSegmentWatcher(object):
                 break
 
             self.last_failure = f"segment HTTP {status}"
-            self._forget_playlist_if_expired(status)
-            if self.media_playlist is None:
+            # A 404 only means this segment already left the edge cache; the
+            # playlist itself is still valid, so move on to the next one.
+            if status != 404 and status in EXPIRED_STATUS_CODES:
                 # The signed URLs expired; the rest of this playlist would
                 # fail the same way until it is re-resolved.
+                self._forget_playlist_if_expired(status, now, resolved_now)
                 break
 
         return requested
+
+    def _resolve(self, now):
+        """Resolve a fresh media playlist, throttling only failed attempts.
+
+        A successful resolve leaves no cooldown, so a later expiry can be
+        recovered from immediately; a failed one waits RESOLVE_RETRY_SECONDS.
+        """
+        self.media_playlist = self._resolve_media_playlist()
+        if self.media_playlist is None:
+            self.next_resolve_attempt = now + RESOLVE_RETRY_SECONDS
+            return False
+        self.next_resolve_attempt = now
+        return True
 
     def _resolve_media_playlist(self):
         try:
@@ -248,10 +278,15 @@ class StreamSegmentWatcher(object):
         while len(self.seen_order) > SEEN_SEGMENT_LIMIT:
             self.seen_segments.discard(self.seen_order.pop(0))
 
-    def _forget_playlist_if_expired(self, status_code):
+    def _forget_playlist_if_expired(self, status_code, now, resolved_now):
         # Signed playlist URLs expire and a restarted stream gets new ones.
-        if status_code in (401, 403, 404, 410):
-            self.media_playlist = None
+        if status_code not in EXPIRED_STATUS_CODES:
+            return
+        self.media_playlist = None
+        if resolved_now:
+            # Even a freshly resolved URL was rejected; back off instead of
+            # re-resolving on every poll.
+            self.next_resolve_attempt = now + RESOLVE_RETRY_SECONDS
 
     def _report(self, now):
         self.last_report = now
@@ -302,10 +337,13 @@ class StreamSegmentWatcher(object):
 
     def _head(self, url):
         try:
+            # HEAD does not follow redirects by default; follow them so a CDN
+            # redirect to an edge node still reaches (and counts) the segment.
             response = requests.head(
                 url,
                 headers={"User-Agent": self.user_agent},
                 timeout=SEGMENT_TIMEOUT,
+                allow_redirects=True,
             )
             return response.status_code
         except requests.exceptions.RequestException as error:

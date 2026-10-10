@@ -292,3 +292,79 @@ def test_stall_and_recovery_logs_carry_emoji(monkeypatch, caplog):
     assert warnings[0].emoji == ":warning:"
     assert len(recoveries) == 1
     assert recoveries[0].emoji == ":white_check_mark:"
+
+
+def test_evicted_segment_404_keeps_playlist_and_continues(monkeypatch):
+    _route_get(monkeypatch, [FakeResponse(200, MEDIA_PLAYLIST)])
+    statuses = iter([404, 200])
+    head_calls = []
+
+    def fake_head(url, **kwargs):
+        head_calls.append(url)
+        return FakeResponse(next(statuses))
+
+    monkeypatch.setattr(requests, "head", fake_head)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is True
+    assert head_calls == [
+        "https://cdn.example/hls/example/0.ts",
+        "https://cdn.example/hls/example/1.ts",
+    ]
+    assert watcher.media_playlist == "https://cdn.example/hls/example/audio_only.m3u8"
+
+
+def test_expired_cached_playlist_is_re_resolved_in_the_same_poll(monkeypatch):
+    calls = _route_get(
+        monkeypatch,
+        [
+            FakeResponse(200, MEDIA_PLAYLIST),
+            FakeResponse(403),
+            FakeResponse(200, MEDIA_PLAYLIST.replace("1.ts", "2.ts")),
+        ],
+    )
+    head_calls = _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is True
+    # Well inside the old 60s resolve cooldown: the expiry is recovered from
+    # immediately instead of losing this poll.
+    assert watcher.poll(now=1030) is True
+    assert calls["master"] == 2
+    assert head_calls[-1] == "https://cdn.example/hls/example/2.ts"
+
+
+def test_rejected_fresh_playlist_backs_off_before_resolving_again(monkeypatch):
+    calls = _route_get(monkeypatch, [FakeResponse(403), FakeResponse(403)])
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is False
+    assert watcher.poll(now=1020) is False
+    assert calls["master"] == 1
+    assert watcher.poll(now=1061) is False
+    assert calls["master"] == 2
+
+
+def test_segment_head_follows_redirects_and_accepts_any_2xx(monkeypatch):
+    _route_get(monkeypatch, [FakeResponse(200, MEDIA_PLAYLIST)])
+    head_kwargs = []
+
+    def fake_head(url, **kwargs):
+        head_kwargs.append(kwargs)
+        return FakeResponse(206)
+
+    monkeypatch.setattr(requests, "head", fake_head)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    assert watcher.poll(now=1000) is True
+    assert all(kwargs.get("allow_redirects") is True for kwargs in head_kwargs)
+    assert len(watcher.seen_segments) == 2

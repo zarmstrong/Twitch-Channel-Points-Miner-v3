@@ -890,6 +890,28 @@ def test_playback_access_token_uses_current_persisted_query_and_platform():
     assert request["variables"]["login"] == "example"
 
 
+def test_playback_access_token_response_is_redacted_from_debug_log(caplog):
+    payload = {
+        "data": {
+            "streamPlaybackAccessToken": {
+                "value": "secret-token-value",
+                "signature": "secret-signature",
+                "authorization": {"isForbidden": False, "forbiddenReasonCode": None},
+            }
+        },
+        "extensions": {"operationName": "PlaybackAccessToken"},
+    }
+
+    with caplog.at_level("DEBUG"):
+        GQL(
+            client_session(), post_request=lambda *a, **k: FakeResponse(payload)
+        ).get_playback_access_token("example")
+
+    assert "secret-token-value" not in caplog.text
+    assert "secret-signature" not in caplog.text
+    assert "<redacted" in caplog.text
+
+
 def test_channel_points_context_accepts_current_query_shape_without_user_ids():
     payload = {
         "data": {
