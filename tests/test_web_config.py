@@ -1797,3 +1797,51 @@ def test_malformed_managed_notifications_fail_cleanly(tmp_path, notifications):
 
     with pytest.raises(ConfigEditError, match="(?i)notification"):
         migrate_web_config(config)
+
+
+def test_managed_web_config_updates_category_drops_override_streamers(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    assert read_managed_web_config(config)["category_drops_override_streamers"] is False
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_sources",
+            "values": {},
+            "category_drops_override_streamers": True,
+        },
+    )
+
+    assert result["category_drops_override_streamers"] is True
+    assert _load_config(config).MINE_CONFIG["category_drops_override_streamers"] is True
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_sources",
+            "values": {},
+            "category_drops_override_streamers": False,
+        },
+    )
+
+    assert result["category_drops_override_streamers"] is False
+    assert (
+        _load_config(config).MINE_CONFIG["category_drops_override_streamers"] is False
+    )
+
+
+def test_managed_web_config_rejects_non_boolean_category_drops_override(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_sources",
+                "values": {},
+                "category_drops_override_streamers": "yes",
+            },
+        )

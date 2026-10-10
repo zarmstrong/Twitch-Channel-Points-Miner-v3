@@ -1294,6 +1294,7 @@ function renderWebConfig(config) {
     $('#category-refresh').val(config.category.refresh_interval_hours);
     $('#category-drops-enabled').prop('checked', config.category.drops_enabled);
     renderSourceSettings(config.sources || {}, config.source_order || []);
+    $('#category-drops-override-streamers').prop('checked', config.category_drops_override_streamers === true);
     $('#console-log-level').val(config.logging.console_level);
     $('#file-log-level').val(config.logging.file_level);
     $('#daily-report-enabled').prop('checked', config.logging.daily_report);
@@ -1585,7 +1586,12 @@ function saveSourceSettings(event) {
         return $(this).data('source-row');
     }).get();
     var button = $(this).find('button[type="submit"]');
-    updateWebConfig({ action: 'update_sources', values: values, order: order }, 'Stream sources were saved. Restart the miner to apply them.', button);
+    updateWebConfig({
+        action: 'update_sources',
+        values: values,
+        order: order,
+        category_drops_override_streamers: $('#category-drops-override-streamers').prop('checked')
+    }, 'Stream sources were saved. Restart the miner to apply them.', button);
 }
 
 function saveLoggingSettings(event) {

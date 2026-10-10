@@ -47,9 +47,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
-from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
-    StreamSegmentWatcher,
-)
+from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import StreamSegmentWatcher
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
@@ -123,6 +121,9 @@ class Twitch(object):
         "last_category_drop_selection",
         "last_wildcard_category_drop_selection",
         "last_drop_pick_streamer",
+        "last_drop_conflict_message",
+        "configured_category_slugs",
+        "category_drops_override_streamers",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "prompt_claim_lock",
@@ -207,6 +208,13 @@ class Twitch(object):
         self.last_category_drop_selection = None
         self.last_wildcard_category_drop_selection = None
         self.last_drop_pick_streamer = None
+        self.last_drop_conflict_message = None
+        # Slugs of the user's configured categories, and whether a
+        # category-tier Drops stream outranks a configured/followed streamer's
+        # Drops stream for a game outside that list (see
+        # send_minute_watched_events).
+        self.configured_category_slugs = set()
+        self.category_drops_override_streamers = False
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.prompt_claim_lock = Lock()
@@ -4386,15 +4394,6 @@ class Twitch(object):
                         category_hold_reason = _stickiness_hold_reason(
                             best_category_index, tier_min_index
                         )
-                self.__log_category_drop_pick(
-                    streamers_snapshot,
-                    best_category_index,
-                    indexes_by_source[StreamerSource.CATEGORIES],
-                    category_expiration,
-                    reason=category_hold_reason,
-                    slotted_candidates=category_candidates,
-                )
-
                 wildcard_category_candidates = [
                     index for index in streamers_watching if index in wildcard_tier
                 ]
@@ -4439,28 +4438,32 @@ class Twitch(object):
                     kept_discovered_index = best_wildcard_category_index
                 else:
                     kept_discovered_index = best_category_index
+
+                # Badge campaigns are time-based Drops campaigns too, and
+                # Twitch credits Drops progress to only one watched channel at
+                # a time - watching a badge stream next to the discovered
+                # category/wildcard Drops stream splits progress so neither
+                # campaign reliably advances. Keep whichever the user ranks
+                # higher in source_priority; the freed slot is backfilled with
+                # a non-discovered points stream below.
+                badge_tier = set(indexes_by_source[StreamerSource.BADGES])
+                kept_badge_index = next(
+                    (index for index in streamers_watching if index in badge_tier),
+                    None,
+                )
+                if kept_badge_index is not None and kept_discovered_index is not None:
+                    if (
+                        source_rank[StreamerSource.BADGES]
+                        < source_rank[streamer_source(kept_discovered_index)]
+                    ):
+                        kept_discovered_index = None
+                    else:
+                        kept_badge_index = None
+
                 self.last_drop_pick_streamer = (
                     streamers_snapshot[kept_discovered_index].username
                     if kept_discovered_index is not None
                     else None
-                )
-                self.__log_category_drop_pick(
-                    streamers_snapshot,
-                    # None (rather than best_wildcard_category_index) unless
-                    # the wildcard pick actually took the shared slot, so this
-                    # logs "eligible but no free slot" instead of falsely
-                    # reporting the wildcard pick as watched.
-                    (
-                        best_wildcard_category_index
-                        if kept_discovered_index == best_wildcard_category_index
-                        else None
-                    ),
-                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
-                    category_expiration,
-                    label="wildcard category",
-                    state_attr="last_wildcard_category_drop_selection",
-                    reason=wildcard_hold_reason,
-                    slotted_candidates=wildcard_category_candidates,
                 )
 
                 # Only discovered category/wildcard tier members are trimmed
@@ -4468,17 +4471,11 @@ class Twitch(object):
                 # wildcard_tier, defined above), not the from_category flag
                 # alone, since a BADGES-source streamer can also carry
                 # from_category=True.
-                # Badge-campaign streamers are their own tier and never compete
-                # for the shared category/wildcard slot, but they are still
-                # capped at one watched stream: badge discovery keeps adding a
-                # fresh live channel for the same campaign each refresh, so
-                # without a cap two channels for one badge campaign could fill
-                # both watch slots.
-                badge_tier = set(indexes_by_source[StreamerSource.BADGES])
-                kept_badge_index = next(
-                    (index for index in streamers_watching if index in badge_tier),
-                    None,
-                )
+                # Badge-campaign streamers are capped at one watched stream
+                # (kept_badge_index, chosen above against the discovered Drops
+                # pick): badge discovery keeps adding a fresh live channel for
+                # the same campaign each refresh, so without a cap two channels
+                # for one badge campaign could fill both watch slots.
                 filtered_streamers_watching = []
                 for index in streamers_watching:
                     if (
@@ -4489,21 +4486,180 @@ class Twitch(object):
                         continue
                     filtered_streamers_watching.append(index)
 
-                # If multiple discovered streams occupied the initial selection,
-                # use any freed slot for an explicitly configured points stream.
+                # Twitch credits Drops progress to only one watched channel at
+                # a time, whatever the source - a configured or followed
+                # streamer playing a Drops game competes with the discovered
+                # Drops pick just like a badge stream does. Keep the single
+                # Drops stream the user ranks highest in source_priority and
+                # evict the rest; their slots are backfilled with points-only
+                # streams below.
+                discovered_tiers = preferred_tier | wildcard_tier | badge_tier
+                drop_stream_cache = {}
+
+                def _is_drop_stream(index):
+                    if index not in drop_stream_cache:
+                        drop_stream_cache[index] = (
+                            index in discovered_tiers
+                            or self.__drops_condition(streamers_snapshot[index]) is True
+                        )
+                    return drop_stream_cache[index]
+
+                override_streamer_drops = (
+                    getattr(self, "category_drops_override_streamers", False) is True
+                )
+                configured_category_slugs = (
+                    getattr(self, "configured_category_slugs", None) or set()
+                )
+
+                def _drop_rank(index):
+                    source = streamer_source(index)
+                    rank = source_rank[source]
+                    if (
+                        override_streamer_drops
+                        and source
+                        in (StreamerSource.STREAMERS, StreamerSource.FOLLOWERS)
+                        and self.__slugify(
+                            streamers_snapshot[index].stream.game_name() or ""
+                        )
+                        not in configured_category_slugs
+                    ):
+                        # category_drops_override_streamers: a configured or
+                        # followed streamer's Drops for a game outside the
+                        # configured category list rank below every
+                        # discovered Drops source.
+                        rank += len(source_rank)
+                    return rank
+
+                def _drop_campaign_key(index):
+                    # The campaign IDs a stream would earn, or None when that
+                    # is unknown or any campaign is limited to listed
+                    # channels (sharing the game is not enough: per-channel
+                    # campaigns of one game are still separate campaigns).
+                    campaigns = [
+                        campaign
+                        for campaign in getattr(
+                            streamers_snapshot[index].stream, "campaigns", None
+                        )
+                        or []
+                        if campaign.has_watchable_drops()
+                    ]
+                    if not campaigns or any(
+                        getattr(campaign, "channels", None) for campaign in campaigns
+                    ):
+                        return None
+                    return frozenset(campaign.id for campaign in campaigns)
+
+                streak_priority = Priority.STREAK in priority
+
+                def _may_share_drop_slot(index, kept_index):
+                    # Two streams earning exactly the same unrestricted
+                    # campaigns cannot split progress, and a pending watch
+                    # streak (when the user prioritizes streaks) is only a
+                    # few minutes of overlap - both may stay watched.
+                    if streak_priority and index not in discovered_tiers:
+                        if self._has_pending_watch_streak(
+                            streamers_snapshot[index], now
+                        ):
+                            return True
+                    kept_key = _drop_campaign_key(kept_index)
+                    return kept_key is not None and kept_key == _drop_campaign_key(
+                        index
+                    )
+
+                drop_streams = [
+                    index
+                    for index in filtered_streamers_watching
+                    if _is_drop_stream(index)
+                ]
+                kept_drop_index = (
+                    min(drop_streams, key=_drop_rank) if drop_streams else None
+                )
+                drop_conflict_message = None
+                evicted = [
+                    index
+                    for index in drop_streams
+                    if index != kept_drop_index
+                    and not _may_share_drop_slot(index, kept_drop_index)
+                ]
+                if evicted:
+                    filtered_streamers_watching = [
+                        index
+                        for index in filtered_streamers_watching
+                        if index not in evicted
+                    ]
+                    if kept_discovered_index in evicted:
+                        self.last_drop_pick_streamer = None
+                    drop_conflict_message = (
+                        "Drops progress only counts on one channel at a time: "
+                        f"keeping {streamers_snapshot[kept_drop_index].username} "
+                        f"({streamer_source(kept_drop_index).name.lower()}), "
+                        "skipping "
+                        + ", ".join(
+                            f"{streamers_snapshot[index].username} "
+                            f"({streamer_source(index).name.lower()})"
+                            for index in evicted
+                        )
+                    )
+                if drop_conflict_message != getattr(
+                    self, "last_drop_conflict_message", None
+                ):
+                    self.last_drop_conflict_message = drop_conflict_message
+                    if drop_conflict_message is not None:
+                        logger.info(
+                            drop_conflict_message,
+                            extra={"emoji": ":dart:"},
+                        )
+
+                # Use any freed slot for a points-only stream - never another
+                # discovered stream, and never a second Drops stream unless it
+                # may share the Drops slot with the kept one.
                 for index in streamers_index:
                     if len(filtered_streamers_watching) >= max_watch_amount:
                         break
                     if index in filtered_streamers_watching:
                         continue
-                    if (
-                        index in preferred_tier
-                        or index in wildcard_tier
-                        or index in badge_tier
-                    ):
+                    if index in discovered_tiers:
                         continue
+                    if _is_drop_stream(index):
+                        if kept_drop_index is None:
+                            kept_drop_index = index
+                        elif not _may_share_drop_slot(index, kept_drop_index):
+                            continue
                     filtered_streamers_watching.append(index)
                 streamers_watching = filtered_streamers_watching
+
+                # Log the category/wildcard picks only now that every slot
+                # decision is final - a badge or higher-ranked Drops stream can
+                # evict the discovered pick after it was chosen, and reporting
+                # it as watched would be wrong (and would suppress the "no
+                # watch slot free" message on later cycles).
+                final_watched = set(streamers_watching)
+                self.__log_category_drop_pick(
+                    streamers_snapshot,
+                    (
+                        best_category_index
+                        if best_category_index in final_watched
+                        else None
+                    ),
+                    indexes_by_source[StreamerSource.CATEGORIES],
+                    category_expiration,
+                    reason=category_hold_reason,
+                    slotted_candidates=category_candidates,
+                )
+                self.__log_category_drop_pick(
+                    streamers_snapshot,
+                    (
+                        best_wildcard_category_index
+                        if best_wildcard_category_index in final_watched
+                        else None
+                    ),
+                    indexes_by_source[StreamerSource.WILDCARD_CATEGORIES],
+                    category_expiration,
+                    label="wildcard category",
+                    state_attr="last_wildcard_category_drop_selection",
+                    reason=wildcard_hold_reason,
+                    slotted_candidates=wildcard_category_candidates,
+                )
 
                 watched_indexes = set(streamers_watching)
                 for index, streamer in enumerate(streamers_snapshot):

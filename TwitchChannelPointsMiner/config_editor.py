@@ -351,6 +351,10 @@ def _base_web_config(config_path):
         },
         "sources": sources,
         "source_order": source_order,
+        "category_drops_override_streamers": mine.get(
+            "category_drops_override_streamers", False
+        )
+        is True,
         "logging": {
             "console_level": logger_settings.get("console_level", "INFO"),
             "file_level": logger_settings.get("file_level", "DEBUG"),
@@ -1111,6 +1115,11 @@ def _update_managed_web_config(config_path, payload):
             not isinstance(order, list) or sorted(order) != sorted(SOURCE_NAMES)
         ):
             raise ConfigEditError("Invalid stream source order.")
+        override_streamer_drops = payload.get("category_drops_override_streamers")
+        if override_streamer_drops is not None and not isinstance(
+            override_streamer_drops, bool
+        ):
+            raise ConfigEditError("Category Drops override must be true or false.")
         source_names = SOURCE_ENUM_BY_NAME
         source = Path(config_path).read_text(encoding="utf-8")
         miner = _simple_value(_assignment(ast.parse(source), "MINER_CONFIG")) or {}
@@ -1159,6 +1168,10 @@ def _update_managed_web_config(config_path, payload):
             mine_values["auto_mine_badge_drops"] = repr(values["badges"])
         if "wildcard_categories" in values:
             mine_values["wildcard_categories"] = repr(values["wildcard_categories"])
+        if override_streamer_drops is not None:
+            mine_values["category_drops_override_streamers"] = repr(
+                override_streamer_drops
+            )
         if mine_values:
             _set_dict_items(config_path, "MINE_CONFIG", mine_values)
     elif action == "update_logging":
