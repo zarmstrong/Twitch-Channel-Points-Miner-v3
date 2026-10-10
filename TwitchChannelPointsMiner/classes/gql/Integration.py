@@ -54,6 +54,12 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
+# Operations whose response bodies carry signed credentials and must never
+# reach the debug log.
+REDACTED_RESPONSE_OPERATIONS = frozenset(
+    {GQLOperations.PlaybackAccessToken["operationName"]}
+)
+
 
 def validate_response(value: Any):
     """
@@ -158,6 +164,20 @@ class GQL:
         """Post through requests with the timeout used by the legacy GQL client."""
         return requests.post(url, json=json, headers=headers, timeout=(5, 30))
 
+    @staticmethod
+    def __loggable_content(request_json: dict | list, content: str) -> str:
+        """Redact response bodies that carry credentials, e.g. playback tokens."""
+        requests_json = (
+            request_json if isinstance(request_json, list) else [request_json]
+        )
+        if any(
+            isinstance(item, dict)
+            and item.get("operationName") in REDACTED_RESPONSE_OPERATIONS
+            for item in requests_json
+        ):
+            return f"<redacted {len(content or '')} characters>"
+        return content
+
     def __post_gql_request(
         self, request_json: dict | list, parse: Callable[[Any], T]
     ) -> T | list[T]:
@@ -174,7 +194,8 @@ class GQL:
             },
         )
         logger.debug(
-            f"Data: {request_json}, Status code: {response.status_code}, Content: {response.text}"
+            f"Data: {request_json}, Status code: {response.status_code}, "
+            f"Content: {self.__loggable_content(request_json, response.text)}"
         )
         if response.status_code == 401 and self.on_unauthorized is not None:
             self.on_unauthorized()
@@ -383,6 +404,7 @@ class GQL:
             "isLive": True,
             "isVod": False,
             "vodID": "",
+            "platform": "web",
             "playerType": "site",
         }
         return self.post_gql_request_single(

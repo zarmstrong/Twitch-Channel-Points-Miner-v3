@@ -2028,6 +2028,98 @@ def test_category_drop_pick_logs_when_first_candidate_appears_with_no_slot(
     assert "late-arrival" in no_slot_messages[0]
 
 
+def test_watch_iteration_polls_stream_segments_for_watched_streamers(monkeypatch):
+    streamers = [
+        _watch_streamer("alpha", explicitly_configured=True),
+        _watch_streamer("bravo", explicitly_configured=True),
+    ]
+    polled = []
+    monkeypatch.setattr(
+        Twitch,
+        "_poll_stream_segments",
+        lambda self, streamer: polled.append(streamer.username),
+    )
+
+    _run_one_watch_iteration(monkeypatch, streamers, streams_watched=2)
+
+    assert polled == ["alpha", "bravo"]
+
+
+def _segment_twitch():
+    twitch = Twitch.__new__(Twitch)
+    twitch.user_agent = "test-agent"
+    twitch.stream_segment_watchers = {}
+    twitch.gql = SimpleNamespace()
+    return twitch
+
+
+def _segment_streamer(username="alice", broadcast_id="broadcast-1", drops=True):
+    return SimpleNamespace(
+        username=username,
+        stream=SimpleNamespace(broadcast_id=broadcast_id),
+        drops_condition=lambda: drops,
+    )
+
+
+def test_poll_stream_segments_manages_watcher_lifecycle(monkeypatch):
+    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+        StreamSegmentWatcher,
+    )
+
+    started = []
+    monkeypatch.setattr(
+        StreamSegmentWatcher, "start_poll", lambda self, now=None: started.append(self)
+    )
+    twitch = _segment_twitch()
+    streamer = _segment_streamer()
+
+    twitch._poll_stream_segments(streamer)
+    watcher = twitch.stream_segment_watchers["alice"]
+    assert isinstance(watcher, StreamSegmentWatcher)
+    assert watcher.broadcast_id == "broadcast-1"
+    assert started == [watcher]
+
+    # Same broadcast reuses the watcher (and its dedup state).
+    twitch._poll_stream_segments(streamer)
+    assert twitch.stream_segment_watchers["alice"] is watcher
+
+    # A new broadcast resets the watcher.
+    streamer.stream.broadcast_id = "broadcast-2"
+    twitch._poll_stream_segments(streamer)
+    assert twitch.stream_segment_watchers["alice"] is not watcher
+    assert twitch.stream_segment_watchers["alice"].broadcast_id == "broadcast-2"
+
+
+def test_poll_stream_segments_skips_streams_without_drops(monkeypatch):
+    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+        StreamSegmentWatcher,
+    )
+
+    started = []
+    monkeypatch.setattr(
+        StreamSegmentWatcher, "start_poll", lambda self, now=None: started.append(self)
+    )
+    twitch = _segment_twitch()
+
+    twitch._poll_stream_segments(_segment_streamer(drops=False))
+
+    assert twitch.stream_segment_watchers == {}
+    assert started == []
+
+
+def test_poll_stream_segments_is_noop_without_gql():
+    twitch = Twitch.__new__(Twitch)
+    twitch.user_agent = "test-agent"
+    twitch.stream_segment_watchers = {}
+    streamer = SimpleNamespace(
+        username="alice", stream=SimpleNamespace(broadcast_id="broadcast-1")
+    )
+
+    twitch._poll_stream_segments(streamer)
+
+    assert twitch.stream_segment_watchers == {}
+
+
 def _explicit_drop_streamer(username, game):
     streamer = _watch_streamer(
         username, explicitly_configured=True, drops_eligible=True
@@ -2247,3 +2339,32 @@ def test_pending_watch_streak_keeps_a_second_drop_stream_when_streaks_prioritize
         "https://spade.test/category-streamer",
         f"https://spade.test/{second}",
     ]
+
+
+def test_poll_stream_segments_logs_and_swallows_unexpected_errors(caplog):
+    def boom():
+        raise ValueError("unexpected")
+
+    twitch = _segment_twitch()
+    streamer = _segment_streamer()
+    streamer.drops_condition = boom
+
+    with caplog.at_level("WARNING"):
+        twitch._poll_stream_segments(streamer)
+
+    assert any(
+        "Unable to request stream segments" in record.getMessage()
+        and record.exc_info is not None
+        for record in caplog.records
+    )
+
+
+def test_idle_stream_segment_watchers_are_forgotten():
+    twitch = _segment_twitch()
+    active = SimpleNamespace(is_idle=lambda now=None: False)
+    idle = SimpleNamespace(is_idle=lambda now=None: True)
+    twitch.stream_segment_watchers = {"active": active, "idle": idle}
+
+    twitch._forget_idle_stream_segment_watchers()
+
+    assert twitch.stream_segment_watchers == {"active": active}
