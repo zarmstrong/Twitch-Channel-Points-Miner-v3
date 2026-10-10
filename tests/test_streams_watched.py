@@ -159,6 +159,8 @@ def _run_one_watch_iteration(
     twitch_out=None,
     post_side_effects=None,
     completed_drop_campaigns=None,
+    category_drops_override_streamers=False,
+    configured_category_slugs=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -183,6 +185,8 @@ def _run_one_watch_iteration(
         now if drop_inventory_progress and now is not None else 0
     )
     twitch.drop_watch_health = drop_watch_health or {}
+    twitch.category_drops_override_streamers = category_drops_override_streamers
+    twitch.configured_category_slugs = set(configured_category_slugs or [])
     if twitch_out is not None:
         twitch_out.append(twitch)
     posted = []
@@ -276,6 +280,15 @@ def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
     monkeypatch.setattr(Settings, "enable_analytics", True)
     monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
 
+    now_watching_file = tmp_path / "now_watching.json"
+
+    def _entries_by_username():
+        assert now_watching_file.is_file()
+        entries = json.loads(now_watching_file.read_text(encoding="utf-8"))
+        return {entry["username"]: entry for entry in entries}
+
+    # Only one Drops stream is watched at a time, so the badge and category
+    # reasons are checked in separate iterations.
     _run_one_watch_iteration(
         monkeypatch,
         [
@@ -285,29 +298,32 @@ def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
                 from_badge_campaign=True,
                 drops_eligible=True,
             ),
+            _watch_streamer("points-streamer"),
+        ],
+        streams_watched=2,
+        priority=[Priority.ORDER],
+        source_priority=[StreamerSource.BADGES, StreamerSource.STREAMERS],
+    )
+
+    entries_by_username = _entries_by_username()
+    assert entries_by_username["badge-streamer"]["reason"] == "badge"
+    assert entries_by_username["points-streamer"]["reason"] == "points"
+    assert entries_by_username["badge-streamer"]["game"] == "badge-streamer"
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [
             _watch_streamer(
                 "category-streamer", from_category=True, drops_eligible=True
             ),
             _watch_streamer("points-streamer"),
         ],
-        streams_watched=3,
+        streams_watched=2,
         priority=[Priority.ORDER],
-        source_priority=[
-            StreamerSource.BADGES,
-            StreamerSource.CATEGORIES,
-            StreamerSource.STREAMERS,
-        ],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.STREAMERS],
     )
 
-    now_watching_file = tmp_path / "now_watching.json"
-    assert now_watching_file.is_file()
-    entries = json.loads(now_watching_file.read_text(encoding="utf-8"))
-    entries_by_username = {entry["username"]: entry for entry in entries}
-
-    assert entries_by_username["badge-streamer"]["reason"] == "badge"
-    assert entries_by_username["category-streamer"]["reason"] == "drops"
-    assert entries_by_username["points-streamer"]["reason"] == "points"
-    assert entries_by_username["badge-streamer"]["game"] == "badge-streamer"
+    assert _entries_by_username()["category-streamer"]["reason"] == "drops"
 
 
 def test_minute_watcher_writes_empty_now_watching_when_nothing_watched(
@@ -1376,7 +1392,7 @@ def test_badge_campaign_streamer_does_not_steal_preferred_category_slot(monkeypa
         [badge, category],
         streams_watched=2,
         priority=[Priority.DROPS],
-        source_priority=[StreamerSource.BADGES, StreamerSource.CATEGORIES],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.BADGES],
         # The badge stream's deadline looks more urgent than the real
         # category candidate's - under the bug, min(category_candidates, ...)
         # picks the badge streamer as kept_discovered_index and the trim loop
@@ -1387,10 +1403,97 @@ def test_badge_campaign_streamer_does_not_steal_preferred_category_slot(monkeypa
         },
     )
 
-    assert set(posted) == {
-        "https://spade.test/badge-streamer",
+    assert posted == ["https://spade.test/category-streamer"]
+
+
+def test_badge_and_category_drop_streams_are_never_watched_together(monkeypatch):
+    # Twitch credits Drops progress to only one watched channel at a time, and
+    # badge campaigns are Drops campaigns too. With CATEGORIES ranked above
+    # BADGES the category Drops stream keeps the drop slot and the badge
+    # stream's slot goes to a points stream instead of splitting progress.
+    category = _watch_streamer(
+        "category-streamer", from_category=True, drops_eligible=True
+    )
+    badge = _watch_streamer(
+        "badge-streamer",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+    followed = _watch_streamer("followed", from_followers=True)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, badge, followed],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[
+            StreamerSource.STREAMERS,
+            StreamerSource.CATEGORIES,
+            StreamerSource.BADGES,
+            StreamerSource.FOLLOWERS,
+        ],
+    )
+
+    assert posted == [
         "https://spade.test/category-streamer",
-    }
+        "https://spade.test/followed",
+    ]
+
+
+def test_badge_drop_stream_wins_drop_slot_when_ranked_above_categories(monkeypatch):
+    category = _watch_streamer(
+        "category-streamer", from_category=True, drops_eligible=True
+    )
+    badge = _watch_streamer(
+        "badge-streamer",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+    followed = _watch_streamer("followed", from_followers=True)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, badge, followed],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[
+            StreamerSource.BADGES,
+            StreamerSource.CATEGORIES,
+            StreamerSource.FOLLOWERS,
+        ],
+    )
+
+    assert posted == [
+        "https://spade.test/badge-streamer",
+        "https://spade.test/followed",
+    ]
+
+
+def test_badge_and_wildcard_drop_streams_are_never_watched_together(monkeypatch):
+    wildcard = _watch_streamer(
+        "wildcard-streamer", from_wildcard_category=True, drops_eligible=True
+    )
+    badge = _watch_streamer(
+        "badge-streamer",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [wildcard, badge],
+        streams_watched=2,
+        priority=[Priority.DROPS],
+        source_priority=[
+            StreamerSource.BADGES,
+            StreamerSource.WILDCARD_CATEGORIES,
+        ],
+    )
+
+    assert posted == ["https://spade.test/badge-streamer"]
 
 
 def test_only_one_badge_campaign_streamer_is_watched_per_cycle(monkeypatch):
@@ -1923,3 +2026,224 @@ def test_category_drop_pick_logs_when_first_candidate_appears_with_no_slot(
     no_slot_messages = [m for m in messages if "eligible but no watch slot free" in m]
     assert len(no_slot_messages) == 1
     assert "late-arrival" in no_slot_messages[0]
+
+
+def _explicit_drop_streamer(username, game):
+    streamer = _watch_streamer(
+        username, explicitly_configured=True, drops_eligible=True
+    )
+    streamer.stream.game_name = lambda: game
+    return streamer
+
+
+@pytest.mark.parametrize(
+    "override, configured_slugs, expected",
+    [
+        # Without the override, source_priority alone decides: STREAMERS wins.
+        (False, [], ["explicit-drops", "points"]),
+        # With the override, an explicit streamer's Drops for a game outside the
+        # configured category list rank below the category Drops stream.
+        (True, [], ["category-streamer", "points"]),
+        # The override does not apply to a game that is in the category list.
+        (True, ["other-game"], ["explicit-drops", "points"]),
+    ],
+)
+def test_explicit_streamer_drops_compete_for_the_single_drop_slot(
+    monkeypatch, override, configured_slugs, expected
+):
+    explicit = _explicit_drop_streamer("explicit-drops", "Other Game")
+    category = _watch_streamer(
+        "category-streamer", from_category=True, drops_eligible=True
+    )
+    points = _watch_streamer("points", explicitly_configured=True)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [explicit, category, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.STREAMERS, StreamerSource.CATEGORIES],
+        category_drops_override_streamers=override,
+        configured_category_slugs=configured_slugs,
+    )
+
+    assert sorted(posted) == sorted(f"https://spade.test/{name}" for name in expected)
+
+
+def test_two_explicit_drop_streamers_are_never_watched_together(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _explicit_drop_streamer("drops-one", "Game One"),
+            _explicit_drop_streamer("drops-two", "Game Two"),
+            _watch_streamer("points", explicitly_configured=True),
+        ],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+    )
+
+    assert posted == ["https://spade.test/drops-one", "https://spade.test/points"]
+
+
+def test_override_leaves_explicit_drop_streamer_watched_without_category_rival(
+    monkeypatch,
+):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _explicit_drop_streamer("explicit-drops", "Other Game"),
+            _watch_streamer("points", explicitly_configured=True),
+        ],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        category_drops_override_streamers=True,
+    )
+
+    assert sorted(posted) == [
+        "https://spade.test/explicit-drops",
+        "https://spade.test/points",
+    ]
+
+
+def _drop_campaigns(*campaign_ids, channels=()):
+    return [
+        SimpleNamespace(
+            id=campaign_id,
+            name=campaign_id,
+            game={"displayName": "Shared Game"},
+            channels=list(channels),
+            drops=[],
+            has_watchable_drops=lambda: True,
+        )
+        for campaign_id in campaign_ids
+    ]
+
+
+def test_category_pick_evicted_by_badge_is_logged_as_no_free_slot(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    category = _watch_streamer(
+        "category-streamer", from_category=True, drops_eligible=True
+    )
+    badge = _watch_streamer(
+        "badge-streamer",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, badge],
+        streams_watched=2,
+        priority=[Priority.DROPS],
+        source_priority=[StreamerSource.BADGES, StreamerSource.CATEGORIES],
+    )
+
+    assert posted == ["https://spade.test/badge-streamer"]
+    assert not any(
+        "Selected" in message and "category-streamer" in message
+        for message in messages
+    )
+    assert any(
+        "eligible but no watch slot free" in message and "category-streamer" in message
+        for message in messages
+    )
+
+
+def test_drop_streams_earning_the_same_unrestricted_campaigns_share_the_slot(
+    monkeypatch,
+):
+    first = _explicit_drop_streamer("drops-one", "Shared Game")
+    second = _explicit_drop_streamer("drops-two", "Shared Game")
+    first.stream.campaigns = _drop_campaigns("campaign-a")
+    second.stream.campaigns = _drop_campaigns("campaign-a")
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [first, second, _watch_streamer("points", explicitly_configured=True)],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+    )
+
+    assert posted == ["https://spade.test/drops-one", "https://spade.test/drops-two"]
+
+
+@pytest.mark.parametrize(
+    "first_campaigns, second_campaigns",
+    [
+        # Same game, but each campaign is limited to listed channels.
+        (
+            _drop_campaigns("campaign-a", channels=("1",)),
+            _drop_campaigns("campaign-b", channels=("2",)),
+        ),
+        # One restricted campaign on both streams is still not shareable.
+        (
+            _drop_campaigns("campaign-a", channels=("1", "2")),
+            _drop_campaigns("campaign-a", channels=("1", "2")),
+        ),
+        # Different unrestricted campaigns.
+        (_drop_campaigns("campaign-a"), _drop_campaigns("campaign-b")),
+        # Unknown campaigns.
+        ([], []),
+    ],
+)
+def test_drop_streams_without_identical_unrestricted_campaigns_do_not_share(
+    monkeypatch, first_campaigns, second_campaigns
+):
+    first = _explicit_drop_streamer("drops-one", "Shared Game")
+    second = _explicit_drop_streamer("drops-two", "Shared Game")
+    first.stream.campaigns = first_campaigns
+    second.stream.campaigns = second_campaigns
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [first, second, _watch_streamer("points", explicitly_configured=True)],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+    )
+
+    assert posted == ["https://spade.test/drops-one", "https://spade.test/points"]
+
+
+@pytest.mark.parametrize(
+    "priority, expect_streak_stream",
+    [
+        ([Priority.STREAK, Priority.DROPS, Priority.ORDER], True),
+        ([Priority.DROPS, Priority.ORDER], False),
+    ],
+)
+def test_pending_watch_streak_keeps_a_second_drop_stream_when_streaks_prioritized(
+    monkeypatch, priority, expect_streak_stream
+):
+    category = _watch_streamer(
+        "category-streamer", from_category=True, drops_eligible=True
+    )
+    streak = _watch_streamer(
+        "streak-streamer",
+        explicitly_configured=True,
+        drops_eligible=True,
+        watch_streak=True,
+    )
+    streak.stream.game_name = lambda: "Other Game"
+    points = _watch_streamer("points", explicitly_configured=True)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, streak, points],
+        streams_watched=2,
+        priority=priority,
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.STREAMERS],
+        category_drops_override_streamers=True,
+    )
+
+    second = "streak-streamer" if expect_streak_stream else "points"
+    assert posted == [
+        "https://spade.test/category-streamer",
+        f"https://spade.test/{second}",
+    ]
