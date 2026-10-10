@@ -3899,7 +3899,9 @@ class Twitch(object):
 
         Twitch only credits Drop progress while a stream's media segments are
         requested, so this polls the (cached) media playlist and HEADs every
-        new segment. State is kept per streamer and reset when the broadcast
+        new segment, but only for streams with Drops to earn. The poll runs on
+        a background thread so slow Twitch or CDN responses never delay the
+        watch loop. State is kept per streamer and reset when the broadcast
         changes; missing on lightweight test doubles, where it is a no-op.
         Unexpected errors are logged and swallowed so they cannot abort the
         remaining streamers in the watch cycle.
@@ -3910,6 +3912,10 @@ class Twitch(object):
             return
 
         try:
+            drops_condition = getattr(streamer, "drops_condition", None)
+            if drops_condition is None or drops_condition() is not True:
+                return
+
             stream = getattr(streamer, "stream", None)
             broadcast_id = getattr(stream, "broadcast_id", None)
             watcher = watchers.get(streamer.username)
@@ -3921,13 +3927,26 @@ class Twitch(object):
                     broadcast_id=broadcast_id,
                 )
                 watchers[streamer.username] = watcher
-            watcher.poll()
+            watcher.start_poll()
         except Exception:
             logger.warning(
                 f"Unable to request stream segments for {streamer}",
                 exc_info=True,
                 extra={"emoji": ":warning:"},
             )
+
+    def _forget_idle_stream_segment_watchers(self, now=None):
+        """Drop segment watchers that have not been polled for a while.
+
+        Streams briefly rotated out of the watched set keep their watcher, so
+        a stall is still reported once rather than on every re-watch.
+        """
+        watchers = getattr(self, "stream_segment_watchers", None)
+        if not watchers:
+            return
+        for username, watcher in list(watchers.items()):
+            if watcher.is_idle(now):
+                del watchers[username]
 
     def send_minute_watched_events(
         self,
@@ -4674,17 +4693,7 @@ class Twitch(object):
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
 
-                # Forget segment watchers for streams that are no longer
-                # watched so a later re-watch starts from a clean playlist.
-                watchers = getattr(self, "stream_segment_watchers", None)
-                if watchers:
-                    watched_usernames = {
-                        streamers_snapshot[index].username
-                        for index in streamers_watching
-                    }
-                    for username in list(watchers):
-                        if username not in watched_usernames:
-                            del watchers[username]
+                self._forget_idle_stream_segment_watchers()
 
                 self.__save_now_watching_analytics(
                     streamers_snapshot, streamers_watching, streamer_source

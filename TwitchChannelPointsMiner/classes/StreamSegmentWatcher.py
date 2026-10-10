@@ -12,6 +12,8 @@ rangermix/TwitchDropsMiner#164.
 
 import logging
 import time
+from collections import OrderedDict
+from threading import Thread
 from urllib.parse import quote, urljoin
 
 import requests
@@ -33,6 +35,12 @@ RESOLVE_RETRY_SECONDS = 60
 EXPIRED_STATUS_CODES = (401, 403, 404, 410)
 # Report a stall at most this often.
 REPORT_INTERVAL_SECONDS = 300
+# Being watched again after this long starts a fresh report window instead
+# of reporting a stall on the first poll back.
+RESUME_GAP_SECONDS = 60
+# A watcher not polled for this long can be dropped by its owner; shorter
+# gaps (rotation, slot swaps) keep it so stall reporting stays deduplicated.
+IDLE_EXPIRY_SECONDS = 600
 # Bound the per-watch memory of already-requested segments.
 SEEN_SEGMENT_LIMIT = 256
 
@@ -40,9 +48,10 @@ SEEN_SEGMENT_LIMIT = 256
 class StreamSegmentWatcher(object):
     """Polls one watched stream's media playlist and HEADs new segments.
 
-    A single instance tracks a single (username, broadcast) pair. It performs
-    no background work; its owner calls ``poll`` on the existing watch cadence
-    and drops the instance once the stream is no longer watched.
+    A single instance tracks a single (username, broadcast) pair. Its owner
+    calls ``start_poll`` on the existing watch cadence, which runs ``poll`` on
+    a short-lived background thread so slow Twitch or CDN responses never hold
+    up the watch loop, and drops the instance once ``is_idle``.
     """
 
     __slots__ = [
@@ -53,14 +62,18 @@ class StreamSegmentWatcher(object):
         "media_playlist",
         "next_resolve_attempt",
         "last_poll",
+        "last_used",
         "last_report",
         "seen_segments",
-        "seen_order",
         "segments_requested",
         "segments_failed",
         "polls_failed",
         "reported_stall",
         "last_failure",
+        "last_sequence",
+        "segments_missed",
+        "playlist_lengths",
+        "worker",
     ]
 
     def __init__(self, username, gql, user_agent, broadcast_id=None):
@@ -71,17 +84,64 @@ class StreamSegmentWatcher(object):
         self.media_playlist = None
         self.next_resolve_attempt = 0.0
         self.last_poll = 0.0
-        self.last_report = 0.0
-        self.seen_segments = set()
-        self.seen_order = []
+        self.last_used = time.time()
+        # None until the first poll opens a report window.
+        self.last_report = None
+        # Insertion-ordered so the oldest segment is evicted first.
+        self.seen_segments = OrderedDict()
         self.segments_requested = 0
         self.segments_failed = 0
         self.polls_failed = 0
         self.reported_stall = False
         self.last_failure = None
+        # Media sequence of the newest segment seen, used to measure segments
+        # that left the playlist window between polls.
+        self.last_sequence = None
+        self.segments_missed = 0
+        self.playlist_lengths = []
+        self.worker = None
 
     def matches_broadcast(self, broadcast_id):
         return self.broadcast_id == broadcast_id
+
+    def is_idle(self, now=None):
+        now = time.time() if now is None else now
+        return now - self.last_used > IDLE_EXPIRY_SECONDS
+
+    def start_poll(self, now=None):
+        """Run ``poll`` on a background thread unless one is still running.
+
+        Returns the started thread, or None when the previous poll is still in
+        flight (a slow resolve or CDN) and this cycle is skipped.
+        """
+        requested_at = time.time() if now is None else now
+        resumed = requested_at - self.last_used > RESUME_GAP_SECONDS
+        self.last_used = requested_at
+        if self.worker is not None and self.worker.is_alive():
+            return None
+        if resumed:
+            # Watched again after a break: no poll is running, so it is safe
+            # to have the next poll open a fresh report window.
+            self.last_report = None
+        self.worker = Thread(
+            target=self._poll_safely,
+            args=(now,),
+            name=f"StreamSegmentWatcher-{self.username}",
+            daemon=True,
+        )
+        self.worker.start()
+        return self.worker
+
+    def _poll_safely(self, now=None):
+        try:
+            self.poll(now)
+        except Exception:
+            logger.warning(
+                "Unable to request stream segments for %s",
+                self.username,
+                exc_info=True,
+                extra={"emoji": ":warning:"},
+            )
 
     def poll(self, now=None):
         """Request every not-yet-seen segment from the current playlist.
@@ -92,6 +152,10 @@ class StreamSegmentWatcher(object):
         now = time.time() if now is None else now
         if now - self.last_poll < POLL_INTERVAL_SECONDS:
             return False
+        if self.last_report is None:
+            # First poll, or the stream is being watched again: give it a
+            # full report window before a failure is reported as a stall.
+            self._start_report_window(now)
         self.last_poll = now
 
         requested = self._poll_playlist(now)
@@ -140,6 +204,7 @@ class StreamSegmentWatcher(object):
             self.last_failure = "media playlist had no segments"
             self.polls_failed += 1
             return False
+        self._measure_window(response.text, len(segments))
 
         requested = False
         for segment in segments:
@@ -235,6 +300,28 @@ class StreamSegmentWatcher(object):
         # HEAD requests follow it, so the exact choice barely matters.
         return variants[-1]
 
+    def _measure_window(self, text, length):
+        """Count segments that left the playlist window between two polls."""
+        self.playlist_lengths.append(length)
+        first = self.parse_media_sequence(text)
+        if first is None:
+            return
+        if self.last_sequence is not None and first > self.last_sequence + 1:
+            self.segments_missed += first - self.last_sequence - 1
+        self.last_sequence = max(first + length - 1, self.last_sequence or 0)
+
+    @staticmethod
+    def parse_media_sequence(text):
+        """Return the playlist's ``#EXT-X-MEDIA-SEQUENCE`` value, if any."""
+        for raw_line in (text or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                try:
+                    return int(line.split(":", 1)[1])
+                except ValueError:
+                    return None
+        return None
+
     @staticmethod
     def parse_playlist(text, base_url, master):
         """Return the absolute URI lines of a master or media playlist.
@@ -271,12 +358,19 @@ class StreamSegmentWatcher(object):
         return urls
 
     def _remember(self, segment):
-        if segment in self.seen_segments:
-            return
-        self.seen_segments.add(segment)
-        self.seen_order.append(segment)
-        while len(self.seen_order) > SEEN_SEGMENT_LIMIT:
-            self.seen_segments.discard(self.seen_order.pop(0))
+        self.seen_segments[segment] = None
+        while len(self.seen_segments) > SEEN_SEGMENT_LIMIT:
+            self.seen_segments.popitem(last=False)
+
+    def _start_report_window(self, now):
+        self.last_report = now
+        self.segments_requested = 0
+        self.segments_failed = 0
+        self.polls_failed = 0
+        self.segments_missed = 0
+        self.playlist_lengths = []
+        # A gap since the last poll is not a miss between consecutive polls.
+        self.last_sequence = None
 
     def _forget_playlist_if_expired(self, status_code, now, resolved_now):
         # Signed playlist URLs expire and a restarted stream gets new ones.
@@ -289,7 +383,6 @@ class StreamSegmentWatcher(object):
             self.next_resolve_attempt = now + RESOLVE_RETRY_SECONDS
 
     def _report(self, now):
-        self.last_report = now
         if self.segments_requested > 0:
             if self.reported_stall:
                 logger.info(
@@ -298,13 +391,18 @@ class StreamSegmentWatcher(object):
                     extra={"emoji": ":white_check_mark:"},
                 )
                 self.reported_stall = False
+            lengths = self.playlist_lengths
             logger.debug(
                 "Requested %s new stream segments for %s (%s failed, "
-                "%s failed polls)",
+                "%s failed polls; playlist window %s-%s segments, %s missed "
+                "between polls)",
                 self.segments_requested,
                 self.username,
                 self.segments_failed,
                 self.polls_failed,
+                min(lengths) if lengths else 0,
+                max(lengths) if lengths else 0,
+                self.segments_missed,
             )
         elif not self.reported_stall:
             logger.warning(
@@ -319,9 +417,10 @@ class StreamSegmentWatcher(object):
             )
             self.reported_stall = True
 
-        self.segments_requested = 0
-        self.segments_failed = 0
-        self.polls_failed = 0
+        # Consecutive polls continue, so keep last_sequence for miss counting.
+        last_sequence = self.last_sequence
+        self._start_report_window(now)
+        self.last_sequence = last_sequence
 
     def _get(self, url, timeout):
         try:

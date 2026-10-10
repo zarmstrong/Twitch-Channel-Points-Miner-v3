@@ -2045,24 +2045,39 @@ def test_watch_iteration_polls_stream_segments_for_watched_streamers(monkeypatch
     assert polled == ["alpha", "bravo"]
 
 
+def _segment_twitch():
+    twitch = Twitch.__new__(Twitch)
+    twitch.user_agent = "test-agent"
+    twitch.stream_segment_watchers = {}
+    twitch.gql = SimpleNamespace()
+    return twitch
+
+
+def _segment_streamer(username="alice", broadcast_id="broadcast-1", drops=True):
+    return SimpleNamespace(
+        username=username,
+        stream=SimpleNamespace(broadcast_id=broadcast_id),
+        drops_condition=lambda: drops,
+    )
+
+
 def test_poll_stream_segments_manages_watcher_lifecycle(monkeypatch):
     from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
         StreamSegmentWatcher,
     )
 
-    monkeypatch.setattr(StreamSegmentWatcher, "poll", lambda self, now=None: None)
-    twitch = Twitch.__new__(Twitch)
-    twitch.user_agent = "test-agent"
-    twitch.stream_segment_watchers = {}
-    twitch.gql = SimpleNamespace()
-    streamer = SimpleNamespace(
-        username="alice", stream=SimpleNamespace(broadcast_id="broadcast-1")
+    started = []
+    monkeypatch.setattr(
+        StreamSegmentWatcher, "start_poll", lambda self, now=None: started.append(self)
     )
+    twitch = _segment_twitch()
+    streamer = _segment_streamer()
 
     twitch._poll_stream_segments(streamer)
     watcher = twitch.stream_segment_watchers["alice"]
     assert isinstance(watcher, StreamSegmentWatcher)
     assert watcher.broadcast_id == "broadcast-1"
+    assert started == [watcher]
 
     # Same broadcast reuses the watcher (and its dedup state).
     twitch._poll_stream_segments(streamer)
@@ -2073,6 +2088,23 @@ def test_poll_stream_segments_manages_watcher_lifecycle(monkeypatch):
     twitch._poll_stream_segments(streamer)
     assert twitch.stream_segment_watchers["alice"] is not watcher
     assert twitch.stream_segment_watchers["alice"].broadcast_id == "broadcast-2"
+
+
+def test_poll_stream_segments_skips_streams_without_drops(monkeypatch):
+    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+        StreamSegmentWatcher,
+    )
+
+    started = []
+    monkeypatch.setattr(
+        StreamSegmentWatcher, "start_poll", lambda self, now=None: started.append(self)
+    )
+    twitch = _segment_twitch()
+
+    twitch._poll_stream_segments(_segment_streamer(drops=False))
+
+    assert twitch.stream_segment_watchers == {}
+    assert started == []
 
 
 def test_poll_stream_segments_is_noop_without_gql():
@@ -2309,24 +2341,13 @@ def test_pending_watch_streak_keeps_a_second_drop_stream_when_streaks_prioritize
     ]
 
 
-def test_poll_stream_segments_logs_and_swallows_unexpected_errors(
-    monkeypatch, caplog
-):
-    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
-        StreamSegmentWatcher,
-    )
-
-    def boom(self, now=None):
+def test_poll_stream_segments_logs_and_swallows_unexpected_errors(caplog):
+    def boom():
         raise ValueError("unexpected")
 
-    monkeypatch.setattr(StreamSegmentWatcher, "poll", boom)
-    twitch = Twitch.__new__(Twitch)
-    twitch.user_agent = "test-agent"
-    twitch.stream_segment_watchers = {}
-    twitch.gql = SimpleNamespace()
-    streamer = SimpleNamespace(
-        username="alice", stream=SimpleNamespace(broadcast_id="broadcast-1")
-    )
+    twitch = _segment_twitch()
+    streamer = _segment_streamer()
+    streamer.drops_condition = boom
 
     with caplog.at_level("WARNING"):
         twitch._poll_stream_segments(streamer)
@@ -2336,3 +2357,14 @@ def test_poll_stream_segments_logs_and_swallows_unexpected_errors(
         and record.exc_info is not None
         for record in caplog.records
     )
+
+
+def test_idle_stream_segment_watchers_are_forgotten():
+    twitch = _segment_twitch()
+    active = SimpleNamespace(is_idle=lambda now=None: False)
+    idle = SimpleNamespace(is_idle=lambda now=None: True)
+    twitch.stream_segment_watchers = {"active": active, "idle": idle}
+
+    twitch._forget_idle_stream_segment_watchers()
+
+    assert twitch.stream_segment_watchers == {"active": active}

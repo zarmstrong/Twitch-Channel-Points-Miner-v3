@@ -234,7 +234,6 @@ def test_seen_segment_cache_is_bounded(monkeypatch):
         watcher._remember(f"segment-{index}")
 
     assert len(watcher.seen_segments) == SEEN_SEGMENT_LIMIT
-    assert len(watcher.seen_order) == SEEN_SEGMENT_LIMIT
     assert "segment-0" not in watcher.seen_segments
     assert f"segment-{SEEN_SEGMENT_LIMIT + 9}" in watcher.seen_segments
 
@@ -256,7 +255,7 @@ def test_network_failure_stops_requesting_remaining_segments(monkeypatch):
     # Only one timeout is paid; the second segment is not attempted.
     assert head_calls == ["https://cdn.example/hls/example/0.ts"]
     assert watcher.last_failure == "segment request failed"
-    assert watcher.seen_segments == set()
+    assert len(watcher.seen_segments) == 0
 
 
 def test_expired_segment_url_stops_requests_and_forgets_playlist(monkeypatch):
@@ -272,8 +271,30 @@ def test_expired_segment_url_stops_requests_and_forgets_playlist(monkeypatch):
     assert watcher.last_failure == "segment HTTP 403"
 
 
-def test_stall_and_recovery_logs_carry_emoji(monkeypatch, caplog):
-    _route_get(monkeypatch, [FakeResponse(200, MEDIA_PLAYLIST)])
+def _live_playlist(sequence, count=2):
+    """A rolling media playlist whose window starts at ``sequence``."""
+    lines = ["#EXTM3U", f"#EXT-X-MEDIA-SEQUENCE:{sequence}"]
+    for number in range(sequence, sequence + count):
+        lines += ["#EXTINF:2.000,", f"{number}.ts"]
+    return "\n".join(lines) + "\n"
+
+
+def _serve_live_stream(monkeypatch):
+    """Serve the master playlist and a live window that advances 10s per poll."""
+    state = {"sequence": 0}
+
+    def fake_get(url, **kwargs):
+        if MASTER_URL_FRAGMENT in url:
+            return FakeResponse(200, MASTER_PLAYLIST)
+        state["sequence"] += 10
+        return FakeResponse(200, _live_playlist(state["sequence"]))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    return state
+
+
+def test_first_failed_poll_waits_a_full_window_before_warning(monkeypatch, caplog):
+    _serve_live_stream(monkeypatch)
     _patch_head(monkeypatch)
     watcher = StreamSegmentWatcher(
         "example",
@@ -282,9 +303,30 @@ def test_stall_and_recovery_logs_carry_emoji(monkeypatch, caplog):
     )
 
     with caplog.at_level("INFO"):
-        watcher.poll(now=1000)
-        watcher.gql = SimpleNamespace(get_playback_access_token=lambda _u: _token())
+        for now in range(1000, 1300, 20):
+            watcher.poll(now=now)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
         watcher.poll(now=1300)
+
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+
+def test_stall_and_recovery_logs_carry_emoji(monkeypatch, caplog):
+    _serve_live_stream(monkeypatch)
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example",
+        SimpleNamespace(get_playback_access_token=lambda _u: _token(forbidden=True)),
+        "ua",
+    )
+
+    with caplog.at_level("INFO"):
+        for now in range(1000, 1320, 20):
+            watcher.poll(now=now)
+        watcher.gql = SimpleNamespace(get_playback_access_token=lambda _u: _token())
+        for now in range(1320, 1620, 20):
+            watcher.poll(now=now)
 
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     recoveries = [r for r in caplog.records if "working again" in r.getMessage()]
@@ -292,6 +334,122 @@ def test_stall_and_recovery_logs_carry_emoji(monkeypatch, caplog):
     assert warnings[0].emoji == ":warning:"
     assert len(recoveries) == 1
     assert recoveries[0].emoji == ":white_check_mark:"
+
+
+def test_rewatch_after_gap_does_not_report_immediately(monkeypatch, caplog):
+    _serve_live_stream(monkeypatch)
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example",
+        SimpleNamespace(get_playback_access_token=lambda _u: _token(forbidden=True)),
+        "ua",
+    )
+
+    watcher.last_used = 1000
+
+    with caplog.at_level("INFO"):
+        # Watched for under a report window, rotated out, then watched again
+        # well after the window: the re-watch gets its own full window.
+        for now in range(1000, 1200, 20):
+            watcher.start_poll(now=now).join(5)
+        watcher.start_poll(now=2000).join(5)
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert watcher.last_report == 2000
+
+
+def test_slow_polls_still_report_a_stall(monkeypatch, caplog):
+    _serve_live_stream(monkeypatch)
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example",
+        SimpleNamespace(get_playback_access_token=lambda _u: _token(forbidden=True)),
+        "ua",
+    )
+
+    with caplog.at_level("INFO"):
+        # Polls 90s apart (each one slow) while the stream stays watched must
+        # not keep reopening the report window.
+        for now in range(1000, 1400, 90):
+            watcher.poll(now=now)
+
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+
+def test_missed_segments_between_polls_are_measured(monkeypatch, caplog):
+    _serve_live_stream(monkeypatch)
+    _patch_head(monkeypatch)
+    watcher = StreamSegmentWatcher(
+        "example", SimpleNamespace(get_playback_access_token=lambda _u: _token()), "ua"
+    )
+
+    with caplog.at_level("DEBUG"):
+        for now in range(1000, 1320, 20):
+            watcher.poll(now=now)
+
+    # Each poll lists 2 segments but the window advances 10, so 8 are missed
+    # between every pair of consecutive polls.
+    reports = [r for r in caplog.records if "missed between polls" in r.getMessage()]
+    assert len(reports) == 1
+    assert "playlist window 2-2 segments, 120 missed" in reports[0].getMessage()
+
+
+def test_parse_media_sequence():
+    assert StreamSegmentWatcher.parse_media_sequence(_live_playlist(42)) == 42
+    assert StreamSegmentWatcher.parse_media_sequence(MEDIA_PLAYLIST) is None
+
+
+def test_start_poll_skips_while_previous_poll_is_running(monkeypatch):
+    import threading
+
+    release = threading.Event()
+    calls = []
+
+    def slow_poll(self, now=None):
+        calls.append(now)
+        release.wait(5)
+
+    monkeypatch.setattr(StreamSegmentWatcher, "poll", slow_poll)
+    watcher = StreamSegmentWatcher("example", SimpleNamespace(), "ua")
+
+    first = watcher.start_poll(now=1000)
+    assert first is not None
+    assert watcher.start_poll(now=1020) is None
+    release.set()
+    first.join(5)
+
+    second = watcher.start_poll(now=1040)
+    assert second is not None
+    second.join(5)
+    assert len(calls) == 2
+
+
+def test_start_poll_logs_and_swallows_poll_errors(monkeypatch, caplog):
+    def boom(self, now=None):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(StreamSegmentWatcher, "poll", boom)
+    watcher = StreamSegmentWatcher("example", SimpleNamespace(), "ua")
+
+    with caplog.at_level("WARNING"):
+        watcher.start_poll().join(5)
+
+    records = [r for r in caplog.records if "Unable to request" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].emoji == ":warning:"
+
+
+def test_is_idle_after_expiry_without_polls():
+    from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
+        IDLE_EXPIRY_SECONDS,
+    )
+
+    watcher = StreamSegmentWatcher("example", SimpleNamespace(), "ua")
+    watcher.last_used = 1000
+
+    assert watcher.is_idle(now=1000 + IDLE_EXPIRY_SECONDS) is False
+    assert watcher.is_idle(now=1001 + IDLE_EXPIRY_SECONDS) is True
 
 
 def test_evicted_segment_404_keeps_playlist_and_continues(monkeypatch):
