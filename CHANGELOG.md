@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.19.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.18.1...3.19.0) (2026-10-10)
+
+
+### Features
+
+* **drops:** add category_drops_override_streamers and one Drops stream across all sources ([b8b0f10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b8b0f108615e6bd84712508ae1dc098455516718))
+
+
+### Bug Fixes
+
+* **drops:** never watch a badge stream alongside the category Drops pick ([#140](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/140)) ([b8b0f10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b8b0f108615e6bd84712508ae1dc098455516718))
+
 ## [3.18.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.18.0...3.18.1) (2026-09-30)
 
 
