@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-__version__ = "3.18.1"  # x-release-please-version
+__version__ = "3.19.0"  # x-release-please-version
 
 from .TwitchChannelPointsMiner import TwitchChannelPointsMiner
 
