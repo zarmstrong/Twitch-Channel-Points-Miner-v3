@@ -1779,7 +1779,7 @@ def _category_search_twitch(monkeypatch, logins, eligibility, verdicts):
     return twitch
 
 
-def test_category_search_keeps_fresh_channel_verdicts(monkeypatch):
+def test_category_search_keeps_fresh_channel_verdicts(monkeypatch, caplog):
     # Regression (#144): re-seeding every rediscovered channel as eligible
     # undid the per-channel check's "advertises no active campaign" verdict,
     # so after each category refresh those channels briefly took the Drops
@@ -1804,7 +1804,13 @@ def test_category_search_keeps_fresh_channel_verdicts(monkeypatch):
         },
     )
 
-    assert twitch.get_live_streamers_for_category("game") == list(logins)
+    twitch.log_drop_checks = True
+    with caplog.at_level(logging.DEBUG):
+        assert twitch.get_live_streamers_for_category("game") == list(logins)
+    assert (
+        "[drops-check] Category refresh kept channel check results for game: "
+        "verified-in (2, 3) checked 100s ago, verified-out (0, 0) checked 100s ago"
+    ) in caplog.messages
     assert twitch.category_campaign_eligibility == {
         ("game", "verified-out"): (0, 0),
         ("game", "verified-in"): (2, 3),

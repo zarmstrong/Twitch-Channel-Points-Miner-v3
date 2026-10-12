@@ -272,7 +272,7 @@ class Twitch(object):
         self.running = False
 
     def __log_drop_check(self, message, level=logging.INFO):
-        if self.log_drop_checks is True:
+        if getattr(self, "log_drop_checks", False) is True:
             logger.log(level, f"[drops-check] {message}")
 
     def __log_drop_check_json(
@@ -333,7 +333,8 @@ class Twitch(object):
         """
         with self.__eligibility_lock():
             verdicts = getattr(self, "category_channel_verdicts", None) or {}
-            fresh_after = time.time() - CHANNEL_VERDICT_FRESHNESS_SECONDS
+            now = time.time()
+            fresh_after = now - CHANNEL_VERDICT_FRESHNESS_SECONDS
             fresh_verdicts = {
                 key: verdict
                 for key, verdict in verdicts.items()
@@ -370,6 +371,18 @@ class Twitch(object):
                 evaluated_categories = set()
                 self.evaluated_category_campaigns = evaluated_categories
             evaluated_categories.add(game_slug)
+
+        if fresh_verdicts:
+            self.__log_drop_check(
+                f"Category refresh kept channel check results for {game_slug}: "
+                + ", ".join(
+                    f"{login} {eligibility} checked {now - checked_at:.0f}s ago"
+                    for (_, login), (eligibility, checked_at) in sorted(
+                        fresh_verdicts.items()
+                    )
+                ),
+                level=logging.DEBUG,
+            )
 
     def __drop_tracking_key(self, drop, campaign_name=None, category_name=None):
         return "|".join(
