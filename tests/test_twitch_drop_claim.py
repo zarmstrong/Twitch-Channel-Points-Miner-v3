@@ -545,6 +545,38 @@ def test_null_channel_query_keeps_unrestricted_gist_campaign(monkeypatch):
     ]
 
 
+def test_answered_channel_query_clears_stale_negative_verdict(monkeypatch):
+    # Category discovery keeps a channel's negative verdict across refreshes
+    # (#144), so the channel check must clear it once the channel qualifies.
+    twitch = per_streamer_campaigns_twitch(
+        monkeypatch,
+        lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
+    )
+    twitch.twitchdrops_app_campaigns["example-game"].append(
+        {"id": "gist-open", "name": "General Drops", "channels": []}
+    )
+    twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (0, 0)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "gist-open"
+    ]
+    assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
+
+
+def test_failed_channel_query_keeps_negative_verdict(monkeypatch):
+    def available_drops(channel_id):
+        raise RetryError("DropsHighlightService_AvailableDrops", [])
+
+    twitch = per_streamer_campaigns_twitch(monkeypatch, available_drops)
+    twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (0, 0)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
 def test_failed_channel_query_keeps_unrestricted_twitch_campaigns(monkeypatch):
     # A failed query proves nothing about the channel, so unrestricted
     # campaigns still apply and existing eligibility is left alone.

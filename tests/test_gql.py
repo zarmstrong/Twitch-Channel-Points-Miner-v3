@@ -1739,6 +1739,63 @@ def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     assert len(stream_calls) == 1
 
 
+def test_category_search_keeps_channel_check_negative_verdicts(monkeypatch):
+    # Regression (#144): re-seeding every rediscovered channel as eligible
+    # undid the per-channel check's "advertises no active campaign" verdict,
+    # so after each category refresh those channels briefly took the Drops
+    # slot until their next stream refresh ruled them out again.
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {
+                "game": {
+                    "streams": {
+                        "edges": [
+                            {"node": {"broadcaster": {"login": login}}}
+                            for login in ("verified-out", "verified-in", "new")
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    twitch = twitch_with_gql(gql)
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {
+        ("game", "verified-out"): (0, 0),
+        ("game", "verified-in"): (2, 2),
+        ("game", "retired"): (0, 0),
+        ("other-game", "verified-out"): (1, 1),
+    }
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "game-id", "name": "Game"}]}
+        return {
+            "data": [
+                {"user_login": login, "game_id": "game-id", "viewer_count": 1}
+                for login in ("verified-out", "verified-in", "new")
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category("game") == [
+        "verified-out",
+        "verified-in",
+        "new",
+    ]
+    assert twitch.category_campaign_eligibility == {
+        ("game", "verified-out"): (0, 0),
+        ("game", "verified-in"): (1, 1),
+        ("game", "new"): (1, 1),
+        ("other-game", "verified-out"): (1, 1),
+    }
+
+
 def test_category_search_rejects_user_created_drops_lookalike(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {

@@ -299,10 +299,29 @@ class Twitch(object):
         return lock
 
     def __replace_category_campaign_eligibility(
-        self, game_slug: str, eligibility_by_login: dict
+        self,
+        game_slug: str,
+        eligibility_by_login: dict,
+        keep_negative_verdicts: bool = False,
     ):
-        """Atomically replace cached eligibility for one game category."""
+        """Atomically replace cached eligibility for one game category.
+
+        keep_negative_verdicts: keep an existing zero-eligible entry for a
+        login that is being re-seeded. Category discovery only seeds
+        provisional positive counts, so a zero can only come from the
+        per-channel campaign check - overwriting it made a channel Twitch had
+        already ruled out look eligible again until its next stream refresh,
+        briefly stealing the Drops slot after every category refresh.
+        """
         with self.__eligibility_lock():
+            if keep_negative_verdicts:
+                eligibility_by_login = dict(eligibility_by_login)
+                for login in eligibility_by_login:
+                    previous = self.category_campaign_eligibility.get(
+                        (game_slug, login)
+                    )
+                    if previous is not None and previous[0] == 0:
+                        eligibility_by_login[login] = previous
             updated_eligibility = {
                 key: value
                 for key, value in self.category_campaign_eligibility.items()
@@ -3149,7 +3168,9 @@ class Twitch(object):
             extra={"emoji": ":dart:", "event": Events.DROP_STATUS},
         )
 
-    def __log_watched_streamers(self, streamers, streamers_watching, streamer_source):
+    def __log_watched_streamers(
+        self, streamers, streamers_watching, streamer_source, is_drop_stream=None
+    ):
         def watch_reason(index):
             source = streamer_source(index)
             if source == StreamerSource.BADGES:
@@ -3170,7 +3191,13 @@ class Twitch(object):
 
         for index in streamers_watching:
             streamer = streamers[index]
-            if self.__drops_condition(streamer) is not True:
+            # Use the watch loop's own Drops-slot decision when given, so a
+            # discovered pick held through a transient eligibility miss is
+            # still reported as watched for drops.
+            if is_drop_stream is not None:
+                if not is_drop_stream(index):
+                    continue
+            elif self.__drops_condition(streamer) is not True:
                 continue
 
             campaigns = self.__describe_campaigns(streamer.stream.campaigns)
@@ -3519,6 +3546,7 @@ class Twitch(object):
                 if drops_enabled is True
                 else {}
             ),
+            keep_negative_verdicts=True,
         )
 
         if drops_enabled is True:
@@ -4641,7 +4669,10 @@ class Twitch(object):
                 )
 
                 self.__log_watched_streamers(
-                    streamers_snapshot, streamers_watching, streamer_source
+                    streamers_snapshot,
+                    streamers_watching,
+                    streamer_source,
+                    is_drop_stream=_is_drop_stream,
                 )
 
                 for index in streamers_watching:
@@ -5317,6 +5348,16 @@ class Twitch(object):
                 f"campaign for {streamer.stream.game_name()}",
                 level=logging.DEBUG,
             )
+        elif campaign_ids and channel_query_answered and is_drop_discovered(streamer):
+            # Category discovery keeps an earlier negative verdict instead of
+            # re-seeding it, so clear it once Twitch answers and the channel
+            # qualifies again - leaving the entry unset, as for any channel
+            # resolved through the fallback campaigns here.
+            with self.__eligibility_lock():
+                key = (game_slug, streamer.username)
+                previous = self.category_campaign_eligibility.get(key)
+                if previous is not None and previous[0] == 0:
+                    del self.category_campaign_eligibility[key]
         return list(campaign_ids)
 
     def __normalize_advertised_campaign(self, campaign: dict) -> dict:

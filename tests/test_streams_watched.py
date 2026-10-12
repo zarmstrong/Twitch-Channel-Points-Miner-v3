@@ -1289,6 +1289,39 @@ def test_drop_pick_survives_transient_eligibility_failure(monkeypatch):
     assert posted == ["https://spade.test/current-pick"]
 
 
+def test_watched_streamer_log_reports_held_drop_pick_as_drops(monkeypatch):
+    # Regression (#144): the "watching for drops" label used the narrower
+    # __drops_condition, so a category pick held through a transient
+    # eligibility miss was watched for drops yet reported as "none".
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.drops_condition = lambda: False
+    current.stream.game_name = lambda: "Current Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current],
+        streams_watched=1,
+        priority=[Priority.DROPS],
+        category_campaign_deadlines={"current-game": datetime(2099, 1, 2)},
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/current-pick"]
+    watch_message = next(
+        message for message in messages if "Watching for points:" in message
+    )
+    assert "watching for drops: current-pick (campaign drops;" in watch_message
+
+
 def test_drop_pick_transient_hold_excludes_channel_ineligible_campaign(monkeypatch):
     # Same transient-eligibility scenario as above, but the only in-progress
     # drop for the game belongs to a campaign restricted to other channels.
