@@ -859,6 +859,59 @@ def test_playback_authorization_accepts_null_forbidden_reason():
     assert response.authorization.forbidden_reason_code is None
 
 
+def test_playback_access_token_uses_current_persisted_query_and_platform():
+    payload = {
+        "data": {
+            "streamPlaybackAccessToken": {
+                "value": "token-value",
+                "signature": "token-signature",
+                "authorization": {
+                    "isForbidden": False,
+                    "forbiddenReasonCode": None,
+                },
+            }
+        },
+        "extensions": {"operationName": "PlaybackAccessToken"},
+    }
+    calls = []
+
+    def post(url, json, headers):
+        calls.append(json)
+        return FakeResponse(payload)
+
+    GQL(client_session(), post_request=post).get_playback_access_token("example")
+
+    request = calls[0]
+    assert (
+        request["extensions"]["persistedQuery"]["sha256Hash"]
+        == "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9"
+    )
+    assert request["variables"]["platform"] == "web"
+    assert request["variables"]["login"] == "example"
+
+
+def test_playback_access_token_response_is_redacted_from_debug_log(caplog):
+    payload = {
+        "data": {
+            "streamPlaybackAccessToken": {
+                "value": "secret-token-value",
+                "signature": "secret-signature",
+                "authorization": {"isForbidden": False, "forbiddenReasonCode": None},
+            }
+        },
+        "extensions": {"operationName": "PlaybackAccessToken"},
+    }
+
+    with caplog.at_level("DEBUG"):
+        GQL(
+            client_session(), post_request=lambda *a, **k: FakeResponse(payload)
+        ).get_playback_access_token("example")
+
+    assert "secret-token-value" not in caplog.text
+    assert "secret-signature" not in caplog.text
+    assert "<redacted" in caplog.text
+
+
 def test_channel_points_context_accepts_current_query_shape_without_user_ids():
     payload = {
         "data": {

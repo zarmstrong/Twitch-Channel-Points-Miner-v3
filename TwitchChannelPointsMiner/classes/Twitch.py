@@ -47,6 +47,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
+from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import StreamSegmentWatcher
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
@@ -140,6 +141,7 @@ class Twitch(object):
         "drop_badge_rewards",
         "restart_requested",
         "gql",
+        "stream_segment_watchers",
     ]
 
     def __init__(self, username, user_agent, gql_factory=None):
@@ -236,6 +238,7 @@ class Twitch(object):
         self.available_badge_names = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
+        self.stream_segment_watchers = {}
 
     def __request_authentication_restart(self):
         if self.restart_requested.is_set():
@@ -3959,6 +3962,65 @@ class Twitch(object):
 
         return points_limit >= 0 and channel_points >= points_limit
 
+    def _poll_stream_segments(self, streamer, drop_stream):
+        """Request the watched stream's HLS segments so Twitch counts watch time.
+
+        Twitch only credits Drop progress while a stream's media segments are
+        requested, so this polls the (cached) media playlist and HEADs every
+        new segment, but only for streams with Drops to earn. ``drop_stream``
+        is the watch loop's own Drops decision for this stream (the one used
+        to fill the Drops slot), so category, wildcard and badge picks whose
+        Stream campaigns Twitch did not populate are still covered. The poll
+        runs on a background thread so slow Twitch or CDN responses never
+        delay the watch loop. State is kept per streamer and reset when the broadcast
+        changes; missing on lightweight test doubles, where it is a no-op.
+        Unexpected errors are logged and swallowed so they cannot abort the
+        remaining streamers in the watch cycle.
+        """
+        watchers = getattr(self, "stream_segment_watchers", None)
+        gql = getattr(self, "gql", None)
+        if watchers is None or gql is None:
+            return
+
+        if drop_stream is not True:
+            return
+
+        try:
+            stream = getattr(streamer, "stream", None)
+            broadcast_id = getattr(stream, "broadcast_id", None)
+            watcher = watchers.get(streamer.username)
+            if watcher is None or not watcher.matches_broadcast(broadcast_id):
+                if watcher is not None:
+                    watcher.close()
+                watcher = StreamSegmentWatcher(
+                    streamer.username,
+                    gql,
+                    self.user_agent,
+                    broadcast_id=broadcast_id,
+                )
+                watchers[streamer.username] = watcher
+            watcher.start_poll()
+        except Exception:
+            logger.warning(
+                f"Unable to request stream segments for {streamer}",
+                exc_info=True,
+                extra={"emoji": ":warning:"},
+            )
+
+    def _forget_idle_stream_segment_watchers(self, now=None):
+        """Drop segment watchers that have not been polled for a while.
+
+        Streams briefly rotated out of the watched set keep their watcher, so
+        a stall is still reported once rather than on every re-watch.
+        """
+        watchers = getattr(self, "stream_segment_watchers", None)
+        if not watchers:
+            return
+        for username, watcher in list(watchers.items()):
+            if watcher.is_idle(now):
+                del watchers[username]
+                watcher.close()
+
     def send_minute_watched_events(
         self,
         streamers,
@@ -4704,6 +4766,8 @@ class Twitch(object):
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
 
+                self._forget_idle_stream_segment_watchers()
+
                 self.__save_now_watching_analytics(
                     streamers_snapshot, streamers_watching, streamer_source
                 )
@@ -4714,6 +4778,15 @@ class Twitch(object):
                     streamer_source,
                     is_drop_stream=_is_drop_stream,
                 )
+
+                # Segment requests are what earn Drop progress now, so start
+                # every watched stream's (background) poll before the
+                # minute-watched requests: an unexpected error there aborts
+                # the rest of this cycle and must not skip them.
+                for index in streamers_watching:
+                    self._poll_stream_segments(
+                        streamers_snapshot[index], _is_drop_stream(index)
+                    )
 
                 for index in streamers_watching:
                     # next_iteration = time.time() + 60 / len(streamers_watching)

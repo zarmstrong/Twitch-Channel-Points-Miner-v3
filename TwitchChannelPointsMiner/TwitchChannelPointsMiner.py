@@ -1607,20 +1607,24 @@ class TwitchChannelPointsMiner:
                 retained_baselines.append(baseline)
                 continue
 
-            streamer.from_badge_campaign = False
-            # from_category was only ever True because this was a badge
-            # campaign (see the badge-streamer construction site above) - not
-            # because it was discovered via category browsing. Reset it too,
-            # or a retained ex-badge streamer permanently misclassifies as a
-            # real category-discovery streamer in every from_category check
-            # from here on (streamer_source(), eligibility, the shared
-            # discovered-slot arbitration).
-            streamer.from_category = False
             if streamer.explicitly_configured or streamer.from_followers:
+                streamer.from_badge_campaign = False
+                # from_category was only ever True because this was a badge
+                # campaign (see the badge-streamer construction site above) -
+                # not because it was discovered via category browsing. Reset
+                # it too, or a retained ex-badge streamer permanently
+                # misclassifies as a real category-discovery streamer in every
+                # from_category check from here on (streamer_source(),
+                # eligibility, the shared discovered-slot arbitration).
+                streamer.from_category = False
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
 
+            # Leave a retiring streamer's badge flags alone: it stays in
+            # self.streamers until this loop finishes (stopping chats can take
+            # seconds), and the watch thread would classify a flagless
+            # badge-only streamer as a configured one and could watch it.
             self.ws_pool.remove_streamer_topics(streamer)
             if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
                 streamer.irc_chat.stop()
@@ -1671,13 +1675,17 @@ class TwitchChannelPointsMiner:
                 retained_baselines.append(baseline)
                 continue
 
-            streamer.from_category = False
-            streamer.from_wildcard_category = False
             if streamer.explicitly_configured or streamer.from_followers:
+                streamer.from_category = False
+                streamer.from_wildcard_category = False
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
 
+            # Leave a retiring streamer's category flags alone: it stays in
+            # self.streamers until this loop finishes (stopping chats can take
+            # seconds), and the watch thread would classify a flagless
+            # category-only streamer as a configured one and could watch it.
             self.ws_pool.remove_streamer_topics(streamer)
             if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
                 streamer.irc_chat.stop()

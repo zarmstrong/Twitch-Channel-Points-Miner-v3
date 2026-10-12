@@ -2,6 +2,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import sys
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener, TimedRotatingFileHandler
@@ -177,6 +178,53 @@ class CategoryConsoleFilter(logging.Filter):
         return record.levelno >= self.global_level or getattr(
             record, "category_log", False
         )
+
+
+class SensitiveUrlFilter(logging.Filter):
+    """Redact signed Twitch playback credentials from every log record.
+
+    Third-party loggers such as urllib3 log each request line at DEBUG, which
+    for stream segment polling includes the usher playlist's ``sig`` and
+    ``token`` query values and the signed media playlist and segment paths.
+    Tracebacks and stack info are redacted too, since request exceptions
+    usually quote the full URL.
+    """
+
+    PATTERNS = (
+        (re.compile(r"([?&](?:sig|token)=)[^&\s\"']+"), r"\1<redacted>"),
+        (re.compile(r"(/v1/(?:playlist|segment)/)[^\s\"']+"), r"\1<redacted>"),
+    )
+
+    _formatter = logging.Formatter()
+
+    @classmethod
+    def redact(cls, text):
+        if not text or ("=" not in text and "/v1/" not in text):
+            return text
+        for pattern, replacement in cls.PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = None
+        if message is not None:
+            redacted = self.redact(message)
+            if redacted != message:
+                record.msg = redacted
+                record.args = None
+
+        if record.exc_info and not record.exc_text:
+            # Formatters reuse exc_text instead of re-formatting exc_info, so
+            # formatting the traceback here lets it be redacted.
+            record.exc_text = self._formatter.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = self.redact(record.exc_text)
+        if record.stack_info:
+            record.stack_info = self.redact(record.stack_info)
+        return True
 
 
 class FileFormatter(logging.Formatter):
@@ -363,6 +411,8 @@ def configure_loggers(username, settings):
     # Queue handler that will handle the logger queue
     logger_queue = queue.Queue(-1)
     queue_handler = QueueHandler(logger_queue)
+    # Redact before the record is queued, so no handler ever sees credentials.
+    queue_handler.addFilter(SensitiveUrlFilter())
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     # Add the queue handler to the root logger

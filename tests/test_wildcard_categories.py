@@ -784,6 +784,47 @@ def test_reconcile_scoped_to_wildcard_does_not_evict_preferred_streamers():
     assert miner.ws_pool.removed == ["wild"]
 
 
+def test_reconcile_never_exposes_retiring_streamers_as_configured():
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        discovery_sources,
+    )
+    from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+
+    class SnapshottingPool(FakeWebSocketsPool):
+        """Record how the watch thread would classify the live list mid-loop."""
+
+        def __init__(self, miner):
+            super().__init__()
+            self.miner = miner
+            self.snapshots = []
+
+        def remove_streamer_topics(self, streamer):
+            super().remove_streamer_topics(streamer)
+            self.snapshots.append(
+                {s.username: discovery_sources(s) for s in self.miner.streamers}
+            )
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    first = Streamer("first-retired", from_category=True)
+    second = Streamer("second-retired", from_category=True)
+    configured = Streamer("configured", from_category=True)
+    configured.explicitly_configured = True
+    miner.streamers = [first, second, configured]
+    miner.original_streamers = [10, 20, 30]
+    miner.ws_pool = SnapshottingPool(miner)
+
+    miner._TwitchChannelPointsMiner__reconcile_category_streamers([], wildcard=False)
+
+    # While each streamer was being retired, none of the not-yet-removed
+    # category-only streamers fell back to the configured STREAMERS tier.
+    assert miner.ws_pool.snapshots
+    for snapshot in miner.ws_pool.snapshots:
+        for username in ("first-retired", "second-retired"):
+            assert StreamerSource.STREAMERS not in snapshot[username]
+    assert [s.username for s in miner.streamers] == ["configured"]
+    assert configured.from_category is False
+
+
 def test_reconcile_scoped_to_preferred_does_not_evict_wildcard_streamers():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
     preferred = Streamer("preferred", from_category=True)

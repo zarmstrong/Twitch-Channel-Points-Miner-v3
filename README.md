@@ -954,6 +954,13 @@ behavior.
 
 Make sure to write the streamers array in order of priority from left to right. If you use `followers=True` you can choose to download the followers sorted by follow date (ASC or DESC).
 
+Since October 2026 Twitch only credits time-based Drop progress while a
+stream's media segments are actually being requested, so the miner polls the
+HLS playlist of each watched stream that has Drops to earn and sends a
+lightweight `HEAD` request for every new segment. No stream audio or video is
+downloaded, and streams watched only for channel points are skipped. This runs
+automatically in the background and needs no configuration.
+
 ## Settings
 Most settings are documented inline in [config.example.py](config.example.py).
 The `priority` option controls which eligible streamers receive the available

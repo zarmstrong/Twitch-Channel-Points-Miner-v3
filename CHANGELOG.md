@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.19.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.18.1...3.19.0) (2026-10-11)
+
+
+### Features
+
+* **drops:** add category_drops_override_streamers and one Drops stream across all sources ([b8b0f10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b8b0f108615e6bd84712508ae1dc098455516718))
+
+
+### Bug Fixes
+
+* **badges:** stop retiring badge streamers from briefly looking configured ([3fcd55e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3fcd55efb1a7a30554205776fbce160f06ef0b5c))
+* **category:** stop retiring category streamers from briefly looking configured ([3fcd55e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3fcd55efb1a7a30554205776fbce160f06ef0b5c))
+* **drops:** never watch a badge stream alongside the category Drops pick ([#140](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/140)) ([b8b0f10](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b8b0f108615e6bd84712508ae1dc098455516718))
+* **gql:** refresh stale PlaybackAccessToken persisted query ([3fcd55e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3fcd55efb1a7a30554205776fbce160f06ef0b5c))
+* **logger:** redact signed Twitch playback URLs from all log output ([3fcd55e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3fcd55efb1a7a30554205776fbce160f06ef0b5c))
+* request HLS media segments so Twitch counts watch time ([#142](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/142)) ([3fcd55e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3fcd55efb1a7a30554205776fbce160f06ef0b5c)), closes [#141](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/141)
+
 ## [3.18.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.18.0...3.18.1) (2026-09-30)
 
 

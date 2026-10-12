@@ -182,6 +182,43 @@ def test_badge_ownership_change_retires_only_stale_badge_streamers():
     assert configured.from_category is False
 
 
+def test_badge_retirement_never_exposes_retiring_streamers_as_configured():
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        discovery_sources,
+    )
+    from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+
+    class SnapshottingPool(FakeWebSocketsPool):
+        """Record how the watch thread would classify the live list mid-loop."""
+
+        def __init__(self, miner):
+            super().__init__()
+            self.miner = miner
+            self.snapshots = []
+
+        def remove_streamer_topics(self, streamer):
+            super().remove_streamer_topics(streamer)
+            self.snapshots.append(
+                {s.username: discovery_sources(s) for s in self.miner.streamers}
+            )
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.streamers = [
+        Streamer("first-retired", from_category=True, from_badge_campaign=True),
+        Streamer("second-retired", from_category=True, from_badge_campaign=True),
+    ]
+    miner.original_streamers = [10, 20]
+    miner.ws_pool = SnapshottingPool(miner)
+
+    miner._TwitchChannelPointsMiner__reconcile_badge_campaign_streamers([])
+
+    assert len(miner.ws_pool.snapshots) == 2
+    for snapshot in miner.ws_pool.snapshots:
+        for username, sources in snapshot.items():
+            assert StreamerSource.STREAMERS not in sources, username
+    assert miner.streamers == []
+
+
 def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
     class RecoveringTwitch(FakeTwitch):
         def __init__(self):
