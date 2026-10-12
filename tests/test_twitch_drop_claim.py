@@ -326,9 +326,11 @@ def test_reward_campaign_advertised_by_channel_falls_back_to_gist_drop_campaign(
     assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
         "real-drop-campaign-1"
     ]
-    # Left unset (not a conclusive (0, N)) so the gist-based fallback in
-    # __category_drops_condition remains free to apply.
-    assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
+    # Recorded as eligible through the gist campaign, not a conclusive (0, N).
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
 
 
 def test_unlisted_reward_campaign_still_falls_back_to_gist_drop_campaign(monkeypatch):
@@ -374,7 +376,10 @@ def test_unlisted_reward_campaign_still_falls_back_to_gist_drop_campaign(monkeyp
     assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
         "real-drop-campaign-1"
     ]
-    assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
 
 
 def test_campaign_names_from_ids_resolves_before_sync_campaigns_catches_up(monkeypatch):
@@ -545,9 +550,11 @@ def test_null_channel_query_keeps_unrestricted_gist_campaign(monkeypatch):
     ]
 
 
-def test_answered_channel_query_clears_stale_negative_verdict(monkeypatch):
-    # Category discovery keeps a channel's negative verdict across refreshes
-    # (#144), so the channel check must clear it once the channel qualifies.
+def test_answered_channel_query_replaces_stale_negative_verdict(monkeypatch):
+    # Category discovery keeps a fresh per-channel verdict across refreshes
+    # (#144), so the channel check must replace a negative one with a
+    # positive verdict once the channel qualifies - deleting it would leave
+    # the channel ineligible, since the game was already evaluated.
     twitch = per_streamer_campaigns_twitch(
         monkeypatch,
         lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
@@ -556,11 +563,22 @@ def test_answered_channel_query_clears_stale_negative_verdict(monkeypatch):
         {"id": "gist-open", "name": "General Drops", "channels": []}
     )
     twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (0, 0)
+    twitch.evaluated_category_campaigns = {"example-game"}
+    streamer = category_streamer()
+    streamer.is_online = True
+    streamer.settings = SimpleNamespace(claim_drops=True)
+    streamer.stream.campaigns_ids = []
 
-    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
-        "gist-open"
-    ]
-    assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == ["gist-open"]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+    assert twitch.category_channel_verdicts[("example-game", "drops-channel")][0] == (
+        1,
+        1,
+    )
+    assert twitch._Twitch__category_drops_condition(streamer) is True
 
 
 def test_failed_channel_query_keeps_negative_verdict(monkeypatch):

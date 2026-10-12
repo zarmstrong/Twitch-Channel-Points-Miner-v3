@@ -1739,11 +1739,7 @@ def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     assert len(stream_calls) == 1
 
 
-def test_category_search_keeps_channel_check_negative_verdicts(monkeypatch):
-    # Regression (#144): re-seeding every rediscovered channel as eligible
-    # undid the per-channel check's "advertises no active campaign" verdict,
-    # so after each category refresh those channels briefly took the Drops
-    # slot until their next stream refresh ruled them out again.
+def _category_search_twitch(monkeypatch, logins, eligibility, verdicts):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
             "data": {
@@ -1751,7 +1747,7 @@ def test_category_search_keeps_channel_check_negative_verdicts(monkeypatch):
                     "streams": {
                         "edges": [
                             {"node": {"broadcaster": {"login": login}}}
-                            for login in ("verified-out", "verified-in", "new")
+                            for login in logins
                         ]
                     }
                 }
@@ -1761,12 +1757,8 @@ def test_category_search_keeps_channel_check_negative_verdicts(monkeypatch):
     twitch = twitch_with_gql(gql)
     twitch.twitchdrops_app_campaigns = {}
     twitch.twitchdrops_app_game_names = {}
-    twitch.category_campaign_eligibility = {
-        ("game", "verified-out"): (0, 0),
-        ("game", "verified-in"): (2, 2),
-        ("game", "retired"): (0, 0),
-        ("other-game", "verified-out"): (1, 1),
-    }
+    twitch.category_campaign_eligibility = dict(eligibility)
+    twitch.category_channel_verdicts = dict(verdicts)
 
     def helix_get(endpoint, params):
         if endpoint == "search/categories":
@@ -1774,7 +1766,7 @@ def test_category_search_keeps_channel_check_negative_verdicts(monkeypatch):
         return {
             "data": [
                 {"user_login": login, "game_id": "game-id", "viewer_count": 1}
-                for login in ("verified-out", "verified-in", "new")
+                for login in logins
             ]
         }
 
@@ -1782,17 +1774,74 @@ def test_category_search_keeps_channel_check_negative_verdicts(monkeypatch):
         Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
     )
     monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(twitch_module.time, "time", lambda: 10_000)
+    return twitch
 
-    assert twitch.get_live_streamers_for_category("game") == [
+
+def test_category_search_keeps_fresh_channel_verdicts(monkeypatch):
+    # Regression (#144): re-seeding every rediscovered channel as eligible
+    # undid the per-channel check's "advertises no active campaign" verdict,
+    # so after each category refresh those channels briefly took the Drops
+    # slot until their next stream refresh ruled them out again.
+    logins = ("verified-out", "verified-in", "stale", "new")
+    twitch = _category_search_twitch(
+        monkeypatch,
+        logins,
+        eligibility={
+            ("game", "verified-out"): (0, 0),
+            ("game", "verified-in"): (2, 3),
+            ("game", "stale"): (0, 0),
+            ("game", "retired"): (0, 0),
+            ("other-game", "verified-out"): (1, 1),
+        },
+        verdicts={
+            ("game", "verified-out"): ((0, 0), 9_900),
+            ("game", "verified-in"): ((2, 3), 9_900),
+            # Older than the freshness window: discovery re-seeds it.
+            ("game", "stale"): ((0, 0), 1_000),
+            ("game", "retired"): ((0, 0), 9_900),
+        },
+    )
+
+    assert twitch.get_live_streamers_for_category("game") == list(logins)
+    assert twitch.category_campaign_eligibility == {
+        ("game", "verified-out"): (0, 0),
+        ("game", "verified-in"): (2, 3),
+        ("game", "stale"): (1, 1),
+        ("game", "new"): (1, 1),
+        ("other-game", "verified-out"): (1, 1),
+    }
+    assert twitch.category_channel_verdicts == {
+        ("game", "verified-out"): ((0, 0), 9_900),
+        ("game", "verified-in"): ((2, 3), 9_900),
+    }
+
+
+def test_restricted_category_search_keeps_fresh_channel_verdicts(monkeypatch):
+    twitch = _category_search_twitch(
+        monkeypatch,
+        ("verified-out", "allowed"),
+        eligibility={("game", "verified-out"): (0, 0)},
+        verdicts={("game", "verified-out"): ((0, 0), 9_900)},
+    )
+    twitch.active_drop_campaigns = {
+        "game": [
+            {
+                "id": "restricted",
+                "name": "Restricted",
+                "channels": ["verified-out", "allowed"],
+            }
+        ]
+    }
+
+    assert sorted(twitch.get_live_streamers_for_category("game")) == [
+        "allowed",
         "verified-out",
-        "verified-in",
-        "new",
     ]
     assert twitch.category_campaign_eligibility == {
         ("game", "verified-out"): (0, 0),
-        ("game", "verified-in"): (1, 1),
-        ("game", "new"): (1, 1),
-        ("other-game", "verified-out"): (1, 1),
+        ("game", "allowed"): (1, 1),
     }
 
 
