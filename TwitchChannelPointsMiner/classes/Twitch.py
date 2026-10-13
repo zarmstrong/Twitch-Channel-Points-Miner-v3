@@ -79,6 +79,12 @@ DROP_INVENTORY_FRESHNESS_SECONDS = 180
 # provisional eligibility. Discovered streams are re-checked about every two
 # minutes, so this only lapses when the channel query keeps failing.
 CHANNEL_VERDICT_FRESHNESS_SECONDS = 600
+# How long an inventory snapshot's per-drop progress may be applied to a
+# channel's advertised campaigns. Inventory syncs run every few minutes but can
+# be six apart, so DROP_INVENTORY_FRESHNESS_SECONDS would lapse between syncs
+# and flip a nearly finished campaign between eligible and not. A drop claimed
+# after the snapshot can only be miscounted for this long.
+INVENTORY_PROGRESS_OVERLAY_SECONDS = 900
 PROMPT_CLAIM_DEBOUNCE_SECONDS = 300
 
 
@@ -101,6 +107,7 @@ class Twitch(object):
         "drop_report_state",
         "drop_inventory_progress",
         "drop_inventory_progress_updated_at",
+        "drop_inventory_minutes_by_drop_id",
         "drop_watch_health",
         "track_drop_item_art",
         "scrape_drop_progress_on_load",
@@ -185,6 +192,7 @@ class Twitch(object):
         self.drop_report_state = {}
         self.drop_inventory_progress = {}
         self.drop_inventory_progress_updated_at = 0
+        self.drop_inventory_minutes_by_drop_id = {}
         self.drop_watch_health = {}
         self.track_drop_item_art = False
         self.scrape_drop_progress_on_load = False
@@ -330,9 +338,12 @@ class Twitch(object):
     ):
         """Atomically replace cached eligibility for one game category.
 
-        A fresh per-channel verdict (see __record_channel_verdict) outranks
-        the discovery seed for a login that is still discovered; verdicts for
-        logins no longer discovered are dropped with their eligibility.
+        A fresh negative per-channel verdict (see __record_channel_verdict)
+        outranks the discovery seed for a login that is still discovered.
+        Positive verdicts do not: discovery's newer count is just as positive
+        and may reflect a campaign completing since. Verdicts for logins no
+        longer discovered are dropped with their eligibility; a channel that
+        is rediscovered later is re-checked when it is added again.
         """
         with self.__eligibility_lock():
             verdicts = getattr(self, "category_channel_verdicts", None) or {}
@@ -344,6 +355,7 @@ class Twitch(object):
                 if key[0] == game_slug
                 and key[1] in eligibility_by_login
                 and verdict[1] >= fresh_after
+                and verdict[0][0] == 0
             }
             eligibility_by_login = {
                 login: (
@@ -476,6 +488,12 @@ class Twitch(object):
             game_slug: tuple(sorted(progress))
             for game_slug, progress in progress_by_game.items()
         }
+        self.drop_inventory_minutes_by_drop_id = {
+            drop_id: current
+            for progress in progress_by_game.values()
+            for (_, _, drop_id, _, current, _, _) in progress
+            if drop_id
+        }
         self.drop_inventory_progress_updated_at = time.time()
 
     def __with_inventory_drop_progress(self, campaign: dict) -> dict:
@@ -486,46 +504,40 @@ class Twitch(object):
         need more minutes than are left, it looked impossible to finish even
         though the account was already most of the way through them. Fill in
         the in-progress minutes the latest inventory snapshot reported for the
-        same drop IDs. A snapshot can only lag behind real progress, so an
-        older one underestimates rather than overestimates.
+        same drop IDs, while that snapshot is recent enough (see
+        INVENTORY_PROGRESS_OVERLAY_SECONDS): an old snapshot can still list a
+        drop that has since been claimed.
         """
-        progress_by_drop_id = {
-            drop_id: current
-            for progress in (
-                getattr(self, "drop_inventory_progress", None) or {}
-            ).values()
-            for (_, _, drop_id, _, current, _, _) in progress
-            if drop_id
-        }
-        drops = campaign.get("timeBasedDrops", []) or []
-        if not progress_by_drop_id or not any(
-            isinstance(drop, dict)
-            and not isinstance(drop.get("self"), dict)
-            and str(drop.get("id") or "") in progress_by_drop_id
-            for drop in drops
+        updated_at = getattr(self, "drop_inventory_progress_updated_at", 0)
+        if (
+            not updated_at
+            or (time.time() - updated_at) > INVENTORY_PROGRESS_OVERLAY_SECONDS
         ):
             return campaign
-        updated = dict(campaign)
-        updated["timeBasedDrops"] = [
-            (
-                {
+        minutes_by_drop_id = (
+            getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
+        )
+        if not minutes_by_drop_id:
+            return campaign
+
+        changed = False
+        drops = []
+        for drop in campaign.get("timeBasedDrops", []) or []:
+            drop_id = str(drop.get("id") or "") if isinstance(drop, dict) else ""
+            if drop_id in minutes_by_drop_id and not isinstance(drop.get("self"), dict):
+                drop = {
                     **drop,
                     "self": {
                         "isClaimed": False,
                         "hasPreconditionsMet": True,
-                        "currentMinutesWatched": progress_by_drop_id[
-                            str(drop.get("id") or "")
-                        ],
+                        "currentMinutesWatched": minutes_by_drop_id[drop_id],
                     },
                 }
-                if isinstance(drop, dict)
-                and not isinstance(drop.get("self"), dict)
-                and str(drop.get("id") or "") in progress_by_drop_id
-                else drop
-            )
-            for drop in drops
-        ]
-        return updated
+                changed = True
+            drops.append(drop)
+        if not changed:
+            return campaign
+        return {**campaign, "timeBasedDrops": drops}
 
     @staticmethod
     def __drop_progress_label(progress) -> str:
@@ -5421,6 +5433,9 @@ class Twitch(object):
                     game_slug, streamer.username, (0, len(fallback_campaigns))
                 )
             else:
+                # A failed query is not a verdict. An older positive verdict
+                # left in place is harmless: only negative verdicts outrank
+                # discovery's seed.
                 with self.__eligibility_lock():
                     self.category_campaign_eligibility[
                         (game_slug, streamer.username)
@@ -5513,19 +5528,27 @@ class Twitch(object):
             )
         elif campaign_ids and channel_query_answered and is_drop_discovered(streamer):
             # Twitch answered and the channel qualifies through the fallback
-            # campaigns: record that, replacing any earlier negative verdict
-            # but keeping an existing positive count.
-            previous = self.category_campaign_eligibility.get(
-                (game_slug, streamer.username)
+            # campaigns: record that, replacing any earlier negative verdict.
+            # These summaries carry no drops to check against the time left,
+            # so apply what is known: completed campaigns and the game's
+            # campaign deadline.
+            deadline = (getattr(self, "category_campaign_deadlines", None) or {}).get(
+                game_slug
+            )
+            eligible_ids = (
+                []
+                if deadline is not None and deadline <= datetime.utcnow()
+                else [
+                    campaign_id
+                    for campaign_id in campaign_ids
+                    if campaign_id
+                    not in (getattr(self, "completed_drop_campaigns", None) or set())
+                ]
             )
             self.__record_channel_verdict(
                 game_slug,
                 streamer.username,
-                (
-                    previous
-                    if previous is not None and previous[0] > 0
-                    else (len(campaign_ids), len(campaign_ids))
-                ),
+                (len(eligible_ids), len(campaign_ids)),
             )
         return list(campaign_ids)
 

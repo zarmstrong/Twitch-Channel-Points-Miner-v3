@@ -1862,18 +1862,19 @@ def test_category_search_keeps_fresh_channel_verdicts(monkeypatch, caplog):
         assert twitch.get_live_streamers_for_category("game") == list(logins)
     assert (
         "[drops-check] Category refresh kept channel check results for game: "
-        "verified-in (2, 3) checked 100s ago, verified-out (0, 0) checked 100s ago"
+        "verified-out (0, 0) checked 100s ago"
     ) in caplog.messages
+    # Only a negative verdict outranks the seed: a positive one is no more
+    # informative than discovery's newer count.
     assert twitch.category_campaign_eligibility == {
         ("game", "verified-out"): (0, 0),
-        ("game", "verified-in"): (2, 3),
+        ("game", "verified-in"): (1, 1),
         ("game", "stale"): (1, 1),
         ("game", "new"): (1, 1),
         ("other-game", "verified-out"): (1, 1),
     }
     assert twitch.category_channel_verdicts == {
         ("game", "verified-out"): ((0, 0), 9_900),
-        ("game", "verified-in"): ((2, 3), 9_900),
     }
 
 

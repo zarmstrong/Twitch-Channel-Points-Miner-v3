@@ -501,3 +501,36 @@ def test_category_refresh_adds_replacements_before_retiring_stale_streamers():
         "blacklisted",
     ]
     assert miner.ws_pool.removed == ["stale"]
+
+
+def test_rediscovered_category_streamer_is_checked_before_it_can_be_watched():
+    # A channel retired for missing one category refresh loses its stored
+    # channel check verdict. When discovery finds it again it must be
+    # re-checked before the watch loop can see it, so a channel Twitch
+    # already ruled out cannot take the Drops slot on discovery's seed.
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.username = "testuser"
+    miner.twitch = FakeTwitch()
+    miner.streamers = []
+    miner.original_streamers = []
+    miner.ws_pool = FakeWebSocketsPool()
+    checked_while_listed = []
+
+    def check_streamer_online(streamer):
+        checked_while_listed.append(streamer in miner.streamers)
+        streamer.is_online = True
+
+    miner.twitch.check_streamer_online = check_streamer_online
+
+    added = miner._TwitchChannelPointsMiner__add_discovered_category_streamers(
+        ["returning"], [], ChatPresence.NEVER
+    )
+
+    assert added == 1
+    assert checked_while_listed == [False]
+    assert [streamer.username for streamer in miner.streamers] == ["returning"]
