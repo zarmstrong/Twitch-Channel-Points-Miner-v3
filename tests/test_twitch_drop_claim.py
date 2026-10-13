@@ -595,6 +595,63 @@ def test_failed_channel_query_keeps_negative_verdict(monkeypatch):
     )
 
 
+def _late_campaign_twitch(monkeypatch, progress):
+    # EXFIL Brothers Day 4: one advertised campaign whose next drop needs
+    # more minutes than are left, unless the account's inventory progress on
+    # that drop is counted.
+    from datetime import datetime, timedelta
+
+    ends_at = (datetime.utcnow() + timedelta(minutes=275)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    campaign = advertised_campaign()
+    campaign["endAt"] = ends_at
+    drop = campaign["timeBasedDrops"][0]
+    drop["id"] = "drop-5"
+    drop["requiredMinutesWatched"] = 300
+    drop["endAt"] = ends_at
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[campaign], campaigns_available=True
+        )
+    )
+    twitch.drop_inventory_progress = progress
+    twitch.awarded_game_event_drops = {}
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_campaigns_details", lambda self, *a, **k: []
+    )
+    return twitch
+
+
+def test_channel_check_counts_inventory_progress_toward_late_drop(monkeypatch):
+    # Regression: the channel query carries no per-account progress, so a
+    # drop needing 300m with 275m left looked impossible even though the
+    # account had already watched 240m of it, and the campaign was dropped.
+    twitch = _late_campaign_twitch(
+        monkeypatch,
+        {
+            "example-game": (
+                ("campaign-1", "Example Campaign", "drop-5", "Reward", 240, 300, None),
+            )
+        },
+    )
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "campaign-1"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+def test_channel_check_without_progress_rules_out_late_drop(monkeypatch):
+    twitch = _late_campaign_twitch(monkeypatch, {})
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+
+
 def test_failed_channel_query_keeps_unrestricted_twitch_campaigns(monkeypatch):
     # A failed query proves nothing about the channel, so unrestricted
     # campaigns still apply and existing eligibility is left alone.

@@ -478,6 +478,55 @@ class Twitch(object):
         }
         self.drop_inventory_progress_updated_at = time.time()
 
+    def __with_inventory_drop_progress(self, campaign: dict) -> dict:
+        """Return the campaign with the account's inventory progress applied.
+
+        A channel's advertised campaigns carry no per-account "self" data, so
+        every drop looks unwatched there: once a campaign's remaining drops
+        need more minutes than are left, it looked impossible to finish even
+        though the account was already most of the way through them. Fill in
+        the in-progress minutes the latest inventory snapshot reported for the
+        same drop IDs. A snapshot can only lag behind real progress, so an
+        older one underestimates rather than overestimates.
+        """
+        progress_by_drop_id = {
+            drop_id: current
+            for progress in (
+                getattr(self, "drop_inventory_progress", None) or {}
+            ).values()
+            for (_, _, drop_id, _, current, _, _) in progress
+            if drop_id
+        }
+        drops = campaign.get("timeBasedDrops", []) or []
+        if not progress_by_drop_id or not any(
+            isinstance(drop, dict)
+            and not isinstance(drop.get("self"), dict)
+            and str(drop.get("id") or "") in progress_by_drop_id
+            for drop in drops
+        ):
+            return campaign
+        updated = dict(campaign)
+        updated["timeBasedDrops"] = [
+            (
+                {
+                    **drop,
+                    "self": {
+                        "isClaimed": False,
+                        "hasPreconditionsMet": True,
+                        "currentMinutesWatched": progress_by_drop_id[
+                            str(drop.get("id") or "")
+                        ],
+                    },
+                }
+                if isinstance(drop, dict)
+                and not isinstance(drop.get("self"), dict)
+                and str(drop.get("id") or "") in progress_by_drop_id
+                else drop
+            )
+            for drop in drops
+        ]
+        return updated
+
     @staticmethod
     def __drop_progress_label(progress) -> str:
         labels = [
@@ -5205,7 +5254,11 @@ class Twitch(object):
                 continue
             if (
                 self.__active_incomplete_drop_deadline(
-                    campaign, set(), set(), set(), log_status=False
+                    self.__with_inventory_drop_progress(campaign),
+                    set(),
+                    set(),
+                    set(),
+                    log_status=False,
                 )
                 is None
             ):
@@ -5315,7 +5368,7 @@ class Twitch(object):
                     for campaign in advertised_campaigns
                     if str(campaign.get("id")) not in self.completed_drop_campaigns
                     and self.__active_incomplete_drop_deadline(
-                        campaign,
+                        self.__with_inventory_drop_progress(campaign),
                         completed_drop_ids,
                         awarded_benefit_ids,
                         awarded_benefit_fingerprints,
