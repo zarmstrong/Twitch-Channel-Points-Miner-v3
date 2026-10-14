@@ -5537,9 +5537,10 @@ class Twitch(object):
         elif campaign_ids and channel_query_answered and is_drop_discovered(streamer):
             # Twitch answered and the channel qualifies through the fallback
             # campaigns: record that, replacing any earlier negative verdict.
-            # These summaries carry no drops to check against the time left,
-            # so apply what is known: completed campaigns and the game's
-            # campaign deadline.
+            # These summaries carry no drops, so apply what is known:
+            # completed campaigns, the game's campaign deadline and, when
+            # Twitch already returned the full campaign elsewhere, whether its
+            # remaining drops can still finish in time.
             deadline = (getattr(self, "category_campaign_deadlines", None) or {}).get(
                 game_slug
             )
@@ -5553,12 +5554,64 @@ class Twitch(object):
                     not in (getattr(self, "completed_drop_campaigns", None) or set())
                 ]
             )
+            full_campaigns = {
+                campaign_id: full_campaign
+                for campaign_id in eligible_ids
+                if (full_campaign := self.__full_campaign_with_drops(campaign_id))
+                is not None
+            }
+            if full_campaigns:
+                (
+                    awarded_benefit_ids,
+                    awarded_benefit_fingerprints,
+                ) = self.__awarded_benefits({})
+                (
+                    ambiguous_benefit_ids,
+                    ambiguous_benefit_names,
+                ) = self.__ambiguous_campaign_benefits(list(full_campaigns.values()))
+                eligible_ids = [
+                    campaign_id
+                    for campaign_id in eligible_ids
+                    if campaign_id not in full_campaigns
+                    or self.__active_incomplete_drop_deadline(
+                        self.__with_inventory_drop_progress(
+                            full_campaigns[campaign_id]
+                        ),
+                        set(),
+                        awarded_benefit_ids,
+                        awarded_benefit_fingerprints,
+                        log_status=False,
+                        ambiguous_benefit_ids=ambiguous_benefit_ids,
+                        ambiguous_benefit_names=ambiguous_benefit_names,
+                    )
+                    is not None
+                ]
             self.__record_channel_verdict(
                 game_slug,
                 streamer.username,
                 (len(eligible_ids), len(campaign_ids)),
             )
         return list(campaign_ids)
+
+    def __full_campaign_with_drops(self, campaign_id: str) -> Optional[dict]:
+        """Return the full Twitch campaign (with its drops) for an ID, when
+        Twitch already returned it to a channel query or the open campaign
+        discovery; None when only a summary is known."""
+        candidates = [
+            (getattr(self, "advertised_drop_campaigns", None) or {}).get(campaign_id)
+        ]
+        candidates.extend(
+            campaign
+            for campaign in getattr(self, "discovered_open_drop_campaigns", None) or []
+            if isinstance(campaign, dict)
+            and str(campaign.get("id") or "") == campaign_id
+        )
+        for campaign in candidates:
+            if isinstance(campaign, dict) and any(
+                isinstance(drop, dict) for drop in campaign.get("timeBasedDrops") or []
+            ):
+                return campaign
+        return None
 
     def __normalize_advertised_campaign(self, campaign: dict) -> dict:
         normalized = copy.deepcopy(campaign)

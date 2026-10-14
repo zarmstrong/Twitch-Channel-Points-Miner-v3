@@ -579,6 +579,79 @@ def test_answered_channel_query_excludes_fallback_after_game_deadline(monkeypatc
     )
 
 
+def fallback_twitch_with_full_campaign(monkeypatch, minutes_left):
+    # The gist summary carries no drops, but Twitch already returned the full
+    # campaign to another channel's query.
+    from datetime import datetime, timedelta
+
+    twitch = per_streamer_campaigns_twitch(
+        monkeypatch,
+        lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
+    )
+    twitch.awarded_game_event_drops = {}
+    twitch.twitchdrops_app_campaigns["example-game"].append(
+        {"id": "gist-open", "name": "General Drops", "channels": []}
+    )
+    now = datetime.utcnow()
+    twitch.advertised_drop_campaigns["gist-open"] = {
+        "id": "gist-open",
+        "name": "General Drops",
+        "game": {"displayName": "Example Game"},
+        "timeBasedDrops": [
+            {
+                "id": "long-drop",
+                "name": "Long Drop",
+                "benefitEdges": [{"benefit": {"id": "reward", "name": "Reward"}}],
+                "requiredMinutesWatched": 300,
+                "startAt": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "endAt": (now + timedelta(minutes=minutes_left)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            }
+        ],
+    }
+    streamer = category_streamer()
+    return twitch, streamer
+
+
+def test_fallback_verdict_rules_out_drops_that_cannot_finish(monkeypatch):
+    twitch, streamer = fallback_twitch_with_full_campaign(monkeypatch, 100)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == ["gist-open"]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+    assert twitch.category_channel_verdicts[("example-game", "drops-channel")][0] == (
+        0,
+        1,
+    )
+
+
+def test_fallback_verdict_keeps_drops_that_can_finish(monkeypatch):
+    twitch, streamer = fallback_twitch_with_full_campaign(monkeypatch, 600)
+
+    twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+def test_fallback_verdict_counts_inventory_progress(monkeypatch):
+    twitch, streamer = fallback_twitch_with_full_campaign(monkeypatch, 100)
+    twitch.drop_inventory_minutes_by_drop_id = {"long-drop": 250}
+    twitch.drop_inventory_progress_updated_at = time.time()
+
+    twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
 def test_null_channel_query_keeps_unrestricted_gist_campaign(monkeypatch):
     twitch = per_streamer_campaigns_twitch(
         monkeypatch,
