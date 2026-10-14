@@ -344,7 +344,7 @@ class Twitch(object):
             self.category_channel_verdicts = verdicts
 
     def __replace_category_campaign_eligibility(
-        self, game_slug: str, eligibility_by_login: dict
+        self, game_slug: str, eligibility_by_login: dict, keep_drop_pick=False
     ):
         """Atomically replace cached eligibility for one game category.
 
@@ -353,8 +353,23 @@ class Twitch(object):
         still discovered. Verdicts for logins no
         longer discovered are dropped with their eligibility; a channel that
         is rediscovered later is re-checked when it is added again.
+
+        keep_drop_pick: set by discovery passes. The current Drops pick keeps
+        its positive eligibility even when discovery's rotating top results
+        leave it out, so the category refresh can keep watching it (see
+        keeps_drop_pick).
         """
         with self.__eligibility_lock():
+            drop_pick = getattr(self, "last_drop_pick_streamer", None)
+            if keep_drop_pick and drop_pick and drop_pick not in eligibility_by_login:
+                pick_eligibility = self.category_campaign_eligibility.get(
+                    (game_slug, drop_pick)
+                )
+                if pick_eligibility is not None and pick_eligibility[0] > 0:
+                    eligibility_by_login = {
+                        **eligibility_by_login,
+                        drop_pick: pick_eligibility,
+                    }
             verdicts = getattr(self, "category_channel_verdicts", None) or {}
             now = time.time()
             fresh_after = now - CHANNEL_VERDICT_FRESHNESS_SECONDS
@@ -2585,6 +2600,28 @@ class Twitch(object):
             if (slug := self.__category_slug(category))
         }
 
+    def keeps_drop_pick(self, streamer, category_slugs) -> bool:
+        """Whether a category refresh should keep a streamer that discovery
+        did not return this time.
+
+        Discovery's top results rotate between refreshes in categories with
+        many small channels, so retiring every channel missing from them
+        replaced the current Drops pick at nearly every refresh. Keep the pick
+        while it is live, still streaming one of `category_slugs` (the
+        categories this refresh found active campaigns for), and still
+        Drop-eligible.
+        """
+        drop_pick = getattr(self, "last_drop_pick_streamer", None)
+        if drop_pick is None or streamer.username != drop_pick:
+            return False
+        if streamer.is_online is not True:
+            return False
+        stream = getattr(streamer, "stream", None)
+        game_slug = self.__slugify((stream.game_name() if stream else None) or "")
+        if not game_slug or game_slug not in category_slugs:
+            return False
+        return self.__drops_condition(streamer) is True
+
     def get_drops_inventory(self) -> dict:
         """Fetch the authenticated account's drops inventory.
 
@@ -3659,6 +3696,7 @@ class Twitch(object):
                 if drops_enabled is True
                 else {}
             ),
+            keep_drop_pick=drops_enabled is True,
         )
 
         if drops_enabled is True:
@@ -3769,6 +3807,7 @@ class Twitch(object):
                 login: (eligible_campaign_counts[login], len(campaigns))
                 for login in usernames
             },
+            keep_drop_pick=True,
         )
         self.__log_category(
             f"Checked {checked}/{len(ranked_logins)} campaign-restricted channels for "
