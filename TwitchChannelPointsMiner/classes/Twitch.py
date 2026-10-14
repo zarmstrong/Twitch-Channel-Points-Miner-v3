@@ -90,6 +90,9 @@ CHANNEL_QUERY_FAILURE_LIMIT = 3
 # after the snapshot can only be miscounted for this long.
 INVENTORY_PROGRESS_OVERLAY_SECONDS = 900
 PROMPT_CLAIM_DEBOUNCE_SECONDS = 300
+# Twitch can accept a claim while the inventory keeps listing the drop as
+# unclaimed. Wait this long before claiming the same drop instance again.
+ACCEPTED_CLAIM_RETRY_SECONDS = 60 * 60
 
 
 class Twitch(object):
@@ -146,6 +149,8 @@ class Twitch(object):
         "prompt_claim_lock",
         "prompt_claim_pass_lock",
         "prompt_claim_last",
+        "accepted_drop_claims",
+        "claim_drop_lock",
         "campaign_game_slugs",
         "campaign_names",
         "reward_campaign_ids",
@@ -242,6 +247,12 @@ class Twitch(object):
         self.prompt_claim_lock = Lock()
         self.prompt_claim_pass_lock = Lock()
         self.prompt_claim_last = {}
+        # drop_instance_id -> monotonic time Twitch accepted its claim, or of
+        # the last retry since then.
+        self.accepted_drop_claims = {}
+        # Serializes claims: the sync and prompt-claim passes can reach the
+        # same drop at once.
+        self.claim_drop_lock = Lock()
         self.campaign_game_slugs = {}
         self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
@@ -513,6 +524,9 @@ class Twitch(object):
                 if (
                     drop_self.get("isClaimed") is True
                     or drop_self.get("hasPreconditionsMet") is False
+                    # Twitch accepted the claim; the inventory is lagging.
+                    or drop_self.get("dropInstanceID")
+                    in (getattr(self, "accepted_drop_claims", None) or {})
                 ):
                     continue
 
@@ -3691,6 +3705,21 @@ class Twitch(object):
             if username:
                 usernames.append(username)
 
+        drop_pick = getattr(self, "last_drop_pick_streamer", None)
+        if (
+            drops_enabled is True
+            and drop_pick in (drops_enabled_logins or set())
+            and self.__is_live_in_game(
+                drop_pick,
+                game_id,
+                {
+                    (stream.get("user_login") or "").lower().strip()
+                    for stream in stream_candidates
+                },
+            )
+        ):
+            usernames = self.__keep_drop_pick(usernames, drop_pick, max_results)
+
         game_slug = self.__slugify(game_name)
         total_campaigns = len(fallback_campaigns) or 1
         self.__replace_category_campaign_eligibility(
@@ -3723,6 +3752,36 @@ class Twitch(object):
             extra={"emoji": ":satellite_antenna:"},
         )
         return usernames
+
+    def __live_stream_for(self, login):
+        response = self.__helix_get("streams", {"user_login": login, "first": 1})
+        stream = (response.get("data") or [None])[0]
+        return stream if isinstance(stream, dict) else None
+
+    def __is_live_in_game(self, login, game_id, live_logins):
+        """Whether a channel is live in game_id. live_logins are the channels
+        discovery already found live in the game; any other channel is looked
+        up separately."""
+        if login in live_logins:
+            return True
+        stream = self.__live_stream_for(login)
+        return stream is not None and str(stream.get("game_id") or "") == str(game_id)
+
+    @staticmethod
+    def __keep_drop_pick(usernames, drop_pick, limit):
+        """Keep the current Drops pick among discovery's results.
+
+        Discovery's top results rotate between refreshes in categories with
+        many small channels, so a pick missing from them was retired and
+        replaced at nearly every refresh. Keeping it in the results, in place
+        of the last one so the limit still holds, lets it go through the same
+        eligibility checks as every other discovered channel.
+        """
+        if drop_pick is None or drop_pick in usernames:
+            return usernames
+        if limit is not None:
+            usernames = usernames[: max(limit - 1, 0)]
+        return usernames + [drop_pick]
 
     def __get_live_restricted_campaign_streamers(
         self,
@@ -3773,6 +3832,15 @@ class Twitch(object):
             ) or (max_total is not None and len(live_streams) >= max_total):
                 break
 
+        drop_pick = getattr(self, "last_drop_pick_streamer", None)
+        if drop_pick in overlap_counts and drop_pick not in live_streams:
+            pick_stream = self.__live_stream_for(drop_pick)
+            if pick_stream is not None and (
+                allow_cross_category
+                or str(pick_stream.get("game_id") or "") == str(game_id)
+            ):
+                live_streams[drop_pick] = pick_stream
+
         sorted_live_streams = sorted(
             live_streams.values(),
             key=lambda stream: stream.get("viewer_count", 0),
@@ -3803,6 +3871,8 @@ class Twitch(object):
         usernames.sort(key=lambda login: -eligible_campaign_counts.get(login, 0))
         if max_total is not None:
             usernames = usernames[:max_total]
+        if drop_pick in live_streams:
+            usernames = self.__keep_drop_pick(usernames, drop_pick, max_total)
         game_slug = self.__slugify(game_name)
         self.__replace_category_campaign_eligibility(
             game_slug,
@@ -5588,9 +5658,10 @@ class Twitch(object):
         elif campaign_ids and channel_query_answered and is_drop_discovered(streamer):
             # Twitch answered and the channel qualifies through the fallback
             # campaigns: record that, replacing any earlier negative verdict.
-            # These summaries carry no drops to check against the time left,
-            # so apply what is known: completed campaigns and the game's
-            # campaign deadline.
+            # These summaries carry no drops, so apply what is known:
+            # completed campaigns, the game's campaign deadline and, when
+            # Twitch already returned the full campaign elsewhere, whether its
+            # remaining drops can still finish in time.
             deadline = (getattr(self, "category_campaign_deadlines", None) or {}).get(
                 game_slug
             )
@@ -5604,12 +5675,71 @@ class Twitch(object):
                     not in (getattr(self, "completed_drop_campaigns", None) or set())
                 ]
             )
+            # Campaigns in active_drop_campaigns already passed this check in
+            # the account-wide evaluation, with the account's own progress;
+            # the cached copies below carry none and could contradict it.
+            evaluated_ids = {
+                str(campaign.get("id") or "") for campaign in authoritative_campaigns
+            }
+            full_campaigns = {
+                campaign_id: full_campaign
+                for campaign_id in eligible_ids
+                if campaign_id not in evaluated_ids
+                and (full_campaign := self.__full_campaign_with_drops(campaign_id))
+                is not None
+            }
+            if full_campaigns:
+                (
+                    awarded_benefit_ids,
+                    awarded_benefit_fingerprints,
+                ) = self.__awarded_benefits({})
+                (
+                    ambiguous_benefit_ids,
+                    ambiguous_benefit_names,
+                ) = self.__ambiguous_campaign_benefits(list(full_campaigns.values()))
+                eligible_ids = [
+                    campaign_id
+                    for campaign_id in eligible_ids
+                    if campaign_id not in full_campaigns
+                    or self.__active_incomplete_drop_deadline(
+                        self.__with_inventory_drop_progress(
+                            full_campaigns[campaign_id]
+                        ),
+                        set(),
+                        awarded_benefit_ids,
+                        awarded_benefit_fingerprints,
+                        log_status=False,
+                        ambiguous_benefit_ids=ambiguous_benefit_ids,
+                        ambiguous_benefit_names=ambiguous_benefit_names,
+                    )
+                    is not None
+                ]
             self.__record_channel_verdict(
                 game_slug,
                 streamer.username,
                 (len(eligible_ids), len(campaign_ids)),
             )
         return list(campaign_ids)
+
+    def __full_campaign_with_drops(self, campaign_id: str) -> Optional[dict]:
+        """Return the full Twitch campaign (with its drops) for an ID, when
+        Twitch already returned it to a channel query or the open campaign
+        discovery; None when only a summary is known."""
+        candidates = [
+            (getattr(self, "advertised_drop_campaigns", None) or {}).get(campaign_id)
+        ]
+        candidates.extend(
+            campaign
+            for campaign in getattr(self, "discovered_open_drop_campaigns", None) or []
+            if isinstance(campaign, dict)
+            and str(campaign.get("id") or "") == campaign_id
+        )
+        for campaign in candidates:
+            if isinstance(campaign, dict) and any(
+                isinstance(drop, dict) for drop in campaign.get("timeBasedDrops") or []
+            ):
+                return campaign
+        return None
 
     def __normalize_advertised_campaign(self, campaign: dict) -> dict:
         normalized = copy.deepcopy(campaign)
@@ -6655,6 +6785,30 @@ class Twitch(object):
 
         return updated
 
+    def __claim_lock(self):
+        # Defensive getattr: some tests construct Twitch via __new__ and skip
+        # __init__ (mirroring __eligibility_lock).
+        lock = getattr(self, "claim_drop_lock", None)
+        if lock is None:
+            lock = Lock()
+            self.claim_drop_lock = lock
+        return lock
+
+    def __forget_inventory_minutes(self, drop):
+        # The inventory snapshot still lists a claimed drop as in progress
+        # until the next sync, or longer when Twitch is slow to confirm the
+        # claim; stop applying it to channel checks so a just-finished
+        # campaign does not look earnable.
+        minutes_by_drop_id = (
+            getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
+        )
+        if str(drop.id or "") in minutes_by_drop_id:
+            self.drop_inventory_minutes_by_drop_id = {
+                drop_id: minutes
+                for drop_id, minutes in minutes_by_drop_id.items()
+                if drop_id != str(drop.id or "")
+            }
+
     def claim_drop(
         self,
         drop,
@@ -6663,9 +6817,45 @@ class Twitch(object):
         campaign_name_override=None,
         category_name_override=None,
     ):
-        logger.info(
-            f"Claim {drop}", extra={"emoji": ":package:", "event": Events.DROP_CLAIM}
-        )
+        # Held across the request so a concurrent pass sees the accepted claim
+        # instead of claiming and notifying a second time.
+        with self.__claim_lock():
+            return self.__claim_drop(
+                drop,
+                campaign=campaign,
+                streamer_username=streamer_username,
+                campaign_name_override=campaign_name_override,
+                category_name_override=category_name_override,
+            )
+
+    def __claim_drop(
+        self,
+        drop,
+        campaign=None,
+        streamer_username=None,
+        campaign_name_override=None,
+        category_name_override=None,
+    ):
+        if getattr(self, "accepted_drop_claims", None) is None:
+            self.accepted_drop_claims = {}
+        now = time.monotonic()
+        accepted_at = self.accepted_drop_claims.get(drop.drop_instance_id)
+        if accepted_at is not None:
+            if (now - accepted_at) < ACCEPTED_CLAIM_RETRY_SECONDS:
+                self.__log_drop_check(
+                    f"skipping claim of drop {drop.id}; Twitch already accepted "
+                    "it and the inventory has not caught up yet"
+                )
+                self.__forget_inventory_minutes(drop)
+                return True
+            # Stamp the retry before sending it, so a failed retry also waits
+            # a full interval instead of repeating on every pass.
+            self.accepted_drop_claims[drop.drop_instance_id] = now
+            logger.info(
+                f"Retrying claim of {drop}; the inventory still lists it as "
+                "unclaimed after Twitch accepted it",
+                extra={"emoji": ":package:"},
+            )
 
         try:
             response = self.gql.claim_drop_rewards(drop.drop_instance_id)
@@ -6680,18 +6870,29 @@ class Twitch(object):
                 "ELIGIBLE_FOR_ALL",
                 "DROP_INSTANCE_ALREADY_CLAIMED",
             ]:
-                # The inventory snapshot still lists this drop as in progress
-                # until the next sync; stop applying it to channel checks so
-                # a just-finished campaign does not look earnable.
-                minutes_by_drop_id = (
-                    getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
-                )
-                if str(drop.id or "") in minutes_by_drop_id:
-                    self.drop_inventory_minutes_by_drop_id = {
-                        drop_id: minutes
-                        for drop_id, minutes in minutes_by_drop_id.items()
-                        if drop_id != str(drop.id or "")
-                    }
+                # Entries the inventory has stopped listing are no longer
+                # refreshed by retries, so prune them once they age out.
+                self.accepted_drop_claims = {
+                    instance_id: stamp
+                    for instance_id, stamp in self.accepted_drop_claims.items()
+                    if (now - stamp) < 2 * ACCEPTED_CLAIM_RETRY_SECONDS
+                }
+                self.accepted_drop_claims[drop.drop_instance_id] = now
+                self.__forget_inventory_minutes(drop)
+                if accepted_at is not None:
+                    return True
+                if response.status == "DROP_INSTANCE_ALREADY_CLAIMED":
+                    # Claimed earlier, for example before a restart: that
+                    # claim already sent the notification.
+                    logger.info(
+                        f"Drop already claimed: {drop}",
+                        extra={"emoji": ":package:"},
+                    )
+                else:
+                    logger.info(
+                        f"Claim {drop}",
+                        extra={"emoji": ":package:", "event": Events.DROP_CLAIM},
+                    )
                 if campaign is not None:
                     remaining_drops = [
                         campaign_drop

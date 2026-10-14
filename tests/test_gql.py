@@ -1792,6 +1792,122 @@ def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     assert len(stream_calls) == 1
 
 
+def _drop_pick_search_twitch(monkeypatch, directory, pick_game_id="game-id"):
+    # The streams page lists "one" and "two"; the current Drops pick is only
+    # found by looking it up directly.
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {
+                "game": {
+                    "streams": {
+                        "edges": [
+                            {"node": {"broadcaster": {"login": login}}}
+                            for login in directory
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    twitch = twitch_with_gql(gql)
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+    twitch.last_drop_pick_streamer = "pick"
+    lookups = []
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "game-id", "name": "Game"}]}
+        if params.get("user_login") == "pick":
+            lookups.append(params)
+            return {"data": [{"user_login": "pick", "game_id": pick_game_id}]}
+        return {
+            "data": [
+                {"user_login": login, "game_id": "game-id", "viewer_count": viewers}
+                for login, viewers in (("one", 2), ("two", 1))
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    return twitch, lookups
+
+
+def test_category_search_keeps_live_drop_pick_within_limit(monkeypatch):
+    # Discovery's top results rotate between refreshes; the current Drops pick
+    # must stay among them while it is live and Drops-enabled in the game.
+    twitch, lookups = _drop_pick_search_twitch(monkeypatch, ["one", "two", "pick"])
+
+    assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "pick"]
+    assert len(lookups) == 1
+    assert twitch.category_campaign_eligibility == {
+        ("game", "one"): (1, 1),
+        ("game", "pick"): (1, 1),
+    }
+
+
+def test_category_search_drops_pick_that_moved_to_another_game(monkeypatch):
+    twitch, _lookups = _drop_pick_search_twitch(
+        monkeypatch, ["one", "two", "pick"], pick_game_id="other-game"
+    )
+
+    assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "two"]
+
+
+def test_category_search_does_not_look_up_pick_outside_drops_directory(monkeypatch):
+    twitch, lookups = _drop_pick_search_twitch(monkeypatch, ["one", "two"])
+
+    assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "two"]
+    assert lookups == []
+
+
+def _restricted_pick_twitch(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    twitch.last_drop_pick_streamer = "pick"
+
+    def helix_get(endpoint, params):
+        return {
+            "data": [
+                {"user_login": login, "game_id": "game-id", "viewer_count": viewers}
+                for login, viewers in (("big", 100), ("pick", 5), ("other", 1))
+                if login in params["user_login"]
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    return twitch
+
+
+def test_restricted_search_keeps_allowlisted_drop_pick(monkeypatch):
+    twitch = _restricted_pick_twitch(monkeypatch)
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["big", "pick"]}], "game-id", "Game", max_total=1
+    )
+
+    assert usernames == ["pick"]
+    assert twitch.category_campaign_eligibility == {("game", "pick"): (1, 1)}
+
+
+def test_restricted_search_drops_pick_missing_from_allowlists(monkeypatch):
+    # The pick's campaign ended; the remaining one is restricted to others.
+    twitch = _restricted_pick_twitch(monkeypatch)
+
+    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["big", "other"]}], "game-id", "Game", max_total=1
+    )
+
+    assert usernames == ["big"]
+    assert ("game", "pick") not in twitch.category_campaign_eligibility
+
+
 def _category_search_twitch(monkeypatch, logins, eligibility, verdicts):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
