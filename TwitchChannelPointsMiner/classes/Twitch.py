@@ -223,8 +223,8 @@ class Twitch(object):
         self.campaign_detail_attempts = set()
         self.category_campaign_eligibility = {}
         self.category_channel_verdicts = {}
-        # (game_slug, login) -> consecutive failed campaign queries for a
-        # provisional wildcard channel.
+        # (game_slug, login) -> (consecutive failed campaign queries, time of
+        # the last one) for a provisional wildcard channel.
         self.channel_query_failures = {}
         self.category_campaign_deadlines = {}
         self.last_category_drop_selection = None
@@ -351,22 +351,38 @@ class Twitch(object):
                 verdicts[key] = (eligibility, now)
             self.category_channel_verdicts = verdicts
 
-    def __count_channel_query_failure(self, game_slug, login, answered):
-        """Track consecutive failed campaign queries for a channel and return
-        the current count; an answered query resets it."""
+    def __count_channel_query_failure(self, game_slug, login):
+        """Count a failed campaign query for a channel and return how many
+        failed in a row. Failures more than CHANNEL_VERDICT_FRESHNESS_SECONDS
+        apart do not count as consecutive, and such old entries are pruned."""
         key = (game_slug, login)
+        now = time.time()
+        stale_before = now - CHANNEL_VERDICT_FRESHNESS_SECONDS
         with self.__eligibility_lock():
             # Defensive getattr: some tests construct Twitch via __new__ and
             # skip __init__.
-            failures = getattr(self, "channel_query_failures", None) or {}
-            if answered:
-                failures.pop(key, None)
-                count = 0
-            else:
-                count = failures.get(key, 0) + 1
-                failures[key] = count
+            failures = {
+                failure_key: entry
+                for failure_key, entry in (
+                    getattr(self, "channel_query_failures", None) or {}
+                ).items()
+                if entry[1] >= stale_before
+            }
+            count = failures.get(key, (0, now))[0] + 1
+            failures[key] = (count, now)
             self.channel_query_failures = failures
         return count
+
+    def __reset_channel_query_failures(self, game_slug, login):
+        key = (game_slug, login)
+        if key not in (getattr(self, "channel_query_failures", None) or {}):
+            return
+        with self.__eligibility_lock():
+            self.channel_query_failures = {
+                failure_key: entry
+                for failure_key, entry in self.channel_query_failures.items()
+                if failure_key != key
+            }
 
     def __replace_category_campaign_eligibility(
         self, game_slug: str, eligibility_by_login: dict
@@ -5281,7 +5297,7 @@ class Twitch(object):
             channel_query_answered,
         ) = self.__get_campaigns_from_channel_id(streamer.channel_id)
         if channel_query_answered:
-            self.__count_channel_query_failure(game_slug, streamer.username, True)
+            self.__reset_channel_query_failures(game_slug, streamer.username)
         for campaign in channel_campaigns:
             if not isinstance(campaign, dict):
                 continue
@@ -5463,13 +5479,12 @@ class Twitch(object):
             # enter the watch pool unless Twitch advertises the campaign on the
             # selected live channel. The advertised-campaign branch above has
             # already returned when that verification succeeded.
-            if (
-                channel_query_answered
-                or self.__count_channel_query_failure(
-                    game_slug, streamer.username, False
-                )
-                >= CHANNEL_QUERY_FAILURE_LIMIT
-            ):
+            failures = (
+                0
+                if channel_query_answered
+                else self.__count_channel_query_failure(game_slug, streamer.username)
+            )
+            if channel_query_answered or failures >= CHANNEL_QUERY_FAILURE_LIMIT:
                 # A single failed query is not a verdict, but one that keeps
                 # failing is treated as one: otherwise every category refresh
                 # re-seeds the channel as eligible and it can briefly take

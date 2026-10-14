@@ -723,7 +723,28 @@ def test_answered_query_resets_wildcard_failure_count(monkeypatch):
     twitch.category_channel_verdicts = {}
     attempts["fail"] = True
     check(streamer)
-    assert twitch.channel_query_failures[key] == 1
+    assert twitch.channel_query_failures[key][0] == 1
+    assert key not in twitch.category_channel_verdicts
+
+
+def test_wildcard_query_failures_far_apart_are_not_consecutive(monkeypatch):
+    from TwitchChannelPointsMiner.classes.Twitch import (
+        CHANNEL_VERDICT_FRESHNESS_SECONDS,
+    )
+
+    twitch, streamer, _attempts = failing_wildcard_twitch(monkeypatch)
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    now = [10_000.0]
+    monkeypatch.setattr(twitch_module.time, "time", lambda: now[0])
+    twitch.channel_query_failures = {("other-game", "gone"): (2, now[0])}
+    key = ("example-game", "drops-channel")
+
+    for _ in range(CHANNEL_QUERY_FAILURE_LIMIT - 1):
+        twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+    now[0] += CHANNEL_VERDICT_FRESHNESS_SECONDS + 1
+    twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert twitch.channel_query_failures == {key: (1, now[0])}
     assert key not in twitch.category_channel_verdicts
 
 
