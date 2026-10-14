@@ -652,6 +652,35 @@ def test_fallback_verdict_counts_inventory_progress(monkeypatch):
     )
 
 
+def test_fallback_verdict_checks_full_campaign_from_open_campaigns(monkeypatch):
+    twitch, streamer = fallback_twitch_with_full_campaign(monkeypatch, 100)
+    full_campaign = twitch.advertised_drop_campaigns.pop("gist-open")
+    twitch.discovered_open_drop_campaigns.append(full_campaign)
+
+    twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
+def test_fallback_verdict_trusts_account_wide_campaign_evaluation(monkeypatch):
+    # The account-wide evaluation already counted the account's progress; a
+    # cached copy without it must not rule the campaign out again.
+    twitch, streamer = fallback_twitch_with_full_campaign(monkeypatch, 100)
+    twitch.active_drop_campaigns["example-game"].append(
+        {"id": "gist-open", "name": "General Drops", "channels": ["drops-channel"]}
+    )
+
+    twitch._Twitch__get_campaign_ids_from_streamer(streamer)
+
+    eligible, _total = twitch.category_campaign_eligibility[
+        ("example-game", "drops-channel")
+    ]
+    assert eligible >= 1
+
+
 def test_null_channel_query_keeps_unrestricted_gist_campaign(monkeypatch):
     twitch = per_streamer_campaigns_twitch(
         monkeypatch,

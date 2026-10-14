@@ -5554,10 +5554,17 @@ class Twitch(object):
                     not in (getattr(self, "completed_drop_campaigns", None) or set())
                 ]
             )
+            # Campaigns in active_drop_campaigns already passed this check in
+            # the account-wide evaluation, with the account's own progress;
+            # the cached copies below carry none and could contradict it.
+            evaluated_ids = {
+                str(campaign.get("id") or "") for campaign in authoritative_campaigns
+            }
             full_campaigns = {
                 campaign_id: full_campaign
                 for campaign_id in eligible_ids
-                if (full_campaign := self.__full_campaign_with_drops(campaign_id))
+                if campaign_id not in evaluated_ids
+                and (full_campaign := self.__full_campaign_with_drops(campaign_id))
                 is not None
             }
             if full_campaigns:
