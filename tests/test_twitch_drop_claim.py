@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
-from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.classes.Twitch import (
+    CHANNEL_QUERY_FAILURE_LIMIT,
+    Twitch,
+)
 
 
 def campaign_data():
@@ -669,6 +672,59 @@ def test_failed_channel_query_keeps_negative_verdict(monkeypatch):
         0,
         0,
     )
+
+
+def failing_wildcard_twitch(monkeypatch):
+    attempts = {"fail": True}
+
+    def available_drops(channel_id):
+        if attempts["fail"]:
+            raise RetryError("DropsHighlightService_AvailableDrops", [])
+        return SimpleNamespace(campaigns=[], campaigns_available=False)
+
+    twitch = per_streamer_campaigns_twitch(monkeypatch, available_drops)
+    twitch.category_channel_verdicts = {}
+    streamer = category_streamer()
+    streamer.from_wildcard_category = True
+    return twitch, streamer, attempts
+
+
+def test_repeatedly_failing_wildcard_query_rules_channel_out(monkeypatch):
+    # A failed query is not a verdict, but one that keeps failing must stop
+    # category refreshes from re-seeding the channel as eligible each time.
+    twitch, streamer, _attempts = failing_wildcard_twitch(monkeypatch)
+    check = twitch._Twitch__get_campaign_ids_from_streamer
+    reseed = twitch._Twitch__replace_category_campaign_eligibility
+    key = ("example-game", "drops-channel")
+
+    for _ in range(CHANNEL_QUERY_FAILURE_LIMIT - 1):
+        assert check(streamer) == []
+        assert key not in twitch.category_channel_verdicts
+    reseed("example-game", {"drops-channel": (1, 1)})
+    assert twitch.category_campaign_eligibility[key] == (1, 1)
+
+    assert check(streamer) == []
+    assert twitch.category_channel_verdicts[key][0] == (0, 1)
+    reseed("example-game", {"drops-channel": (1, 1)})
+    assert twitch.category_campaign_eligibility[key] == (0, 1)
+
+
+def test_answered_query_resets_wildcard_failure_count(monkeypatch):
+    twitch, streamer, attempts = failing_wildcard_twitch(monkeypatch)
+    check = twitch._Twitch__get_campaign_ids_from_streamer
+    key = ("example-game", "drops-channel")
+
+    for _ in range(CHANNEL_QUERY_FAILURE_LIMIT - 1):
+        check(streamer)
+    attempts["fail"] = False
+    check(streamer)
+    assert key not in twitch.channel_query_failures
+
+    twitch.category_channel_verdicts = {}
+    attempts["fail"] = True
+    check(streamer)
+    assert twitch.channel_query_failures[key] == 1
+    assert key not in twitch.category_channel_verdicts
 
 
 def _late_campaign_twitch(monkeypatch, minutes_by_drop_id, snapshot_age=60):
