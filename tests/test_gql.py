@@ -1850,7 +1850,6 @@ def test_category_search_keeps_fresh_channel_verdicts(monkeypatch, caplog):
         },
         verdicts={
             ("game", "verified-out"): ((0, 0), 9_900),
-            ("game", "verified-in"): ((2, 3), 9_900),
             # Older than the freshness window: discovery re-seeds it.
             ("game", "stale"): ((0, 0), 1_000),
             ("game", "retired"): ((0, 0), 9_900),
@@ -1864,8 +1863,8 @@ def test_category_search_keeps_fresh_channel_verdicts(monkeypatch, caplog):
         "[drops-check] Category refresh kept channel check results for game: "
         "verified-out (0, 0) checked 100s ago"
     ) in caplog.messages
-    # Only a negative verdict outranks the seed: a positive one is no more
-    # informative than discovery's newer count.
+    # Only negative verdicts are stored, so a positive check result such as
+    # verified-in's is re-seeded like any other discovered channel.
     assert twitch.category_campaign_eligibility == {
         ("game", "verified-out"): (0, 0),
         ("game", "verified-in"): (1, 1),

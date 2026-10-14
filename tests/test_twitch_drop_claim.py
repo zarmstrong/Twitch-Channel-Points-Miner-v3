@@ -617,11 +617,44 @@ def test_answered_channel_query_replaces_stale_negative_verdict(monkeypatch):
         1,
         1,
     )
-    assert twitch.category_channel_verdicts[("example-game", "drops-channel")][0] == (
-        1,
-        1,
-    )
+    assert ("example-game", "drops-channel") not in twitch.category_channel_verdicts
     assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
+def test_channel_verdicts_store_only_fresh_negative_results(monkeypatch):
+    # Only negative verdicts can outrank discovery, and expired ones (for
+    # example from games no longer discovered) are pruned on every record.
+    twitch = bare_twitch(monkeypatch)
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(twitch_module.time, "time", lambda: 10_000)
+    twitch.category_channel_verdicts = {
+        ("old-game", "gone"): ((0, 0), 1_000),
+        ("game", "recent"): ((0, 1), 9_900),
+    }
+    record = twitch._Twitch__record_channel_verdict
+
+    record("game", "ruled-out", (0, 2))
+    record("game", "recent", (1, 1))
+
+    assert twitch.category_channel_verdicts == {
+        ("game", "ruled-out"): ((0, 2), 10_000),
+    }
+    assert twitch.category_campaign_eligibility == {
+        ("game", "ruled-out"): (0, 2),
+        ("game", "recent"): (1, 1),
+    }
+
+
+def test_accepted_claim_stops_applying_inventory_progress(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.drop_inventory_minutes_by_drop_id = {"drop-1": 9, "drop-2": 5}
+    monkeypatch.setattr(
+        Twitch, "_Twitch__save_drop_claim_analytics", lambda *args, **kwargs: None
+    )
+    drop = SimpleNamespace(id="drop-1", drop_instance_id="instance-1")
+
+    assert twitch.claim_drop(drop) is True
+    assert twitch.drop_inventory_minutes_by_drop_id == {"drop-2": 5}
 
 
 def test_failed_channel_query_keeps_negative_verdict(monkeypatch):

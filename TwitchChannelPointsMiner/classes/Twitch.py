@@ -318,30 +318,39 @@ class Twitch(object):
     def __record_channel_verdict(self, game_slug, login, eligibility):
         """Store the per-channel campaign check's eligibility for a channel.
 
-        Category discovery only seeds provisional counts. The verdict is kept
-        separately so a later discovery pass cannot overwrite what Twitch
-        just said about the channel - doing so made channels Twitch had ruled
-        out look eligible after every category refresh, briefly stealing the
-        Drops slot until their next stream refresh.
+        Category discovery only seeds provisional counts. A negative verdict
+        is kept separately so a later discovery pass cannot overwrite what
+        Twitch just said about the channel - doing so made channels Twitch had
+        ruled out look eligible after every category refresh, briefly stealing
+        the Drops slot until their next stream refresh. A positive verdict
+        only clears an earlier negative one, since discovery's seed is just as
+        positive. Expired verdicts are pruned here, so games that drop out of
+        discovery do not leave entries behind.
         """
         key = (game_slug, login)
+        now = time.time()
         with self.__eligibility_lock():
             self.category_campaign_eligibility[key] = eligibility
-            verdicts = getattr(self, "category_channel_verdicts", None)
-            if verdicts is None:
-                verdicts = {}
-                self.category_channel_verdicts = verdicts
-            verdicts[key] = (eligibility, time.time())
+            fresh_after = now - CHANNEL_VERDICT_FRESHNESS_SECONDS
+            verdicts = {
+                verdict_key: verdict
+                for verdict_key, verdict in (
+                    getattr(self, "category_channel_verdicts", None) or {}
+                ).items()
+                if verdict_key != key and verdict[1] >= fresh_after
+            }
+            if eligibility[0] == 0:
+                verdicts[key] = (eligibility, now)
+            self.category_channel_verdicts = verdicts
 
     def __replace_category_campaign_eligibility(
         self, game_slug: str, eligibility_by_login: dict
     ):
         """Atomically replace cached eligibility for one game category.
 
-        A fresh negative per-channel verdict (see __record_channel_verdict)
-        outranks the discovery seed for a login that is still discovered.
-        Positive verdicts do not: discovery's newer count is just as positive
-        and may reflect a campaign completing since. Verdicts for logins no
+        A fresh per-channel verdict (see __record_channel_verdict, which only
+        keeps negative ones) outranks the discovery seed for a login that is
+        still discovered. Verdicts for logins no
         longer discovered are dropped with their eligibility; a channel that
         is rediscovered later is re-checked when it is added again.
         """
@@ -355,7 +364,6 @@ class Twitch(object):
                 if key[0] == game_slug
                 and key[1] in eligibility_by_login
                 and verdict[1] >= fresh_after
-                and verdict[0][0] == 0
             }
             eligibility_by_login = {
                 login: (
@@ -6621,6 +6629,18 @@ class Twitch(object):
                 "ELIGIBLE_FOR_ALL",
                 "DROP_INSTANCE_ALREADY_CLAIMED",
             ]:
+                # The inventory snapshot still lists this drop as in progress
+                # until the next sync; stop applying it to channel checks so
+                # a just-finished campaign does not look earnable.
+                minutes_by_drop_id = (
+                    getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
+                )
+                if str(drop.id or "") in minutes_by_drop_id:
+                    self.drop_inventory_minutes_by_drop_id = {
+                        drop_id: minutes
+                        for drop_id, minutes in minutes_by_drop_id.items()
+                        if drop_id != str(drop.id or "")
+                    }
                 if campaign is not None:
                     remaining_drops = [
                         campaign_drop
