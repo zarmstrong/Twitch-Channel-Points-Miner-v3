@@ -353,7 +353,8 @@ class TwitchChannelPointsMiner:
         streamer_settings: StreamerSettings = StreamerSettings(),
         streams_watched: int = 2,
         gql: AttemptStrategy | GQLFactory | None = None,
-        streamer_source_priority: list | tuple = (
+        streamer_source_priority: list
+        | tuple = (
             StreamerSource.STREAMERS,
             StreamerSource.FOLLOWERS,
             StreamerSource.CATEGORIES,
@@ -1639,9 +1640,7 @@ class TwitchChannelPointsMiner:
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 
-    def __reconcile_category_streamers(
-        self, discovered_usernames, wildcard=False, category_slugs=None
-    ):
+    def __reconcile_category_streamers(self, discovered_usernames, wildcard=False):
         """Retire category-only channels absent from the latest discovery.
 
         Scoped by `wildcard` so a preferred-category refresh only retires
@@ -1649,11 +1648,6 @@ class TwitchChannelPointsMiner:
         wildcard-discovered ones -- the two discovery passes run independently
         and must not evict each other's streamers just for being absent from
         the other pass's discovery list.
-
-        `category_slugs` are the categories this pass found active campaigns
-        for. When given, the current Drops pick is kept while it is still
-        live, eligible and streaming one of them, even if discovery did not
-        return it this time.
         """
         discovered = {
             str(username).lower().strip()
@@ -1677,18 +1671,6 @@ class TwitchChannelPointsMiner:
                 else StreamerSource.CATEGORIES
             ) in discovery_sources(streamer)
             if not in_scope or streamer.username in discovered:
-                retained.append(streamer)
-                retained_baselines.append(baseline)
-                continue
-
-            if category_slugs is not None and self.twitch.keeps_drop_pick(
-                streamer, category_slugs
-            ):
-                logger.info(
-                    f"Keeping current Drops pick {streamer.username}: still live "
-                    "and eligible although discovery did not return it",
-                    extra={"emoji": ":pushpin:", "category_log": True},
-                )
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
@@ -1905,7 +1887,6 @@ class TwitchChannelPointsMiner:
         wildcard_discovery_ran = wildcard_categories and not discovered_usernames
         wildcard_standing_down = wildcard_categories and not wildcard_discovery_ran
         wildcard_discovered_usernames = []
-        wildcard_eligible_categories = []
         if wildcard_discovery_ran:
             pinned_category_slugs = {
                 self.twitch.get_game_name_slug(streamer.stream.game_name())
@@ -1941,17 +1922,11 @@ class TwitchChannelPointsMiner:
 
         # Keep the previous category set available while replacement channels
         # are initialized so the minute watcher cannot observe a partial refresh.
-        self.__reconcile_category_streamers(
-            discovered_usernames,
-            wildcard=False,
-            category_slugs=self.twitch.get_category_slugs(eligible_categories),
-        )
+        self.__reconcile_category_streamers(discovered_usernames, wildcard=False)
         self.__order_category_streamers(discovered_usernames, wildcard=False)
         if not wildcard_standing_down:
             self.__reconcile_category_streamers(
-                wildcard_discovered_usernames,
-                wildcard=True,
-                category_slugs=set(wildcard_eligible_categories),
+                wildcard_discovered_usernames, wildcard=True
             )
             self.__order_category_streamers(
                 wildcard_discovered_usernames, wildcard=True

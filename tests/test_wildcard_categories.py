@@ -374,9 +374,6 @@ class FakeTwitch:
     def get_category_slugs(self, categories):
         return {category for category in categories}
 
-    def keeps_drop_pick(self, streamer, category_slugs):
-        return False
-
     def get_game_name_slug(self, game_name):
         return (game_name or "").lower().replace(" ", "-")
 
@@ -826,73 +823,6 @@ def test_reconcile_never_exposes_retiring_streamers_as_configured():
             assert StreamerSource.STREAMERS not in snapshot[username]
     assert [s.username for s in miner.streamers] == ["configured"]
     assert configured.from_category is False
-
-
-def test_reconcile_keeps_current_drop_pick_missing_from_discovery():
-    # Discovery's top results rotate between refreshes; the current Drops pick
-    # must not be retired just because it was not returned this time.
-    class PickTwitch:
-        def __init__(self):
-            self.calls = []
-
-        def keeps_drop_pick(self, streamer, category_slugs):
-            self.calls.append((streamer.username, category_slugs))
-            return streamer.username == "pick"
-
-    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
-    pick = Streamer("pick", from_category=True)
-    stale = Streamer("stale", from_category=True)
-    fresh = Streamer("fresh", from_category=True)
-    miner.streamers = [pick, stale, fresh]
-    miner.original_streamers = [10, 20, 30]
-    miner.ws_pool = FakeWebSocketsPool()
-    miner.twitch = PickTwitch()
-
-    miner._TwitchChannelPointsMiner__reconcile_category_streamers(
-        ["fresh"], wildcard=False, category_slugs={"preferred-game"}
-    )
-
-    assert [s.username for s in miner.streamers] == ["pick", "fresh"]
-    assert miner.original_streamers == [10, 30]
-    assert miner.ws_pool.removed == ["stale"]
-    assert miner.twitch.calls == [
-        ("pick", {"preferred-game"}),
-        ("stale", {"preferred-game"}),
-    ]
-
-
-def test_refresh_passes_active_category_slugs_to_drop_pick_check():
-    twitch = FakeTwitch(
-        eligible_categories=["preferred-game"], wildcard_categories=["wild-game"]
-    )
-    checked = []
-    twitch.keeps_drop_pick = lambda streamer, slugs: checked.append(
-        (streamer.username, slugs)
-    )
-    miner = _bare_miner(twitch)
-    miner.streamers = [
-        Streamer("old-preferred", from_category=True),
-        Streamer("old-wild", from_category=True, from_wildcard_category=True),
-    ]
-    miner.original_streamers = [10, 20]
-    twitch.empty_categories = {"preferred-game"}
-
-    miner._TwitchChannelPointsMiner__refresh_category_streamers(
-        ["preferred-game"],
-        [],
-        True,
-        2,
-        "VIEWERS_DESC",
-        "ORDER",
-        ChatPresence.NEVER,
-        logging.INFO,
-        wildcard_categories=True,
-    )
-
-    assert checked == [
-        ("old-preferred", {"preferred-game"}),
-        ("old-wild", {"wild-game"}),
-    ]
 
 
 def test_reconcile_scoped_to_preferred_does_not_evict_wildcard_streamers():
