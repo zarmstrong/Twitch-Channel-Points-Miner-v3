@@ -657,6 +657,101 @@ def test_accepted_claim_stops_applying_inventory_progress(monkeypatch):
     assert twitch.drop_inventory_minutes_by_drop_id == {"drop-2": 5}
 
 
+def test_accepted_claim_is_not_repeated_while_inventory_lags(monkeypatch, caplog):
+    # Twitch can accept a claim while the inventory keeps listing the drop as
+    # unclaimed; claiming it again on every pass sent a notification each time.
+    twitch = bare_twitch(monkeypatch)
+    requests = []
+    twitch.gql = SimpleNamespace(
+        claim_drop_rewards=lambda drop_instance_id: requests.append(drop_instance_id)
+        or SimpleNamespace(status="ELIGIBLE_FOR_ALL", errors=[])
+    )
+    saved = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__save_drop_claim_analytics",
+        lambda *args, **kwargs: saved.append(args),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__drop_variant_entries_from_drop",
+        lambda self, drop: [{"name": "Reward"}],
+    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    now = [1_000.0]
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: now[0])
+    drop = SimpleNamespace(id="drop-1", drop_instance_id="instance-1")
+
+    with caplog.at_level(logging.INFO):
+        assert twitch.claim_drop(drop) is True
+        twitch.drop_inventory_minutes_by_drop_id = {"drop-1": 180}
+        now[0] += 60
+        assert twitch.claim_drop(drop) is True
+
+    assert requests == ["instance-1"]
+    assert len(saved) == 1
+    assert twitch.drop_inventory_minutes_by_drop_id == {}
+    claim_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == twitch_module.Events.DROP_CLAIM
+    ]
+    assert len(claim_events) == 1
+
+
+def test_accepted_claim_retries_quietly_after_backoff(monkeypatch, caplog):
+    twitch = bare_twitch(monkeypatch)
+    requests = []
+    twitch.gql = SimpleNamespace(
+        claim_drop_rewards=lambda drop_instance_id: requests.append(drop_instance_id)
+        or SimpleNamespace(status="ELIGIBLE_FOR_ALL", errors=[])
+    )
+    saved = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__save_drop_claim_analytics",
+        lambda *args, **kwargs: saved.append(args),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__drop_variant_entries_from_drop",
+        lambda self, drop: [{"name": "Reward"}],
+    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    now = [1_000.0]
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: now[0])
+    drop = SimpleNamespace(id="drop-1", drop_instance_id="instance-1")
+
+    with caplog.at_level(logging.INFO):
+        assert twitch.claim_drop(drop) is True
+        now[0] += twitch_module.ACCEPTED_CLAIM_RETRY_SECONDS
+        assert twitch.claim_drop(drop) is True
+
+    assert requests == ["instance-1", "instance-1"]
+    assert len(saved) == 1
+    assert twitch.accepted_drop_claims == {"instance-1": now[0]}
+    claim_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == twitch_module.Events.DROP_CLAIM
+    ]
+    assert len(claim_events) == 1
+
+
+def test_failed_claim_is_retried_on_next_pass(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    requests = []
+    twitch.gql = SimpleNamespace(
+        claim_drop_rewards=lambda drop_instance_id: requests.append(drop_instance_id)
+        or SimpleNamespace(status="DROP_INSTANCE_NOT_FOUND", errors=[])
+    )
+    drop = SimpleNamespace(id="drop-1", drop_instance_id="instance-1")
+
+    assert twitch.claim_drop(drop) is False
+    assert twitch.claim_drop(drop) is False
+    assert requests == ["instance-1", "instance-1"]
+
+
 def test_failed_channel_query_keeps_negative_verdict(monkeypatch):
     def available_drops(channel_id):
         raise RetryError("DropsHighlightService_AvailableDrops", [])

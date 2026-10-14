@@ -86,6 +86,9 @@ CHANNEL_VERDICT_FRESHNESS_SECONDS = 600
 # after the snapshot can only be miscounted for this long.
 INVENTORY_PROGRESS_OVERLAY_SECONDS = 900
 PROMPT_CLAIM_DEBOUNCE_SECONDS = 300
+# Twitch can accept a claim while the inventory keeps listing the drop as
+# unclaimed. Wait this long before claiming the same drop instance again.
+ACCEPTED_CLAIM_RETRY_SECONDS = 60 * 60
 
 
 class Twitch(object):
@@ -141,6 +144,7 @@ class Twitch(object):
         "prompt_claim_lock",
         "prompt_claim_pass_lock",
         "prompt_claim_last",
+        "accepted_drop_claims",
         "campaign_game_slugs",
         "campaign_names",
         "reward_campaign_ids",
@@ -234,6 +238,8 @@ class Twitch(object):
         self.prompt_claim_lock = Lock()
         self.prompt_claim_pass_lock = Lock()
         self.prompt_claim_last = {}
+        # drop_instance_id -> monotonic time Twitch last accepted its claim.
+        self.accepted_drop_claims = {}
         self.campaign_game_slugs = {}
         self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
@@ -6604,6 +6610,21 @@ class Twitch(object):
 
         return updated
 
+    def __forget_inventory_minutes(self, drop):
+        # The inventory snapshot still lists a claimed drop as in progress
+        # until the next sync, or longer when Twitch is slow to confirm the
+        # claim; stop applying it to channel checks so a just-finished
+        # campaign does not look earnable.
+        minutes_by_drop_id = (
+            getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
+        )
+        if str(drop.id or "") in minutes_by_drop_id:
+            self.drop_inventory_minutes_by_drop_id = {
+                drop_id: minutes
+                for drop_id, minutes in minutes_by_drop_id.items()
+                if drop_id != str(drop.id or "")
+            }
+
     def claim_drop(
         self,
         drop,
@@ -6612,9 +6633,37 @@ class Twitch(object):
         campaign_name_override=None,
         category_name_override=None,
     ):
-        logger.info(
-            f"Claim {drop}", extra={"emoji": ":package:", "event": Events.DROP_CLAIM}
-        )
+        # Defensive getattr: some tests construct Twitch via __new__ and skip
+        # __init__.
+        accepted_claims = getattr(self, "accepted_drop_claims", None)
+        if accepted_claims is None:
+            accepted_claims = {}
+            self.accepted_drop_claims = accepted_claims
+        now = time.monotonic()
+        accepted_at = accepted_claims.get(drop.drop_instance_id)
+        if (
+            accepted_at is not None
+            and (now - accepted_at) < ACCEPTED_CLAIM_RETRY_SECONDS
+        ):
+            self.__log_drop_check(
+                f"skipping claim of drop {drop.id}; Twitch already accepted it "
+                "and the inventory has not caught up yet"
+            )
+            self.__forget_inventory_minutes(drop)
+            return True
+
+        if accepted_at is None:
+            logger.info(
+                f"Claim {drop}",
+                extra={"emoji": ":package:", "event": Events.DROP_CLAIM},
+            )
+        else:
+            # No event: the first claim already sent the notification.
+            logger.info(
+                f"Retrying claim of {drop}; the inventory still lists it as "
+                "unclaimed after Twitch accepted it",
+                extra={"emoji": ":package:"},
+            )
 
         try:
             response = self.gql.claim_drop_rewards(drop.drop_instance_id)
@@ -6629,18 +6678,17 @@ class Twitch(object):
                 "ELIGIBLE_FOR_ALL",
                 "DROP_INSTANCE_ALREADY_CLAIMED",
             ]:
-                # The inventory snapshot still lists this drop as in progress
-                # until the next sync; stop applying it to channel checks so
-                # a just-finished campaign does not look earnable.
-                minutes_by_drop_id = (
-                    getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
-                )
-                if str(drop.id or "") in minutes_by_drop_id:
-                    self.drop_inventory_minutes_by_drop_id = {
-                        drop_id: minutes
-                        for drop_id, minutes in minutes_by_drop_id.items()
-                        if drop_id != str(drop.id or "")
-                    }
+                # Entries the inventory has stopped listing are no longer
+                # refreshed by retries, so prune them once they age out.
+                self.accepted_drop_claims = {
+                    instance_id: stamp
+                    for instance_id, stamp in accepted_claims.items()
+                    if (now - stamp) < 2 * ACCEPTED_CLAIM_RETRY_SECONDS
+                }
+                self.accepted_drop_claims[drop.drop_instance_id] = now
+                self.__forget_inventory_minutes(drop)
+                if accepted_at is not None:
+                    return True
                 if campaign is not None:
                     remaining_drops = [
                         campaign_drop
