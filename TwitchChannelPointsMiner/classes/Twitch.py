@@ -6842,9 +6842,11 @@ class Twitch(object):
         accepted_at = self.accepted_drop_claims.get(drop.drop_instance_id)
         if accepted_at is not None:
             if (now - accepted_at) < ACCEPTED_CLAIM_RETRY_SECONDS:
+                # Repeats on every claim pass while the inventory lags.
                 self.__log_drop_check(
                     f"skipping claim of drop {drop.id}; Twitch already accepted "
-                    "it and the inventory has not caught up yet"
+                    "it and the inventory has not caught up yet",
+                    level=logging.DEBUG,
                 )
                 self.__forget_inventory_minutes(drop)
                 return True
