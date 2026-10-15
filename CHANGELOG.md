@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.19.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.0...3.19.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **drops:** check time left on fallback channel verdicts ([#155](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/155)) ([f40f58a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f40f58a4e72327a5a6c6b483646c864a55c09f7d))
+* **drops:** count inventory progress when checking a channel's campaigns ([221252e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/221252e0f4565e6f87b24b04e6375b4c0dd31fbf))
+* **drops:** keep per-channel ineligibility across category refreshes ([#145](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/145)) ([221252e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/221252e0f4565e6f87b24b04e6375b4c0dd31fbf)), closes [#144](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/144)
+* **drops:** keep the current Drops pick across category refreshes ([#154](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/154)) ([fe878c0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/fe878c0e9ec5cb63b48d7e4a31461cc22566e7c1))
+* **drops:** log skipped accepted claims at debug level ([#159](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/159)) ([5a8fecf](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5a8fecf586fb8dbd556684a77551e7d197bbc874))
+* **drops:** report the held Drops pick in the "watching for drops" label ([221252e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/221252e0f4565e6f87b24b04e6375b4c0dd31fbf))
+* **drops:** report the held Drops pick in the "watching for drops" label ([221252e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/221252e0f4565e6f87b24b04e6375b4c0dd31fbf))
+* **drops:** rule out wildcard channels whose campaign query keeps failing ([#156](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/156)) ([0bab224](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0bab2243ffd7c85a108216884404b1cd4e2d72f7))
+* **drops:** stop re-claiming drops Twitch already accepted ([#153](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/153)) ([9d84dba](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9d84dbaf16dffed46e4592192bb4b54264a34fe2))
+
 ## [3.19.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.18.1...3.19.0) (2026-10-11)
 
 
