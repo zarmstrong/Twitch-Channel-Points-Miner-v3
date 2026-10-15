@@ -1448,6 +1448,7 @@ class TwitchChannelPointsMiner:
                 )
 
         discovered_usernames = []
+        discovery_failed = False
         for game_slug in dict.fromkeys(unrestricted_games):
             try:
                 discovered_usernames.extend(
@@ -1460,6 +1461,7 @@ class TwitchChannelPointsMiner:
                     )
                 )
             except Exception as error:
+                discovery_failed = True
                 logger.warning(
                     f"Unable to find a live channel for badge Drop campaign "
                     f"'{game_slug}': {error}",
@@ -1478,6 +1480,7 @@ class TwitchChannelPointsMiner:
                     )
                 )
             except Exception as error:
+                discovery_failed = True
                 logger.warning(
                     f"Unable to find restricted live channels for badge Drop "
                     f"campaign '{game_slug}': {error}",
@@ -1491,8 +1494,15 @@ class TwitchChannelPointsMiner:
             and owned_badges != previous_owned_badges
         )
         with self.config_reload_lock:
-            if earned_badge_changed:
-                self.__reconcile_badge_campaign_streamers(discovered_usernames)
+            # Badge channels the latest check no longer returns are retired,
+            # or every check (limit 1, often a random sort) adds another one.
+            # The current Drops pick stays among the results while it is live
+            # in its game. A failed lookup returns nothing for its game, so
+            # only an ownership change retires channels after one.
+            if earned_badge_changed or not discovery_failed:
+                self.__reconcile_badge_campaign_streamers(
+                    discovered_usernames, earned_badge_changed=earned_badge_changed
+                )
             existing_usernames = {streamer.username for streamer in self.streamers}
             for username in dict.fromkeys(discovered_usernames):
                 username = str(username).lower().strip()
@@ -1583,8 +1593,10 @@ class TwitchChannelPointsMiner:
             extra={"emoji": ":gift:", "category_log": True},
         )
 
-    def __reconcile_badge_campaign_streamers(self, discovered_usernames):
-        """Retire badge-only channels after Twitch reports an ownership change."""
+    def __reconcile_badge_campaign_streamers(
+        self, discovered_usernames, earned_badge_changed=True
+    ):
+        """Retire badge-only channels absent from the latest badge discovery."""
         discovered = {
             str(username).lower().strip()
             for username in discovered_usernames
@@ -1634,9 +1646,13 @@ class TwitchChannelPointsMiner:
         self.streamers[:] = retained
         self.original_streamers[:] = retained_baselines
         if removed:
+            reason = (
+                "Earned badge inventory changed"
+                if earned_badge_changed
+                else "Badge Drop check"
+            )
             logger.info(
-                "Earned badge inventory changed; retired badge Drop streamers: "
-                + ", ".join(removed),
+                f"{reason}; retired badge Drop streamers: " + ", ".join(removed),
                 extra={"emoji": ":next_track_button:", "category_log": True},
             )
 

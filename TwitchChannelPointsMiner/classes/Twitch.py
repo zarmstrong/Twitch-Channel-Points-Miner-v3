@@ -3706,9 +3706,16 @@ class Twitch(object):
                 usernames.append(username)
 
         drop_pick = getattr(self, "last_drop_pick_streamer", None)
+        # The Drops-enabled directory lists at most 100 channels, so in a busy
+        # game the pick can be missing from it. Its own positive eligibility,
+        # which every stream refresh re-checks, is accepted instead.
         if (
             drops_enabled is True
-            and drop_pick in (drops_enabled_logins or set())
+            and drop_pick is not None
+            and (
+                drop_pick in (drops_enabled_logins or set())
+                or self.__has_positive_eligibility(self.__slugify(game_name), drop_pick)
+            )
             and self.__is_live_in_game(
                 drop_pick,
                 game_id,
@@ -3766,6 +3773,10 @@ class Twitch(object):
             return True
         stream = self.__live_stream_for(login)
         return stream is not None and str(stream.get("game_id") or "") == str(game_id)
+
+    def __has_positive_eligibility(self, game_slug, login):
+        eligibility = self.category_campaign_eligibility.get((game_slug, login))
+        return eligibility is not None and eligibility[0] > 0
 
     @staticmethod
     def __keep_drop_pick(usernames, drop_pick, limit):
@@ -4741,9 +4752,17 @@ class Twitch(object):
                     else:
                         kept_badge_index = None
 
-                self.last_drop_pick_streamer = (
-                    streamers_snapshot[kept_discovered_index].username
+                # Category and badge discovery keep this channel in their
+                # results while it is live in its game, so a refresh cannot
+                # take the slot away from it (see __keep_drop_pick).
+                kept_pick_index = (
+                    kept_discovered_index
                     if kept_discovered_index is not None
+                    else kept_badge_index
+                )
+                self.last_drop_pick_streamer = (
+                    streamers_snapshot[kept_pick_index].username
+                    if kept_pick_index is not None
                     else None
                 )
 
@@ -4868,7 +4887,7 @@ class Twitch(object):
                         for index in filtered_streamers_watching
                         if index not in evicted
                     ]
-                    if kept_discovered_index in evicted:
+                    if kept_pick_index in evicted:
                         self.last_drop_pick_streamer = None
                     drop_conflict_message = (
                         "Drops progress only counts on one channel at a time: "

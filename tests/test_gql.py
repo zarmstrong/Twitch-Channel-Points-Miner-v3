@@ -1857,6 +1857,17 @@ def test_category_search_drops_pick_that_moved_to_another_game(monkeypatch):
     assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "two"]
 
 
+def test_category_search_keeps_eligible_pick_missing_from_capped_directory(monkeypatch):
+    # The Drops-enabled directory lists at most 100 channels; a pick the
+    # per-channel check still finds eligible is kept while live in the game.
+    twitch, lookups = _drop_pick_search_twitch(monkeypatch, ["one", "two"])
+    twitch.category_campaign_eligibility = {("game", "pick"): (1, 1)}
+
+    assert twitch.get_live_streamers_for_category("game", limit=1) == ["pick"]
+    assert len(lookups) == 1
+    assert twitch.category_campaign_eligibility == {("game", "pick"): (1, 1)}
+
+
 def test_category_search_does_not_look_up_pick_outside_drops_directory(monkeypatch):
     twitch, lookups = _drop_pick_search_twitch(monkeypatch, ["one", "two"])
 

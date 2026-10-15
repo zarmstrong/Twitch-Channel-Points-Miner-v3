@@ -1504,6 +1504,29 @@ def test_badge_drop_stream_wins_drop_slot_when_ranked_above_categories(monkeypat
     ]
 
 
+def test_badge_drop_holder_is_recorded_as_drop_pick(monkeypatch):
+    # Badge discovery keeps the recorded pick in its results; without it,
+    # each badge check could hand the slot to another badge channel.
+    badge = _watch_streamer(
+        "badge-streamer",
+        from_category=True,
+        from_badge_campaign=True,
+        drops_eligible=True,
+    )
+    twitch_out = []
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [badge, _watch_streamer("followed", from_followers=True)],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.BADGES, StreamerSource.FOLLOWERS],
+        twitch_out=twitch_out,
+    )
+
+    assert twitch_out[0].last_drop_pick_streamer == "badge-streamer"
+
+
 def test_badge_and_wildcard_drop_streams_are_never_watched_together(monkeypatch):
     wildcard = _watch_streamer(
         "wildcard-streamer", from_wildcard_category=True, drops_eligible=True

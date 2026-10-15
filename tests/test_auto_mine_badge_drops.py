@@ -144,6 +144,60 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
     ]
 
 
+def _badge_check_miner(twitch):
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.username = "testuser"
+    miner.twitch = twitch
+    miner.streamers = [
+        Streamer("previous-random", from_category=True, from_badge_campaign=True)
+    ]
+    miner.original_streamers = [10]
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.drop_badge_catalog = FakeCatalog()
+    miner.badge_drop_streamer_limit = 2
+    miner.badge_drop_category_chat = ChatPresence.NEVER
+    miner.badge_drop_category_sort = "RANDOM"
+    miner.badge_drop_blacklist = set()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+    return miner
+
+
+def test_badge_check_retires_channels_it_no_longer_returns():
+    # With limit 1 and a random sort, each check returned another channel and
+    # none were retired until the earned badges changed.
+    miner = _badge_check_miner(FakeTwitch())
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert [streamer.username for streamer in miner.streamers] == [
+        "allchannel",
+        "blacklisted",
+        "allowedchannel",
+    ]
+    assert miner.ws_pool.removed == ["previous-random"]
+
+
+def test_failed_badge_lookup_does_not_retire_badge_channels():
+    class FailingTwitch(FakeTwitch):
+        def get_live_streamers_for_category(self, selector, **kwargs):
+            if kwargs.get("restricted_campaigns"):
+                raise RuntimeError("helix unavailable")
+            return super().get_live_streamers_for_category(selector, **kwargs)
+
+    miner = _badge_check_miner(FailingTwitch())
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert "previous-random" in [streamer.username for streamer in miner.streamers]
+    assert miner.ws_pool.removed == []
+
+
 def test_badge_ownership_change_retires_only_stale_badge_streamers():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
     stale = Streamer(
