@@ -818,6 +818,21 @@ def test_accepted_claim_is_not_repeated_while_inventory_lags(monkeypatch, caplog
     assert len(drop_claim_events(caplog)) == 1
 
 
+def test_skipped_accepted_claim_logs_at_debug(monkeypatch, caplog):
+    twitch, drop, _requests, _saved, now = claim_recording_twitch(monkeypatch)
+    twitch.log_drop_checks = True
+
+    assert twitch.claim_drop(drop) is True
+    now[0] += 60
+    with caplog.at_level(logging.DEBUG):
+        assert twitch.claim_drop(drop) is True
+
+    skips = [
+        record for record in caplog.records if "skipping claim" in record.getMessage()
+    ]
+    assert [record.levelno for record in skips] == [logging.DEBUG]
+
+
 def test_accepted_claim_retries_quietly_after_backoff(monkeypatch, caplog):
     from TwitchChannelPointsMiner.classes.Twitch import ACCEPTED_CLAIM_RETRY_SECONDS
 
