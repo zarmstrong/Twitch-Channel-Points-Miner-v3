@@ -1375,7 +1375,9 @@ class Twitch(object):
                 if drop_self.get("isClaimed") is True and drop.get("id"):
                     completed_ids.add(str(drop["id"]))
 
-        return completed_ids
+        # Claims Twitch accepted count too: the inventory may never confirm
+        # them (for example, when the game account is not linked).
+        return completed_ids | set(getattr(self, "accepted_drop_ids", None) or ())
 
     def __completed_campaign_ids_from_inventory(self, inventory: dict) -> set:
         completed_ids = set()
@@ -6848,11 +6850,16 @@ class Twitch(object):
                 for drop_id, minutes in minutes_by_drop_id.items()
                 if drop_id != str(drop.id or "")
             }
+
+    def __mark_drop_accepted(self, drop):
+        # Twitch accepted the claim, so the drop has nothing left to watch
+        # even while the inventory keeps listing it unclaimed. Called under
+        # the claim lock; inventory syncs never write this.
         if drop.id:
-            # Called under the claim lock; inventory syncs never write this.
             self.accepted_drop_ids = frozenset(
                 getattr(self, "accepted_drop_ids", None) or ()
             ) | {str(drop.id)}
+        self.__forget_inventory_minutes(drop)
 
     def __finished_drop_ids(self):
         # Without these, a finished drop that a channel still advertises gets
@@ -6902,7 +6909,7 @@ class Twitch(object):
                     "it and the inventory has not caught up yet",
                     level=logging.DEBUG,
                 )
-                self.__forget_inventory_minutes(drop)
+                self.__mark_drop_accepted(drop)
                 return True
             # Stamp the retry before sending it, so a failed retry also waits
             # a full interval instead of repeating on every pass.
@@ -6934,7 +6941,7 @@ class Twitch(object):
                     if (now - stamp) < 2 * ACCEPTED_CLAIM_RETRY_SECONDS
                 }
                 self.accepted_drop_claims[drop.drop_instance_id] = now
-                self.__forget_inventory_minutes(drop)
+                self.__mark_drop_accepted(drop)
                 if accepted_at is not None:
                     return True
                 if response.status == "DROP_INSTANCE_ALREADY_CLAIMED":

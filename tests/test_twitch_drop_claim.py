@@ -1938,6 +1938,55 @@ def test_fully_captured_unclaimed_campaign_stops_category_watch(monkeypatch):
     assert twitch._Twitch__category_drops_condition(streamer) is False
 
 
+def _account_wide_evaluation(monkeypatch, accepted_drop_ids):
+    twitch = bare_twitch(monkeypatch)
+    twitch.accepted_drop_ids = frozenset(accepted_drop_ids)
+    inventory_campaign = campaign_data()
+    inventory_campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 5,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [campaign_data()],
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_campaigns_details", lambda self, campaigns: campaigns
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
+    )
+    deadlines, _games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": [inventory_campaign]}, {"example-game"}
+    )
+    return twitch, deadlines
+
+
+def test_account_wide_evaluation_counts_accepted_claims_as_completed(monkeypatch):
+    # The inventory may keep listing an accepted drop unclaimed, so the
+    # account-wide evaluation must not mark its campaign active (which also
+    # skips the per-channel recheck of that campaign).
+    twitch, deadlines = _account_wide_evaluation(monkeypatch, {"drop-1"})
+
+    assert deadlines == {}
+    assert twitch.active_drop_campaigns == {}
+
+
+def test_account_wide_evaluation_keeps_campaign_without_accepted_claim(monkeypatch):
+    _twitch, deadlines = _account_wide_evaluation(monkeypatch, set())
+
+    assert set(deadlines) == {"example-game"}
+
+
 def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     monkeypatch,
 ):
