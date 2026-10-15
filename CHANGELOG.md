@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.19.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.1...3.19.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **drops:** keep the badge Drop holder across badge checks ([#161](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/161)) ([3fb0c30](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3fb0c30930a56e4d6baa078224e1f3a441f93e36)), closes [#160](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/160)
+* **drops:** rule out channels whose advertised drops are finished ([#164](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/164)) ([2282800](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/22828006330b031e78279bfb6055fcbec0b551bf))
+
 ## [3.19.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.0...3.19.1) (2026-10-15)
 
 
