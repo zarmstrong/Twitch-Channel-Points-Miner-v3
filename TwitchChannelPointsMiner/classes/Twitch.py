@@ -115,6 +115,7 @@ class Twitch(object):
         "drop_inventory_progress",
         "drop_inventory_progress_updated_at",
         "drop_inventory_minutes_by_drop_id",
+        "drop_inventory_finished_ids",
         "drop_watch_health",
         "track_drop_item_art",
         "scrape_drop_progress_on_load",
@@ -203,6 +204,9 @@ class Twitch(object):
         self.drop_inventory_progress = {}
         self.drop_inventory_progress_updated_at = 0
         self.drop_inventory_minutes_by_drop_id = {}
+        # Drop IDs with nothing left to watch: claimed, fully watched, or with
+        # an accepted claim the inventory has not confirmed.
+        self.drop_inventory_finished_ids = frozenset()
         self.drop_watch_health = {}
         self.track_drop_item_art = False
         self.scrape_drop_progress_on_load = False
@@ -501,6 +505,7 @@ class Twitch(object):
 
     def __cache_drop_inventory_progress(self, inventory: dict):
         progress_by_game = {}
+        finished_ids = set()
         for campaign in inventory.get("dropCampaignsInProgress", []) or []:
             if not isinstance(campaign, dict):
                 continue
@@ -521,6 +526,15 @@ class Twitch(object):
                 drop_self = drop.get("self")
                 if not isinstance(drop_self, dict):
                     continue
+                required_minutes = drop.get("requiredMinutesWatched") or 0
+                current_minutes = drop_self.get("currentMinutesWatched") or 0
+                if drop.get("id") and (
+                    drop_self.get("isClaimed") is True
+                    or drop_self.get("dropInstanceID")
+                    in (getattr(self, "accepted_drop_claims", None) or {})
+                    or 0 < required_minutes <= current_minutes
+                ):
+                    finished_ids.add(str(drop["id"]))
                 if (
                     drop_self.get("isClaimed") is True
                     or drop_self.get("hasPreconditionsMet") is False
@@ -530,8 +544,6 @@ class Twitch(object):
                 ):
                     continue
 
-                required_minutes = drop.get("requiredMinutesWatched") or 0
-                current_minutes = drop_self.get("currentMinutesWatched") or 0
                 if required_minutes <= 0 or current_minutes >= required_minutes:
                     continue
 
@@ -557,6 +569,7 @@ class Twitch(object):
             for (_, _, drop_id, _, current, _, _) in progress
             if drop_id
         }
+        self.drop_inventory_finished_ids = frozenset(finished_ids)
         self.drop_inventory_progress_updated_at = time.time()
 
     def __with_inventory_drop_progress(self, campaign: dict) -> dict:
@@ -5385,6 +5398,9 @@ class Twitch(object):
                 # A campaign already confirmed subscription/gift/cheer-gated
                 # by the account-wide evaluation is excluded here by ID.
                 continue
+            # Finished drops are deliberately not passed here: dropping a
+            # finished campaign at this point would send the channel to the
+            # fallback campaigns below instead of the count that rules it out.
             if (
                 self.__active_incomplete_drop_deadline(
                     self.__with_inventory_drop_progress(campaign),
@@ -5487,7 +5503,7 @@ class Twitch(object):
                 return []
 
             if is_drop_discovered(streamer):
-                completed_drop_ids = set()
+                completed_drop_ids = set(self.__finished_drop_ids())
                 (
                     awarded_benefit_ids,
                     awarded_benefit_fingerprints,
@@ -5705,7 +5721,7 @@ class Twitch(object):
                         self.__with_inventory_drop_progress(
                             full_campaigns[campaign_id]
                         ),
-                        set(),
+                        set(self.__finished_drop_ids()),
                         awarded_benefit_ids,
                         awarded_benefit_fingerprints,
                         log_status=False,
@@ -6808,6 +6824,17 @@ class Twitch(object):
                 for drop_id, minutes in minutes_by_drop_id.items()
                 if drop_id != str(drop.id or "")
             }
+        if drop.id:
+            self.drop_inventory_finished_ids = self.__finished_drop_ids() | {
+                str(drop.id)
+            }
+
+    def __finished_drop_ids(self):
+        # Without these, a finished drop that a channel still advertises gets
+        # no inventory minutes and looks unwatched, so the channel stays
+        # Drop-eligible when Twitch never confirms the claim (for example,
+        # when the game account is not linked).
+        return frozenset(getattr(self, "drop_inventory_finished_ids", None) or ())
 
     def claim_drop(
         self,
