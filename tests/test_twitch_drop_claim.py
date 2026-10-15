@@ -1170,7 +1170,41 @@ def test_accepted_claim_marks_drop_finished(monkeypatch):
 
     assert twitch.claim_drop(drop) is True
 
-    assert "drop-1" in twitch.drop_inventory_finished_ids
+    assert "drop-1" in twitch._Twitch__finished_drop_ids()
+
+
+def test_accepted_drop_stays_finished_across_inventory_syncs(monkeypatch):
+    # The inventory may keep listing the drop unclaimed, under minutes, after
+    # its accepted_drop_claims entry was pruned; it must not look earnable.
+    twitch, campaign = _finished_daily_campaign_twitch(monkeypatch)
+    drop = SimpleNamespace(id="daily-drop", drop_instance_id="instance-daily")
+    twitch.gql.claim_drop_rewards = lambda drop_instance_id: SimpleNamespace(
+        status="ELIGIBLE_FOR_ALL", errors=[]
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__save_drop_claim_analytics", lambda *args, **kwargs: None
+    )
+    assert twitch.claim_drop(drop) is True
+    twitch.accepted_drop_claims = {}
+    twitch._Twitch__cache_drop_inventory_progress(_daily_drop_inventory(campaign, 170))
+
+    twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
+def test_fully_watched_drop_without_instance_is_not_finished(monkeypatch):
+    # Until Twitch issues the claimable instance, the drop may still need
+    # watching, so the channel keeps counting as eligible.
+    twitch, campaign = _finished_daily_campaign_twitch(monkeypatch)
+    twitch._Twitch__cache_drop_inventory_progress(
+        _daily_drop_inventory(campaign, 180, instance=None)
+    )
+
+    assert twitch._Twitch__finished_drop_ids() == frozenset()
 
 
 def test_channel_check_ignores_outdated_inventory_progress(monkeypatch):
