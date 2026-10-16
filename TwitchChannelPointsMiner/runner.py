@@ -269,9 +269,10 @@ def run_config(config, path, on_miner_ready=None):
     )
     watcher.start()
     miner.mine(config.STREAMERS, **config.MINE_CONFIG)
+    # Flush queued notifications, such as the forced alert explaining why the
+    # miner stopped or is restarting, before the process exits or is replaced.
+    miner.queue_listener.stop()
     if miner.twitch.restart_requested.is_set():
-        # Flush the forced authentication alert before replacing the process.
-        miner.queue_listener.stop()
         restart_process()
 
 

@@ -1,5 +1,7 @@
-import pytest
+import threading
 from types import SimpleNamespace
+
+import pytest
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _capture_drop_progress_baseline,
@@ -559,3 +561,39 @@ def test_capture_drop_progress_baseline_does_not_repeat_progress_scrape():
     assert _capture_drop_progress_baseline(TwitchStub(), progress_scraped=True) == {
         "drop": {"current_minutes_watched": 25}
     }
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_run_config_flushes_notifications_whenever_mining_ends(
+    monkeypatch, tmp_path, restart
+):
+    import TwitchChannelPointsMiner as package
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    # run_config() sets this; restore it after the test.
+    monkeypatch.setattr(
+        Settings, "config_path", getattr(Settings, "config_path", None), raising=False
+    )
+    calls = []
+
+    class FakeMiner:
+        def __init__(self, **_kwargs):
+            self.queue_listener = SimpleNamespace(stop=lambda: calls.append("stop"))
+            self.twitch = SimpleNamespace(restart_requested=threading.Event())
+
+        def mine(self, *_args, **_kwargs):
+            # The miner stops itself, for example when it cannot clear a
+            # cached login, after logging a forced alert.
+            if restart:
+                self.twitch.restart_requested.set()
+
+    monkeypatch.setattr(package, "TwitchChannelPointsMiner", FakeMiner)
+    monkeypatch.setattr(runner, "_watch_config", lambda *_args: None)
+    monkeypatch.setattr(runner, "restart_process", lambda: calls.append("restart"))
+    config = SimpleNamespace(
+        MINER_CONFIG={}, MINE_CONFIG={}, STREAMERS=[], ANALYTICS_CONFIG=None
+    )
+
+    runner.run_config(config, tmp_path / "config.py")
+
+    assert calls == (["stop", "restart"] if restart else ["stop"])

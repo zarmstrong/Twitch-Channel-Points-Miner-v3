@@ -5,6 +5,7 @@ import platform
 import queue
 import re
 import sys
+import threading
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener, TimedRotatingFileHandler
 from pathlib import Path
@@ -333,27 +334,38 @@ class NotificationHandler(logging.Handler):
     def __init__(self, settings: LoggerSettings, level=logging.NOTSET):
         super().__init__(level)
         self.settings = settings
-        # Last failure reason per provider, so a notifier that keeps failing
-        # is reported once rather than on every event.
+        # Last failure reason of each provider that is currently failing, so
+        # an outage is reported once rather than on every event.
         self._failures = {}
 
-    def emit(self, record):
-        if not hasattr(record, "event") or not any(
+    def has_providers(self):
+        """Return True when at least one provider is set up to send."""
+        return any(
             getattr(self.settings, provider, None) is not None
-            for provider in self.PLACEHOLDERS
-        ):
+            and not is_placeholder(getattr(self.settings, provider))
+            for provider, is_placeholder in self.PLACEHOLDERS.items()
+        )
+
+    def emit(self, record):
+        if not hasattr(record, "event") or not self.has_providers():
             return
+        # Problems are logged through the queue rather than handleError(),
+        # which prints the traceback to stderr without redaction. Only the
+        # exception type is kept, since errors can quote webhook or token URLs.
         try:
             message = decorate_message(record, self.settings)
         except Exception as error:
-            self._report_failure("notification", error)
+            logging.getLogger(__name__).warning(
+                f"Unable to build the notification message: {type(error).__name__}"
+            )
             return
         for provider in self.PLACEHOLDERS:
             try:
-                self._dispatch(provider, record, message)
+                result = self._dispatch(provider, record, message)
             except Exception as error:
                 # One failing provider must not stop the others.
-                self._report_failure(provider, error)
+                result = (False, f"The notifier raised {type(error).__name__}.")
+            self._report_result(provider, result)
 
     def _dispatch(self, provider, record, message):
         notifier = getattr(self.settings, provider, None)
@@ -362,8 +374,8 @@ class NotificationHandler(logging.Handler):
             or getattr(record, f"skip_{provider}", False)
             or self.PLACEHOLDERS[provider](notifier)
         ):
-            return
-        self._report_result(provider, self._send(notifier, record, message))
+            return None
+        return self._send(notifier, record, message)
 
     def _report_result(self, provider, result):
         # Notifiers catch their own delivery errors and return a reason that
@@ -374,22 +386,16 @@ class NotificationHandler(logging.Handler):
         log = logging.getLogger(__name__)
         if success:
             if self._failures.pop(provider, None) is not None:
-                log.info(f"{provider} notifications are being delivered again")
-        elif self._failures.get(provider) != reason:
+                log.info(f"Notifications to {provider} are being delivered again")
+        elif provider not in self._failures:
             self._failures[provider] = reason
             log.warning(
-                f"Notification not sent: {reason} "
-                "Repeats are not logged until a notification gets through."
+                f"Notifications to {provider} are failing: {reason} "
+                "Further failures are not logged until one gets through."
             )
-
-    @staticmethod
-    def _report_failure(provider, error):
-        # Log through the queue rather than handleError(), which prints the
-        # traceback to stderr without redaction. Only the exception type is
-        # kept, since provider errors can quote webhook or bot-token URLs.
-        logging.getLogger(__name__).warning(
-            f"Unable to send {provider} notification: {type(error).__name__}"
-        )
+        elif self._failures[provider] != reason:
+            self._failures[provider] = reason
+            log.debug(f"Notifications to {provider} are still failing: {reason}")
 
     @staticmethod
     def _send(notifier, record, message):
@@ -425,39 +431,69 @@ class LoggingQueueListener(QueueListener):
     """Write log records, and send notifications on a thread of their own.
 
     A slow or unreachable notifier then never delays console or file output.
-    stop() drains both queues, so alerts logged before shutdown are still sent.
+    stop() drains both queues, so alerts logged before shutdown are still sent,
+    but waits at most NOTIFICATION_SHUTDOWN_TIMEOUT seconds for notifiers.
     """
 
+    NOTIFICATION_SHUTDOWN_TIMEOUT = 30
+
     def __init__(self, logger_queue, *handlers, settings, respect_handler_level=True):
-        notification_queue = queue.Queue(-1)
-        self.notification_listener = QueueListener(
-            notification_queue, NotificationHandler(settings)
-        )
+        self.notification_listener = None
+        self._stop_lock = threading.Lock()
+        self._stopped = False
+        notification_handler = NotificationHandler(settings)
+        if notification_handler.has_providers():
+            # Logger settings changes restart the miner, so a notification
+            # thread is only needed when a provider is set up at startup.
+            notification_queue = queue.Queue(-1)
+            self.notification_listener = QueueListener(
+                notification_queue, notification_handler
+            )
+            handlers = (*handlers, NotificationQueueHandler(notification_queue))
         super().__init__(
-            logger_queue,
-            *handlers,
-            NotificationQueueHandler(notification_queue),
-            respect_handler_level=respect_handler_level,
+            logger_queue, *handlers, respect_handler_level=respect_handler_level
         )
 
     def start(self):
-        self.notification_listener.start()
+        if self.notification_listener is not None:
+            self.notification_listener.start()
         super().start()
 
     def stop(self):
-        # Stop the log listener first, so every record it hands over is
-        # queued before the notification thread drains and exits.
-        super().stop()
-        self.notification_listener.stop()
-        # Failures reported while the notification queue drained were logged
-        # after the log listener stopped; write them out now.
-        while True:
-            try:
-                record = self.dequeue(False)
-            except queue.Empty:
-                break
-            if record is not self._sentinel:
-                self.handle(record)
+        # Safe to call more than once: the miner's end() and the runner can
+        # both stop the listener.
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            # Stop the log listener first, so every record it hands over is
+            # queued before the notification thread drains and exits.
+            super().stop()
+            if self.notification_listener is not None:
+                self._stop_notifications()
+            # Problems reported while the notification queue drained were
+            # logged after the log listener stopped; write them out now.
+            while True:
+                try:
+                    record = self.dequeue(False)
+                except queue.Empty:
+                    break
+                if record is not self._sentinel:
+                    self.handle(record)
+
+    def _stop_notifications(self):
+        # QueueListener.stop() joins without a timeout, so an unreachable
+        # notifier with a backlog could hold up shutdown indefinitely.
+        listener = self.notification_listener
+        listener.enqueue_sentinel()
+        listener._thread.join(self.NOTIFICATION_SHUTDOWN_TIMEOUT)
+        if listener._thread.is_alive():
+            logging.getLogger(__name__).warning(
+                "Stopped waiting for notifications after "
+                f"{self.NOTIFICATION_SHUTDOWN_TIMEOUT} seconds; alerts still "
+                "queued were not sent."
+            )
+        listener._thread = None
 
 
 # Logging extra for records that should reach the console and log files but
