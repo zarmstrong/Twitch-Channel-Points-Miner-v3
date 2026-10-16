@@ -392,6 +392,49 @@ class NotificationHandler(logging.Handler):
             logging.getLogger(__name__).warning(f"Notification not sent: {result[1]}")
 
 
+class NotificationQueueHandler(QueueHandler):
+    """Hand event records to the notification thread unchanged."""
+
+    def emit(self, record):
+        if hasattr(record, "event"):
+            super().emit(record)
+
+    def prepare(self, record):
+        # Both threads are in-process, and NotificationHandler builds its own
+        # message, so the record needs no flattening.
+        return record
+
+
+class LoggingQueueListener(QueueListener):
+    """Write log records, and send notifications on a thread of their own.
+
+    A slow or unreachable notifier then never delays console or file output.
+    stop() drains both queues, so alerts logged before shutdown are still sent.
+    """
+
+    def __init__(self, logger_queue, *handlers, settings, respect_handler_level=True):
+        notification_queue = queue.Queue(-1)
+        self.notification_listener = QueueListener(
+            notification_queue, NotificationHandler(settings)
+        )
+        super().__init__(
+            logger_queue,
+            *handlers,
+            NotificationQueueHandler(notification_queue),
+            respect_handler_level=respect_handler_level,
+        )
+
+    def start(self):
+        self.notification_listener.start()
+        super().start()
+
+    def stop(self):
+        # Stop the log listener first, so every record it hands over is
+        # queued before the notification thread drains and exits.
+        super().stop()
+        self.notification_listener.stop()
+
+
 # Logging extra for records that should reach the console and log files but
 # no notifier, such as status lines that are summarized separately.
 SKIP_NOTIFICATIONS = {
@@ -442,10 +485,6 @@ def configure_loggers(username, settings):
         )
     )
 
-    # Each provider's event list decides what is sent, so a quieter console
-    # never silences notifications.
-    notification_handler = NotificationHandler(settings)
-
     if settings.save is True:
         logs_path = os.path.join(Path().absolute(), "logs")
         Path(logs_path).mkdir(parents=True, exist_ok=True)
@@ -486,21 +525,16 @@ def configure_loggers(username, settings):
         file_handler.addFilter(NotificationOnlyFilter())
 
         # Add logger handlers to the logger queue and start the process
-        queue_listener = QueueListener(
-            logger_queue,
-            file_handler,
-            console_handler,
-            notification_handler,
-            respect_handler_level=True,
+        # Each provider's event list decides what is sent, so a quieter console
+        # never silences notifications.
+        queue_listener = LoggingQueueListener(
+            logger_queue, file_handler, console_handler, settings=settings
         )
         queue_listener.start()
         return logs_file, queue_listener
     else:
-        queue_listener = QueueListener(
-            logger_queue,
-            console_handler,
-            notification_handler,
-            respect_handler_level=True,
+        queue_listener = LoggingQueueListener(
+            logger_queue, console_handler, settings=settings
         )
         queue_listener.start()
         return None, queue_listener

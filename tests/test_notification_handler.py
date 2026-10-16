@@ -1,5 +1,7 @@
 import io
 import logging
+import threading
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -255,3 +257,27 @@ def test_skip_notifications_silences_every_provider():
 
     for notifier in notifiers.values():
         notifier.send.assert_not_called()
+
+
+def test_slow_notifier_does_not_delay_console_output():
+    release = threading.Event()
+    telegram = _telegram()
+    telegram.send.side_effect = lambda *_args: release.wait(5) and (True, None)
+    settings = LoggerSettings(save=False, telegram=telegram)
+
+    with _configured(settings) as listener:
+        stream = io.StringIO()
+        _console_handler(listener).setStream(stream)
+        logger = logging.getLogger("miner")
+        logger.info("Streamer is online", extra={"event": Events.STREAMER_ONLINE})
+        logger.info("next line")
+
+        deadline = time.monotonic() + 2
+        while "next line" not in stream.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        console_before_release = stream.getvalue()
+        release.set()
+
+    assert "next line" in console_before_release
+    # Stopping the listener still delivers the queued notification.
+    telegram.send.assert_called_once_with("Streamer is online", Events.STREAMER_ONLINE)
