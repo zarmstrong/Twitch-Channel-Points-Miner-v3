@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.19.3](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.2...3.19.3) (2026-10-16)
+
+
+### Bug Fixes
+
+* **drops:** send drop-status alerts to every notifier as one summary ([#168](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/168)) ([59f06c4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/59f06c4d6020e192935f4cbd4f41fabed7ae6e02))
+* **drops:** stop console-only status lines from reaching Pushover and email ([59f06c4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/59f06c4d6020e192935f4cbd4f41fabed7ae6e02))
+* **logger:** flush queued notifications on every exit without hanging shutdown ([59f06c4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/59f06c4d6020e192935f4cbd4f41fabed7ae6e02))
+* **logger:** keep notifications independent of the console formatter ([#166](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/166)) ([94d8f68](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/94d8f68e9fd4a537f0dc1b2c0364531700888281))
+* **logger:** report why a notification could not be delivered ([#166](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/166)) ([94d8f68](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/94d8f68e9fd4a537f0dc1b2c0364531700888281))
+* **logger:** stop console_level from silencing notifications ([#166](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/166)) ([94d8f68](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/94d8f68e9fd4a537f0dc1b2c0364531700888281))
+* **logger:** stop one failing notifier from blocking the others ([#166](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/166)) ([94d8f68](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/94d8f68e9fd4a537f0dc1b2c0364531700888281))
+* **logger:** word delivery warnings clearly and report each outage once ([59f06c4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/59f06c4d6020e192935f4cbd4f41fabed7ae6e02))
+
 ## [3.19.2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.1...3.19.2) (2026-10-15)
 
 
