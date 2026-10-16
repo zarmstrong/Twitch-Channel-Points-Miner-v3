@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from TwitchChannelPointsMiner.logger import GlobalFormatter
+from TwitchChannelPointsMiner.logger import NotificationHandler
 
 
 @pytest.mark.parametrize(
@@ -18,13 +18,13 @@ from TwitchChannelPointsMiner.logger import GlobalFormatter
     ),
 )
 def test_logger_notification_skip_flags_must_be_truthy(provider, notifier):
-    formatter = GlobalFormatter.__new__(GlobalFormatter)
-    formatter.settings = SimpleNamespace(**{provider: notifier})
+    handler = NotificationHandler.__new__(NotificationHandler)
+    handler.settings = SimpleNamespace(**{provider: notifier})
     included = SimpleNamespace(**{f"skip_{provider}": False})
     skipped = SimpleNamespace(**{f"skip_{provider}": True})
 
-    with patch.object(formatter, "_send") as send:
-        getattr(formatter, provider)(included)
-        getattr(formatter, provider)(skipped)
+    with patch.object(handler, "_send") as send:
+        getattr(handler, provider)(included, "msg")
+        getattr(handler, provider)(skipped, "msg")
 
-    send.assert_called_once_with(notifier, included)
+    send.assert_called_once_with(notifier, included, "msg")

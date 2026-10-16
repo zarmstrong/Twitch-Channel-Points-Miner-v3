@@ -5,7 +5,7 @@ import requests
 
 from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
 from TwitchChannelPointsMiner.classes.Settings import Events
-from TwitchChannelPointsMiner.logger import GlobalFormatter
+from TwitchChannelPointsMiner.logger import NotificationHandler
 
 
 def test_ntfy_publishes_message_with_optional_headers():
@@ -82,26 +82,26 @@ def test_ntfy_reports_sanitized_request_failure():
 
 
 def test_logger_skips_placeholder_ntfy_topic():
-    formatter = GlobalFormatter.__new__(GlobalFormatter)
-    formatter.settings = MagicMock(
+    handler = NotificationHandler.__new__(NotificationHandler)
+    handler.settings = MagicMock(
         ntfy=Ntfy("YOUR_NTFY_TOPIC", [Events.DROP_CLAIM])
     )
 
-    with patch.object(formatter, "_send") as send:
-        formatter.ntfy(SimpleNamespace())
+    with patch.object(handler, "_send") as send:
+        handler.ntfy(SimpleNamespace(), "msg")
 
     send.assert_not_called()
 
 
 def test_logger_ntfy_skip_flag_must_be_truthy():
     notifier = Ntfy("private-topic", [Events.DROP_CLAIM])
-    formatter = GlobalFormatter.__new__(GlobalFormatter)
-    formatter.settings = MagicMock(ntfy=notifier)
+    handler = NotificationHandler.__new__(NotificationHandler)
+    handler.settings = MagicMock(ntfy=notifier)
     included = SimpleNamespace(skip_ntfy=False)
     skipped = SimpleNamespace(skip_ntfy=True)
 
-    with patch.object(formatter, "_send") as send:
-        formatter.ntfy(included)
-        formatter.ntfy(skipped)
+    with patch.object(handler, "_send") as send:
+        handler.ntfy(included, "msg")
+        handler.ntfy(skipped, "msg")
 
-    send.assert_called_once_with(notifier, included)
+    send.assert_called_once_with(notifier, included, "msg")

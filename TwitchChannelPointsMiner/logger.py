@@ -269,45 +269,85 @@ class GlobalFormatter(logging.Formatter):
         return dt.strftime(datefmt or self.default_time_format)
 
     def format(self, record):
-        record.emoji_is_present = (
-            record.emoji_is_present if hasattr(record, "emoji_is_present") else False
-        )
-        if (
-            hasattr(record, "emoji")
-            and self.settings.emoji is True
-            and record.emoji_is_present is False
-        ):
-            record.msg = emoji.emojize(
-                f"{record.emoji}  {record.msg.strip()}", language="alias"
-            )
-            record.emoji_is_present = True
+        # Decorate a copy so other handlers never see emoji, username or color
+        # changes regardless of the order the queue listener calls them in.
+        record = logging.makeLogRecord(record.__dict__)
+        record.msg = decorate_message(record, self.settings)
+        record.args = None
 
-        if self.settings.emoji is False:
-            if "\u2192" in record.msg:
-                record.msg = record.msg.replace("\u2192", "-->")
-
-            # With the update of Stream class, the Stream Title may contain emoji
-            # Full remove using a method from utils.
-            record.msg = remove_emoji(record.msg)
-
-        record.msg = self.settings.username + record.msg
-
-        if hasattr(record, "event"):
-            self.telegram(record)
-            self.discord(record)
-            self.webhook(record)
-            self.matrix(record)
-            self.pushover(record)
-            self.gotify(record)
-            self.ntfy(record)
-            self.email(record)
-
-            if self.settings.colored is True:
-                record.msg = f"{self.settings.color_palette.get(record.event)}{record.msg}{Fore.RESET}"
+        if hasattr(record, "event") and self.settings.colored is True:
+            record.msg = f"{self.settings.color_palette.get(record.event)}{record.msg}{Fore.RESET}"
 
         return super().format(record)
 
-    def telegram(self, record):
+
+def decorate_message(record, settings):
+    """Return the record's message with emoji and the username prefix applied."""
+    message = record.getMessage()
+    if hasattr(record, "emoji") and settings.emoji is True:
+        message = emoji.emojize(f"{record.emoji}  {message.strip()}", language="alias")
+
+    if settings.emoji is False:
+        if "\u2192" in message:
+            message = message.replace("\u2192", "-->")
+
+        # With the update of Stream class, the Stream Title may contain emoji
+        # Full remove using a method from utils.
+        message = remove_emoji(message)
+
+    return (settings.username or "") + message
+
+
+class NotificationHandler(logging.Handler):
+    """Send event records to the configured notification providers.
+
+    Notifications are independent of the console and file formatters, so
+    changing how log lines are rendered never changes what gets sent.
+    """
+
+    PROVIDERS = (
+        "telegram",
+        "discord",
+        "webhook",
+        "matrix",
+        "pushover",
+        "gotify",
+        "ntfy",
+        "email",
+    )
+
+    def __init__(self, settings: LoggerSettings, level=logging.NOTSET):
+        super().__init__(level)
+        self.settings = settings
+
+    def emit(self, record):
+        if not hasattr(record, "event") or not any(
+            getattr(self.settings, provider, None) is not None
+            for provider in self.PROVIDERS
+        ):
+            return
+        try:
+            message = decorate_message(record, self.settings)
+        except Exception as error:
+            self._report_failure("notification", error)
+            return
+        for provider in self.PROVIDERS:
+            try:
+                getattr(self, provider)(record, message)
+            except Exception as error:
+                # One failing provider must not stop the others.
+                self._report_failure(provider, error)
+
+    @staticmethod
+    def _report_failure(provider, error):
+        # Log through the queue rather than handleError(), which prints the
+        # traceback to stderr without redaction. Only the exception type is
+        # kept, since provider errors can quote webhook or bot-token URLs.
+        logging.getLogger(__name__).warning(
+            f"Unable to send {provider} notification: {type(error).__name__}"
+        )
+
+    def telegram(self, record, message):
         skip_telegram = getattr(record, "skip_telegram", False)
 
         if (
@@ -315,9 +355,9 @@ class GlobalFormatter(logging.Formatter):
             and not skip_telegram
             and self.settings.telegram.chat_id != 123456789
         ):
-            self._send(self.settings.telegram, record)
+            self._send(self.settings.telegram, record, message)
 
-    def discord(self, record):
+    def discord(self, record, message):
         skip_discord = getattr(record, "skip_discord", False)
 
         if (
@@ -326,9 +366,9 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.discord.webhook_api
             != "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J"
         ):
-            self._send(self.settings.discord, record)
+            self._send(self.settings.discord, record, message)
 
-    def webhook(self, record):
+    def webhook(self, record, message):
         skip_webhook = getattr(record, "skip_webhook", False)
 
         if (
@@ -336,9 +376,9 @@ class GlobalFormatter(logging.Formatter):
             and not skip_webhook
             and self.settings.webhook.endpoint != "https://example.com/webhook"
         ):
-            self._send(self.settings.webhook, record)
+            self._send(self.settings.webhook, record, message)
 
-    def matrix(self, record):
+    def matrix(self, record, message):
         skip_matrix = getattr(record, "skip_matrix", False)
 
         if (
@@ -347,9 +387,9 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.matrix.room_id != "..."
             and self.settings.matrix.access_token
         ):
-            self._send(self.settings.matrix, record)
+            self._send(self.settings.matrix, record, message)
 
-    def pushover(self, record):
+    def pushover(self, record, message):
         skip_pushover = getattr(record, "skip_pushover", False)
 
         if (
@@ -358,9 +398,9 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.pushover.userkey != "YOUR-ACCOUNT-TOKEN"
             and self.settings.pushover.token != "YOUR-APPLICATION-TOKEN"
         ):
-            self._send(self.settings.pushover, record)
+            self._send(self.settings.pushover, record, message)
 
-    def gotify(self, record):
+    def gotify(self, record, message):
         skip_gotify = getattr(record, "skip_gotify", False)
 
         if (
@@ -369,28 +409,28 @@ class GlobalFormatter(logging.Formatter):
             and self.settings.gotify.endpoint
             != "https://example.com/message?token=TOKEN"
         ):
-            self._send(self.settings.gotify, record)
+            self._send(self.settings.gotify, record, message)
 
-    def email(self, record):
+    def email(self, record, message):
         skip_email = getattr(record, "skip_email", False)
         if (
             self.settings.email is not None
             and not skip_email
             and self.settings.email.host != "smtp.example.com"
         ):
-            self._send(self.settings.email, record)
+            self._send(self.settings.email, record, message)
 
-    def ntfy(self, record):
+    def ntfy(self, record, message):
         skip_ntfy = getattr(record, "skip_ntfy", False)
         if (
             self.settings.ntfy is not None
             and not skip_ntfy
             and self.settings.ntfy.topic != "YOUR_NTFY_TOPIC"
         ):
-            self._send(self.settings.ntfy, record)
+            self._send(self.settings.ntfy, record, message)
 
     @staticmethod
-    def _send(notifier, record):
+    def _send(notifier, record, message):
         """Send a record, optionally bypassing a notifier's event allowlist."""
         event = str(record.event)
         force_alert = getattr(record, "force_alert", False)
@@ -398,7 +438,7 @@ class GlobalFormatter(logging.Formatter):
         if added:
             notifier.events.append(event)
         try:
-            notifier.send(record.msg, record.event)
+            notifier.send(message, record.event)
         finally:
             if added:
                 notifier.events.remove(event)
@@ -446,6 +486,11 @@ def configure_loggers(username, settings):
         )
     )
 
+    # Notifications keep following the console level, as they did when the
+    # console formatter sent them.
+    notification_handler = NotificationHandler(settings)
+    notification_handler.addFilter(CategoryConsoleFilter(settings.console_level))
+
     if settings.save is True:
         logs_path = os.path.join(Path().absolute(), "logs")
         Path(logs_path).mkdir(parents=True, exist_ok=True)
@@ -486,13 +531,20 @@ def configure_loggers(username, settings):
 
         # Add logger handlers to the logger queue and start the process
         queue_listener = QueueListener(
-            logger_queue, file_handler, console_handler, respect_handler_level=True
+            logger_queue,
+            file_handler,
+            console_handler,
+            notification_handler,
+            respect_handler_level=True,
         )
         queue_listener.start()
         return logs_file, queue_listener
     else:
         queue_listener = QueueListener(
-            logger_queue, console_handler, respect_handler_level=True
+            logger_queue,
+            console_handler,
+            notification_handler,
+            respect_handler_level=True,
         )
         queue_listener.start()
         return None, queue_listener

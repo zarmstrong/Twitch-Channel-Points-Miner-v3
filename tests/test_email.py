@@ -8,7 +8,7 @@ import pytest
 
 from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Settings import Events
-from TwitchChannelPointsMiner.logger import GlobalFormatter
+from TwitchChannelPointsMiner.logger import NotificationHandler
 
 
 def test_email_sends_with_starttls_and_authentication():
@@ -181,25 +181,25 @@ def test_logger_skips_placeholder_email_host():
         "you@example.com",
         [Events.DAILY_REPORT],
     )
-    formatter = GlobalFormatter.__new__(GlobalFormatter)
-    formatter.settings = MagicMock(email=notifier)
+    handler = NotificationHandler.__new__(NotificationHandler)
+    handler.settings = MagicMock(email=notifier)
     record = SimpleNamespace()
 
-    with patch.object(formatter, "_send") as send:
-        formatter.email(record)
+    with patch.object(handler, "_send") as send:
+        handler.email(record, "msg")
 
     send.assert_not_called()
 
 
 def test_logger_email_skip_flag_must_be_truthy():
     notifier = MagicMock(host="smtp.valid.example")
-    formatter = GlobalFormatter.__new__(GlobalFormatter)
-    formatter.settings = MagicMock(email=notifier)
+    handler = NotificationHandler.__new__(NotificationHandler)
+    handler.settings = MagicMock(email=notifier)
     included = SimpleNamespace(skip_email=False)
     skipped = SimpleNamespace(skip_email=True)
 
-    with patch.object(formatter, "_send") as send:
-        formatter.email(included)
-        formatter.email(skipped)
+    with patch.object(handler, "_send") as send:
+        handler.email(included, "msg")
+        handler.email(skipped, "msg")
 
-    send.assert_called_once_with(notifier, included)
+    send.assert_called_once_with(notifier, included, "msg")
