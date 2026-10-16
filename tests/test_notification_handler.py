@@ -1,5 +1,6 @@
 import io
 import logging
+import queue
 import threading
 import time
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from TwitchChannelPointsMiner.logger import (
     LoggerSettings,
     SKIP_NOTIFICATIONS,
     NotificationHandler,
+    NotificationQueueHandler,
     configure_loggers,
 )
 
@@ -281,3 +283,60 @@ def test_slow_notifier_does_not_delay_console_output():
     assert "next line" in console_before_release
     # Stopping the listener still delivers the queued notification.
     telegram.send.assert_called_once_with("Streamer is online", Events.STREAMER_ONLINE)
+
+
+def test_failure_while_draining_at_shutdown_is_still_logged():
+    def slow_failure(*_args):
+        # Fail after stop() has already stopped the log listener.
+        time.sleep(0.2)
+        return False, "Telegram rejected the configured credentials (HTTP 401)."
+
+    telegram = _telegram()
+    telegram.send.side_effect = slow_failure
+    settings = LoggerSettings(save=False, telegram=telegram)
+
+    with _configured(settings) as listener:
+        stream = io.StringIO()
+        _console_handler(listener).setStream(stream)
+        logging.getLogger("miner").info(
+            "Final report", extra={"event": Events.STREAMER_ONLINE}
+        )
+
+    assert "Notification not sent: Telegram rejected" in stream.getvalue()
+
+
+def test_repeated_failure_is_logged_once_until_delivery_recovers(caplog):
+    reason = "Discord rate limited the notification (HTTP 429)."
+    telegram = _telegram()
+    telegram.send.side_effect = [
+        (False, reason),
+        (False, reason),
+        (True, None),
+        (False, reason),
+    ]
+    handler = NotificationHandler(LoggerSettings(telegram=telegram, username=""))
+
+    with caplog.at_level(logging.INFO, logger="TwitchChannelPointsMiner.logger"):
+        for _ in range(4):
+            handler.handle(_record(event=Events.STREAMER_ONLINE))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        f"Notification not sent: {reason} "
+        "Repeats are not logged until a notification gets through.",
+        "telegram notifications are being delivered again",
+        f"Notification not sent: {reason} "
+        "Repeats are not logged until a notification gets through.",
+    ]
+
+
+def test_notification_thread_gets_its_own_copy_of_the_record():
+    notification_queue = queue.Queue()
+    record = _record(event=Events.STREAMER_ONLINE)
+
+    NotificationQueueHandler(notification_queue).handle(record)
+    queued = notification_queue.get_nowait()
+
+    assert queued is not record
+    assert queued.event == Events.STREAMER_ONLINE
+    assert queued.getMessage() == "Streamer is online"

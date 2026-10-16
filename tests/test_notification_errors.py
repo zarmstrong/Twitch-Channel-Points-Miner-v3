@@ -23,7 +23,7 @@ def http_error(status):
         (http_error(404), "Discord endpoint was not found (HTTP 404)."),
         (
             http_error(429),
-            "Discord rate limited the test notification (HTTP 429).",
+            "Discord rate limited the notification (HTTP 429).",
         ),
         (http_error(503), "Discord reported a server error (HTTP 503)."),
         (

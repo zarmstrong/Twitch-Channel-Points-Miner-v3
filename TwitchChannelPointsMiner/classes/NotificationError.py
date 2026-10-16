@@ -14,11 +14,11 @@ def format_request_failure(service, error):
         if status == 404:
             return f"{service} endpoint was not found (HTTP 404)."
         if status == 429:
-            return f"{service} rate limited the test notification (HTTP 429)."
+            return f"{service} rate limited the notification (HTTP 429)."
         if status is not None and status >= 500:
             return f"{service} reported a server error (HTTP {status})."
         detail = f" (HTTP {status})" if status is not None else ""
-        return f"{service} rejected the test notification{detail}."
+        return f"{service} rejected the notification{detail}."
     if isinstance(error, requests.exceptions.SSLError):
         return f"TLS negotiation with {service} failed. Check its HTTPS certificate."
     if isinstance(error, requests.exceptions.Timeout):

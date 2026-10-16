@@ -94,7 +94,7 @@ class Email(object):
         except (ConnectionError, OSError):
             return False, f"Unable to reach SMTP server {self.host}:{self.port}."
         except smtplib.SMTPException:
-            return False, "The SMTP server rejected the test message."
+            return False, "The SMTP server rejected the message."
 
 
 def _smtp_status_error(prefix, error):

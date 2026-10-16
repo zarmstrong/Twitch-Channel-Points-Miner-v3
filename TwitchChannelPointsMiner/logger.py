@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import platform
@@ -332,6 +333,9 @@ class NotificationHandler(logging.Handler):
     def __init__(self, settings: LoggerSettings, level=logging.NOTSET):
         super().__init__(level)
         self.settings = settings
+        # Last failure reason per provider, so a notifier that keeps failing
+        # is reported once rather than on every event.
+        self._failures = {}
 
     def emit(self, record):
         if not hasattr(record, "event") or not any(
@@ -359,7 +363,24 @@ class NotificationHandler(logging.Handler):
             or self.PLACEHOLDERS[provider](notifier)
         ):
             return
-        self._send(notifier, record, message)
+        self._report_result(provider, self._send(notifier, record, message))
+
+    def _report_result(self, provider, result):
+        # Notifiers catch their own delivery errors and return a reason that
+        # is already safe to show, without URLs or credentials.
+        if not (isinstance(result, tuple) and len(result) == 2):
+            return
+        success, reason = result
+        log = logging.getLogger(__name__)
+        if success:
+            if self._failures.pop(provider, None) is not None:
+                log.info(f"{provider} notifications are being delivered again")
+        elif self._failures.get(provider) != reason:
+            self._failures[provider] = reason
+            log.warning(
+                f"Notification not sent: {reason} "
+                "Repeats are not logged until a notification gets through."
+            )
 
     @staticmethod
     def _report_failure(provider, error):
@@ -381,28 +402,23 @@ class NotificationHandler(logging.Handler):
         if added:
             notifier.events.append(event)
         try:
-            result = notifier.send(message, record.event)
+            return notifier.send(message, record.event)
         finally:
             if added:
                 notifier.events.remove(event)
 
-        # Notifiers catch their own delivery errors and return a reason that
-        # is already safe to show, without URLs or credentials.
-        if isinstance(result, tuple) and len(result) == 2 and not result[0]:
-            logging.getLogger(__name__).warning(f"Notification not sent: {result[1]}")
-
 
 class NotificationQueueHandler(QueueHandler):
-    """Hand event records to the notification thread unchanged."""
+    """Hand event records to the notification thread."""
 
     def emit(self, record):
         if hasattr(record, "event"):
             super().emit(record)
 
     def prepare(self, record):
-        # Both threads are in-process, and NotificationHandler builds its own
-        # message, so the record needs no flattening.
-        return record
+        # NotificationHandler builds its own message, so the record needs no
+        # flattening. A copy keeps the two threads from sharing one record.
+        return copy.copy(record)
 
 
 class LoggingQueueListener(QueueListener):
@@ -433,6 +449,15 @@ class LoggingQueueListener(QueueListener):
         # queued before the notification thread drains and exits.
         super().stop()
         self.notification_listener.stop()
+        # Failures reported while the notification queue drained were logged
+        # after the log listener stopped; write them out now.
+        while True:
+            try:
+                record = self.dequeue(False)
+            except queue.Empty:
+                break
+            if record is not self._sentinel:
+                self.handle(record)
 
 
 # Logging extra for records that should reach the console and log files but
