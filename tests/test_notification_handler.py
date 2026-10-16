@@ -167,3 +167,44 @@ def test_notifications_skip_decoration_when_no_provider_is_configured():
         handler.handle(_record(event=Events.STREAMER_ONLINE))
 
     decorate.assert_not_called()
+
+
+def test_delivery_failure_reason_is_logged(caplog):
+    telegram = _telegram()
+    telegram.send.return_value = (
+        False,
+        "Telegram rejected the configured credentials (HTTP 401).",
+    )
+    handler = NotificationHandler(LoggerSettings(telegram=telegram, username=""))
+
+    with caplog.at_level(logging.WARNING):
+        handler.handle(_record(event=Events.STREAMER_ONLINE))
+
+    assert (
+        "Notification not sent: Telegram rejected the configured credentials "
+        "(HTTP 401)." in caplog.text
+    )
+
+
+def test_events_outside_the_allowlist_are_skipped_quietly(caplog):
+    telegram = _telegram(events=())
+    telegram.send.return_value = (False, "This event is not enabled for Telegram.")
+    handler = NotificationHandler(LoggerSettings(telegram=telegram, username=""))
+
+    with caplog.at_level(logging.WARNING):
+        handler.handle(_record(event=Events.STREAMER_ONLINE))
+
+    telegram.send.assert_not_called()
+    assert caplog.text == ""
+
+
+def test_successful_delivery_logs_nothing(caplog):
+    telegram = _telegram()
+    telegram.send.return_value = (True, None)
+    handler = NotificationHandler(LoggerSettings(telegram=telegram, username=""))
+
+    with caplog.at_level(logging.WARNING):
+        handler.handle(_record(event=Events.STREAMER_ONLINE))
+
+    telegram.send.assert_called_once()
+    assert caplog.text == ""

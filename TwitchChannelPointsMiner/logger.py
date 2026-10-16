@@ -435,13 +435,20 @@ class NotificationHandler(logging.Handler):
         event = str(record.event)
         force_alert = getattr(record, "force_alert", False)
         added = force_alert and event not in notifier.events
+        if not added and event not in notifier.events:
+            return
         if added:
             notifier.events.append(event)
         try:
-            notifier.send(message, record.event)
+            result = notifier.send(message, record.event)
         finally:
             if added:
                 notifier.events.remove(event)
+
+        # Notifiers catch their own delivery errors and return a reason that
+        # is already safe to show, without URLs or credentials.
+        if isinstance(result, tuple) and len(result) == 2 and not result[0]:
+            logging.getLogger(__name__).warning(f"Notification not sent: {result[1]}")
 
 
 def configure_loggers(username, settings):
