@@ -24,7 +24,7 @@ def test_logger_notification_skip_flags_must_be_truthy(provider, notifier):
     skipped = SimpleNamespace(**{f"skip_{provider}": True})
 
     with patch.object(handler, "_send") as send:
-        getattr(handler, provider)(included, "msg")
-        getattr(handler, provider)(skipped, "msg")
+        handler._dispatch(provider, included, "msg")
+        handler._dispatch(provider, skipped, "msg")
 
     send.assert_called_once_with(notifier, included, "msg")

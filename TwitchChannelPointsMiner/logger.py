@@ -305,16 +305,22 @@ class NotificationHandler(logging.Handler):
     changing how log lines are rendered never changes what gets sent.
     """
 
-    PROVIDERS = (
-        "telegram",
-        "discord",
-        "webhook",
-        "matrix",
-        "pushover",
-        "gotify",
-        "ntfy",
-        "email",
-    )
+    # Each configured provider, with a check for the example values from
+    # config.example.py that mean it was never set up.
+    PLACEHOLDERS = {
+        "telegram": lambda notifier: notifier.chat_id == 123456789,
+        "discord": lambda notifier: notifier.webhook_api
+        == "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J",
+        "webhook": lambda notifier: notifier.endpoint == "https://example.com/webhook",
+        "matrix": lambda notifier: notifier.room_id == "..."
+        or not notifier.access_token,
+        "pushover": lambda notifier: notifier.userkey == "YOUR-ACCOUNT-TOKEN"
+        or notifier.token == "YOUR-APPLICATION-TOKEN",
+        "gotify": lambda notifier: notifier.endpoint
+        == "https://example.com/message?token=TOKEN",
+        "ntfy": lambda notifier: notifier.topic == "YOUR_NTFY_TOPIC",
+        "email": lambda notifier: notifier.host == "smtp.example.com",
+    }
 
     def __init__(self, settings: LoggerSettings, level=logging.NOTSET):
         super().__init__(level)
@@ -323,7 +329,7 @@ class NotificationHandler(logging.Handler):
     def emit(self, record):
         if not hasattr(record, "event") or not any(
             getattr(self.settings, provider, None) is not None
-            for provider in self.PROVIDERS
+            for provider in self.PLACEHOLDERS
         ):
             return
         try:
@@ -331,12 +337,22 @@ class NotificationHandler(logging.Handler):
         except Exception as error:
             self._report_failure("notification", error)
             return
-        for provider in self.PROVIDERS:
+        for provider in self.PLACEHOLDERS:
             try:
-                getattr(self, provider)(record, message)
+                self._dispatch(provider, record, message)
             except Exception as error:
                 # One failing provider must not stop the others.
                 self._report_failure(provider, error)
+
+    def _dispatch(self, provider, record, message):
+        notifier = getattr(self.settings, provider, None)
+        if (
+            notifier is None
+            or getattr(record, f"skip_{provider}", False)
+            or self.PLACEHOLDERS[provider](notifier)
+        ):
+            return
+        self._send(notifier, record, message)
 
     @staticmethod
     def _report_failure(provider, error):
@@ -346,88 +362,6 @@ class NotificationHandler(logging.Handler):
         logging.getLogger(__name__).warning(
             f"Unable to send {provider} notification: {type(error).__name__}"
         )
-
-    def telegram(self, record, message):
-        skip_telegram = getattr(record, "skip_telegram", False)
-
-        if (
-            self.settings.telegram is not None
-            and not skip_telegram
-            and self.settings.telegram.chat_id != 123456789
-        ):
-            self._send(self.settings.telegram, record, message)
-
-    def discord(self, record, message):
-        skip_discord = getattr(record, "skip_discord", False)
-
-        if (
-            self.settings.discord is not None
-            and not skip_discord
-            and self.settings.discord.webhook_api
-            != "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J"
-        ):
-            self._send(self.settings.discord, record, message)
-
-    def webhook(self, record, message):
-        skip_webhook = getattr(record, "skip_webhook", False)
-
-        if (
-            self.settings.webhook is not None
-            and not skip_webhook
-            and self.settings.webhook.endpoint != "https://example.com/webhook"
-        ):
-            self._send(self.settings.webhook, record, message)
-
-    def matrix(self, record, message):
-        skip_matrix = getattr(record, "skip_matrix", False)
-
-        if (
-            self.settings.matrix is not None
-            and not skip_matrix
-            and self.settings.matrix.room_id != "..."
-            and self.settings.matrix.access_token
-        ):
-            self._send(self.settings.matrix, record, message)
-
-    def pushover(self, record, message):
-        skip_pushover = getattr(record, "skip_pushover", False)
-
-        if (
-            self.settings.pushover is not None
-            and not skip_pushover
-            and self.settings.pushover.userkey != "YOUR-ACCOUNT-TOKEN"
-            and self.settings.pushover.token != "YOUR-APPLICATION-TOKEN"
-        ):
-            self._send(self.settings.pushover, record, message)
-
-    def gotify(self, record, message):
-        skip_gotify = getattr(record, "skip_gotify", False)
-
-        if (
-            self.settings.gotify is not None
-            and not skip_gotify
-            and self.settings.gotify.endpoint
-            != "https://example.com/message?token=TOKEN"
-        ):
-            self._send(self.settings.gotify, record, message)
-
-    def email(self, record, message):
-        skip_email = getattr(record, "skip_email", False)
-        if (
-            self.settings.email is not None
-            and not skip_email
-            and self.settings.email.host != "smtp.example.com"
-        ):
-            self._send(self.settings.email, record, message)
-
-    def ntfy(self, record, message):
-        skip_ntfy = getattr(record, "skip_ntfy", False)
-        if (
-            self.settings.ntfy is not None
-            and not skip_ntfy
-            and self.settings.ntfy.topic != "YOUR_NTFY_TOPIC"
-        ):
-            self._send(self.settings.ntfy, record, message)
 
     @staticmethod
     def _send(notifier, record, message):

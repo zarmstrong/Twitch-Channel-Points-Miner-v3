@@ -83,12 +83,10 @@ def test_ntfy_reports_sanitized_request_failure():
 
 def test_logger_skips_placeholder_ntfy_topic():
     handler = NotificationHandler.__new__(NotificationHandler)
-    handler.settings = MagicMock(
-        ntfy=Ntfy("YOUR_NTFY_TOPIC", [Events.DROP_CLAIM])
-    )
+    handler.settings = MagicMock(ntfy=Ntfy("YOUR_NTFY_TOPIC", [Events.DROP_CLAIM]))
 
     with patch.object(handler, "_send") as send:
-        handler.ntfy(SimpleNamespace(), "msg")
+        handler._dispatch("ntfy", SimpleNamespace(), "msg")
 
     send.assert_not_called()
 
@@ -101,7 +99,7 @@ def test_logger_ntfy_skip_flag_must_be_truthy():
     skipped = SimpleNamespace(skip_ntfy=True)
 
     with patch.object(handler, "_send") as send:
-        handler.ntfy(included, "msg")
-        handler.ntfy(skipped, "msg")
+        handler._dispatch("ntfy", included, "msg")
+        handler._dispatch("ntfy", skipped, "msg")
 
     send.assert_called_once_with(notifier, included, "msg")

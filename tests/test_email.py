@@ -145,9 +145,7 @@ def test_email_reports_sanitized_smtp_status_response():
     )
     smtp = MagicMock()
     smtp.__enter__.return_value = smtp
-    smtp.send_message.side_effect = smtplib.SMTPDataError(
-        554, b"Transaction failed"
-    )
+    smtp.send_message.side_effect = smtplib.SMTPDataError(554, b"Transaction failed")
 
     with patch(
         "TwitchChannelPointsMiner.classes.Email.smtplib.SMTP", return_value=smtp
@@ -186,7 +184,7 @@ def test_logger_skips_placeholder_email_host():
     record = SimpleNamespace()
 
     with patch.object(handler, "_send") as send:
-        handler.email(record, "msg")
+        handler._dispatch("email", record, "msg")
 
     send.assert_not_called()
 
@@ -199,7 +197,7 @@ def test_logger_email_skip_flag_must_be_truthy():
     skipped = SimpleNamespace(skip_email=True)
 
     with patch.object(handler, "_send") as send:
-        handler.email(included, "msg")
-        handler.email(skipped, "msg")
+        handler._dispatch("email", included, "msg")
+        handler._dispatch("email", skipped, "msg")
 
     send.assert_called_once_with(notifier, included, "msg")
