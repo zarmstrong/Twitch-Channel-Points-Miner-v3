@@ -115,22 +115,21 @@ def test_notifications_skip_records_without_an_event():
     telegram.send.assert_not_called()
 
 
-def test_notifications_follow_the_console_level():
+def test_notifications_do_not_depend_on_the_console_level():
     telegram = _telegram()
     settings = LoggerSettings(
         save=False, console_level=logging.WARNING, telegram=telegram
     )
 
     with _configured(settings) as listener:
-        _console_handler(listener).setStream(io.StringIO())
-        logger = logging.getLogger("miner")
-        logger.info("hidden", extra={"event": Events.STREAMER_ONLINE})
-        logger.info(
-            "category",
-            extra={"event": Events.STREAMER_ONLINE, "category_log": True},
+        stream = io.StringIO()
+        _console_handler(listener).setStream(stream)
+        logging.getLogger("miner").info(
+            "Streamer is online", extra={"event": Events.STREAMER_ONLINE}
         )
 
-    telegram.send.assert_called_once_with("category", Events.STREAMER_ONLINE)
+    assert stream.getvalue() == ""
+    telegram.send.assert_called_once_with("Streamer is online", Events.STREAMER_ONLINE)
 
 
 def test_failing_provider_does_not_block_the_others(caplog):

@@ -486,10 +486,9 @@ def configure_loggers(username, settings):
         )
     )
 
-    # Notifications keep following the console level, as they did when the
-    # console formatter sent them.
+    # Each provider's event list decides what is sent, so a quieter console
+    # never silences notifications.
     notification_handler = NotificationHandler(settings)
-    notification_handler.addFilter(CategoryConsoleFilter(settings.console_level))
 
     if settings.save is True:
         logs_path = os.path.join(Path().absolute(), "logs")
