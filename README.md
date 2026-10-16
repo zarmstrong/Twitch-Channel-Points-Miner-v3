@@ -992,10 +992,12 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 |---|---|---|---|
 | `save` | bool | `True` | Save logs to rotating files. |
 | `less` | bool | `False` | Use compact log formatting and shorter messages. |
+| `console_format` | logging format | `LoggingFormat.TEXT` | Format of log events written to the console. |
 | `console_level` | logging level | `logging.INFO` | Minimum level written to the console. |
 | `console_username` | bool | `False` | Include the account username in console and notification messages. |
 | `time_zone` | str or None | `None` | Log time zone, such as `America/Denver`. |
 | `date_format` | str | `"dd/mm/yy"` | Date format used in logs and analytics. Use `dd`, `mm`, and `yy` or `yyyy`, separated by `/`, `-`, or `.`. |
+| `file_format` | logging format | `LoggingFormat.TEXT` | Format of log events written to log files. |
 | `file_level` | logging level | `logging.DEBUG` | Minimum level written to log files. |
 | `emoji` | bool | Platform-dependent | Enable emoji; defaults to disabled on Windows and enabled elsewhere. |
 | `colored` | bool | `False` | Enable colored console output. |
