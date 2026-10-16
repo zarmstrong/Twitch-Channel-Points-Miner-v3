@@ -298,6 +298,13 @@ def decorate_message(record, settings):
     return (settings.username or "") + message
 
 
+class NotificationOnlyFilter(logging.Filter):
+    """Keep records meant only for notifiers out of the console and log files."""
+
+    def filter(self, record):
+        return not getattr(record, "notification_only", False)
+
+
 class NotificationHandler(logging.Handler):
     """Send event records to the configured notification providers.
 
@@ -385,6 +392,13 @@ class NotificationHandler(logging.Handler):
             logging.getLogger(__name__).warning(f"Notification not sent: {result[1]}")
 
 
+# Logging extra for records that should reach the console and log files but
+# no notifier, such as status lines that are summarized separately.
+SKIP_NOTIFICATIONS = {
+    f"skip_{provider}": True for provider in NotificationHandler.PLACEHOLDERS
+}
+
+
 def configure_loggers(username, settings):
     if settings.colored is True:
         init(autoreset=True)
@@ -415,6 +429,7 @@ def configure_loggers(username, settings):
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG)
     console_handler.addFilter(CategoryConsoleFilter(settings.console_level))
+    console_handler.addFilter(NotificationOnlyFilter())
     console_handler.setFormatter(
         GlobalFormatter(
             fmt=(
@@ -468,6 +483,7 @@ def configure_loggers(username, settings):
             )
         )
         file_handler.setLevel(settings.file_level)
+        file_handler.addFilter(NotificationOnlyFilter())
 
         # Add logger handlers to the logger queue and start the process
         queue_listener = QueueListener(

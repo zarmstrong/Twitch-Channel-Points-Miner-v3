@@ -10,6 +10,7 @@ from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.logger import (
     GlobalFormatter,
     LoggerSettings,
+    SKIP_NOTIFICATIONS,
     NotificationHandler,
     configure_loggers,
 )
@@ -208,3 +209,49 @@ def test_successful_delivery_logs_nothing(caplog):
 
     telegram.send.assert_called_once()
     assert caplog.text == ""
+
+
+def test_notification_only_records_skip_console_and_log_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    telegram = _telegram(events=(Events.DROP_STATUS,))
+    settings = LoggerSettings(file_level=logging.DEBUG, telegram=telegram)
+
+    with _configured(settings) as listener:
+        stream = io.StringIO()
+        _console_handler(listener).setStream(stream)
+        logger = logging.getLogger("miner")
+        logger.info(
+            "Drop: 50%", extra={"event": Events.DROP_STATUS, **SKIP_NOTIFICATIONS}
+        )
+        logger.info(
+            "streamer is streaming\nDrop: 50%",
+            extra={"event": Events.DROP_STATUS, "notification_only": True},
+        )
+
+    telegram.send.assert_called_once_with(
+        "streamer is streaming\nDrop: 50%", Events.DROP_STATUS
+    )
+    log_file = (tmp_path / "logs" / "test-user.log").read_text(encoding="utf-8")
+    for output in (stream.getvalue(), log_file):
+        assert "Drop: 50%" in output
+        assert "streamer is streaming" not in output
+
+
+def test_skip_notifications_silences_every_provider():
+    assert set(SKIP_NOTIFICATIONS) == {
+        f"skip_{provider}" for provider in NotificationHandler.PLACEHOLDERS
+    }
+    notifiers = {}
+    for provider in NotificationHandler.PLACEHOLDERS:
+        notifier = MagicMock()
+        notifier.events = [str(Events.DROP_STATUS)]
+        notifiers[provider] = notifier
+    settings = LoggerSettings(username="", **notifiers)
+    handler = NotificationHandler(settings)
+
+    handler.handle(
+        _record("Watching for points", event=Events.DROP_STATUS, **SKIP_NOTIFICATIONS)
+    )
+
+    for notifier in notifiers.values():
+        notifier.send.assert_not_called()

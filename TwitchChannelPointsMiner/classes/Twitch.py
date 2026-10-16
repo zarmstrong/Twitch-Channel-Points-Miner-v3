@@ -58,6 +58,7 @@ from TwitchChannelPointsMiner.constants import (
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
+from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -3422,12 +3423,7 @@ class Twitch(object):
             extra={
                 "emoji": ":eye:",
                 "event": Events.DROP_STATUS,
-                "skip_telegram": True,
-                "skip_discord": True,
-                "skip_webhook": True,
-                "skip_matrix": True,
-                "skip_gotify": True,
-                "skip_ntfy": True,
+                **SKIP_NOTIFICATIONS,
             },
         )
 
@@ -5094,41 +5090,19 @@ class Twitch(object):
                                                 single_line,
                                                 extra={
                                                     "event": Events.DROP_STATUS,
-                                                    "skip_telegram": True,
-                                                    "skip_discord": True,
-                                                    "skip_webhook": True,
-                                                    "skip_matrix": True,
-                                                    "skip_gotify": True,
-                                                    "skip_ntfy": True,
+                                                    **SKIP_NOTIFICATIONS,
                                                 },
                                             )
 
-                                        if Settings.logger.telegram is not None:
-                                            Settings.logger.telegram.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
-
-                                        if Settings.logger.discord is not None:
-                                            Settings.logger.discord.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
-                                        if Settings.logger.webhook is not None:
-                                            Settings.logger.webhook.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
-                                        if Settings.logger.gotify is not None:
-                                            Settings.logger.gotify.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
-                                        if Settings.logger.ntfy is not None:
-                                            Settings.logger.ntfy.send(
-                                                "\n".join(drop_messages),
-                                                Events.DROP_STATUS,
-                                            )
+                                        # One summary for notifiers instead of
+                                        # a notification per console line.
+                                        logger.info(
+                                            "\n".join(drop_messages),
+                                            extra={
+                                                "event": Events.DROP_STATUS,
+                                                "notification_only": True,
+                                            },
+                                        )
 
                     except requests.exceptions.ConnectionError as e:
                         logger.error(f"Error while trying to send minute watched: {e}")
@@ -7217,12 +7191,7 @@ class Twitch(object):
                                     f"{Fore.RED}Stopped watching category channel {streamers[i].username} for {game_label} because all drops were captured for {self.__describe_campaigns(previous_campaigns)}{Fore.RESET}",
                                     extra={
                                         "event": Events.DROP_STATUS,
-                                        "skip_telegram": True,
-                                        "skip_discord": True,
-                                        "skip_webhook": True,
-                                        "skip_matrix": True,
-                                        "skip_gotify": True,
-                                        "skip_ntfy": True,
+                                        **SKIP_NOTIFICATIONS,
                                     },
                                 )
                             elif previous_signature == "" and current_signature != "":
@@ -7230,12 +7199,7 @@ class Twitch(object):
                                     f"{Fore.GREEN}Watching category channel {streamers[i].username} for {game_label} - {self.__describe_campaigns(current_campaigns)}{Fore.RESET}",
                                     extra={
                                         "event": Events.DROP_STATUS,
-                                        "skip_telegram": True,
-                                        "skip_discord": True,
-                                        "skip_webhook": True,
-                                        "skip_matrix": True,
-                                        "skip_gotify": True,
-                                        "skip_ntfy": True,
+                                        **SKIP_NOTIFICATIONS,
                                     },
                                 )
 
