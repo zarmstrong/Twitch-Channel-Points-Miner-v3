@@ -4861,6 +4861,11 @@ class Twitch(object):
             f"{streamers[index].username} ({watch_reason(index)})"
             for index in streamers_watching
         ]
+        streak_streams = [
+            f"{streamers[index].username} ({watch_reason(index)})"
+            for index in streamers_watching
+            if self._has_pending_watch_streak(streamers[index])
+        ]
         drops_streams = []
 
         for index in streamers_watching:
@@ -4904,7 +4909,9 @@ class Twitch(object):
             "Watching for points: "
             f"{', '.join(points_streams) if points_streams else 'none'}; "
             "watching for drops: "
-            f"{', '.join(drops_streams) if drops_streams else 'none'}"
+            f"{', '.join(drops_streams) if drops_streams else 'none'}; "
+            "watching for watch streak: "
+            f"{', '.join(streak_streams) if streak_streams else 'none'}"
         )
         # Log at INFO only when the line changes, or as a reminder once
         # interval_minutes pass (0 disables the reminder). Repeats in between
@@ -6417,7 +6424,6 @@ class Twitch(object):
         if (
             getattr(settings, "watch_streak", False) is not True
             or getattr(stream, "watch_streak_missing", False) is not True
-            or getattr(stream, "minute_watched", 0) >= 11
         ):
             return False
 
@@ -7585,7 +7591,8 @@ class Twitch(object):
                                     continue
                                 raise
                         logger.debug(
-                            f"Send minute watched request for {streamer} - Status code: {response.status_code}"
+                            f"Send minute watched request for {streamer} - "
+                            f"Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
                             streamer.stream.update_minute_watched()

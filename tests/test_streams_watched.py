@@ -117,6 +117,7 @@ def _watch_streamer(
     points=0,
     points_limit=None,
     watch_streak=False,
+    minute_watched=0,
 ):
     # Production builds wildcard and badge-campaign streamers with
     # from_category=True as well; mirror that so the fakes classify the same.
@@ -131,7 +132,7 @@ def _watch_streamer(
         game={"displayName": username},
         game_name=lambda: username,
         watch_streak_missing=watch_streak,
-        minute_watched=0,
+        minute_watched=minute_watched,
     )
     return SimpleNamespace(
         username=username,
@@ -482,6 +483,30 @@ def test_pending_watch_streak_honors_explicit_zero_timestamp():
     streamer.offline_at = -60
 
     assert Twitch._has_pending_watch_streak(streamer, now=0) is False
+
+
+def test_pending_watch_streak_survives_beyond_eleven_minutes():
+    streamer = _watch_streamer("streak", watch_streak=True, minute_watched=45)
+
+    assert Twitch._has_pending_watch_streak(streamer) is True
+
+
+def test_pending_watch_streak_stays_watched_until_confirmed(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("slow-streak", watch_streak=True, minute_watched=30)],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/slow-streak"]
+
+
+def test_confirmed_watch_streak_is_no_longer_pending():
+    streamer = _watch_streamer("streak", watch_streak=True, minute_watched=30)
+    streamer.stream.watch_streak_missing = False
+
+    assert Twitch._has_pending_watch_streak(streamer) is False
 
 
 def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
@@ -1010,6 +1035,29 @@ def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     assert "badge (badge drop)" in watch_message
     assert "explicit (streamer)" in watch_message
     assert "badge (badge drop; badge drops)" in watch_message
+
+
+def test_watched_streamer_log_lists_pending_watch_streak(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    streamers = [_watch_streamer("streaky", watch_streak=True)]
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        streamers,
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    watch_message = next(
+        message for message in messages if "Watching for points:" in message
+    )
+    assert "watching for watch streak: streaky (streamer)" in watch_message
 
 
 def test_source_priority_appends_omitted_sources():
