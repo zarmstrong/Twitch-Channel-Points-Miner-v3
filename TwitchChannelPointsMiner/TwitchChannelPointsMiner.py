@@ -656,7 +656,7 @@ class TwitchChannelPointsMiner:
             # Without this, the worker threads (which are not daemons) kept the
             # process alive after the main loop died, so it looked healthy and
             # a container restart policy never recovered it. Stop them and
-            # re-raise so the process exits non-zero instead.
+            # exit non-zero instead.
             # Mark the miner stopped first so a signal arriving mid-shutdown
             # makes end() a no-op instead of exiting 0 over this failure.
             self.running = self.twitch.running = False
@@ -672,7 +672,8 @@ class TwitchChannelPointsMiner:
             )
             self.__stop_workers()
             self.queue_listener.stop()
-            raise
+            # The traceback was already logged above; don't print it twice.
+            raise SystemExit(1) from None
 
     def run(
         self,
@@ -1251,8 +1252,22 @@ class TwitchChannelPointsMiner:
 
     def __refresh_channel_points_context(self):
         for streamer in list(self.streamers):
-            if streamer.is_online:
+            # Skip streamers retired since the snapshot was taken.
+            if not streamer.is_online or streamer not in self.streamers:
+                continue
+            # One unreachable channel must not take down the main loop.
+            try:
                 self.twitch.load_channel_points_context(streamer)
+            except StreamerDoesNotExistException:
+                logger.info(
+                    f"Streamer {streamer.username} does not exist",
+                    extra={"emoji": ":cry:"},
+                )
+            except Exception:
+                logger.warning(
+                    f"Unable to refresh channel points for {streamer.username}",
+                    exc_info=True,
+                )
 
     def __check_for_update(self, now=None):
         if not self.update_check_enabled:
@@ -2264,29 +2279,34 @@ class TwitchChannelPointsMiner:
                     )
 
         print("")
-        for streamer_index in range(0, len(self.streamers)):
-            if self.streamers[streamer_index].history != {}:
-                gained = (
-                    self.streamers[streamer_index].channel_points
-                    - self.original_streamers[streamer_index]
-                )
+        # Retiring streamers shrinks both lists under config_reload_lock, so
+        # pair them under it too. Bounded: end() can run as a signal handler on
+        # the main thread while that thread already holds the (non-reentrant)
+        # lock.
+        acquired = self.config_reload_lock.acquire(timeout=5)
+        try:
+            streamer_baselines = list(zip(self.streamers, self.original_streamers))
+        finally:
+            if acquired:
+                self.config_reload_lock.release()
+        for streamer, original_points in streamer_baselines:
+            if streamer.history != {}:
+                gained = streamer.channel_points - original_points
 
                 from colorama import Fore
 
                 streamer_highlight = Fore.YELLOW
 
                 streamer_gain = (
-                    f"{streamer_highlight}{self.streamers[streamer_index]}{Fore.RESET}, Total Points Gained: {_millify(gained)}"
+                    f"{streamer_highlight}{streamer}{Fore.RESET}, Total Points Gained: {_millify(gained)}"
                     if Settings.logger.less
-                    else f"{streamer_highlight}{repr(self.streamers[streamer_index])}{Fore.RESET}, Total Points Gained (after farming - before farming): {_millify(gained)}"
+                    else f"{streamer_highlight}{repr(streamer)}{Fore.RESET}, Total Points Gained (after farming - before farming): {_millify(gained)}"
                 )
 
                 indent = " " * 25
                 streamer_history = "\n".join(
                     f"{indent}{history}"
-                    for history in self.streamers[streamer_index]
-                    .print_history()
-                    .split("; ")
+                    for history in streamer.print_history().split("; ")
                 )
 
                 logger.info(

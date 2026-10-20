@@ -97,8 +97,12 @@ class WebSocketsPool:
         for websocket in retired:
             websocket.close()
 
-    def __submit(self, index, topic, replay=False):
+    def __submit(self, index, topic, replay=False, websocket=None):
         with self.topic_lock:
+            # A replay targets one specific websocket, which may have been
+            # retired from the pool since the replay started.
+            if websocket is not None and not self.__holds(index, websocket):
+                return
             if replay and topic not in self.ws[index].topics:
                 return
             websocket, should_listen = self.__register(index, topic)
@@ -141,20 +145,26 @@ class WebSocketsPool:
             # on_close=WebSocketsPool.handle_reconnection, # Do nothing.
         )
 
+    def __holds(self, index, websocket):
+        return 0 <= index < len(self.ws) and self.ws[index] is websocket
+
     def __start(self, index):
+        # Resolve the websocket now: the pool can shrink before the new
+        # thread gets around to running it.
+        websocket = self.ws[index]
         if Settings.disable_ssl_cert_verification is True:
             import ssl
 
             thread_ws = Thread(
-                target=lambda: self.ws[index].run_forever(
+                target=lambda: websocket.run_forever(
                     sslopt={"cert_reqs": ssl.CERT_NONE}
                 )
             )
             logger.warn("SSL certificate verification is disabled! Be aware!")
         else:
-            thread_ws = Thread(target=lambda: self.ws[index].run_forever())
+            thread_ws = Thread(target=lambda: websocket.run_forever())
         thread_ws.daemon = True
-        thread_ws.name = f"WebSocket #{self.ws[index].index}"
+        thread_ws.name = f"WebSocket #{websocket.index}"
         thread_ws.start()
 
     def end(self):
@@ -245,11 +255,7 @@ class WebSocketsPool:
             with self.topic_lock:
                 # The socket may have been retired (popped from the pool by
                 # remove_streamer_topics) while this thread was sleeping.
-                if (
-                    ws.forced_close is True
-                    or ws.index >= len(self.ws)
-                    or self.ws[ws.index] is not ws
-                ):
+                if ws.forced_close is True or not self.__holds(ws.index, ws):
                     logger.info(
                         f"#{ws.index} - WebSocket was retired, not reconnecting"
                     )
@@ -258,12 +264,12 @@ class WebSocketsPool:
                 replacement = self.__new(ws.index)
                 replacement.topics.extend(topics)
                 self.ws[ws.index] = replacement
+                self.__start(ws.index)  # Start a new thread.
 
-            self.__start(ws.index)  # Start a new thread.
             time.sleep(30)
 
             for topic in topics:
-                self.__submit(ws.index, topic, replay=True)
+                self.__submit(ws.index, topic, replay=True, websocket=replacement)
 
     @staticmethod
     def on_message(ws, message):

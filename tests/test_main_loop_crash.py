@@ -1,10 +1,12 @@
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
@@ -50,7 +52,31 @@ def test_channel_points_refresh_survives_streamers_retired_mid_loop():
 
     miner._TwitchChannelPointsMiner__refresh_channel_points_context()
 
-    assert refreshed == ["alice", "bob", "carol"]
+    # bob and carol were retired mid-loop, so they are skipped, not refreshed.
+    assert refreshed == ["alice"]
+
+
+def test_channel_points_refresh_survives_a_streamer_that_no_longer_exists():
+    # A banned or renamed channel raised StreamerDoesNotExistException out of
+    # the 30-minute refresh and took the whole main loop down with it.
+    miner = _miner()
+    miner.streamers = [_streamer("gone"), _streamer("bob"), _streamer("carol")]
+    refreshed = []
+
+    def load_channel_points_context(streamer):
+        if streamer.username == "gone":
+            raise StreamerDoesNotExistException
+        if streamer.username == "bob":
+            raise RuntimeError("GQL hiccup")
+        refreshed.append(streamer.username)
+
+    miner.twitch.load_channel_points_context = load_channel_points_context
+
+    with patch(f"{MODULE}.logger") as logger:
+        miner._TwitchChannelPointsMiner__refresh_channel_points_context()
+
+    assert refreshed == ["carol"]
+    logger.warning.assert_called_once()
 
 
 def test_channel_points_refresh_skips_offline_streamers():
@@ -87,7 +113,7 @@ def test_websocket_check_survives_websockets_retired_mid_loop():
     assert reconnected == [first, second]
 
 
-def test_mine_stops_workers_and_reraises_when_run_crashes():
+def test_mine_stops_workers_and_exits_non_zero_when_run_crashes():
     # A crash in run() used to leave the non-daemon worker threads running,
     # so the process stayed up as a zombie and a container restart policy
     # never recovered it.
@@ -101,8 +127,9 @@ def test_mine_stops_workers_and_reraises_when_run_crashes():
     with patch.object(
         TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
     ), patch(f"{MODULE}.logger") as logger:
-        with pytest.raises(IndexError, match="boom"):
+        with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
+    assert exit_info.value.code == 1
 
     assert miner.running is False
     assert miner.twitch.running is False
@@ -138,8 +165,9 @@ def test_mine_keeps_the_original_error_when_a_worker_was_never_started():
     with patch.object(
         TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
     ), patch(f"{MODULE}.logger"):
-        with pytest.raises(IndexError, match="boom"):
+        with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
+    assert exit_info.value.code == 1
 
     miner.queue_listener.stop.assert_called_once()
 
@@ -159,8 +187,9 @@ def test_signal_during_crash_shutdown_does_not_exit_cleanly():
     with patch.object(
         TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
     ), patch(f"{MODULE}.logger"):
-        with pytest.raises(IndexError, match="boom"):
+        with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
+    assert exit_info.value.code == 1
 
     miner.queue_listener.stop.assert_called_once()
 
@@ -221,3 +250,86 @@ def test_pool_end_survives_websockets_retired_mid_loop():
     pool.end()
 
     assert closed == [0, 1]
+
+
+def test_reconnection_replay_skips_a_replacement_retired_while_sleeping(monkeypatch):
+    # The replacement can itself be retired during the sleep before topics are
+    # replayed; replaying onto its old slot raised IndexError.
+    topic = SimpleNamespace(name="topic")
+    websocket = SimpleNamespace(
+        index=1,
+        is_reconnecting=False,
+        forced_close=False,
+        topics=[topic],
+        is_closed=False,
+        keep_running=True,
+    )
+    pool = _pool([SimpleNamespace(index=0), websocket])
+    websocket.parent_pool = pool
+    replacement = SimpleNamespace(index=1, topics=[], pending_topics=[])
+    started = []
+    sleeps = []
+    monkeypatch.setattr(
+        WebSocketsPool, "_WebSocketsPool__new", lambda _self, _index: replacement
+    )
+    monkeypatch.setattr(
+        WebSocketsPool,
+        "_WebSocketsPool__start",
+        lambda _self, index: started.append(_self.ws[index]),
+    )
+    register = MagicMock()
+    monkeypatch.setattr(WebSocketsPool, "_WebSocketsPool__register", register)
+
+    def sleep(_seconds):
+        sleeps.append(_seconds)
+        if len(sleeps) == 2:
+            pool.ws.pop()
+
+    monkeypatch.setattr(f"{POOL_MODULE}.time.sleep", sleep)
+    monkeypatch.setattr(f"{POOL_MODULE}.internet_connection_available", lambda: True)
+
+    WebSocketsPool.handle_reconnection(websocket)
+
+    assert started == [replacement]
+    register.assert_not_called()
+
+
+def test_report_survives_streamers_retired_while_it_runs():
+    # end() prints the report while the badge catalog thread may still be
+    # retiring streamers; pairing the two lists by index raised IndexError.
+    miner = _miner()
+    miner.config_reload_lock = threading.Lock()
+    miner.session_id = "session"
+    miner.logs_file = None
+    miner.start_datetime = datetime.now()
+    miner.events_predictions = {}
+    miner.original_drop_progress = {}
+    miner.twitch.drop_report_snapshot = lambda: {}
+
+    def streamer(username, points):
+        streamer = _streamer(username)
+        streamer.channel_points = points
+        streamer.history = {"WATCH": 1}
+        streamer.print_history = lambda: "WATCH(1 times)"
+        return streamer
+
+    miner.streamers = [streamer("alice", 150), streamer("bob", 260)]
+    miner.original_streamers = [100, 200]
+    gains = []
+
+    def info(message, *args, **kwargs):
+        if kwargs.get("extra", {}).get("emoji") == ":moneybag:":
+            gains.append(message)
+            # A retirement lands while the report is printing.
+            miner.streamers[:] = []
+            miner.original_streamers[:] = []
+
+    with patch(f"{MODULE}.logger") as logger, patch(
+        f"{MODULE}._drop_progress_report_entries", return_value=[]
+    ):
+        logger.info.side_effect = info
+        miner._TwitchChannelPointsMiner__print_report()
+
+    assert len(gains) == 2
+    assert "alice" in gains[0] and "50" in gains[0]
+    assert "bob" in gains[1] and "60" in gains[1]
