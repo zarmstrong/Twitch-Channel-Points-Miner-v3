@@ -615,36 +615,54 @@ class TwitchChannelPointsMiner:
         wildcard_category_streamer_limit: int = 1,
         wildcard_category_pin_active: bool = True,
     ):
-        self.run(
-            streamers=streamers,
-            blacklist=blacklist,
-            followers=followers,
-            followers_order=followers_order,
-            categories=categories,
-            category_drops_enabled=category_drops_enabled,
-            category_limit=category_limit,
-            category_sort=category_sort,
-            category_campaign_order=category_campaign_order,
-            category_chat=category_chat,
-            category_log_level=category_log_level,
-            drop_item_art=drop_item_art,
-            print_open_drop_campaigns_on_load=print_open_drop_campaigns_on_load,
-            scrape_drop_progress_on_load=scrape_drop_progress_on_load,
-            log_drop_checks=log_drop_checks,
-            track_category_streamer_points=track_category_streamer_points,
-            category_refresh_interval_hours=category_refresh_interval_hours,
-            drop_progress_stall_minutes=drop_progress_stall_minutes,
-            drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
-            category_drops_override_streamers=category_drops_override_streamers,
-            drop_badge_catalog=drop_badge_catalog,
-            drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
-            auto_mine_badge_drops=auto_mine_badge_drops,
-            badge_drop_streamer_limit=badge_drop_streamer_limit,
-            wildcard_categories=wildcard_categories,
-            wildcard_category_limit=wildcard_category_limit,
-            wildcard_category_streamer_limit=wildcard_category_streamer_limit,
-            wildcard_category_pin_active=wildcard_category_pin_active,
-        )
+        try:
+            self.run(
+                streamers=streamers,
+                blacklist=blacklist,
+                followers=followers,
+                followers_order=followers_order,
+                categories=categories,
+                category_drops_enabled=category_drops_enabled,
+                category_limit=category_limit,
+                category_sort=category_sort,
+                category_campaign_order=category_campaign_order,
+                category_chat=category_chat,
+                category_log_level=category_log_level,
+                drop_item_art=drop_item_art,
+                print_open_drop_campaigns_on_load=print_open_drop_campaigns_on_load,
+                scrape_drop_progress_on_load=scrape_drop_progress_on_load,
+                log_drop_checks=log_drop_checks,
+                track_category_streamer_points=track_category_streamer_points,
+                category_refresh_interval_hours=category_refresh_interval_hours,
+                drop_progress_stall_minutes=drop_progress_stall_minutes,
+                drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
+                category_drops_override_streamers=category_drops_override_streamers,
+                drop_badge_catalog=drop_badge_catalog,
+                drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
+                auto_mine_badge_drops=auto_mine_badge_drops,
+                badge_drop_streamer_limit=badge_drop_streamer_limit,
+                wildcard_categories=wildcard_categories,
+                wildcard_category_limit=wildcard_category_limit,
+                wildcard_category_streamer_limit=wildcard_category_streamer_limit,
+                wildcard_category_pin_active=wildcard_category_pin_active,
+            )
+        except Exception as error:
+            # Without this, the worker threads (which are not daemons) kept the
+            # process alive after the main loop died, so it looked healthy and
+            # a container restart policy never recovered it. Stop them and
+            # re-raise so the process exits non-zero instead.
+            logger.error(
+                f"The miner stopped because of an unexpected error: {error!r}. "
+                "Shutting down so it can be restarted.",
+                extra={
+                    "emoji": ":warning:",
+                    "event": Events.CONFIGURATION,
+                    "force_alert": True,
+                },
+            )
+            self.__stop_workers()
+            self.queue_listener.stop()
+            raise
 
     def run(
         self,
@@ -1151,26 +1169,11 @@ class TwitchChannelPointsMiner:
                     break
                 self.__send_daily_report_if_due()
                 self.__check_for_update()
-                # Do an external control for WebSocket. Check if the thread is running
-                # Check if is not None because maybe we have already created a new connection on array+1 and now index is None
-                for index in range(0, len(self.ws_pool.ws)):
-                    if (
-                        self.ws_pool.ws[index].is_reconnecting is False
-                        and self.ws_pool.ws[index].elapsed_last_ping() > 10
-                        and internet_connection_available() is True
-                    ):
-                        logger.info(
-                            f"#{index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
-                        )
-                        WebSocketsPool.handle_reconnection(self.ws_pool.ws[index])
+                self.__check_websockets()
 
                 if ((time.time() - refresh_context) // 60) >= 30:
                     refresh_context = time.time()
-                    for index in range(0, len(self.streamers)):
-                        if self.streamers[index].is_online:
-                            self.twitch.load_channel_points_context(
-                                self.streamers[index]
-                            )
+                    self.__refresh_channel_points_context()
 
                 if (
                     (categories or self.wildcard_categories)
@@ -1219,6 +1222,27 @@ class TwitchChannelPointsMiner:
                             )
                             + 5,
                         )
+
+    # Both loops iterate snapshots: the badge Drop and category refresh threads
+    # retire streamers (and their now-empty websockets) by shrinking these
+    # lists in place, which made index-based loops overrun and crash run().
+    def __check_websockets(self):
+        # Do an external control for WebSocket. Check if the thread is running
+        for index, websocket in enumerate(list(self.ws_pool.ws)):
+            if (
+                websocket.is_reconnecting is False
+                and websocket.elapsed_last_ping() > 10
+                and internet_connection_available() is True
+            ):
+                logger.info(
+                    f"#{index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
+                )
+                WebSocketsPool.handle_reconnection(websocket)
+
+    def __refresh_channel_points_context(self):
+        for streamer in list(self.streamers):
+            if streamer.is_online:
+                self.twitch.load_channel_points_context(streamer)
 
     def __check_for_update(self, now=None):
         if not self.update_check_enabled:
@@ -2135,6 +2159,15 @@ class TwitchChannelPointsMiner:
 
         logger.info("CTRL+C Detected! Please wait just a moment!")
 
+        self.__stop_workers()
+        self.__print_report()
+
+        # Stop the queue listener to make sure all messages have been logged
+        self.queue_listener.stop()
+
+        sys.exit(0)
+
+    def __stop_workers(self):
         for streamer in self.streamers:
             if (
                 streamer.irc_chat is not None
@@ -2183,13 +2216,6 @@ class TwitchChannelPointsMiner:
                         f"Mutex for {streamer} did not release in time, "
                         "continuing shutdown anyway"
                     )
-
-        self.__print_report()
-
-        # Stop the queue listener to make sure all messages have been logged
-        self.queue_listener.stop()
-
-        sys.exit(0)
 
     def __print_report(self):
         print("\n")

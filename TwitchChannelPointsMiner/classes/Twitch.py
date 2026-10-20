@@ -7156,23 +7156,21 @@ class Twitch(object):
                 campaigns = self.__sync_campaigns(campaigns)
 
                 # Check if user It's currently streaming the same game present in campaigns_details
-                for i in range(0, len(streamers)):
+                for streamer in list(streamers):
                     if (
-                        streamers[i].settings.claim_drops is True
-                        and streamers[i].is_online is True
-                        and streamers[i].stream.campaigns_ids != []
+                        streamer.settings.claim_drops is True
+                        and streamer.is_online is True
+                        and streamer.stream.campaigns_ids != []
                     ):
-                        previous_campaigns = list(streamers[i].stream.campaigns)
-                        # yes! The streamer[i] have the drops_tags enabled and we It's currently stream a game with campaign active!
+                        previous_campaigns = list(streamer.stream.campaigns)
+                        # yes! The streamer has the drops_tags enabled and we It's currently stream a game with campaign active!
                         # With 'campaigns_ids' we are also sure that this streamer have the campaign active.
-                        # yes! The streamer[index] have the drops_tags enabled and we It's currently stream a game with campaign active!
+                        # yes! The streamer has the drops_tags enabled and we It's currently stream a game with campaign active!
                         current_campaigns = list(
                             filter(
                                 lambda x: x.drops != []
-                                and self.__campaign_matches_stream(
-                                    x, streamers[i].stream
-                                )
-                                and x.id in streamers[i].stream.campaigns_ids,
+                                and self.__campaign_matches_stream(x, streamer.stream)
+                                and x.id in streamer.stream.campaigns_ids,
                                 campaigns,
                             )
                         )
@@ -7181,14 +7179,14 @@ class Twitch(object):
                             previous_campaigns
                         )
                         current_signature = self.__campaign_signature(current_campaigns)
-                        game_label = self.__stream_game_label(streamers[i].stream)
+                        game_label = self.__stream_game_label(streamer.stream)
                         if (
                             previous_signature != current_signature
-                            and is_drop_discovered(streamers[i])
+                            and is_drop_discovered(streamer)
                         ):
                             if previous_signature != "" and current_signature == "":
                                 logger.info(
-                                    f"{Fore.RED}Stopped watching category channel {streamers[i].username} for {game_label} because all drops were captured for {self.__describe_campaigns(previous_campaigns)}{Fore.RESET}",
+                                    f"{Fore.RED}Stopped watching category channel {streamer.username} for {game_label} because all drops were captured for {self.__describe_campaigns(previous_campaigns)}{Fore.RESET}",
                                     extra={
                                         "event": Events.DROP_STATUS,
                                         **SKIP_NOTIFICATIONS,
@@ -7196,14 +7194,14 @@ class Twitch(object):
                                 )
                             elif previous_signature == "" and current_signature != "":
                                 logger.info(
-                                    f"{Fore.GREEN}Watching category channel {streamers[i].username} for {game_label} - {self.__describe_campaigns(current_campaigns)}{Fore.RESET}",
+                                    f"{Fore.GREEN}Watching category channel {streamer.username} for {game_label} - {self.__describe_campaigns(current_campaigns)}{Fore.RESET}",
                                     extra={
                                         "event": Events.DROP_STATUS,
                                         **SKIP_NOTIFICATIONS,
                                     },
                                 )
 
-                        streamers[i].stream.campaigns = current_campaigns
+                        streamer.stream.campaigns = current_campaigns
 
             except (ValueError, KeyError, requests.exceptions.ConnectionError) as e:
                 logger.error(f"Error while syncing inventory: {e}")
