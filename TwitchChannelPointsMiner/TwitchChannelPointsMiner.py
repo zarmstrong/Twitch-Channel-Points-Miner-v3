@@ -175,10 +175,28 @@ def _normalize_update_check_interval(interval):
     return int(interval)
 
 
-def _thread_started(thread):
-    # Worker threads are created before they are started, and a crash in
-    # between still reaches shutdown; joining an unstarted thread raises.
-    return thread is not None and thread.ident is not None
+def _exit_after_crash():
+    # The traceback was already logged, so don't let Python print it again.
+    lingering = [
+        thread
+        for thread in threading.enumerate()
+        if thread is not threading.current_thread()
+        and not thread.daemon
+        and thread.is_alive()
+    ]
+    if lingering and threading.current_thread() is threading.main_thread():
+        # Interpreter shutdown joins non-daemon threads without a timeout, so
+        # a worker that outlived its bounded join would keep the process up.
+        logger.warning(
+            "Forcing exit; threads still running: "
+            + ", ".join(thread.name for thread in lingering)
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    # Off the main thread (the Windows shell runs the miner in one), os._exit
+    # would kill the whole app; just end this thread.
+    raise SystemExit(1) from None
 
 
 def _is_running_in_container():
@@ -475,7 +493,9 @@ class TwitchChannelPointsMiner:
         self.start_datetime = None
         self.original_streamers = []
         self.original_drop_progress = None
-        self.config_reload_lock = threading.Lock()
+        # Reentrant: end() can run as a signal handler on the main thread while
+        # that thread already holds it (e.g. mid category refresh).
+        self.config_reload_lock = threading.RLock()
         self.drop_badge_catalog = None
         self.drop_badge_catalog_thread = None
         self.drop_badge_catalog_stop_event = threading.Event()
@@ -670,10 +690,12 @@ class TwitchChannelPointsMiner:
                     "force_alert": True,
                 },
             )
-            self.__stop_workers()
-            self.queue_listener.stop()
-            # The traceback was already logged above; don't print it twice.
-            raise SystemExit(1) from None
+            try:
+                self.__stop_workers()
+            finally:
+                # Flush the alert above even if stopping a worker failed.
+                self.queue_listener.stop()
+                _exit_after_crash()
 
     def run(
         self,
@@ -1178,61 +1200,73 @@ class TwitchChannelPointsMiner:
             while self.running and self.twitch.running:
                 if self.twitch.restart_requested.wait(random.uniform(20, 60)):
                     break
-                self.__send_daily_report_if_due()
-                self.__check_for_update()
-                self.__check_websockets()
+                # One failed pass (e.g. a network error in the category refresh)
+                # must not end the main loop; log it and retry on the next pass.
+                try:
+                    self.__send_daily_report_if_due()
+                    self.__check_for_update()
+                    self.__check_websockets()
 
-                if ((time.time() - refresh_context) // 60) >= 30:
-                    refresh_context = time.time()
-                    self.__refresh_channel_points_context()
+                    if ((time.time() - refresh_context) // 60) >= 30:
+                        refresh_context = time.time()
+                        self.__refresh_channel_points_context()
 
-                if (
-                    (categories or self.wildcard_categories)
-                    and next_category_refresh_at is not None
-                    and time.time() >= next_category_refresh_at
-                ):
-                    with self.config_reload_lock:
-                        self.__refresh_category_streamers(
-                            categories=categories,
-                            blacklist=blacklist,
-                            drops_enabled=category_drops_enabled,
-                            limit=category_limit,
-                            sort_by=category_sort,
-                            campaign_order=category_campaign_order,
-                            category_chat=category_chat,
-                            category_log_level=category_log_level,
-                            wildcard_categories=self.wildcard_categories,
-                            wildcard_category_limit=self.wildcard_category_limit,
-                            wildcard_category_streamer_limit=(
-                                self.wildcard_category_streamer_limit
-                            ),
-                            wildcard_category_pin_active=(
-                                self.wildcard_category_pin_active
-                            ),
-                        )
-                    effective_category_refresh_seconds = (
-                        min(category_refresh_interval_seconds, 5 * 60)
-                        if self.twitch.twitchdrops_app_campaigns
-                        else category_refresh_interval_seconds
-                    )
-                    next_category_refresh_at = (
-                        time.time()
-                        + effective_category_refresh_seconds
-                        + random.randint(20, 5 * 60)
-                    )
-                    upcoming_drop_start = self.twitch.next_upcoming_drop_start()
-                    if upcoming_drop_start is not None:
-                        next_category_refresh_at = min(
-                            next_category_refresh_at,
-                            time.time()
-                            + max(
-                                (
-                                    upcoming_drop_start - datetime.utcnow()
-                                ).total_seconds(),
-                                0,
+                    if (
+                        (categories or self.wildcard_categories)
+                        and next_category_refresh_at is not None
+                        and time.time() >= next_category_refresh_at
+                    ):
+                        # Reschedule even if the refresh fails, so a failing refresh
+                        # waits for its next slot instead of retrying every pass.
+                        try:
+                            with self.config_reload_lock:
+                                self.__refresh_category_streamers(
+                                    categories=categories,
+                                    blacklist=blacklist,
+                                    drops_enabled=category_drops_enabled,
+                                    limit=category_limit,
+                                    sort_by=category_sort,
+                                    campaign_order=category_campaign_order,
+                                    category_chat=category_chat,
+                                    category_log_level=category_log_level,
+                                    wildcard_categories=self.wildcard_categories,
+                                    wildcard_category_limit=self.wildcard_category_limit,
+                                    wildcard_category_streamer_limit=(
+                                        self.wildcard_category_streamer_limit
+                                    ),
+                                    wildcard_category_pin_active=(
+                                        self.wildcard_category_pin_active
+                                    ),
+                                )
+                        finally:
+                            effective_category_refresh_seconds = (
+                                min(category_refresh_interval_seconds, 5 * 60)
+                                if self.twitch.twitchdrops_app_campaigns
+                                else category_refresh_interval_seconds
                             )
-                            + 5,
-                        )
+                            next_category_refresh_at = (
+                                time.time()
+                                + effective_category_refresh_seconds
+                                + random.randint(20, 5 * 60)
+                            )
+                            upcoming_drop_start = self.twitch.next_upcoming_drop_start()
+                            if upcoming_drop_start is not None:
+                                next_category_refresh_at = min(
+                                    next_category_refresh_at,
+                                    time.time()
+                                    + max(
+                                        (
+                                            upcoming_drop_start - datetime.utcnow()
+                                        ).total_seconds(),
+                                        0,
+                                    )
+                                    + 5,
+                                )
+                except Exception:
+                    logger.error(
+                        "Error in the main loop, retrying on the next pass",
+                        exc_info=True,
+                    )
 
     # Both loops iterate snapshots: the badge Drop and category refresh threads
     # retire streamers (and their now-empty websockets) by shrinking these
@@ -2193,40 +2227,54 @@ class TwitchChannelPointsMiner:
         sys.exit(0)
 
     def __stop_workers(self):
-        for streamer in self.streamers:
+        # Snapshot: the badge Drop thread may still be retiring streamers.
+        streamers = list(self.streamers)
+        for streamer in streamers:
             if (
                 streamer.irc_chat is not None
                 and streamer.settings.chat != ChatPresence.NEVER
             ):
+                # leave_chat() swaps in a fresh, unstarted ThreadChat, so keep
+                # the running one to wait for.
+                irc_chat = streamer.irc_chat
                 streamer.leave_chat()
-                if streamer.irc_chat.is_alive() is True:
-                    streamer.irc_chat.join()
+                if irc_chat.is_alive() is True:
+                    irc_chat.join(timeout=10)
 
         self.running = self.twitch.running = False
         self.drop_badge_catalog_stop_event.set()
         if self.ws_pool is not None:
             self.ws_pool.end()
 
-        if _thread_started(self.minute_watcher_thread):
+        if (
+            self.minute_watcher_thread is not None
+            and self.minute_watcher_thread.is_alive()
+        ):
             self.minute_watcher_thread.join(timeout=60)
             if self.minute_watcher_thread.is_alive():
                 logger.warning(
                     "Minute watcher thread did not stop in time, continuing shutdown anyway"
                 )
 
-        if _thread_started(self.sync_campaigns_thread):
+        if (
+            self.sync_campaigns_thread is not None
+            and self.sync_campaigns_thread.is_alive()
+        ):
             self.sync_campaigns_thread.join(timeout=60)
             if self.sync_campaigns_thread.is_alive():
                 logger.warning(
                     "Sync campaigns thread did not stop in time, continuing shutdown anyway"
                 )
 
-        if _thread_started(self.drop_badge_catalog_thread):
+        if (
+            self.drop_badge_catalog_thread is not None
+            and self.drop_badge_catalog_thread.is_alive()
+        ):
             self.drop_badge_catalog_thread.join(timeout=30)
 
         # Check if all the mutex are unlocked.
         # Prevent breaks of .json file
-        for streamer in self.streamers:
+        for streamer in streamers:
             if streamer.mutex.locked():
                 # Bounded, unlike a bare acquire() - a save still in
                 # progress (e.g. a slow/hung disk write, or another thread
@@ -2280,15 +2328,9 @@ class TwitchChannelPointsMiner:
 
         print("")
         # Retiring streamers shrinks both lists under config_reload_lock, so
-        # pair them under it too. Bounded: end() can run as a signal handler on
-        # the main thread while that thread already holds the (non-reentrant)
-        # lock.
-        acquired = self.config_reload_lock.acquire(timeout=5)
-        try:
+        # pair them under it too.
+        with self.config_reload_lock:
             streamer_baselines = list(zip(self.streamers, self.original_streamers))
-        finally:
-            if acquired:
-                self.config_reload_lock.release()
         for streamer, original_points in streamer_baselines:
             if streamer.history != {}:
                 gained = streamer.channel_points - original_points

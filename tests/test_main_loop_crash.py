@@ -9,7 +9,10 @@ from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
-from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+    TwitchChannelPointsMiner,
+    _exit_after_crash,
+)
 
 MODULE = "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
 POOL_MODULE = "TwitchChannelPointsMiner.classes.WebSocketsPool"
@@ -121,7 +124,7 @@ def test_mine_stops_workers_and_exits_non_zero_when_run_crashes():
     miner.streamers = [_streamer("alice")]
     miner.ws_pool = MagicMock()
     minute_watcher = MagicMock()
-    minute_watcher.is_alive.return_value = False
+    minute_watcher.is_alive.side_effect = [True, False]
     miner.minute_watcher_thread = minute_watcher
 
     with patch.object(
@@ -298,7 +301,7 @@ def test_report_survives_streamers_retired_while_it_runs():
     # end() prints the report while the badge catalog thread may still be
     # retiring streamers; pairing the two lists by index raised IndexError.
     miner = _miner()
-    miner.config_reload_lock = threading.Lock()
+    miner.config_reload_lock = threading.RLock()
     miner.session_id = "session"
     miner.logs_file = None
     miner.start_datetime = datetime.now()
@@ -328,8 +331,98 @@ def test_report_survives_streamers_retired_while_it_runs():
         f"{MODULE}._drop_progress_report_entries", return_value=[]
     ):
         logger.info.side_effect = info
-        miner._TwitchChannelPointsMiner__print_report()
+        # Held by this same thread, as when end() runs as a signal handler in
+        # the middle of a category refresh; must not stall or deadlock.
+        with miner.config_reload_lock:
+            miner._TwitchChannelPointsMiner__print_report()
 
     assert len(gains) == 2
     assert "alice" in gains[0] and "50" in gains[0]
     assert "bob" in gains[1] and "60" in gains[1]
+
+
+def test_crash_alert_is_flushed_even_if_stopping_a_worker_fails():
+    miner = _miner()
+    miner.ws_pool = MagicMock()
+    miner.ws_pool.end.side_effect = OSError("socket already gone")
+
+    with patch.object(
+        TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
+    ), patch(f"{MODULE}.logger"):
+        with pytest.raises(SystemExit) as exit_info:
+            miner.mine([])
+    assert exit_info.value.code == 1
+
+    miner.queue_listener.stop.assert_called_once()
+
+
+def test_stop_workers_waits_for_the_running_irc_thread():
+    # leave_chat() swaps in a fresh, unstarted ThreadChat; joining
+    # streamer.irc_chat afterwards never waited for the real IRC thread.
+    miner = _miner()
+    running_chat = MagicMock()
+    running_chat.is_alive.return_value = True
+    streamer = _streamer("alice")
+    streamer.irc_chat = running_chat
+    streamer.settings = SimpleNamespace(chat=ChatPresence.ALWAYS)
+    streamer.mutex.locked.return_value = False
+
+    def leave_chat():
+        streamer.irc_chat = MagicMock()
+
+    streamer.leave_chat = leave_chat
+    miner.streamers = [streamer]
+
+    miner._TwitchChannelPointsMiner__stop_workers()
+
+    running_chat.join.assert_called_once_with(timeout=10)
+
+
+def _lingering_thread():
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, name="stuck worker")
+    thread.start()
+    return thread, release
+
+
+def test_exit_after_crash_forces_exit_when_a_worker_is_stuck():
+    # Interpreter shutdown joins non-daemon threads without a timeout, so a
+    # stuck worker would otherwise keep the crashed process up.
+    thread, release = _lingering_thread()
+    try:
+        with patch(f"{MODULE}.os._exit", side_effect=RuntimeError("exited")) as (
+            exit_mock
+        ), patch(f"{MODULE}.logger") as logger:
+            with pytest.raises(RuntimeError, match="exited"):
+                _exit_after_crash()
+    finally:
+        release.set()
+        thread.join()
+
+    exit_mock.assert_called_once_with(1)
+    assert "stuck worker" in logger.warning.call_args.args[0]
+
+
+def test_exit_after_crash_only_ends_the_thread_off_the_main_thread():
+    # The Windows shell runs the miner off the main thread, where os._exit
+    # would kill the whole app.
+    thread, release = _lingering_thread()
+    outcome = []
+
+    def crash():
+        try:
+            _exit_after_crash()
+        except SystemExit as error:
+            outcome.append(error.code)
+
+    try:
+        with patch(f"{MODULE}.os._exit") as exit_mock:
+            miner_thread = threading.Thread(target=crash)
+            miner_thread.start()
+            miner_thread.join()
+    finally:
+        release.set()
+        thread.join()
+
+    exit_mock.assert_not_called()
+    assert outcome == [1]

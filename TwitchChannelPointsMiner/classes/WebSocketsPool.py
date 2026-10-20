@@ -97,11 +97,11 @@ class WebSocketsPool:
         for websocket in retired:
             websocket.close()
 
-    def __submit(self, index, topic, replay=False, websocket=None):
+    def __submit(self, index, topic, replay=False, target=None):
         with self.topic_lock:
             # A replay targets one specific websocket, which may have been
             # retired from the pool since the replay started.
-            if websocket is not None and not self.__holds(index, websocket):
+            if target is not None and not self.__holds(index, target):
                 return
             if replay and topic not in self.ws[index].topics:
                 return
@@ -269,7 +269,7 @@ class WebSocketsPool:
             time.sleep(30)
 
             for topic in topics:
-                self.__submit(ws.index, topic, replay=True, websocket=replacement)
+                self.__submit(ws.index, topic, replay=True, target=replacement)
 
     @staticmethod
     def on_message(ws, message):
