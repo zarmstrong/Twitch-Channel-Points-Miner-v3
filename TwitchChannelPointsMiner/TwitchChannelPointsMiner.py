@@ -175,6 +175,12 @@ def _normalize_update_check_interval(interval):
     return int(interval)
 
 
+def _thread_started(thread):
+    # Worker threads are created before they are started, and a crash in
+    # between still reaches shutdown; joining an unstarted thread raises.
+    return thread is not None and thread.ident is not None
+
+
 def _is_running_in_container():
     return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
@@ -651,9 +657,13 @@ class TwitchChannelPointsMiner:
             # process alive after the main loop died, so it looked healthy and
             # a container restart policy never recovered it. Stop them and
             # re-raise so the process exits non-zero instead.
+            # Mark the miner stopped first so a signal arriving mid-shutdown
+            # makes end() a no-op instead of exiting 0 over this failure.
+            self.running = self.twitch.running = False
             logger.error(
                 f"The miner stopped because of an unexpected error: {error!r}. "
                 "Shutting down so it can be restarted.",
+                exc_info=True,
                 extra={
                     "emoji": ":warning:",
                     "event": Events.CONFIGURATION,
@@ -1228,14 +1238,14 @@ class TwitchChannelPointsMiner:
     # lists in place, which made index-based loops overrun and crash run().
     def __check_websockets(self):
         # Do an external control for WebSocket. Check if the thread is running
-        for index, websocket in enumerate(list(self.ws_pool.ws)):
+        for websocket in list(self.ws_pool.ws):
             if (
                 websocket.is_reconnecting is False
                 and websocket.elapsed_last_ping() > 10
                 and internet_connection_available() is True
             ):
                 logger.info(
-                    f"#{index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
+                    f"#{websocket.index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
                 )
                 WebSocketsPool.handle_reconnection(websocket)
 
@@ -2182,21 +2192,21 @@ class TwitchChannelPointsMiner:
         if self.ws_pool is not None:
             self.ws_pool.end()
 
-        if self.minute_watcher_thread is not None:
+        if _thread_started(self.minute_watcher_thread):
             self.minute_watcher_thread.join(timeout=60)
             if self.minute_watcher_thread.is_alive():
                 logger.warning(
                     "Minute watcher thread did not stop in time, continuing shutdown anyway"
                 )
 
-        if self.sync_campaigns_thread is not None:
+        if _thread_started(self.sync_campaigns_thread):
             self.sync_campaigns_thread.join(timeout=60)
             if self.sync_campaigns_thread.is_alive():
                 logger.warning(
                     "Sync campaigns thread did not stop in time, continuing shutdown anyway"
                 )
 
-        if self.drop_badge_catalog_thread is not None:
+        if _thread_started(self.drop_badge_catalog_thread):
             self.drop_badge_catalog_thread.join(timeout=30)
 
         # Check if all the mutex are unlocked.

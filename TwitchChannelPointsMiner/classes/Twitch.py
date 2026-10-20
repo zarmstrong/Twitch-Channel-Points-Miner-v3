@@ -7157,6 +7157,11 @@ class Twitch(object):
 
                 # Check if user It's currently streaming the same game present in campaigns_details
                 for streamer in list(streamers):
+                    # Iterate a snapshot (other threads retire streamers by
+                    # shrinking the shared list in place) but skip any that
+                    # were retired since it was taken.
+                    if streamer not in streamers:
+                        continue
                     if (
                         streamer.settings.claim_drops is True
                         and streamer.is_online is True

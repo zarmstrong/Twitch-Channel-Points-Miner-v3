@@ -158,9 +158,9 @@ class WebSocketsPool:
         thread_ws.start()
 
     def end(self):
-        for index in range(0, len(self.ws)):
-            self.ws[index].forced_close = True
-            self.ws[index].close()
+        for websocket in list(self.ws):
+            websocket.forced_close = True
+            websocket.close()
 
     @staticmethod
     def on_open(ws):
@@ -243,6 +243,17 @@ class WebSocketsPool:
             # Why not create a new ws on the same array index? Let's try.
             self = ws.parent_pool
             with self.topic_lock:
+                # The socket may have been retired (popped from the pool by
+                # remove_streamer_topics) while this thread was sleeping.
+                if (
+                    ws.forced_close is True
+                    or ws.index >= len(self.ws)
+                    or self.ws[ws.index] is not ws
+                ):
+                    logger.info(
+                        f"#{ws.index} - WebSocket was retired, not reconnecting"
+                    )
+                    return
                 topics = list(ws.topics)
                 replacement = self.__new(ws.index)
                 replacement.topics.extend(topics)
