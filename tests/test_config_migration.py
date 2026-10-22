@@ -25,7 +25,7 @@ from TwitchChannelPointsMiner.config_migration import (
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
-from TwitchChannelPointsMiner.logger import LoggerSettings
+from TwitchChannelPointsMiner.logger import LoggerSettings, LoggingFormat
 
 
 RUNNER = """\
@@ -206,6 +206,33 @@ ANALYTICS_CONFIG = None
     assert new_version == CONFIG_VERSION
     assert namespace["MINE_CONFIG"]["drop_pick_stickiness_minutes"] == 15
     assert namespace["MINE_CONFIG"]["category_drops_override_streamers"] is False
+
+
+def test_version_ten_migration_adds_text_logging_formats():
+    source = """\
+CONFIG_VERSION = 10
+import logging
+from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 10
+    assert new_version == CONFIG_VERSION
+    assert 'console_format="text"' in migrated
+    assert 'file_format="text"' in migrated
+    assert "LoggingFormat" not in migrated
+    settings = namespace["LOGGER"]
+    assert settings.save is False
+    assert settings.console_format is LoggingFormat.TEXT
+    assert settings.file_format is LoggingFormat.TEXT
 
 
 def test_version_seven_migration_appends_wildcard_last_to_custom_priority():

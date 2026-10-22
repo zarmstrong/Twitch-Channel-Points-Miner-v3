@@ -12,7 +12,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 11
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -28,10 +28,12 @@ STREAMER_SETTINGS_DEFAULTS = (
 LOGGER_SETTINGS_DEFAULTS = (
     ("save", "True"),
     ("less", "False"),
+    ("console_format", '"text"'),
     ("console_level", "logging.INFO"),
     ("console_username", "False"),
     ("time_zone", "None"),
     ("date_format", '"dd/mm/yy"'),
+    ("file_format", '"text"'),
     ("file_level", "logging.DEBUG"),
     ("emoji", "True"),
     ("colored", "False"),

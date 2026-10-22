@@ -6,6 +6,7 @@ import pytest
 
 from TwitchChannelPointsMiner.logger import (
     LoggerSettings,
+    LoggingFormat,
     SensitiveUrlFilter,
     configure_loggers,
 )
@@ -15,6 +16,36 @@ from TwitchChannelPointsMiner.logger import (
 def test_log_retention_days_requires_a_positive_integer(value):
     with pytest.raises(ValueError, match="positive integer"):
         LoggerSettings(log_retention_days=value)
+
+
+def test_logging_formats_default_to_text():
+    settings = LoggerSettings()
+
+    assert settings.console_format is LoggingFormat.TEXT
+    assert settings.file_format is LoggingFormat.TEXT
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("text", LoggingFormat.TEXT),
+        ("json", LoggingFormat.JSON),
+        ("JSON", LoggingFormat.JSON),
+        (LoggingFormat.JSON, LoggingFormat.JSON),
+    ],
+)
+def test_logging_formats_accept_strings_and_enum_values(value, expected):
+    settings = LoggerSettings(console_format=value, file_format=value)
+
+    assert settings.console_format is expected
+    assert settings.file_format is expected
+
+
+@pytest.mark.parametrize("name", ["console_format", "file_format"])
+@pytest.mark.parametrize("value", ["xml", "", None, 1])
+def test_invalid_logging_format_is_rejected(name, value):
+    with pytest.raises(ValueError, match=f"{name} must be"):
+        LoggerSettings(**{name: value})
 
 
 def test_file_logs_rotate_at_midnight_with_configured_retention(tmp_path, monkeypatch):

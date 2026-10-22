@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 11
 
 import logging
 from colorama import Fore
@@ -50,12 +50,14 @@ MINER_CONFIG = {
     ],
     'logger_settings': LoggerSettings(
         save=True,                              # If you want to save logs in a file (suggested)
+        console_format="text",                  # Console log format: "text" or "json" (one JSON object per line)
         console_level=logging.INFO,             # Level of logs - use logging.DEBUG for more info
         console_username=False,                 # Adds a username to every console log line if True. Also adds it to Telegram, Discord, etc. Useful when you have several accounts
         auto_clear=True,                        # Rotate the active log file every night at local midnight (default)
         log_retention_days=7,                   # Number of daily log archives to keep before deleting the oldest
         time_zone="",                           # Set a specific time zone for console and file loggers. Use tz database names. Example: "America/Denver"
         date_format="dd/mm/yy",                 # Date format in logs and analytics. Supported tokens: dd, mm, yy, yyyy
+        file_format="text",                     # Log file format: "text" or "json" (one JSON object per line)
         file_level=logging.INFO,                # Level of logs - If you think the log file it's too big, use logging.INFO
         emoji=True,                             # On Windows, we have a problem printing emoji. Set to false if you have a problem
         less=False,                             # If you think that the logs are too verbose, set this to True
