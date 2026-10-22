@@ -30,7 +30,13 @@ set COMMIT_HASH=unknown
 for /f %%i in ('git rev-parse --short HEAD 2^>nul') do set COMMIT_HASH=%%i
 echo %COMMIT_HASH%> commit_hash.txt
 
-py -m PyInstaller ^
+rem Defaults to the py launcher for local builds. CI sets
+rem PYINSTALLER_PYTHON=python so PyInstaller runs on the interpreter
+rem setup-python installed it into; the launcher picks the newest Python
+rem on the machine, which may not have PyInstaller.
+if not defined PYINSTALLER_PYTHON set PYINSTALLER_PYTHON=py
+
+%PYINSTALLER_PYTHON% -m PyInstaller ^
   --clean ^
   --noconfirm ^
   --onefile ^

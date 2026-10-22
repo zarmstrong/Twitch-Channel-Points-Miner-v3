@@ -111,6 +111,10 @@ jobs:
 
       - name: Build Windows executable
         shell: cmd
+        # Use setup-python's interpreter; the py launcher would pick the
+        # newest Python on the runner, which doesn't have PyInstaller.
+        env:
+          PYINSTALLER_PYTHON: python
         run: build_windows.bat ${{ matrix.flavor }}
 
       - name: Smoke-test Windows executable
