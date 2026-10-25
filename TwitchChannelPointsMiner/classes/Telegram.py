@@ -1,9 +1,18 @@
+from functools import partial
 from textwrap import dedent
 
 import requests
 
-from TwitchChannelPointsMiner.classes.NotificationError import format_request_failure
+from TwitchChannelPointsMiner.classes.NotificationError import (
+    notification_prefix,
+    send_parts,
+)
 from TwitchChannelPointsMiner.classes.Settings import Events
+from TwitchChannelPointsMiner.utils import split_message_lines
+
+# Telegram rejects sendMessage requests whose ``text`` exceeds this many
+# characters (counted in UTF-16 code units).
+TELEGRAM_TEXT_LIMIT = 4096
 
 
 class Telegram(object):
@@ -31,23 +40,29 @@ class Telegram(object):
 
     def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
+            texts = split_message_lines(
+                dedent(message), TELEGRAM_TEXT_LIMIT, notification_prefix()
+            )
+            session = requests.Session()
             try:
-                data = {
-                    "chat_id": self.chat_id,
-                    "text": dedent(message),
-                    "disable_web_page_preview": True,
-                    "disable_notification": self.disable_notification,
-                }
-                if self.message_thread_id is not None:
-                    data["message_thread_id"] = self.message_thread_id
-
-                response = requests.post(
-                    url=self.telegram_api,
-                    data=data,
-                    timeout=(5, 15),
-                )
-                response.raise_for_status()
-                return True, None
-            except requests.RequestException as error:
-                return False, format_request_failure("Telegram", error)
+                return send_parts("Telegram", texts, partial(self._post, session))
+            finally:
+                session.close()
         return False, "This event is not enabled for Telegram."
+
+    def _post(self, session: requests.Session, text: str) -> None:
+        data = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+            "disable_notification": self.disable_notification,
+        }
+        if self.message_thread_id is not None:
+            data["message_thread_id"] = self.message_thread_id
+
+        response = session.post(
+            url=self.telegram_api,
+            data=data,
+            timeout=(5, 15),
+        )
+        response.raise_for_status()

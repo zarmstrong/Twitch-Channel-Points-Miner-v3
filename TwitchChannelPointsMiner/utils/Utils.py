@@ -168,6 +168,80 @@ def create_chunks(lst, n):
     return [lst[i : (i + n)] for i in range(0, len(lst), n)]  # noqa: E203
 
 
+def _utf16_width(character: str) -> int:
+    return 2 if ord(character) > 0xFFFF else 1
+
+
+def utf16_length(text: str) -> int:
+    """Return the length of ``text`` in UTF-16 code units.
+
+    Chat services such as Discord, Telegram, and Pushover count message length
+    this way, so characters outside the Basic Multilingual Plane (most emoji)
+    count twice.
+    """
+    return sum(_utf16_width(character) for character in text)
+
+
+def _wrap_line(line: str, limit: int) -> list[tuple[str, int]]:
+    """Hard-wrap ``line`` into ``(segment, utf16_length)`` pairs within ``limit``."""
+    segments = []
+    start = 0
+    length = 0
+    for index, character in enumerate(line):
+        width = _utf16_width(character)
+        if length and length + width > limit:
+            segments.append((line[start:index], length))
+            start, length = index, 0
+        length += width
+    segments.append((line[start:], length))
+    return segments
+
+
+def split_message_lines(message: str, limit: int, prefix: str = "") -> list[str]:
+    """Split a message into pieces of at most ``limit`` UTF-16 code units.
+
+    A message that already fits is returned unchanged as the only piece.
+    Otherwise pieces break on line boundaries whenever possible, and a single
+    line that is longer than ``limit`` on its own is hard-wrapped with every
+    character preserved. Blank lines are kept inside a piece but never start
+    one, so no piece is blank; the only exception is a whitespace run within a
+    single line that is longer than ``limit``, which is kept rather than lost.
+
+    When the message starts with ``prefix`` (such as the username the logger
+    adds), every later piece starts with it too, within the limit.
+    """
+    if limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if utf16_length(message) <= limit:
+        return [message]
+    if prefix and message.startswith(prefix):
+        prefix_length = utf16_length(prefix)
+        if prefix_length <= limit // 2:
+            body = message[len(prefix) :]  # noqa: E203
+            pieces = _split_lines(body, limit - prefix_length)
+            return [prefix + piece for piece in pieces]
+    return _split_lines(message, limit)
+
+
+def _split_lines(message: str, limit: int) -> list[str]:
+    pieces = []
+    current = []
+    current_length = 0
+    for line in message.split("\n"):
+        blank = not line.strip()
+        for segment, segment_length in _wrap_line(line, limit):
+            if current and current_length + 1 + segment_length > limit:
+                pieces.append("\n".join(current))
+                current, current_length = [], 0
+            if blank and not current:
+                continue
+            current_length += segment_length + (1 if current else 0)
+            current.append(segment)
+    if current:
+        pieces.append("\n".join(current))
+    return pieces or [""]
+
+
 def read(fname):
     package_root = path.dirname(path.dirname(__file__))
     with open(path.join(package_root, fname), encoding="utf-8") as file:
