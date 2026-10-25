@@ -2062,7 +2062,8 @@ class TwitchChannelPointsMiner:
             # categories" as if discovery had succeeded with nothing to find.
             logger.log(
                 category_log_level,
-                "Category refresh skipped: drops inventory unavailable; keeping current category streamers until the next refresh",
+                "Category discovery skipped: drops inventory unavailable; "
+                "streamers from enabled category settings are kept until the next refresh",
                 extra={"emoji": ":pause_button:", "category_log": True},
             )
             return

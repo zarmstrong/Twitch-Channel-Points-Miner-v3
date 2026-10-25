@@ -956,7 +956,7 @@ def test_failed_inventory_load_logs_skip_instead_of_empty_summary(caplog):
         _refresh(miner, ["overwatch-2"], wildcard_categories=True)
 
     messages = [record.getMessage() for record in caplog.records]
-    assert any("Category refresh skipped" in message for message in messages)
+    assert any("Category discovery skipped" in message for message in messages)
     assert not any("Category refresh complete" in message for message in messages)
 
 
@@ -964,3 +964,18 @@ def test_drops_inventory_loaded_rejects_failed_loads():
     assert Twitch.drops_inventory_loaded({"dropCampaignsInProgress": []}) is True
     assert Twitch.drops_inventory_loaded({}) is False
     assert Twitch.drops_inventory_loaded(None) is False
+
+
+def test_real_discovery_filters_skip_on_failed_inventory(monkeypatch):
+    # The refresh tests stub both filters; this pins the real ones to the
+    # same "{} means not loaded" rule the refresh relies on.
+    twitch = _bare_twitch(monkeypatch, {"overwatch-2": datetime(2099, 1, 1)})
+    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {})
+
+    assert twitch.filter_categories_with_active_drops(["overwatch-2"]) == []
+    assert (
+        twitch.filter_categories_with_active_drops(["overwatch-2"], inventory={})
+        == []
+    )
+    assert twitch.get_wildcard_categories_with_active_drops() == []
+    assert twitch.get_wildcard_categories_with_active_drops(inventory={}) == []
