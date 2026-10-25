@@ -1,5 +1,6 @@
 import importlib
 import logging
+import threading
 import time
 from threading import Lock
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Twitch import (
+    _drops_dashboard_state,
     CHANNEL_QUERY_FAILURE_LIMIT,
     Twitch,
 )
@@ -2867,3 +2869,84 @@ def test_gist_copy_of_a_rejected_listed_campaign_is_not_readmitted(monkeypatch):
         0,
         0,
     )
+
+
+def _stub_campaign_sources(monkeypatch):
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+
+def test_campaign_discovery_snapshots_its_own_dashboard_outcome(monkeypatch):
+    # Issue #175: the dashboard outcome is thread-local, so another thread's
+    # dashboard call (the campaign sync thread) succeeding in the very window
+    # between this pass's failed request and its snapshot cannot clear it.
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    twitch = bare_twitch(monkeypatch)
+
+    def failed_dashboard(self, status="OPEN"):
+        _drops_dashboard_state.unavailable = True
+        other_thread = threading.Thread(
+            target=lambda: setattr(_drops_dashboard_state, "unavailable", False)
+        )
+        other_thread.start()
+        other_thread.join()
+        return []
+
+    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", failed_dashboard)
+    _stub_campaign_sources(monkeypatch)
+
+    deadlines, _ = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {}, {"example-game"}
+    )
+
+    assert deadlines == {}
+    assert twitch.campaign_lookup_unavailable is True
+
+
+def test_campaign_discovery_records_a_loaded_dashboard(monkeypatch):
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", True, raising=False)
+    twitch = bare_twitch(monkeypatch)
+    twitch.campaign_lookup_unavailable = True
+
+    def loaded_dashboard(self, status="OPEN"):
+        _drops_dashboard_state.unavailable = False
+        return []
+
+    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", loaded_dashboard)
+    _stub_campaign_sources(monkeypatch)
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
+
+    assert twitch.campaign_lookup_unavailable is False
+
+
+def test_campaign_discovery_treats_unwritten_dashboard_state_as_loaded(monkeypatch):
+    # Stubs that never touch the thread-local (every existing dashboard stub)
+    # keep behaving as a loaded dashboard.
+    monkeypatch.delattr(_drops_dashboard_state, "unavailable", raising=False)
+    twitch = bare_twitch(monkeypatch)
+    twitch.campaign_lookup_unavailable = True
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, status="OPEN": []
+    )
+    _stub_campaign_sources(monkeypatch)
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
+
+    assert twitch.campaign_lookup_unavailable is False

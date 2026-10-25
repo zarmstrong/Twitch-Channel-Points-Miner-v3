@@ -3,6 +3,9 @@ import logging
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
+from TwitchChannelPointsMiner.classes.Exceptions import CategoryLookupFailedException
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Settings import Settings
@@ -133,6 +136,20 @@ def test_drops_directory_filter_does_not_trust_user_tag_text(monkeypatch):
     )
 
     assert twitch._Twitch__get_drops_enabled_directory_logins("game") == set()
+
+
+def test_drops_directory_request_failure_raises_instead_of_empty_set():
+    # Issue #175: an empty set means "no Drops-enabled channel is live" and
+    # retires the category's streamers; a failed request must not look alike.
+    def post_gql_request_raw(operation, request):
+        raise RetryError("DirectoryPage_Game", [])
+
+    twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch._Twitch__get_drops_enabled_directory_logins("game")
+
+    assert error.value.game_slug == "game"
 
 
 def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypatch):

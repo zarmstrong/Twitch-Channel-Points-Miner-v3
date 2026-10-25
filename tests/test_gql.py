@@ -10,6 +10,7 @@ import requests
 
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.Exceptions import (
+    CategoryLookupFailedException,
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
 )
@@ -31,7 +32,7 @@ from TwitchChannelPointsMiner.classes.gql.data.response.PlaybackAccessToken impo
     Authorization,
     PlaybackAccessTokenResponse,
 )
-from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.classes.Twitch import Twitch, _drops_dashboard_state
 from TwitchChannelPointsMiner.utils import AttemptStrategy
 
 
@@ -2096,11 +2097,14 @@ def test_category_search_keeps_allow_listed_channels_with_a_zero_limit(monkeypat
     assert usernames == ["a1"]
 
 
-def test_category_search_still_finds_the_pick_when_the_batch_lookup_fails(
+def test_category_search_reports_a_failed_batch_lookup_instead_of_dropping_the_pick(
     monkeypatch,
 ):
     # A failed chunk request must not count its logins as checked-and-offline,
-    # or the pick's own lookup is skipped and the watched pick gets retired.
+    # or the watched pick (and every other allow-listed channel) gets retired.
+    # The lookup reports the failure instead, so the category stays
+    # unevaluated and its tracked streamers, the pick included, are kept
+    # (issue #175).
     calls = []
     twitch = _mixed_campaign_twitch(
         monkeypatch,
@@ -2111,14 +2115,42 @@ def test_category_search_still_finds_the_pick_when_the_batch_lookup_fails(
     )
     twitch.last_drop_pick_streamer = "gz"
 
-    usernames = twitch.get_live_streamers_for_category(
-        "Gray Zone Warfare", drops_enabled=True, limit=2
-    )
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category(
+            "Gray Zone Warfare", drops_enabled=True, limit=2
+        )
 
-    assert usernames == ["gz", "big"]
-    assert any(
-        call[0] == "streams" and call[1].get("user_login") == "gz" for call in calls
+    assert error.value.game_slug == "gray-zone-warfare"
+    assert error.value.usernames == []
+
+
+def test_failed_discovery_page_keeps_allow_listed_channels_in_a_mixed_game(
+    monkeypatch,
+):
+    # The allow-list lookup worked but the category's stream list failed: the
+    # allow-listed channel already found live is still reported (and its
+    # eligibility seeded) instead of being lost with the failed page.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300}
     )
+    helix_get = Twitch._Twitch__helix_get
+
+    def failing_category_page(self, endpoint, params):
+        if endpoint == "streams" and "game_id" in params:
+            return {}
+        return helix_get(self, endpoint, params)
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", failing_category_page)
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category(
+            "Gray Zone Warfare", drops_enabled=True, limit=2
+        )
+
+    assert error.value.usernames == ["grayzonewarfare"]
+    assert twitch.category_campaign_eligibility[
+        ("gray-zone-warfare", "grayzonewarfare")
+    ] == (2, 2)
 
 
 def test_category_search_lets_allow_listed_channels_fill_a_mixed_limit(monkeypatch):
@@ -2346,7 +2378,9 @@ def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     assert len(stream_calls) == 1
 
 
-def _drop_pick_search_twitch(monkeypatch, directory, pick_game_id="game-id"):
+def _drop_pick_search_twitch(
+    monkeypatch, directory, pick_game_id="game-id", pick_lookup_fails=False
+):
     # The streams page lists "one" and "two"; the current Drops pick is only
     # found by looking it up directly.
     gql = SimpleNamespace(
@@ -2375,6 +2409,8 @@ def _drop_pick_search_twitch(monkeypatch, directory, pick_game_id="game-id"):
             return {"data": [{"id": "game-id", "name": "Game"}]}
         if params.get("user_login") == "pick":
             lookups.append(params)
+            if pick_lookup_fails:
+                return {}
             return {"data": [{"user_login": "pick", "game_id": pick_game_id}]}
         return {
             "data": [
@@ -2399,6 +2435,28 @@ def test_category_search_keeps_live_drop_pick_within_limit(monkeypatch):
     assert len(lookups) == 1
     assert twitch.category_campaign_eligibility == {
         ("game", "one"): (1, 1),
+        ("game", "pick"): (1, 1),
+    }
+
+
+def test_category_search_keeps_drop_pick_when_its_live_check_fails(monkeypatch):
+    # A failed lookup is "unknown", not "offline": dropping the pick on it is
+    # the re-pick churn __keep_drop_pick exists to prevent. It is kept beside
+    # the channels confirmed live, not in place of one, so the result exceeds
+    # the limit by one for this cycle.
+    twitch, lookups = _drop_pick_search_twitch(
+        monkeypatch, ["one", "two", "pick"], pick_lookup_fails=True
+    )
+
+    assert twitch.get_live_streamers_for_category("game", limit=2) == [
+        "one",
+        "two",
+        "pick",
+    ]
+    assert len(lookups) == 1
+    assert twitch.category_campaign_eligibility == {
+        ("game", "one"): (1, 1),
+        ("game", "two"): (1, 1),
         ("game", "pick"): (1, 1),
     }
 
@@ -2429,12 +2487,14 @@ def test_category_search_does_not_look_up_pick_outside_drops_directory(monkeypat
     assert lookups == []
 
 
-def _restricted_pick_twitch(monkeypatch):
+def _restricted_pick_twitch(monkeypatch, pick_lookup_fails=False):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.category_campaign_eligibility = {}
     twitch.last_drop_pick_streamer = "pick"
 
     def helix_get(endpoint, params):
+        if pick_lookup_fails and params["user_login"] == "pick":
+            return {}
         return {
             "data": [
                 {"user_login": login, "game_id": "game-id", "viewer_count": viewers}
@@ -2460,6 +2520,36 @@ def test_restricted_search_keeps_allowlisted_drop_pick(monkeypatch):
     assert usernames == ["pick"]
     # Recording is the caller's job now; the helper hands back the counts.
     assert eligibility == {"pick": (1, 1)}
+
+
+def test_restricted_search_keeps_pick_when_its_live_check_fails(monkeypatch):
+    # The pick is allow-listed after 100 other channels, so the first chunk
+    # (where big alone fills max_total) never reaches it and its own live
+    # check runs, and fails. It is kept as unknown beside big, beyond
+    # max_total for this cycle, instead of displacing the live channel.
+    twitch = _restricted_pick_twitch(monkeypatch, pick_lookup_fails=True)
+    channels = ["big"] + [f"filler-{index}" for index in range(99)] + ["pick"]
+
+    usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": channels}], "game-id", "Game", max_total=1
+    )
+
+    assert usernames == ["big", "pick"]
+    # Recording is the caller's job; the helper returns the counts for both.
+    assert eligibility == {"big": (1, 1), "pick": (1, 1)}
+
+
+def test_restricted_search_verified_pick_still_takes_the_last_slot(monkeypatch):
+    # Same layout with a working live check: the pick is confirmed live and
+    # takes the last slot within max_total, as before.
+    twitch = _restricted_pick_twitch(monkeypatch)
+    channels = ["big"] + [f"filler-{index}" for index in range(99)] + ["pick"]
+
+    usernames, _ = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": channels}], "game-id", "Game", max_total=1
+    )
+
+    assert usernames == ["pick"]
 
 
 def test_restricted_search_drops_pick_missing_from_allowlists(monkeypatch):
@@ -3040,3 +3130,513 @@ def test_mod_view_channel_parses_moderator_status():
     )
 
     assert gql.mod_view_channel("example").is_moderator is True
+
+
+def _category_lookup_twitch(gql=None):
+    twitch = twitch_with_gql(gql if gql is not None else SimpleNamespace())
+    twitch.active_drop_campaigns = {}
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+    twitch.category_log_level = logging.INFO
+    return twitch
+
+
+def _helix_with_category(streams_response):
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "ow-id", "name": "Overwatch 2"}]}
+        return streams_response
+
+    return helix_get
+
+
+def test_category_search_request_failure_raises_instead_of_no_category(
+    monkeypatch, caplog
+):
+    # Issue #175: __helix_get returns {} when the request fails, which used
+    # to be reported as "No category found" plus an empty, stale-looking
+    # result that retired the category's tracked streamers.
+    twitch = _category_lookup_twitch()
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", lambda self, *args: {})
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(CategoryLookupFailedException) as error:
+            twitch.get_live_streamers_for_category("overwatch-2")
+
+    # Unresolved category: the slug of the name it was about to be searched by.
+    assert error.value.game_slug == "overwatch-2"
+    assert error.value.usernames == []
+    assert "No category found" not in caplog.text
+
+
+def test_category_search_request_failure_carries_catalog_alias_slug(monkeypatch):
+    # The tracked stream reports the Twitch game ('bitcraft-online'), not the
+    # configured alias ('bitcraft'); the exception must cover the former.
+    twitch = _category_lookup_twitch()
+    twitch.twitchdrops_app_game_names = {"bitcraft": "BitCraft Online"}
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", lambda self, *args: {})
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("bitcraft")
+
+    assert error.value.game_slug == "bitcraft-online"
+
+
+def test_category_search_genuinely_empty_still_reports_no_category(monkeypatch, caplog):
+    twitch = _category_lookup_twitch()
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", lambda self, *args: {"data": []})
+
+    with caplog.at_level(logging.WARNING):
+        assert twitch.get_live_streamers_for_category("overwatch-2") == []
+
+    assert "No category found for 'overwatch-2'" in caplog.text
+
+
+def test_live_streams_request_failure_raises_with_resolved_game_slug(monkeypatch):
+    twitch = _category_lookup_twitch()
+    helix_get = _helix_with_category({})
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("overwatch-2", drops_enabled=False)
+
+    assert error.value.game_slug == "overwatch-2"
+
+
+def test_live_streams_genuinely_empty_page_returns_no_streamers(monkeypatch):
+    twitch = _category_lookup_twitch()
+    helix_get = _helix_with_category({"data": [], "pagination": {}})
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    assert (
+        twitch.get_live_streamers_for_category("overwatch-2", drops_enabled=False) == []
+    )
+
+
+def test_drops_directory_request_failure_raises_instead_of_empty_result(
+    monkeypatch,
+):
+    def post_gql_request_raw(operation, request):
+        raise RetryError("DirectoryPage_Game", [])
+
+    twitch = _category_lookup_twitch(
+        SimpleNamespace(post_gql_request_raw=post_gql_request_raw)
+    )
+    helix_get = _helix_with_category(
+        {"data": [{"user_login": "ow_esports", "game_id": "ow-id", "viewer_count": 5}]}
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("overwatch-2")
+
+    assert error.value.game_slug == "overwatch-2"
+
+
+def test_forced_category_streamer_lookup_failure_raises_instead_of_not_live(
+    monkeypatch, caplog
+):
+    twitch = _category_lookup_twitch()
+    helix_get = _helix_with_category({})
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(CategoryLookupFailedException) as error:
+            twitch.get_live_streamers_for_category("overwatch-2|forced_streamer")
+
+    assert error.value.game_slug == "overwatch-2"
+    assert "is not live" not in caplog.text
+
+
+def test_forced_category_streamer_genuinely_offline_logs_not_live(monkeypatch, caplog):
+    twitch = _category_lookup_twitch()
+    helix_get = _helix_with_category({"data": []})
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert (
+            twitch.get_live_streamers_for_category("overwatch-2|forced_streamer") == []
+        )
+
+    assert "Forced category streamer 'forced_streamer' is not live" in caplog.text
+
+
+def test_restricted_campaign_channel_lookup_failure_raises(monkeypatch):
+    twitch = _category_lookup_twitch()
+    twitch.active_drop_campaigns = {
+        "overwatch-2": [{"id": "campaign-1", "channels": ["allowed-channel"]}]
+    }
+    helix_get = _helix_with_category({})
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("overwatch-2", drops_enabled=False)
+
+    assert error.value.game_slug == "overwatch-2"
+
+
+def test_drops_dashboard_failure_is_recorded_for_category_discovery(monkeypatch):
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+
+    def fail():
+        raise RetryError("ViewerDropsDashboard", [])
+
+    twitch = twitch_with_gql(SimpleNamespace(get_viewer_drops_dashboard=fail))
+
+    assert twitch._Twitch__get_drops_dashboard(status="OPEN") == []
+    assert _drops_dashboard_state.unavailable is True
+
+    twitch.gql = SimpleNamespace(
+        get_viewer_drops_dashboard=lambda: SimpleNamespace(
+            raw_response={"data": {"currentUser": {"dropCampaigns": []}}}
+        )
+    )
+
+    assert twitch._Twitch__get_drops_dashboard(status="OPEN") == []
+    assert _drops_dashboard_state.unavailable is False
+
+
+def test_live_streams_failure_after_first_page_carries_found_channels(monkeypatch):
+    # The category stays unevaluated, but page one's channels are reported on
+    # the exception so the caller can still add them this cycle.
+    # Three Drops-enabled channels keep the search window above page one's
+    # two results, so the second page is actually requested.
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {
+                "game": {
+                    "streams": {
+                        "edges": [
+                            {"node": {"broadcaster": {"login": login}}}
+                            for login in ("one", "two", "three")
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    twitch = _category_lookup_twitch(gql)
+    pages = []
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "ow-id", "name": "Overwatch 2"}]}
+        pages.append(params.get("after"))
+        if params.get("after") == "page-2":
+            return {}
+        return {
+            "data": [
+                {"user_login": "one", "game_id": "ow-id", "viewer_count": 2},
+                {"user_login": "two", "game_id": "ow-id", "viewer_count": 1},
+            ],
+            "pagination": {"cursor": "page-2"},
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("overwatch-2", limit=5)
+
+    assert pages == [None, "page-2"]
+    assert error.value.game_slug == "overwatch-2"
+    assert error.value.usernames == ["one", "two"]
+    assert "after 2 live channels were found" in str(error.value)
+    # The partial channels get the discovery seed so they can be watched.
+    assert twitch.category_campaign_eligibility == {
+        ("overwatch-2", "one"): (1, 1),
+        ("overwatch-2", "two"): (1, 1),
+    }
+
+
+def _helix_twitch(monkeypatch, response_factory):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
+    twitch.user_agent = "test-agent"
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.requests.get",
+        lambda url, **kwargs: response_factory(),
+    )
+    return twitch
+
+
+@pytest.mark.parametrize("status_code", [400, 404, 410, 422])
+def test_helix_get_reports_permanent_client_errors_as_empty_page(
+    monkeypatch, status_code
+):
+    # A request-shape error: Twitch answered and will keep answering the same
+    # way (e.g. a malformed login in a campaign allow-list), so it is an
+    # evaluated empty page, not a failure, or the category would stay
+    # unevaluated forever.
+    twitch = _helix_twitch(monkeypatch, lambda: FakeResponse({}, status_code))
+
+    response = twitch._Twitch__helix_get("streams", {"user_login": ["bad login"]})
+
+    assert response == {"data": []}
+    assert twitch._Twitch__helix_request_failed(response) is False
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 408, 425, 429, 500, 502, 503])
+def test_helix_get_reports_transient_http_errors_as_failed(monkeypatch, status_code):
+    # 401/403 included: an expired token or a Cloudflare streak must not read
+    # as "No category found" and retire every category streamer.
+    twitch = _helix_twitch(monkeypatch, lambda: FakeResponse({}, status_code))
+
+    response = twitch._Twitch__helix_get("streams", {"game_id": "1"})
+
+    assert response == {}
+    assert twitch._Twitch__helix_request_failed(response) is True
+
+
+@pytest.mark.parametrize(
+    "error", [requests.ConnectionError("down"), requests.Timeout("slow")]
+)
+def test_helix_get_reports_network_errors_as_failed(monkeypatch, error):
+    def fail():
+        raise error
+
+    twitch = _helix_twitch(monkeypatch, fail)
+
+    response = twitch._Twitch__helix_get("streams", {"game_id": "1"})
+
+    assert response == {}
+    assert twitch._Twitch__helix_request_failed(response) is True
+
+
+def test_helix_get_still_suppresses_listed_statuses_silently(monkeypatch):
+    twitch = _helix_twitch(monkeypatch, lambda: FakeResponse({}, 404))
+
+    assert (
+        twitch._Twitch__helix_get("drops/campaigns", {}, suppress_status_codes={404})
+        == {}
+    )
+
+
+def test_permanent_streams_error_is_an_evaluated_empty_category(monkeypatch):
+    # End to end: a 400 from `streams` yields a normal empty result, so the
+    # category's stale streamers are still retired by the caller.
+    twitch = _category_lookup_twitch()
+    twitch.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
+    twitch.user_agent = "test-agent"
+
+    def get(url, **kwargs):
+        if url.endswith("search/categories"):
+            return FakeResponse({"data": [{"id": "ow-id", "name": "Overwatch 2"}]})
+        return FakeResponse({"error": "Bad Request"}, 400)
+
+    monkeypatch.setattr("TwitchChannelPointsMiner.classes.Twitch.requests.get", get)
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert (
+        twitch.get_live_streamers_for_category("overwatch-2", drops_enabled=False) == []
+    )
+
+
+def test_restricted_lookup_failure_after_first_chunk_seeds_found_channels(
+    monkeypatch,
+):
+    # The second allow-list chunk fails: the channels the first chunk found
+    # are reported on the exception with their real per-campaign eligibility
+    # already seeded, like the paginated path does.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    chunks = []
+
+    def helix_get(endpoint, params):
+        chunks.append(len(params["user_login"]))
+        if "streamer-0" not in params["user_login"]:
+            return {}
+        return {
+            "data": [
+                {"user_login": "streamer-1", "game_id": "game-1", "viewer_count": 5},
+                {"user_login": "streamer-0", "game_id": "game-1", "viewer_count": 9},
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    campaigns = [
+        {"channels": [f"streamer-{index}" for index in range(150)]},
+        {"channels": ["streamer-0"]},
+    ]
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch._Twitch__get_live_restricted_campaign_streamers(
+            campaigns, "game-1", "Game", target_per_campaign=200
+        )
+
+    assert chunks == [100, 50]
+    assert error.value.game_slug == "game"
+    assert error.value.usernames == ["streamer-0", "streamer-1"]
+    assert twitch.category_campaign_eligibility == {
+        ("game", "streamer-0"): (2, 2),
+        ("game", "streamer-1"): (1, 2),
+    }
+
+
+def _paginated_failure_twitch(monkeypatch, directory, page_one, sort_viewers=None):
+    """Page one succeeds (and has a cursor because the Drops directory lists
+    more channels than it returned), page two fails."""
+    gql = SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {
+                "game": {
+                    "streams": {
+                        "edges": [
+                            {"node": {"broadcaster": {"login": login}}}
+                            for login in directory
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    twitch = _category_lookup_twitch(gql)
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "ow-id", "name": "Overwatch 2"}]}
+        if params.get("after") == "page-2":
+            return {}
+        return {"data": page_one, "pagination": {"cursor": "page-2"}}
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    return twitch
+
+
+def test_partial_page_failure_applies_configured_sort_before_the_limit(monkeypatch):
+    twitch = _paginated_failure_twitch(
+        monkeypatch,
+        ["one", "two", "three", "four", "five"],
+        [
+            {"user_login": "three", "game_id": "ow-id", "viewer_count": 3},
+            {"user_login": "one", "game_id": "ow-id", "viewer_count": 1},
+            {"user_login": "two", "game_id": "ow-id", "viewer_count": 2},
+        ],
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category(
+            "overwatch-2", limit=2, sort_by="VIEWERS_ASC"
+        )
+
+    assert error.value.usernames == ["one", "two"]
+
+
+def test_partial_page_failure_keeps_drop_pick_found_on_first_page(monkeypatch):
+    twitch = _paginated_failure_twitch(
+        monkeypatch,
+        ["one", "two", "three", "four", "five"],
+        [
+            {"user_login": "three", "game_id": "ow-id", "viewer_count": 3},
+            {"user_login": "one", "game_id": "ow-id", "viewer_count": 1},
+            {"user_login": "two", "game_id": "ow-id", "viewer_count": 2},
+        ],
+    )
+    twitch.last_drop_pick_streamer = "three"
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category(
+            "overwatch-2", limit=2, sort_by="VIEWERS_ASC"
+        )
+
+    assert error.value.usernames == ["one", "three"]
+
+
+def test_partial_page_failure_reseeds_stale_negative_eligibility(monkeypatch):
+    # Same per-entry rule as a complete lookup: a stale negative verdict is
+    # superseded by the discovery seed, a fresh one is honoured, and entries
+    # of channels the failed pages never reached are left alone.
+    twitch = _paginated_failure_twitch(
+        monkeypatch,
+        ["one", "two", "three"],
+        [
+            {"user_login": "one", "game_id": "ow-id", "viewer_count": 2},
+            {"user_login": "two", "game_id": "ow-id", "viewer_count": 1},
+        ],
+    )
+    stale = time.time() - 15 * 60
+    twitch.category_campaign_eligibility = {
+        ("overwatch-2", "one"): (0, 1),
+        ("overwatch-2", "two"): (0, 1),
+        ("overwatch-2", "unreached"): (0, 1),
+        ("other-game", "one"): (0, 1),
+    }
+    twitch.category_channel_verdicts = {
+        ("overwatch-2", "one"): ((0, 1), stale),
+        ("overwatch-2", "two"): ((0, 1), time.time()),
+        ("overwatch-2", "unreached"): ((0, 1), stale),
+    }
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("overwatch-2", limit=5)
+
+    assert error.value.usernames == ["one", "two"]
+    assert twitch.category_campaign_eligibility == {
+        ("overwatch-2", "one"): (1, 1),
+        ("overwatch-2", "two"): (0, 1),
+        ("overwatch-2", "unreached"): (0, 1),
+        ("other-game", "one"): (0, 1),
+    }
+    assert set(twitch.category_channel_verdicts) == {
+        ("overwatch-2", "two"),
+        ("overwatch-2", "unreached"),
+    }
+    assert "overwatch-2" in twitch.evaluated_category_campaigns
+
+
+def test_restricted_partial_failure_reseeds_stale_negative_eligibility(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    stale = time.time() - 15 * 60
+    twitch.category_campaign_eligibility = {
+        ("game", "streamer-0"): (0, 1),
+        ("game", "streamer-1"): (0, 1),
+    }
+    twitch.category_channel_verdicts = {
+        ("game", "streamer-0"): ((0, 1), stale),
+        ("game", "streamer-1"): ((0, 1), time.time()),
+    }
+
+    def helix_get(endpoint, params):
+        if "streamer-0" not in params["user_login"]:
+            return {}
+        return {
+            "data": [
+                {"user_login": "streamer-0", "game_id": "game-1", "viewer_count": 9},
+                {"user_login": "streamer-1", "game_id": "game-1", "viewer_count": 5},
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    campaigns = [{"channels": [f"streamer-{index}" for index in range(150)]}]
+
+    with pytest.raises(CategoryLookupFailedException):
+        twitch._Twitch__get_live_restricted_campaign_streamers(
+            campaigns, "game-1", "Game", target_per_campaign=200
+        )
+
+    assert twitch.category_campaign_eligibility == {
+        ("game", "streamer-0"): (1, 1),
+        ("game", "streamer-1"): (0, 1),
+    }

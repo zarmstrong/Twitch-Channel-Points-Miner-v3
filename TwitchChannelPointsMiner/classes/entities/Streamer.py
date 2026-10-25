@@ -166,6 +166,7 @@ class Streamer(object):
         "from_category",
         "from_badge_campaign",
         "from_wildcard_category",
+        "discovery_category_slugs",
         "explicitly_configured",
         "channel_id",
         "settings",
@@ -198,12 +199,19 @@ class Streamer(object):
         from_badge_campaign=False,
         from_followers=False,
         from_wildcard_category=False,
+        discovery_category_slugs=None,
     ):
         self.username: str = username.lower().strip()
         self.from_followers = from_followers
         self.from_category = from_category
         self.from_badge_campaign = from_badge_campaign
         self.from_wildcard_category = from_wildcard_category
+        # Configured category slug(s) this channel was discovered under, so a
+        # category refresh can map it back to its category before its first
+        # stream update reports a game. None for channels not found that way.
+        self.discovery_category_slugs = (
+            set(discovery_category_slugs) if discovery_category_slugs else None
+        )
         self.explicitly_configured = explicitly_configured
         self.channel_id: str = ""
         self.settings = settings

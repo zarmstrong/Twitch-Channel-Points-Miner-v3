@@ -58,6 +58,9 @@ class FakeTwitch:
     def filter_categories_with_active_drops(self, categories, **_kwargs):
         return categories
 
+    def get_category_slugs(self, categories):
+        return set(categories)
+
     def get_drops_inventory(self):
         return {"present": True}
 
