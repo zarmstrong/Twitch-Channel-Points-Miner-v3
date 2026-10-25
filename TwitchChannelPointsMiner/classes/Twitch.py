@@ -2671,6 +2671,15 @@ class Twitch(object):
         """
         return self.__get_inventory()
 
+    @staticmethod
+    def drops_inventory_loaded(inventory) -> bool:
+        """Whether an inventory from get_drops_inventory() actually loaded.
+
+        __get_inventory returns {} when the request or its parsing fails, and
+        category discovery skips (returning no categories) in that case.
+        """
+        return isinstance(inventory, dict) and inventory != {}
+
     def completed_badge_campaign_signatures(self, inventory: dict) -> set:
         """Build (game_slug, campaign_name, ends_at_epoch) signatures for
         campaigns the authenticated account has already completed.
@@ -2782,7 +2791,7 @@ class Twitch(object):
 
         if inventory is None:
             inventory = self.__get_inventory()
-        if not isinstance(inventory, dict) or inventory == {}:
+        if not self.drops_inventory_loaded(inventory):
             logger.warning(
                 "Unable to load drops inventory; skipping category stream discovery",
                 extra={"emoji": ":warning:"},
@@ -2910,7 +2919,7 @@ class Twitch(object):
 
         if inventory is None:
             inventory = self.__get_inventory()
-        if not isinstance(inventory, dict) or inventory == {}:
+        if not self.drops_inventory_loaded(inventory):
             logger.warning(
                 "Unable to load drops inventory; skipping wildcard category discovery",
                 extra={"emoji": ":warning:"},

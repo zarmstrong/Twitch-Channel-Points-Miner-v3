@@ -837,3 +837,130 @@ def test_reconcile_scoped_to_preferred_does_not_evict_wildcard_streamers():
 
     assert [s.username for s in miner.streamers] == ["wild"]
     assert miner.ws_pool.removed == ["preferred"]
+
+
+class InventoryFailureTwitch(FakeTwitch):
+    """Mirrors Twitch.__get_inventory's `{}` on a transient GQL failure: both
+    discovery filters then skip and report no eligible categories."""
+
+    def get_drops_inventory(self):
+        self.inventory_fetch_count += 1
+        return {}
+
+    def filter_categories_with_active_drops(self, categories, **kwargs):
+        self.filter_calls.append(kwargs)
+        return []
+
+    def get_wildcard_categories_with_active_drops(self, **kwargs):
+        self.wildcard_calls.append(kwargs)
+        return []
+
+
+def _refresh(miner, categories, wildcard_categories=False):
+    miner._TwitchChannelPointsMiner__refresh_category_streamers(
+        categories,
+        [],
+        True,
+        2,
+        "VIEWERS_DESC",
+        "ORDER",
+        ChatPresence.NEVER,
+        logging.INFO,
+        wildcard_categories=wildcard_categories,
+        wildcard_category_limit=10,
+        wildcard_category_streamer_limit=1,
+        wildcard_category_pin_active=True,
+    )
+
+
+def _tracked(username, wildcard=False):
+    streamer = Streamer(username, from_category=True, from_wildcard_category=wildcard)
+    streamer.irc_chat = FakeIrcChat()
+    return streamer
+
+
+def test_failed_inventory_load_keeps_preferred_and_wildcard_streamers():
+    # Issue #124: a transient Inventory failure made discovery come back
+    # empty and the reconcile pass retired every live category streamer.
+    twitch = InventoryFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    wildcard = _tracked("wild", wildcard=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+
+    _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+
+    assert miner.streamers == [preferred, wildcard]
+    assert miner.original_streamers == [10, 20]
+    assert miner.ws_pool.removed == []
+    assert preferred.irc_chat.stopped is False
+    assert wildcard.irc_chat.stopped is False
+    assert wildcard.from_wildcard_category is True
+    # Wildcard discovery can't succeed without the inventory either.
+    assert twitch.wildcard_calls == []
+
+
+def test_failed_inventory_load_still_retires_streamers_of_disabled_categories():
+    # Turning `categories` off still means off, even while the inventory is
+    # unavailable for the wildcard pass.
+    twitch = InventoryFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    wildcard = _tracked("wild", wildcard=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+
+    _refresh(miner, [], wildcard_categories=True)
+
+    assert miner.streamers == [wildcard]
+    assert miner.ws_pool.removed == ["ow_esports"]
+
+
+def test_successful_empty_discovery_still_retires_stale_streamers():
+    twitch = FakeTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    miner.streamers = [_tracked("ow_esports")]
+    miner.original_streamers = [10]
+
+    _refresh(miner, ["overwatch-2"])
+
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["ow_esports"]
+
+
+def test_failed_inventory_load_still_retires_wildcard_streamers_when_disabled():
+    # Same "off means off" rule for wildcard_categories: turning it off
+    # retires wildcard streamers even while the inventory is unavailable,
+    # while preferred streamers are kept.
+    twitch = InventoryFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    wildcard = _tracked("wild", wildcard=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+
+    _refresh(miner, ["overwatch-2"], wildcard_categories=False)
+
+    assert miner.streamers == [preferred]
+    assert miner.ws_pool.removed == ["wild"]
+
+
+def test_failed_inventory_load_logs_skip_instead_of_empty_summary(caplog):
+    twitch = InventoryFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    miner.streamers = [_tracked("ow_esports")]
+    miner.original_streamers = [10]
+
+    with caplog.at_level(logging.INFO):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Category refresh skipped" in message for message in messages)
+    assert not any("Category refresh complete" in message for message in messages)
+
+
+def test_drops_inventory_loaded_rejects_failed_loads():
+    assert Twitch.drops_inventory_loaded({"dropCampaignsInProgress": []}) is True
+    assert Twitch.drops_inventory_loaded({}) is False
+    assert Twitch.drops_inventory_loaded(None) is False
