@@ -18,6 +18,7 @@ class Stream(object):
         "drops_tags",
         "campaigns",
         "campaigns_ids",
+        "channel_campaign_ids",
         "viewers_count",
         "spade_url",
         "payload",
@@ -37,6 +38,8 @@ class Stream(object):
         self.drops_tags = False
         self.campaigns = []
         self.campaigns_ids = []
+        # The subset of campaigns_ids Twitch advertised on this channel itself.
+        self.channel_campaign_ids = []
 
         self.viewers_count = 0
         self.__last_update = 0
@@ -84,7 +87,7 @@ class Stream(object):
 
     def game_name(self):
         return None if self.game in [{}, None] else self.game["name"]
-    
+
     def game_id(self):
         return None if self.game in [{}, None] else self.game["id"]
 

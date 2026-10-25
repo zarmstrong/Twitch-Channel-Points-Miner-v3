@@ -2612,3 +2612,81 @@ def test_prompt_claim_clears_debounce_when_claim_raises(monkeypatch):
     # The claim attempt failed, so the debounce entry must be cleared rather
     # than left behind unusable.
     assert twitch.prompt_claim_last == {}
+
+
+def test_channel_advertised_campaigns_are_recorded_on_the_stream(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    campaign = advertised_campaign()
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[campaign], campaigns_available=True
+        )
+    )
+    twitch.awarded_game_event_drops = {}
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+    )
+    streamer = category_streamer()
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == ["campaign-1"]
+    assert streamer.stream.channel_campaign_ids == ["campaign-1"]
+
+
+def test_fallback_campaigns_are_not_recorded_as_channel_advertised(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [
+            {
+                "id": "gist-campaign-1",
+                "name": "Gist Campaign",
+                "channels": ["drops-channel"],
+            }
+        ]
+    }
+    streamer = category_streamer()
+    # A stale value from an earlier refresh must not survive.
+    streamer.stream.channel_campaign_ids = ["gist-campaign-1"]
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == [
+        "gist-campaign-1"
+    ]
+    assert streamer.stream.channel_campaign_ids == []
+
+
+def test_failed_channel_query_keeps_previously_advertised_campaigns(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+
+    def failed_query(channel_id):
+        raise RetryError("DropsHighlightService_AvailableDrops", [])
+
+    twitch.gql = SimpleNamespace(get_available_drops=failed_query)
+    twitch.discovered_open_drop_campaigns = []
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [
+            {"id": "campaign-1", "name": "Example Campaign", "channels": []}
+        ]
+    }
+    followed = SimpleNamespace(
+        username="followed-channel",
+        channel_id="12345",
+        from_category=False,
+        from_badge_campaign=False,
+        stream=SimpleNamespace(
+            game_name=lambda: "Example Game",
+            # Advertised by the channel on an earlier refresh; the ended
+            # campaign no longer resolves and is dropped.
+            channel_campaign_ids=["campaign-1", "ended-campaign"],
+        ),
+    )
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(followed) == ["campaign-1"]
+    # One failed query is not a verdict on the channel.
+    assert followed.stream.channel_campaign_ids == ["campaign-1"]
