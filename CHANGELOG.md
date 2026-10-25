@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.19.4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.3...3.19.4) (2026-10-25)
+
+
+### Bug Fixes
+
+* **ci:** build Windows executables with the workflow's Python ([#173](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/173)) ([68d89bf](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/68d89bf1a1fb2a79c55825d6f6e35a70d4768158))
+* **drops:** keep category streamers when the drops inventory fails to load ([#177](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/177)) ([600fb06](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/600fb06fb9482e1853dffed2ed0e14dd65c0621f))
+* exit instead of leaving a zombie process when the main loop crashes ([f6fc481](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f6fc481fa5c1ff626f1cf872ee54c640f34af4bb))
+* exit instead of leaving a zombie process when the main loop crashes ([f6fc481](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f6fc481fa5c1ff626f1cf872ee54c640f34af4bb))
+* keep the main loop alive when streamers are retired mid-iteration ([#171](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/171)) ([f6fc481](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f6fc481fa5c1ff626f1cf872ee54c640f34af4bb)), closes [#169](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/169)
+* retry failed main loop passes instead of stopping the miner ([f6fc481](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f6fc481fa5c1ff626f1cf872ee54c640f34af4bb))
+* **websocket:** skip reconnecting a websocket retired while it slept ([f6fc481](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f6fc481fa5c1ff626f1cf872ee54c640f34af4bb))
+
 ## [3.19.3](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.2...3.19.3) (2026-10-16)
 
 
