@@ -862,11 +862,21 @@ class TwitchChannelPointsMiner:
                 )
 
                 if categories and eligible_categories == []:
-                    logger.log(
-                        category_log_level,
-                        "Skipping category stream discovery: no configured categories have active incomplete campaigns",
-                        extra={"emoji": ":sleeping:", "category_log": True},
-                    )
+                    # Keep the two causes apart in the log: a failed inventory
+                    # load is a transient outage, not evidence that no campaign
+                    # is running (same distinction the refresh makes).
+                    if not Twitch.drops_inventory_loaded(discovery_inventory):
+                        logger.log(
+                            category_log_level,
+                            "Skipping category stream discovery: drops inventory unavailable",
+                            extra={"emoji": ":pause_button:", "category_log": True},
+                        )
+                    else:
+                        logger.log(
+                            category_log_level,
+                            "Skipping category stream discovery: no configured categories have active incomplete campaigns",
+                            extra={"emoji": ":sleeping:", "category_log": True},
+                        )
 
                 for category in eligible_categories:
                     all_category_usernames.extend(
