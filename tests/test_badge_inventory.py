@@ -1,5 +1,7 @@
 import json
 import logging
+
+import pytest
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ def bare_twitch(gql):
     twitch = object.__new__(Twitch)
     twitch.gql = gql
     twitch.available_badge_names = None
+    twitch.completed_badge_campaign_signature_cache = None
     twitch.twitchdrops_app_campaigns = {}
     twitch.twitchdrops_app_upcoming_starts = {}
     twitch.log_drop_checks = False
@@ -20,6 +23,10 @@ def bare_twitch(gql):
     twitch.category_campaign_eligibility = {}
     twitch.awarded_game_event_drops = {}
     return twitch
+
+
+# What the real callers pass once the inventory loaded with no completions.
+EMPTY_INVENTORY = {"completedRewardCampaigns": []}
 
 
 def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
@@ -424,7 +431,7 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     )
 
     deadlines = twitch._Twitch__twitchdrops_app_fallback(
-        ["two-point-museum"], set()
+        ["two-point-museum"], set(), EMPTY_INVENTORY
     )
 
     assert deadlines == {}
@@ -468,6 +475,7 @@ def test_non_badge_reward_name_does_not_complete_fallback_campaign(monkeypatch):
     deadlines = twitch._Twitch__twitchdrops_app_fallback(
         ["the-elder-scrolls-online"],
         set(),
+        EMPTY_INVENTORY,
     )
 
     assert deadlines == {"the-elder-scrolls-online": datetime(2099, 1, 1)}
@@ -519,7 +527,7 @@ def test_full_fallback_catalog_evaluates_every_indexed_game(monkeypatch):
 
     monkeypatch.setattr(TwitchDropsAppScraper, "scrape", scrape)
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(None, set())
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(None, set(), EMPTY_INVENTORY)
 
     assert deadlines == {
         "urgent-game": datetime(2050, 1, 1),
@@ -542,7 +550,7 @@ def test_failed_full_fallback_catalog_is_still_marked_attempted(monkeypatch):
         lambda self: (_ for _ in ()).throw(ValueError("unavailable")),
     )
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(None, set())
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(None, set(), EMPTY_INVENTORY)
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_deadlines == {}
@@ -590,7 +598,9 @@ def test_current_campaign_award_completes_non_badge_fallback(monkeypatch):
         },
     )
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(["star-citizen"], set())
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["star-citizen"], set(), EMPTY_INVENTORY
+    )
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_campaigns == {}
@@ -666,6 +676,247 @@ def test_completed_reward_campaign_signature_completes_fallback_despite_stale_aw
     assert twitch.twitchdrops_app_campaigns == {}
 
 
+COMPLETED_MINECRAFT_INVENTORY = {
+    "completedRewardCampaigns": [
+        {
+            "campaign": {
+                "name": "Corrupted Creeper Cape",
+                "endAt": "2099-01-01T00:00:00Z",
+                "game": {"displayName": "Minecraft"},
+            }
+        }
+    ]
+}
+PARTIAL_INVENTORY = {"dropCampaignsInProgress": [], "completedRewardCampaigns": None}
+
+
+def _minecraft_gist(monkeypatch):
+    """Point the gist scraper at one completed Minecraft campaign; return calls."""
+    front_page_calls = []
+
+    def scrape_front_page(self):
+        front_page_calls.append(True)
+        return [
+            {
+                "slug": "minecraft",
+                "game": "Minecraft",
+                "url": "https://twitchdrops.app/game/minecraft",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(TwitchDropsAppScraper, "scrape_front_page", scrape_front_page)
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Minecraft",
+            "campaigns": [
+                {
+                    "name": "Corrupted Creeper Cape",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "Corrupted Creeper Cape"}],
+                }
+            ],
+        },
+    )
+    return front_page_calls
+
+
+def _badge_gql():
+    return SimpleNamespace(
+        post_gql_request_raw=lambda operation, request: {
+            "data": {"currentUser": {"availableBadges": []}}
+        }
+    )
+
+
+def test_drops_inventory_completions_loaded_requires_a_list():
+    assert Twitch.drops_inventory_completions_loaded(COMPLETED_MINECRAFT_INVENTORY)
+    assert Twitch.drops_inventory_completions_loaded({"completedRewardCampaigns": []})
+    assert Twitch.drops_inventory_completions_loaded({}) is False
+    assert Twitch.drops_inventory_completions_loaded(None) is False
+    assert Twitch.drops_inventory_completions_loaded(PARTIAL_INVENTORY) is False
+    assert (
+        Twitch.drops_inventory_completions_loaded({"dropCampaignsInProgress": []})
+        is False
+    )
+
+
+def test_completed_badge_campaign_signatures_or_cached_keeps_last_good_load():
+    twitch = bare_twitch(SimpleNamespace())
+
+    assert twitch.completed_badge_campaign_signatures_or_cached({}) is None
+
+    signatures = twitch.completed_badge_campaign_signatures_or_cached(
+        COMPLETED_MINECRAFT_INVENTORY
+    )
+    assert len(signatures) == 1
+    assert twitch.completed_badge_campaign_signature_cache == signatures
+    assert twitch.completed_badge_campaign_signatures_or_cached({}) == signatures
+    assert (
+        twitch.completed_badge_campaign_signatures_or_cached(PARTIAL_INVENTORY)
+        == signatures
+    )
+    # A later good load that leaves the campaign out (for example because
+    # its entry errored and was dropped) does not forget it: completing a
+    # campaign is permanent, so the cache only grows.
+    assert (
+        twitch.completed_badge_campaign_signatures_or_cached(
+            {"completedRewardCampaigns": []}
+        )
+        == signatures
+    )
+    assert twitch.completed_badge_campaign_signature_cache == signatures
+
+
+def test_completed_badge_campaign_signatures_or_cached_merges_new_completions(
+    monkeypatch,
+):
+    twitch = bare_twitch(SimpleNamespace())
+    twitch.completed_badge_campaign_signatures_or_cached(COMPLETED_MINECRAFT_INVENTORY)
+    monkeypatch.setattr(
+        Twitch,
+        "completed_badge_campaign_signatures",
+        lambda self, inventory: {"another"},
+    )
+
+    merged = twitch.completed_badge_campaign_signatures_or_cached(
+        {"completedRewardCampaigns": [{"campaign": {}}]}
+    )
+
+    assert len(merged) == 2
+    assert "another" in merged
+    # Callers get a copy, so changing it cannot change the cache.
+    merged.clear()
+    assert len(twitch.completed_badge_campaign_signature_cache) == 2
+
+
+@pytest.mark.parametrize("unusable_inventory", [{}, PARTIAL_INVENTORY])
+def test_gist_fallback_keeps_suppressing_completed_campaign_from_cached_inventory(
+    monkeypatch, unusable_inventory
+):
+    """The gist matcher shares the badge check's completion evidence, so a
+    failed or partial inventory after one good load must not resurrect a
+    campaign the account already completed."""
+    twitch = bare_twitch(_badge_gql())
+    front_page_calls = _minecraft_gist(monkeypatch)
+
+    assert (
+        twitch._Twitch__twitchdrops_app_fallback(
+            ["minecraft"], set(), COMPLETED_MINECRAFT_INVENTORY
+        )
+        == {}
+    )
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["minecraft"], set(), unusable_inventory
+    )
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
+    assert len(front_page_calls) == 2
+
+
+def test_gist_fallback_stands_down_without_any_completion_evidence(monkeypatch, caplog):
+    twitch = bare_twitch(_badge_gql())
+    twitch.category_log_level = logging.INFO
+    previous_deadlines = {"minecraft": datetime(2098, 1, 1)}
+    twitch.twitchdrops_app_deadlines = dict(previous_deadlines)
+    twitch.twitchdrops_app_campaigns = {"minecraft": ["previous cycle"]}
+    front_page_calls = _minecraft_gist(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        deadlines = twitch._Twitch__twitchdrops_app_fallback(
+            ["minecraft"], set(), PARTIAL_INVENTORY
+        )
+
+    # The previous cycle's gist result stands, nothing was scraped, and the
+    # stand-down is reported at the category log level.
+    assert deadlines == previous_deadlines
+    assert twitch.twitchdrops_app_deadlines == previous_deadlines
+    assert twitch.twitchdrops_app_campaigns == {"minecraft": ["previous cycle"]}
+    assert front_page_calls == []
+    assert twitch.completed_badge_campaign_signature_cache is None
+    skip_records = [
+        record
+        for record in caplog.records
+        if "Skipping Twitch Drops gist check" in record.getMessage()
+    ]
+    assert [record.levelno for record in skip_records] == [logging.INFO]
+
+
+def _inventory_twitch(monkeypatch, inventory, error_path):
+    """A Twitch whose GQL returns `inventory` with one error at `error_path`."""
+    response = SimpleNamespace(
+        inventory=inventory,
+        errors=[SimpleNamespace(message="service error", path=error_path)],
+    )
+    twitch = bare_twitch(SimpleNamespace(get_inventory=lambda: response))
+    twitch.completed_drop_campaigns = set()
+    monkeypatch.setattr(
+        Twitch, "_Twitch__cache_drop_inventory_progress", lambda self, inv: None
+    )
+    return twitch
+
+
+def test_inventory_error_on_completed_campaigns_list_marks_completions_unloaded(
+    monkeypatch,
+):
+    twitch = _inventory_twitch(
+        monkeypatch,
+        {
+            "dropCampaignsInProgress": [],
+            "gameEventDrops": [],
+            "completedRewardCampaigns": None,
+        },
+        ["currentUser", "inventory", "completedRewardCampaigns"],
+    )
+
+    loaded = twitch.get_drops_inventory()
+
+    assert Twitch.drops_inventory_loaded(loaded) is True
+    assert loaded["completedRewardCampaigns"] is None
+    assert Twitch.drops_inventory_completions_loaded(loaded) is False
+    assert twitch.completed_badge_campaign_signatures_or_cached(loaded) is None
+    assert twitch.completed_drop_campaigns == set()
+
+
+def test_inventory_error_in_one_completed_campaign_entry_keeps_the_rest(monkeypatch):
+    """A persistent per-entry error (one stale campaign failing on every fetch)
+    must not stop completions from counting as loaded, or badge discovery and
+    gist matching would stand down forever; only the named entry is dropped."""
+    surviving = {
+        "campaign": {
+            "id": "campaign-1",
+            "name": "Corrupted Creeper Cape",
+            "endAt": "2099-01-01T00:00:00Z",
+            "game": {"displayName": "Minecraft"},
+        }
+    }
+    twitch = _inventory_twitch(
+        monkeypatch,
+        {
+            "dropCampaignsInProgress": [],
+            "gameEventDrops": [],
+            "completedRewardCampaigns": [
+                surviving,
+                {"campaign": {"id": "campaign-2", "name": "Stale", "game": None}},
+            ],
+        },
+        ["currentUser", "inventory", "completedRewardCampaigns", 1, "campaign", "game"],
+    )
+
+    loaded = twitch.get_drops_inventory()
+
+    assert loaded["completedRewardCampaigns"] == [surviving]
+    assert Twitch.drops_inventory_completions_loaded(loaded) is True
+    signatures = twitch.completed_badge_campaign_signatures_or_cached(loaded)
+    assert {game_slug for game_slug, _, _ in signatures} == {"minecraft"}
+    assert twitch.completed_badge_campaign_signature_cache == signatures
+    # The other inventory readers still see the surviving entry.
+    assert twitch.completed_drop_campaigns == {"campaign-1"}
 def test_earned_viewer_reward_drop_completes_fallback_despite_expired_campaign_status(
     monkeypatch,
 ):
@@ -739,7 +990,9 @@ def test_earned_viewer_reward_drop_completes_fallback_despite_expired_campaign_s
         },
     )
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["minecraft"], set(), EMPTY_INVENTORY
+    )
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_campaigns == {}
@@ -807,7 +1060,9 @@ def test_unearned_viewer_reward_drop_does_not_complete_fallback_campaign(monkeyp
         },
     )
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["minecraft"], set(), EMPTY_INVENTORY
+    )
 
     assert "minecraft" in deadlines
     assert twitch.twitchdrops_app_campaigns != {}
@@ -957,7 +1212,9 @@ def test_future_campaign_in_active_report_is_not_mined_early(monkeypatch):
         },
     )
 
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set())
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["minecraft"], set(), EMPTY_INVENTORY
+    )
 
     assert deadlines == {}
     assert twitch.twitchdrops_app_campaigns == {}
@@ -999,6 +1256,7 @@ def test_twitchdrops_app_skips_detail_requests_for_twitch_games(
     twitch._Twitch__twitchdrops_app_fallback(
         ["path-of-exile", "not-on-front-page"],
         known_slugs,
+        EMPTY_INVENTORY,
     )
 
     assert detail_requests == []
@@ -1094,7 +1352,9 @@ def test_twitchdrops_app_keeps_campaigns_twitch_did_not_report(monkeypatch):
     )
 
     known_slugs = {"rust"}
-    deadlines = twitch._Twitch__twitchdrops_app_fallback(["rust"], known_slugs)
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["rust"], known_slugs, EMPTY_INVENTORY
+    )
 
     assert deadlines == {"rust": datetime(2098, 1, 1)}
     assert [
