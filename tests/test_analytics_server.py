@@ -780,6 +780,11 @@ def test_now_watching_widget_jumps_to_drops_tab_on_click():
     # Drops-tab category selection.
     assert "&& entry.game)" in render_now_watching
 
+    # Pending watch streaks are reported separately from points so the widget
+    # names the reason the channel actually holds a watch slot.
+    assert "entry.reason === 'streak'" in render_now_watching
+    assert "for watch streak" in render_now_watching
+
     assert "function findDropCategoryForNowWatching(entry)" in script
     resolver = script.split("function findDropCategoryForNowWatching", 1)[1].split(
         "function changeDropCategory", 1

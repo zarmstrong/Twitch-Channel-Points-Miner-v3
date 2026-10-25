@@ -55,6 +55,77 @@ def test_new_broadcast_gets_a_new_pending_session(tmp_path):
     assert new_session.claimed is False
 
 
+def test_streak_confirmed_before_online_transition_is_not_refarmed(
+    tmp_path, monkeypatch
+):
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+
+    current_time = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Streamer.time.time",
+        lambda: current_time[0],
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.WatchStreakCache.time.time",
+        lambda: current_time[0],
+    )
+
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.set_online()
+    streamer.set_offline()
+
+    # The next broadcast starts, but Twitch confirms the streak before the
+    # miner has refreshed broadcast_id past the previous broadcast. The
+    # confirmation must still count for the broadcast about to be tracked.
+    current_time[0] += 200
+    streamer.stream_up = current_time[0] - 50
+    streamer.update_history("WATCH_STREAK", earned=450)
+    assert streamer.watch_streak_confirmed_at == current_time[0]
+
+    current_time[0] += 1
+    streamer.stream.broadcast_id = "broadcast-2"
+    streamer.set_online()
+
+    assert streamer.stream.watch_streak_missing is False
+    assert cache.get("channel", "broadcast-2").claimed is True
+
+
+def test_streak_confirmed_before_previous_broadcast_ended_is_refarmed(
+    tmp_path, monkeypatch
+):
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+
+    current_time = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Streamer.time.time",
+        lambda: current_time[0],
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.WatchStreakCache.time.time",
+        lambda: current_time[0],
+    )
+
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.set_online()
+    streamer.update_history("WATCH_STREAK", earned=450)
+    current_time[0] += 1
+    streamer.set_offline()
+
+    # A new broadcast begins without the miner seeing a fresh stream-up
+    # message, so the stale stream_up timestamp must not make the previous
+    # broadcast's confirmation look like it belongs to this one.
+    current_time[0] += 600
+    streamer.stream.broadcast_id = "broadcast-2"
+    streamer.set_online()
+
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-2").claimed is False
+
+
 def test_offline_transition_is_persisted(tmp_path, monkeypatch):
     cache_path = tmp_path / "watch-streak.json"
     cache = WatchStreakCache.load(cache_path, "viewer")

@@ -4857,14 +4857,24 @@ class Twitch(object):
                 return "followed channel"
             return "streamer"
 
+        # A pending watch streak is the reason that stream holds its slot, even
+        # when the user's fallback priority would otherwise farm it for points.
+        # List it only under "watch streak" so the points line does not imply a
+        # second, lower-priority reason for the same channel.
+        streak_indexes = {
+            index
+            for index in streamers_watching
+            if self._has_pending_watch_streak(streamers[index])
+        }
         points_streams = [
             f"{streamers[index].username} ({watch_reason(index)})"
             for index in streamers_watching
+            if index not in streak_indexes
         ]
         streak_streams = [
             f"{streamers[index].username} ({watch_reason(index)})"
             for index in streamers_watching
-            if self._has_pending_watch_streak(streamers[index])
+            if index in streak_indexes
         ]
         drops_streams = []
 
@@ -10519,6 +10529,10 @@ class Twitch(object):
         for index in streamers_watching:
             streamer = streamers_snapshot[index]
             source = streamer_source(index)
+            # A pending watch streak outranks the points fallback, so report
+            # the streak rather than implying the channel is watched only to
+            # accrue channel points. Drops and badge campaigns keep their own
+            # label because those streams may earn a reward as well.
             if source == StreamerSource.BADGES:
                 reason = "badge"
             elif source in (
@@ -10526,6 +10540,8 @@ class Twitch(object):
                 StreamerSource.WILDCARD_CATEGORIES,
             ):
                 reason = "drops"
+            elif self._has_pending_watch_streak(streamer):
+                reason = "streak"
             else:
                 reason = "points"
 

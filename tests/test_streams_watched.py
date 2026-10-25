@@ -360,6 +360,26 @@ def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
     assert _entries_by_username()["category-streamer"]["reason"] == "drops"
 
 
+def test_now_watching_analytics_labels_pending_watch_streak(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("streak-streamer", watch_streak=True, points=300),
+            _watch_streamer("points-streamer", points=400),
+        ],
+        streams_watched=2,
+        priority=[Priority.STREAK, Priority.ORDER],
+    )
+
+    entries = json.loads((tmp_path / "now_watching.json").read_text(encoding="utf-8"))
+    entries_by_username = {entry["username"]: entry for entry in entries}
+    assert entries_by_username["streak-streamer"]["reason"] == "streak"
+    assert entries_by_username["points-streamer"]["reason"] == "points"
+
+
 def test_minute_watcher_writes_empty_now_watching_when_nothing_watched(
     monkeypatch, tmp_path
 ):
@@ -1058,6 +1078,12 @@ def test_watched_streamer_log_lists_pending_watch_streak(monkeypatch):
         message for message in messages if "Watching for points:" in message
     )
     assert "watching for watch streak: streaky (streamer)" in watch_message
+    # A pending streak must not also be listed as a points watch, or the
+    # dashboard/log appears to farm it for the lower-priority fallback reason.
+    points_section = watch_message.split("Watching for points:", 1)[1].split(
+        "; watching for drops:", 1
+    )[0]
+    assert "streaky" not in points_section
 
 
 def test_source_priority_appends_omitted_sources():

@@ -842,6 +842,10 @@ function renderNowWatching(entries) {
         } else if (entry.reason === 'drops' || entry.reason === 'badge') {
             var label2 = entry.reason === 'badge' ? 'Badge campaign' : 'Drops';
             line.text(`Currently watching ${entry.username} for ${label2}`);
+        } else if (entry.reason === 'streak') {
+            line.text(
+                `Currently watching ${entry.username} for watch streak (${entry.channel_points})`
+            );
         } else {
             line.text(
                 `Currently watching ${entry.username} for points (${entry.channel_points})`

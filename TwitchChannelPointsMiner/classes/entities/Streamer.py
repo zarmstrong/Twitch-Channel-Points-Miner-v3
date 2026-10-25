@@ -209,6 +209,7 @@ class Streamer(object):
         "mutex",
         "last_drop_watch_signature",
         "watch_streak_cache",
+        "watch_streak_confirmed_at",
     ]
 
     def __init__(
@@ -254,6 +255,7 @@ class Streamer(object):
         self.history = {}
         self.last_drop_watch_signature = None
         self.watch_streak_cache = None
+        self.watch_streak_confirmed_at = 0
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -306,6 +308,15 @@ class Streamer(object):
                 )
                 if session is not None and session.claimed is True:
                     self.stream.watch_streak_missing = False
+                elif self._watch_streak_confirmed_for_current_broadcast():
+                    # Twitch can confirm the streak before the miner notices the
+                    # channel is live, while broadcast_id still points at the
+                    # previous broadcast. Carry that confirmation over to the
+                    # broadcast we just started tracking instead of re-arming.
+                    self.stream.watch_streak_missing = False
+                    self.watch_streak_cache.mark_claimed(
+                        self.username, self.stream.broadcast_id
+                    )
 
         self.toggle_chat()
 
@@ -321,6 +332,22 @@ class Streamer(object):
                 "event": Events.STREAMER_ONLINE,
             },
         )
+
+    def _watch_streak_confirmed_for_current_broadcast(self):
+        """Is the last streak confirmation from the broadcast being tracked?
+
+        Twitch may award the streak for a broadcast before the miner has
+        refreshed ``stream.broadcast_id`` (or before any broadcast id is known).
+        The confirmation timestamp is compared against the point where the
+        current broadcast started so a previous broadcast's streak is not
+        mistaken for this one.
+        """
+        confirmed_at = self.watch_streak_confirmed_at
+        if confirmed_at == 0:
+            return False
+
+        broadcast_started_at = max(self.stream_up, self.offline_at)
+        return broadcast_started_at == 0 or confirmed_at >= broadcast_started_at
 
     def print_history(self):
         return "; ".join(
@@ -339,6 +366,7 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
+            self.watch_streak_confirmed_at = time.time()
             if self.watch_streak_cache is not None:
                 self.watch_streak_cache.mark_claimed(
                     self.username, self.stream.broadcast_id
