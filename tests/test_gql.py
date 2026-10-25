@@ -1743,6 +1743,185 @@ def test_category_search_prefers_resolved_game_campaign_allowlist(monkeypatch):
     }
 
 
+def _mixed_campaign_twitch(monkeypatch, live, allow_listed=("grayzonewarfare",)):
+    # Gray Zone Warfare, 2026-10-25: "Rogue Ops - Stage 1" was open to every
+    # channel while "Rogue Ops - MADFINGER" was limited to grayzonewarfare.
+    # `live` maps every live login to its viewer count; allow-listed channels
+    # are only found through the per-login lookup, the rest through the
+    # category's stream list and Drops-enabled directory.
+    discovered = [login for login in live if login not in allow_listed]
+    directory = {
+        "data": {
+            "game": {
+                "streams": {
+                    "edges": [
+                        {"node": {"broadcaster": {"login": login}}}
+                        for login in discovered
+                    ]
+                }
+            }
+        }
+    }
+    twitch = twitch_with_gql(
+        SimpleNamespace(post_gql_request_raw=lambda operation, request: directory)
+    )
+    twitch.active_drop_campaigns = {
+        "gray-zone-warfare": [
+            {"id": "stage-1", "channels": []},
+            {"id": "madfinger", "channels": list(allow_listed)},
+        ]
+    }
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+
+    def stream(login):
+        return {"user_login": login, "game_id": "gzw-id", "viewer_count": live[login]}
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "gzw-id", "name": "Gray Zone Warfare"}]}
+        if "user_login" in params:
+            logins = params["user_login"]
+            if isinstance(logins, str):
+                logins = [logins]
+            return {"data": [stream(login) for login in logins if login in live]}
+        assert params["game_id"] == "gzw-id"
+        return {
+            "data": sorted(
+                (stream(login) for login in discovered),
+                key=lambda entry: -entry["viewer_count"],
+            )
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    return twitch
+
+
+def test_category_search_discovers_channels_for_an_all_channel_campaign(
+    monkeypatch,
+):
+    # The allow-listed channel was offline, so only searching allow-lists found
+    # nothing and the all-channel campaign was never mined.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"big": 300, "mid": 200, "small": 100}
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=False, limit=2
+    )
+
+    assert usernames == ["big", "mid"]
+
+
+def test_category_search_puts_allow_listed_channels_first_for_mixed_campaigns(
+    monkeypatch,
+):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300, "mid": 200}
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    # The allow-listed channel earns both campaigns, so it goes first and the
+    # rest of the limit is filled from regular discovery.
+    assert usernames == ["grayzonewarfare", "big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "grayzonewarfare"): (2, 2),
+        ("gray-zone-warfare", "big"): (1, 2),
+    }
+
+
+def test_category_search_keeps_the_drop_pick_for_mixed_campaigns(monkeypatch):
+    # Merging the allow-listed channels in after __keep_drop_pick had already
+    # appended the pick trimmed the pick off, so a mixed game retired and
+    # replaced its pick on every refresh.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300, "small": 100}
+    )
+    twitch.last_drop_pick_streamer = "small"
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["grayzonewarfare", "small"]
+    assert twitch.category_campaign_eligibility[("gray-zone-warfare", "small")] == (
+        1,
+        2,
+    )
+
+
+def test_category_search_caps_allow_listed_channels_at_the_limit(monkeypatch):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "a3": 20, "a4": 10, "big": 300},
+        allow_listed=("a1", "a2", "a3", "a4"),
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["a1", "a2"]
+
+
+def test_category_search_records_allow_listed_eligibility_without_drops_filter(
+    monkeypatch,
+):
+    # Twitch's allow-list vouches for its channels even when the Drops-enabled
+    # directory filter is off; discovered channels stay unrecorded as before.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300}
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=False, limit=2
+    )
+
+    assert usernames == ["grayzonewarfare", "big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "grayzonewarfare"): (2, 2)
+    }
+
+
+def test_category_search_keeps_an_allow_listed_drop_pick_without_a_lookup(
+    monkeypatch,
+):
+    # The pick is allow-listed but outside the allow-listed share of the limit.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "a3": 20, "a4": 10, "big": 300},
+        allow_listed=("a1", "a2", "a3", "a4"),
+    )
+    twitch.last_drop_pick_streamer = "a4"
+    helix_get = Twitch._Twitch__helix_get
+    single_lookups = []
+
+    def counting_helix_get(self, endpoint, params):
+        if endpoint == "streams" and params.get("first") == 1:
+            single_lookups.append(params["user_login"])
+        return helix_get(self, endpoint, params)
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", counting_helix_get)
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    # The restricted lookup already confirmed the pick live in the game, so
+    # the merge keeps it in place of the last allow-listed channel without
+    # asking Helix about it again.
+    assert usernames == ["a1", "a4"]
+    assert single_lookups == []
+    assert twitch.category_campaign_eligibility[("gray-zone-warfare", "a4")] == (2, 2)
+
+
 def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
@@ -1899,24 +2078,25 @@ def _restricted_pick_twitch(monkeypatch):
 def test_restricted_search_keeps_allowlisted_drop_pick(monkeypatch):
     twitch = _restricted_pick_twitch(monkeypatch)
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["big", "pick"]}], "game-id", "Game", max_total=1
     )
 
     assert usernames == ["pick"]
-    assert twitch.category_campaign_eligibility == {("game", "pick"): (1, 1)}
+    # Recording is the caller's job now; the helper hands back the counts.
+    assert eligibility == {"pick": (1, 1)}
 
 
 def test_restricted_search_drops_pick_missing_from_allowlists(monkeypatch):
     # The pick's campaign ended; the remaining one is restricted to others.
     twitch = _restricted_pick_twitch(monkeypatch)
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["big", "other"]}], "game-id", "Game", max_total=1
     )
 
     assert usernames == ["big"]
-    assert ("game", "pick") not in twitch.category_campaign_eligibility
+    assert "pick" not in eligibility
 
 
 def _category_search_twitch(monkeypatch, logins, eligibility, verdicts):

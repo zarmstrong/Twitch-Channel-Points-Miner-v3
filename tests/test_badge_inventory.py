@@ -47,7 +47,7 @@ def test_restricted_campaign_lookup_stops_after_total_live_limit(monkeypatch):
         }
     ]
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, _ = twitch._Twitch__get_live_restricted_campaign_streamers(
         campaigns,
         "game-1",
         "Special Events",
@@ -78,7 +78,7 @@ def test_restricted_campaign_lookup_trusts_campaign_channel_allowlist(monkeypatc
         },
     )
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, _ = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["ravenquest-channel"]}],
         "ravenquest-id",
         "RavenQuest",
@@ -153,7 +153,7 @@ def test_special_events_restricted_lookup_accepts_other_game_categories(monkeypa
         },
     )
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, _ = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["ewc-channel"]}],
         "special-events-id",
         "Special Events",
@@ -182,7 +182,7 @@ def test_normal_restricted_lookup_still_requires_matching_game(monkeypatch):
         },
     )
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, _ = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["wrong-game-channel"]}],
         "expected-game",
         "Expected Game",
