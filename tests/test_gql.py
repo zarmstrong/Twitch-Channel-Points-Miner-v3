@@ -1743,6 +1743,560 @@ def test_category_search_prefers_resolved_game_campaign_allowlist(monkeypatch):
     }
 
 
+def _mixed_campaign_twitch(
+    monkeypatch,
+    live,
+    allow_listed=("grayzonewarfare",),
+    campaigns=None,
+    calls=None,
+    directory_logins=None,
+    fail_batch_lookup=False,
+    catalog=False,
+):
+    # Gray Zone Warfare, 2026-10-25: "Rogue Ops - Stage 1" was open to every
+    # channel while "Rogue Ops - MADFINGER" was limited to grayzonewarfare.
+    # `live` maps every live login to its viewer count; allow-listed channels
+    # are only found through the per-login lookup, the rest through the
+    # category's stream list and Drops-enabled directory. Every Helix and GQL
+    # request is appended to `calls` when one is given.
+    calls = [] if calls is None else calls
+    discovered = [login for login in live if login not in allow_listed]
+    directory = {
+        "data": {
+            "game": {
+                "streams": {
+                    "edges": [
+                        {"node": {"broadcaster": {"login": login}}}
+                        for login in (
+                            discovered if directory_logins is None else directory_logins
+                        )
+                    ]
+                }
+            }
+        }
+    }
+
+    def post_gql_request_raw(operation, request):
+        calls.append(("gql", operation))
+        return directory
+
+    twitch = twitch_with_gql(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
+    campaigns = campaigns or [
+        {"id": "stage-1", "channels": []},
+        {"id": "madfinger", "channels": list(allow_listed)},
+    ]
+    # Twitch's own campaigns normally; `catalog` seeds twitchdrops.app records
+    # instead, which discovery only consults when Twitch lists none.
+    twitch.active_drop_campaigns = {} if catalog else {"gray-zone-warfare": campaigns}
+    twitch.twitchdrops_app_campaigns = (
+        {"gray-zone-warfare": campaigns} if catalog else {}
+    )
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+
+    def stream(login):
+        return {"user_login": login, "game_id": "gzw-id", "viewer_count": live[login]}
+
+    def helix_get(endpoint, params):
+        calls.append((endpoint, params))
+        if endpoint == "search/categories":
+            return {"data": [{"id": "gzw-id", "name": "Gray Zone Warfare"}]}
+        if "user_login" in params:
+            logins = params["user_login"]
+            if isinstance(logins, str):
+                logins = [logins]
+            elif fail_batch_lookup:
+                return {}  # what __helix_get returns on a request failure
+            return {"data": [stream(login) for login in logins if login in live]}
+        assert params["game_id"] == "gzw-id"
+        if "after" in params:
+            # The second page is always empty; the first advertises it.
+            return {"data": []}
+        return {
+            "data": sorted(
+                (stream(login) for login in discovered),
+                key=lambda entry: -entry["viewer_count"],
+            ),
+            "pagination": {"cursor": "next-page"},
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    return twitch
+
+
+def test_category_search_discovers_channels_for_an_all_channel_campaign(
+    monkeypatch,
+):
+    # The allow-listed channel was offline, so only searching allow-lists found
+    # nothing and the all-channel campaign was never mined.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"big": 300, "mid": 200, "small": 100}
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=False, limit=2
+    )
+
+    assert usernames == ["big", "mid"]
+
+
+def test_category_search_puts_allow_listed_channels_first_for_mixed_campaigns(
+    monkeypatch,
+):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300, "mid": 200}
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    # The allow-listed channel earns both campaigns, so it goes first and the
+    # rest of the limit is filled from regular discovery.
+    assert usernames == ["grayzonewarfare", "big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "grayzonewarfare"): (2, 2),
+        ("gray-zone-warfare", "big"): (1, 2),
+    }
+
+
+def test_category_search_keeps_the_drop_pick_for_mixed_campaigns(monkeypatch):
+    # Merging the allow-listed channels in after __keep_drop_pick had already
+    # appended the pick trimmed the pick off, so a mixed game retired and
+    # replaced its pick on every refresh.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300, "small": 100}
+    )
+    twitch.last_drop_pick_streamer = "small"
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["grayzonewarfare", "small"]
+    assert twitch.category_campaign_eligibility[("gray-zone-warfare", "small")] == (
+        1,
+        2,
+    )
+
+
+def test_category_search_caps_allow_listed_channels_at_the_limit(monkeypatch):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "a3": 20, "a4": 10, "big": 300},
+        allow_listed=("a1", "a2", "a3", "a4"),
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["a1", "a2"]
+
+
+def test_category_search_records_allow_listed_eligibility_without_drops_filter(
+    monkeypatch,
+):
+    # Twitch's allow-list vouches for its channels even when the Drops-enabled
+    # directory filter is off; discovered channels stay unrecorded as before.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300}
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=False, limit=2
+    )
+
+    assert usernames == ["grayzonewarfare", "big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "grayzonewarfare"): (2, 2)
+    }
+
+
+def test_category_search_keeps_an_allow_listed_drop_pick_without_a_lookup(
+    monkeypatch,
+):
+    # The pick is allow-listed but outside the allow-listed share of the limit.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "a3": 20, "a4": 10, "big": 300},
+        allow_listed=("a1", "a2", "a3", "a4"),
+    )
+    twitch.last_drop_pick_streamer = "a4"
+    helix_get = Twitch._Twitch__helix_get
+    single_lookups = []
+
+    def counting_helix_get(self, endpoint, params):
+        if endpoint == "streams" and params.get("first") == 1:
+            single_lookups.append(params["user_login"])
+        return helix_get(self, endpoint, params)
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", counting_helix_get)
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    # The restricted lookup already confirmed the pick live in the game, so
+    # the merge keeps it in place of the last allow-listed channel without
+    # asking Helix about it again.
+    assert usernames == ["a1", "a4"]
+    assert single_lookups == []
+    assert twitch.category_campaign_eligibility[("gray-zone-warfare", "a4")] == (2, 2)
+
+
+def _discovery_requests(calls):
+    return [
+        call
+        for call in calls
+        if call[0] == "gql" or (call[0] == "streams" and "game_id" in call[1])
+    ]
+
+
+def test_category_search_skips_discovery_when_allow_listed_channels_fill_limit(
+    monkeypatch,
+):
+    # Nothing discovery finds can be used once the allow-listed channels fill
+    # the limit, so the paginated stream search and the Drops-enabled directory
+    # request are not sent at all.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "big": 300},
+        allow_listed=("a1", "a2"),
+        calls=calls,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["a1", "a2"]
+    assert _discovery_requests(calls) == []
+
+
+def test_category_search_never_evicts_an_allow_listed_channel_for_a_pick(
+    monkeypatch,
+):
+    # A discovered pick earns only the all-channel campaigns, while every
+    # allow-listed channel earns those and its own, so the pick is dropped
+    # rather than an allow-listed channel, and it is not looked up again.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "big": 300},
+        allow_listed=("a1", "a2"),
+        calls=calls,
+    )
+    twitch.last_drop_pick_streamer = "big"
+    twitch.category_campaign_eligibility = {("gray-zone-warfare", "big"): (1, 2)}
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["a1", "a2"]
+    assert not any(
+        call[0] == "streams" and call[1].get("user_login") in ("big", ["big"])
+        for call in calls
+    )
+    assert ("gray-zone-warfare", "big") not in twitch.category_campaign_eligibility
+
+
+def test_category_search_keeps_an_unpopulated_catalog_campaign_restricted(
+    monkeypatch,
+):
+    # A twitchdrops.app record whose channel list was not scraped says
+    # all_channels: false with no channels. That is a restricted campaign with
+    # unknown channels, not one open to everyone, so it must not turn the game
+    # into a mixed one and get Drops-directory channels mined for it.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"x": 5, "big": 300},
+        allow_listed=("x",),
+        campaigns=[
+            {"id": "x-only", "all_channels": False, "channels": ["x"]},
+            {"id": "unknown", "all_channels": False, "channels": []},
+        ],
+        calls=calls,
+        catalog=True,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=5
+    )
+
+    assert usernames == ["x"]
+    assert _discovery_requests(calls) == []
+    # The unpopulated record is left out entirely, as the badge flow does.
+    assert twitch.category_campaign_eligibility == {("gray-zone-warfare", "x"): (1, 1)}
+
+
+def test_category_search_ignores_unpopulated_catalog_campaigns(monkeypatch):
+    # With every campaign an unpopulated catalog record there is nothing to
+    # match channels against, so the game is searched as if the catalog had
+    # no campaign data for it, the same as before mixed games were handled.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300},
+        allow_listed=(),
+        campaigns=[{"id": "unknown", "all_channels": False, "channels": []}],
+        catalog=True,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=5
+    )
+
+    assert usernames == ["big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "big"): (1, 1)
+    }
+
+
+def test_category_search_stops_paging_once_admissible_directory_is_exhausted(
+    monkeypatch,
+):
+    # Allow-listed channels that are also in the Drops directory can never
+    # become discovery candidates, so a window sized by the raw directory kept
+    # requesting further stream pages that could not admit anyone.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "big": 300, "mid": 200},
+        allow_listed=("a1", "a2"),
+        directory_logins=("a1", "a2", "big", "mid"),
+        calls=calls,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=30
+    )
+
+    assert usernames == ["a1", "a2", "big", "mid"]
+    stream_pages = [
+        call for call in calls if call[0] == "streams" and "game_id" in call[1]
+    ]
+    assert len(stream_pages) == 1
+
+
+def test_category_search_keeps_allow_listed_channels_with_a_zero_limit(monkeypatch):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"a1": 40, "big": 300}, allow_listed=("a1",)
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=0
+    )
+
+    assert usernames == ["a1"]
+
+
+def test_category_search_still_finds_the_pick_when_the_batch_lookup_fails(
+    monkeypatch,
+):
+    # A failed chunk request must not count its logins as checked-and-offline,
+    # or the pick's own lookup is skipped and the watched pick gets retired.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"gz": 5, "big": 300},
+        allow_listed=("a1", "gz"),
+        calls=calls,
+        fail_batch_lookup=True,
+    )
+    twitch.last_drop_pick_streamer = "gz"
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["gz", "big"]
+    assert any(
+        call[0] == "streams" and call[1].get("user_login") == "gz" for call in calls
+    )
+
+
+def test_category_search_lets_allow_listed_channels_fill_a_mixed_limit(monkeypatch):
+    # The per-campaign target of 20 is for restricted-only games; in a mixed
+    # game allow-listed channels come first and may fill the whole limit.
+    partners = [f"p{index:02d}" for index in range(22)]
+    live = {login: 100 - index for index, login in enumerate(partners)}
+    live["big"] = 300
+    twitch = _mixed_campaign_twitch(monkeypatch, live=live, allow_listed=partners)
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=25
+    )
+
+    assert usernames == partners + ["big"]
+
+
+def test_badge_restricted_lookup_keeps_a_zero_limit_empty(monkeypatch):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"a1": 40, "big": 300}, allow_listed=("a1",)
+    )
+    # Even a live current pick cannot push past a zero limit.
+    twitch.last_drop_pick_streamer = "a1"
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare",
+        drops_enabled=True,
+        limit=0,
+        restricted_campaigns=[{"id": "badge", "channels": ["a1"]}],
+    )
+
+    assert usernames == []
+
+
+def test_category_search_keeps_every_restricted_campaign_in_a_mixed_game(
+    monkeypatch,
+):
+    # A big allow-list ranked first used to fill the cap, so the lookup either
+    # stopped before reaching a later campaign's allow-list or trimmed that
+    # campaign's channels off the end. Each campaign with a live channel keeps
+    # at least one slot.
+    big = [f"a{index:02d}" for index in range(40)]
+    live = {login: 100 + index for index, login in enumerate(big)}
+    live.update({"b1": 50, "b2": 40, "open": 999})
+    for chunk_size in (120, 30):
+        allow_a = big + [f"off{index}" for index in range(chunk_size - len(big))]
+        twitch = _mixed_campaign_twitch(
+            monkeypatch,
+            live=live,
+            allow_listed=tuple(allow_a + ["b1", "b2"]),
+            campaigns=[
+                {"id": "stage-1", "channels": []},
+                {"id": "a", "channels": allow_a},
+                {"id": "b", "channels": ["b1", "b2"]},
+            ],
+        )
+
+        usernames = twitch.get_live_streamers_for_category(
+            "Gray Zone Warfare", drops_enabled=True, limit=30
+        )
+
+        assert len(usernames) == 30
+        assert "b1" in usernames
+
+
+def test_category_search_does_not_page_one_stream_at_a_time(monkeypatch):
+    # The allow-listed channel is the top stream; a page sized only by the
+    # discovered room returned just that channel and forced extra requests.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"gz": 999, "big": 300},
+        allow_listed=("gz",),
+        calls=calls,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["gz", "big"]
+    stream_pages = [
+        call for call in calls if call[0] == "streams" and "game_id" in call[1]
+    ]
+    assert stream_pages[0][1]["first"] >= 2
+
+
+def test_capped_restricted_lookup_does_not_page_a_whole_offline_allow_list(
+    monkeypatch,
+):
+    # Badge flow: a 3,000-login allow-list with almost everyone offline. Once
+    # the cap is met the lookup may look a little further for unrepresented
+    # campaigns, but must not request every chunk on each refresh.
+    calls = []
+    big = [f"off{index:04d}" for index in range(3000)]
+    live = {f"on{index:02d}": 100 - index for index in range(30)}
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live=live,
+        allow_listed=tuple(list(live) + big),
+        calls=calls,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare",
+        drops_enabled=True,
+        limit=30,
+        restricted_campaigns=[
+            {"id": "badge", "channels": list(live)},
+            {"id": "huge", "channels": big},
+        ],
+    )
+
+    assert len(usernames) == 30
+    batch_lookups = [
+        call
+        for call in calls
+        if call[0] == "streams" and isinstance(call[1].get("user_login"), list)
+    ]
+    assert len(batch_lookups) <= 3
+
+
+def test_restricted_lookup_keeps_each_campaign_when_adding_the_pick(monkeypatch):
+    # Round-robin gives campaigns a and b one channel each; keeping the pick
+    # (also on a's list) must evict a's other channel, not b's only one.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 90, "b1": 80, "pick": 10},
+        allow_listed=("a1", "pick", "b1"),
+        campaigns=[
+            {"id": "a", "channels": ["a1", "pick"]},
+            {"id": "b", "channels": ["b1"]},
+        ],
+    )
+    twitch.last_drop_pick_streamer = "pick"
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare",
+        drops_enabled=True,
+        limit=2,
+        restricted_campaigns=[
+            {"id": "a", "channels": ["a1", "pick"]},
+            {"id": "b", "channels": ["b1"]},
+        ],
+    )
+
+    assert sorted(usernames) == ["b1", "pick"]
+
+
+def test_category_search_looks_up_an_offline_allow_listed_pick_only_once(
+    monkeypatch,
+):
+    # The restricted lookup already asked Helix about every allow-listed login
+    # (including the offline pick); the merge must not ask again just because
+    # the pick's eligibility from the previous refresh is still cached.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "big": 300},
+        allow_listed=("a1", "gz"),
+        calls=calls,
+    )
+    twitch.last_drop_pick_streamer = "gz"
+    twitch.category_campaign_eligibility = {("gray-zone-warfare", "gz"): (2, 2)}
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["a1", "big"]
+    pick_lookups = [
+        call
+        for call in calls
+        if call[0] == "streams" and "gz" in (call[1].get("user_login") or [])
+    ]
+    assert len(pick_lookups) == 1
+
+
 def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
@@ -1899,24 +2453,25 @@ def _restricted_pick_twitch(monkeypatch):
 def test_restricted_search_keeps_allowlisted_drop_pick(monkeypatch):
     twitch = _restricted_pick_twitch(monkeypatch)
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["big", "pick"]}], "game-id", "Game", max_total=1
     )
 
     assert usernames == ["pick"]
-    assert twitch.category_campaign_eligibility == {("game", "pick"): (1, 1)}
+    # Recording is the caller's job now; the helper hands back the counts.
+    assert eligibility == {"pick": (1, 1)}
 
 
 def test_restricted_search_drops_pick_missing_from_allowlists(monkeypatch):
     # The pick's campaign ended; the remaining one is restricted to others.
     twitch = _restricted_pick_twitch(monkeypatch)
 
-    usernames = twitch._Twitch__get_live_restricted_campaign_streamers(
+    usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
         [{"channels": ["big", "other"]}], "game-id", "Game", max_total=1
     )
 
     assert usernames == ["big"]
-    assert ("game", "pick") not in twitch.category_campaign_eligibility
+    assert "pick" not in eligibility
 
 
 def _category_search_twitch(monkeypatch, logins, eligibility, verdicts):

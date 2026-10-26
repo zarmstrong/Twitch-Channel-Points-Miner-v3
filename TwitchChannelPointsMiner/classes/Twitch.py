@@ -1547,6 +1547,34 @@ class Twitch(object):
                 logins.append(login)
         return logins
 
+    @staticmethod
+    def __campaign_channels_unknown(campaign: dict) -> bool:
+        """A twitchdrops.app record scraped without its channel list: not open
+        to all channels, yet naming none. Nobody can be matched against it."""
+        return campaign.get("all_channels") is False and not (
+            Twitch.__campaign_channel_logins(campaign)
+        )
+
+    @staticmethod
+    def __campaign_logins_by_campaign(campaigns) -> list:
+        """One entry per campaign: None when any channel can earn it, else its
+        allow-listed logins in allow-list order (the restricted lookup ranks
+        ties by first appearance). A catalog record says outright whether it is
+        open to all channels; a Twitch campaign is open when it carries no
+        allow-list. Callers filter out catalog records without a channel list
+        first (see __campaign_channels_unknown) so the entries line up with
+        their campaigns; any that slip through are skipped rather than read as
+        open to everyone."""
+        by_campaign = []
+        for campaign in campaigns:
+            if Twitch.__campaign_channels_unknown(campaign):
+                continue
+            logins = Twitch.__campaign_channel_logins(campaign)
+            all_channels = campaign.get("all_channels")
+            is_open = all_channels is True if all_channels is not None else not logins
+            by_campaign.append(None if is_open else logins)
+        return by_campaign
+
     def __awarded_benefits(self, inventory: dict) -> Tuple[set, set]:
         benefit_ids = set()
         benefit_fingerprints = set()
@@ -3590,39 +3618,80 @@ class Twitch(object):
         if not game_id:
             return []
 
-        requested_game_slug = self.__slugify(normalized_category.replace("-", " "))
         game_slug = self.__slugify(game_name)
         active_campaigns_by_game = getattr(self, "active_drop_campaigns", {})
         active_twitch_campaigns = active_campaigns_by_game.get(
             game_slug
-        ) or active_campaigns_by_game.get(requested_game_slug, [])
+        ) or active_campaigns_by_game.get(requested_slug, [])
         fallback_catalog_campaigns = self.twitchdrops_app_campaigns.get(
             game_slug
-        ) or self.twitchdrops_app_campaigns.get(requested_game_slug, [])
+        ) or self.twitchdrops_app_campaigns.get(requested_slug, [])
         fallback_campaigns = (
             restricted_campaigns
             if restricted_campaigns is not None
             else active_twitch_campaigns or fallback_catalog_campaigns
         )
+        # A catalog record whose channel list was not scraped names no channel
+        # anyone could be matched against, so leave it out, as the badge Drop
+        # flow does, instead of letting it decide how this game is searched.
+        fallback_campaigns = [
+            campaign
+            for campaign in fallback_campaigns
+            if not self.__campaign_channels_unknown(campaign)
+        ]
+        max_results = max(limit, 1)
+        restricted_usernames = None
+        restricted_eligibility = {}
+        # One entry per campaign: None when any channel can earn it, else its
+        # allow-listed logins (see __campaign_logins_by_campaign); the sets
+        # answer membership, the lists keep allow-list order.
+        campaign_logins = []
+        campaign_login_sets = []
         if (
             respect_campaign_restrictions is True
             and forced_streamer_username is None
             and fallback_campaigns
         ):
-            if any(
-                self.__campaign_channel_logins(campaign)
-                for campaign in fallback_campaigns
-            ):
-                return self.__get_live_restricted_campaign_streamers(
+            campaign_logins = self.__campaign_logins_by_campaign(fallback_campaigns)
+            campaign_login_sets = [
+                None if logins is None else set(logins) for logins in campaign_logins
+            ]
+            if any(campaign_logins):
+                open_campaigns = any(logins is None for logins in campaign_logins)
+                # The badge flow passes its own limit through. In a mixed game
+                # the allow-listed channels come first and share the limit with
+                # discovered ones, so let them fill it and keep the Drops pick
+                # among them here. A restricted-only game keeps the default
+                # per-campaign target with no total cap.
+                if restricted_campaigns is not None:
+                    restricted_cap = limit
+                elif open_campaigns:
+                    restricted_cap = max_results
+                else:
+                    restricted_cap = None
+                (
+                    restricted_usernames,
+                    restricted_eligibility,
+                ) = self.__get_live_restricted_campaign_streamers(
                     fallback_campaigns,
                     game_id,
                     game_name,
                     drops_enabled=drops_enabled,
                     target_per_campaign=(
-                        limit if restricted_campaigns is not None else 20
+                        restricted_cap if restricted_cap is not None else 20
                     ),
-                    max_total=(limit if restricted_campaigns is not None else None),
+                    max_total=restricted_cap,
+                    campaign_logins_by_campaign=campaign_logins,
+                    campaign_login_sets_by_campaign=campaign_login_sets,
                 )
+                if not open_campaigns:
+                    self.__replace_category_campaign_eligibility(
+                        game_slug, restricted_eligibility
+                    )
+                    return restricted_usernames
+                # A campaign open to every channel still needs channels
+                # discovered for it when another campaign for the same game is
+                # allow-listed, so fall through to regular discovery and merge.
 
         if forced_streamer_username is not None:
             eligible_campaigns = len(fallback_campaigns)
@@ -3631,15 +3700,10 @@ class Twitch(object):
                 and respect_campaign_restrictions is True
                 and fallback_campaigns
             ):
-                campaign_channel_logins = [
-                    self.__campaign_channel_logins(campaign)
-                    for campaign in fallback_campaigns
-                ]
-                eligible_campaigns = sum(
-                    1
-                    for channel_logins in campaign_channel_logins
-                    if not channel_logins or forced_streamer_username in channel_logins
-                )
+                eligible_campaigns = self.__campaign_eligibility(
+                    forced_streamer_username,
+                    self.__campaign_logins_by_campaign(fallback_campaigns),
+                )[0]
                 if eligible_campaigns == 0:
                     self.__log_category(
                         f"Forced category streamer '{forced_streamer_username}' is "
@@ -3669,9 +3733,7 @@ class Twitch(object):
                 return []
 
             if drops_enabled is True:
-                drops_logins = self.__get_drops_enabled_directory_logins(
-                    self.__slugify(game_name)
-                )
+                drops_logins = self.__get_drops_enabled_directory_logins(game_slug)
                 if forced_streamer_username not in drops_logins:
                     self.__log_category(
                         f"Forced category streamer '{forced_streamer_username}' is in "
@@ -3699,27 +3761,40 @@ class Twitch(object):
             )
             return [forced_streamer_username]
 
-        log_suffix = " with DropsEnabled tag" if drops_enabled else ""
-        self.__log_category(
-            f"Searching live channels for '{game_name}'{log_suffix}",
-            extra={"emoji": ":satellite:"},
-        )
+        # Allow-listed channels go first: they earn their restricted campaigns
+        # as well as every campaign open to all channels, so the configured
+        # sort only orders the discovered remainder, which fills the rest of
+        # the limit. The restricted lookup already capped them at the limit and
+        # kept the current Drops pick among them.
+        allow_listed = list(restricted_usernames or [])
+        discovered_room = max_results - len(allow_listed)
+        if discovered_room > 0:
+            log_suffix = " with DropsEnabled tag" if drops_enabled else ""
+            self.__log_category(
+                f"Searching live channels for '{game_name}'{log_suffix}",
+                extra={"emoji": ":satellite:"},
+            )
 
         sort_key = self.__normalize_category_sort(sort_by)
 
         stream_candidates = []
-        usernames_seen = set()
+        # Allow-listed channels are already placed, so discovery must not
+        # spend candidate slots on them.
+        usernames_seen = set(allow_listed)
         drops_enabled_logins = None
         cursor = None
-        max_results = max(limit, 1)
-        search_window = (
-            max_results
-            if sort_key in ["ORDER", "VIEWERS_DESC"]
-            else min(max_results * 3, 300)
-        )
+        if discovered_room <= 0:
+            # Nothing discovered could be used, so skip the search entirely.
+            search_window = 0
+        elif sort_key in ["ORDER", "VIEWERS_DESC"]:
+            search_window = discovered_room
+        else:
+            search_window = min(discovered_room * 3, 300)
 
         while len(stream_candidates) < search_window:
-            first = min(100, search_window - len(stream_candidates))
+            # Allow-listed channels are already placed and get rejected as
+            # seen, so make room for them rather than paging one at a time.
+            first = min(100, search_window - len(stream_candidates) + len(allow_listed))
             params = {
                 "type": "live",
                 "game_id": game_id,
@@ -3735,11 +3810,16 @@ class Twitch(object):
 
             if drops_enabled is True and drops_enabled_logins is None:
                 drops_enabled_logins = self.__get_drops_enabled_directory_logins(
-                    self.__slugify(game_name)
+                    game_slug
                 )
-                if not drops_enabled_logins:
+                # Allow-listed channels in the directory were seeded as seen
+                # and can never become candidates; sizing the window by them
+                # would page the whole category looking for channels that
+                # cannot be admitted.
+                admissible = drops_enabled_logins - usernames_seen
+                if not admissible:
                     break
-                search_window = min(search_window, len(drops_enabled_logins))
+                search_window = min(search_window, len(admissible))
 
             for stream in streams:
                 username = (stream.get("user_login") or "").lower().strip()
@@ -3784,22 +3864,33 @@ class Twitch(object):
         elif sort_key == "RANDOM":
             random.shuffle(stream_candidates)
 
-        usernames = []
-        for stream in stream_candidates[:max_results]:
+        discovered = []
+        for stream in stream_candidates[:discovered_room]:
             username = (stream.get("user_login") or "").lower().strip()
             if username:
-                usernames.append(username)
+                discovered.append(username)
 
-        drop_pick = getattr(self, "last_drop_pick_streamer", None)
         # The Drops-enabled directory lists at most 100 channels, so in a busy
         # game the pick can be missing from it. Its own positive eligibility,
         # which every stream refresh re-checks, is accepted instead.
+        # A discovered pick only competes for the discovered share of the
+        # limit: an allow-listed channel earns every campaign the pick can and
+        # more, so it is never evicted to keep the pick.
+        drop_pick = getattr(self, "last_drop_pick_streamer", None)
         if (
             drops_enabled is True
             and drop_pick is not None
+            and drop_pick not in discovered
+            and discovered_room > 0
+            # An allow-listed pick was already checked (and not selected) by
+            # the restricted lookup, so do not ask Helix about it again.
+            and not any(
+                logins is not None and drop_pick in logins
+                for logins in campaign_login_sets
+            )
             and (
                 drop_pick in (drops_enabled_logins or set())
-                or self.__has_positive_eligibility(self.__slugify(game_name), drop_pick)
+                or self.__has_positive_eligibility(game_slug, drop_pick)
             )
             and self.__is_live_in_game(
                 drop_pick,
@@ -3810,29 +3901,44 @@ class Twitch(object):
                 },
             )
         ):
-            usernames = self.__keep_drop_pick(usernames, drop_pick, max_results)
+            discovered = self.__keep_drop_pick(discovered, drop_pick, discovered_room)
 
-        game_slug = self.__slugify(game_name)
         total_campaigns = len(fallback_campaigns) or 1
-        self.__replace_category_campaign_eligibility(
-            game_slug,
-            (
-                {username: (total_campaigns, total_campaigns) for username in usernames}
-                if drops_enabled is True
-                else {}
-            ),
-        )
-
+        # Twitch's own allow-list vouches for the allow-listed channels
+        # regardless of the Drops-enabled directory filter.
+        eligibility = {
+            username: restricted_eligibility[username] for username in allow_listed
+        }
         if drops_enabled is True:
+            for username in discovered:
+                eligibility[username] = (
+                    self.__campaign_eligibility(username, campaign_login_sets)
+                    if campaign_login_sets
+                    else (total_campaigns, total_campaigns)
+                )
+        self.__replace_category_campaign_eligibility(game_slug, eligibility)
+        usernames = allow_listed + discovered
+
+        if drops_enabled is True and allow_listed and discovered_room <= 0:
+            message = (
+                f"Selected {len(usernames)} allow-listed live channels for "
+                f"'{game_name}', filling the limit without discovery "
+                f"(limit: {max_results}, sort: {sort_key})"
+            )
+        elif drops_enabled is True:
             eligible_count = len(drops_enabled_logins or [])
             eligible_label = (
                 f"at least {eligible_count}"
                 if eligible_count >= 100
                 else eligible_count
             )
+            allow_listed_note = (
+                f"{len(allow_listed)} allow-listed plus " if allow_listed else ""
+            )
             message = (
-                f"Selected {len(usernames)} of {eligible_label} Drops-enabled live "
-                f"channels for '{game_name}' (limit: {max_results}, sort: {sort_key})"
+                f"Selected {allow_listed_note}{len(discovered)} of {eligible_label} "
+                f"Drops-enabled live channels for '{game_name}' "
+                f"(limit: {max_results}, sort: {sort_key})"
             )
         else:
             message = (
@@ -3876,7 +3982,9 @@ class Twitch(object):
         if drop_pick is None or drop_pick in usernames:
             return usernames
         if limit is not None:
-            usernames = usernames[: max(limit - 1, 0)]
+            if limit <= 0:
+                return usernames
+            usernames = usernames[: limit - 1]
         return usernames + [drop_pick]
 
     def __get_live_restricted_campaign_streamers(
@@ -3887,32 +3995,74 @@ class Twitch(object):
         drops_enabled=True,
         target_per_campaign=20,
         max_total=None,
+        campaign_logins_by_campaign=None,
+        campaign_login_sets_by_campaign=None,
     ):
-        all_campaign_login_lists = [
-            self.__campaign_channel_logins(campaign) for campaign in campaigns
+        """Live channels from the campaigns' allow-lists, most widely eligible
+        first, plus each one's (eligible campaigns, total campaigns). Recording
+        that eligibility is left to the caller, which may merge these with
+        channels discovered for campaigns open to every channel.
+
+        campaigns must already exclude catalog records without a channel list
+        (see __campaign_channels_unknown); campaign_logins_by_campaign is
+        __campaign_logins_by_campaign(campaigns), passed in when the caller has
+        built it, along with campaign_login_sets_by_campaign, the same entries
+        as sets. When max_total caps the result, the cap is filled round-robin
+        across restricted campaigns so each one with a live channel keeps at
+        least one slot."""
+        if campaign_logins_by_campaign is None:
+            campaign_logins_by_campaign = self.__campaign_logins_by_campaign(campaigns)
+            campaign_login_sets_by_campaign = None
+        if campaign_login_sets_by_campaign is None:
+            campaign_login_sets_by_campaign = [
+                None if logins is None else set(logins)
+                for logins in campaign_logins_by_campaign
+            ]
+        campaign_login_lists = [
+            logins for logins in campaign_logins_by_campaign if logins
         ]
-        campaign_login_lists = [logins for logins in all_campaign_login_lists if logins]
-        campaign_logins = [set(logins) for logins in campaign_login_lists]
+        campaign_logins = [
+            logins for logins in campaign_login_sets_by_campaign if logins
+        ]
         overlap_counts = {}
         first_seen = {}
+        # A login's earliest position in any allow-list: ranking by it after
+        # overlap interleaves the campaigns, so a small campaign's channels are
+        # reached in the first chunks instead of after a big campaign's list.
+        list_position = {}
         for logins in campaign_login_lists:
-            for login in logins:
+            for position, login in enumerate(logins):
                 overlap_counts[login] = overlap_counts.get(login, 0) + 1
                 if login not in first_seen:
                     first_seen[login] = len(first_seen)
+                list_position[login] = min(list_position.get(login, position), position)
         ranked_logins = sorted(
             overlap_counts,
-            key=lambda login: (-overlap_counts[login], first_seen[login]),
+            key=lambda login: (
+                -overlap_counts[login],
+                list_position[login],
+                first_seen[login],
+            ),
         )
 
         live_streams = {}
         checked = 0
+        checked_logins = set()
+        # Chunks fetched after the cap was met while some campaign still had
+        # no live channel; bounded so a big, fully offline allow-list cannot
+        # page through every login on each refresh.
+        chunks_past_cap = 0
         allow_cross_category = self.__slugify(game_name) == "special-events"
         for login_chunk in create_chunks(ranked_logins, 100):
             response = self.__helix_get(
                 "streams", {"user_login": login_chunk, "first": 100}
             )
-            checked += len(login_chunk)
+            if "data" in response:
+                # A failed request (__helix_get returns {}) leaves these
+                # unchecked, so a Drops pick among them still gets its own
+                # lookup below instead of being taken for offline.
+                checked += len(login_chunk)
+                checked_logins.update(login_chunk)
             for stream in response.get("data", []) or []:
                 if not allow_cross_category and str(stream.get("game_id") or "") != str(
                     game_id
@@ -3925,11 +4075,28 @@ class Twitch(object):
             if all(
                 len(logins.intersection(live_streams)) >= target_per_campaign
                 for logins in campaign_logins
-            ) or (max_total is not None and len(live_streams) >= max_total):
+            ):
                 break
+            if max_total is not None and len(live_streams) >= max_total:
+                # Past the cap, keep looking only while some campaign has
+                # neither a live channel nor its whole allow-list checked.
+                if all(
+                    logins <= checked_logins or logins.intersection(live_streams)
+                    for logins in campaign_logins
+                ):
+                    break
+                chunks_past_cap += 1
+                if chunks_past_cap >= 2:
+                    break
 
         drop_pick = getattr(self, "last_drop_pick_streamer", None)
-        if drop_pick in overlap_counts and drop_pick not in live_streams:
+        # The pick only needs its own lookup when the chunked search stopped
+        # before reaching it; a pick it did check and not find is offline.
+        if (
+            drop_pick in overlap_counts
+            and drop_pick not in live_streams
+            and drop_pick not in checked_logins
+        ):
             pick_stream = self.__live_stream_for(drop_pick)
             if pick_stream is not None and (
                 allow_cross_category
@@ -3942,48 +4109,90 @@ class Twitch(object):
             key=lambda stream: stream.get("viewer_count", 0),
             reverse=True,
         )
-        unrestricted_campaigns = sum(
-            1 for logins in all_campaign_login_lists if not logins
-        )
         eligible_campaign_counts = {
-            login: unrestricted_campaigns
-            + sum(1 for logins in campaign_logins if login in logins)
+            login: self.__campaign_eligibility(login, campaign_login_sets_by_campaign)[
+                0
+            ]
             for login in live_streams
         }
-        usernames = []
-        selected = set()
+        # Each restricted campaign's live channels, most viewers first, up to
+        # the per-campaign target.
+        per_campaign = []
         for logins in campaign_logins:
-            campaign_selected = 0
+            campaign_streams = []
             for stream in sorted_live_streams:
                 login = (stream.get("user_login") or "").lower().strip()
-                if login not in logins:
-                    continue
-                campaign_selected += 1
-                if login not in selected:
-                    selected.add(login)
-                    usernames.append(login)
-                if campaign_selected >= target_per_campaign:
+                if login in logins:
+                    campaign_streams.append(login)
+                    if len(campaign_streams) >= target_per_campaign:
+                        break
+            per_campaign.append(campaign_streams)
+        usernames = []
+        selected = set()
+        # Take one channel per campaign per round, so a cap cannot spend every
+        # slot on the first campaign and leave a later one with none.
+        positions = [0] * len(per_campaign)
+        while max_total is None or len(usernames) < max_total:
+            added = False
+            for index, campaign_streams in enumerate(per_campaign):
+                while positions[index] < len(campaign_streams):
+                    login = campaign_streams[positions[index]]
+                    positions[index] += 1
+                    if login not in selected:
+                        selected.add(login)
+                        usernames.append(login)
+                        added = True
+                        break
+                if max_total is not None and len(usernames) >= max_total:
                     break
+            if not added:
+                break
         usernames.sort(key=lambda login: -eligible_campaign_counts.get(login, 0))
-        if max_total is not None:
-            usernames = usernames[:max_total]
-        if drop_pick in live_streams:
-            usernames = self.__keep_drop_pick(usernames, drop_pick, max_total)
-        game_slug = self.__slugify(game_name)
-        self.__replace_category_campaign_eligibility(
-            game_slug,
-            {
-                login: (eligible_campaign_counts[login], len(campaigns))
-                for login in usernames
-            },
-        )
+        if drop_pick in live_streams and drop_pick not in usernames:
+            if max_total is None or len(usernames) < max_total:
+                usernames.append(drop_pick)
+            elif max_total > 0:
+                # Make room by evicting, from the end, a channel whose
+                # campaigns all keep another channel (the pick included), so
+                # keeping the pick never costs a campaign its only channel.
+                kept = usernames + [drop_pick]
+
+                def replaceable(login):
+                    return all(
+                        any(other != login and other in logins for other in kept)
+                        for logins in campaign_logins
+                        if login in logins
+                    )
+
+                victim = next(
+                    (login for login in reversed(usernames) if replaceable(login)),
+                    usernames[-1],
+                )
+                usernames.remove(victim)
+                usernames.append(drop_pick)
         self.__log_category(
             f"Checked {checked}/{len(ranked_logins)} campaign-restricted channels for "
             f"'{game_name}'; selected {len(usernames)} live across "
-            f"{len(campaigns)} campaigns",
+            f"{len(campaign_logins)} allow-listed campaigns",
             extra={"emoji": ":satellite_antenna:"},
         )
-        return usernames
+        return usernames, {
+            login: (eligible_campaign_counts[login], len(campaigns))
+            for login in usernames
+        }
+
+    @staticmethod
+    def __campaign_eligibility(login, campaign_logins_by_campaign):
+        """(campaigns this login can earn, total campaigns): every campaign
+        open to all channels plus each allow-list that names the login, given
+        __campaign_logins_by_campaign's one entry per campaign (callers pass
+        the entries as sets so membership is cheap)."""
+        eligible = sum(
+            1
+            for logins in campaign_logins_by_campaign
+            if logins is None or login in logins
+        )
+        return eligible, len(campaign_logins_by_campaign)
 
     def __get_drops_enabled_directory_logins(self, game_slug: str) -> set[str]:
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
