@@ -1,7 +1,8 @@
 name: Mark issues awaiting release
 
 on:
-  pull_request:
+  # Fork PRs receive a read-only token on pull_request, even after merging.
+  pull_request_target:
     types: [closed]
 
 permissions:
@@ -18,7 +19,9 @@ jobs:
       - name: Checkout automation
         uses: actions/checkout@v6
         with:
+          # Run only trusted default-branch automation with the write token.
           ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Mark linked issues awaiting release
         uses: actions/github-script@v8
