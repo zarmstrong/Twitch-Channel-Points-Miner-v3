@@ -407,3 +407,44 @@ def test_no_notification_thread_without_a_provider():
 
     with _configured(LoggerSettings(save=False, telegram=_telegram())) as listener:
         assert listener.notification_listener is not None
+
+
+def _log_failure(event=Events.CONFIGURATION):
+    try:
+        raise ValueError("title \U0001f389 \u2192 done")
+    except ValueError:
+        logging.getLogger("miner").error(
+            "The miner stopped", exc_info=True, extra={"event": event}
+        )
+
+
+def test_notification_message_keeps_the_traceback_with_emoji_removed():
+    telegram = _telegram(events=(Events.CONFIGURATION,))
+    settings = LoggerSettings(save=False, emoji=False, telegram=telegram)
+
+    with _configured(settings):
+        _log_failure()
+
+    message, event = telegram.send.call_args.args
+    assert event == Events.CONFIGURATION
+    assert message.startswith("The miner stopped\nTraceback")
+    assert "ValueError: title" in message
+    assert "\U0001f389" not in message
+    assert "--> done" in message
+
+
+def test_console_traceback_is_decorated_like_the_message():
+    settings = LoggerSettings(save=False, emoji=False, colored=True)
+
+    with _configured(settings) as listener:
+        stream = io.StringIO()
+        _console_handler(listener).setStream(stream)
+        _log_failure(event=Events.BET_WIN)
+
+    output = stream.getvalue()
+    assert "ValueError: title" in output
+    assert "\U0001f389" not in output
+    assert "--> done" in output
+    # The event color wraps the traceback as well, then resets.
+    assert output.rstrip("\n").endswith(Fore.RESET)
+    assert output.count("Traceback") == 1

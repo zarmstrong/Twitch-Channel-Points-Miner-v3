@@ -1173,6 +1173,16 @@ def test_tee_stream_writes_to_buffer_and_underlying():
     assert lines == ["hello\n"]
 
 
+def test_tee_stream_reports_the_forwarded_stream_encoding():
+    buffer = windows_launcher.ConsoleBuffer()
+
+    class Underlying:
+        encoding = "cp1252"
+
+    assert windows_launcher._TeeStream(buffer, Underlying()).encoding == "cp1252"
+    assert windows_launcher._TeeStream(buffer, None).encoding is None
+
+
 def test_tee_stream_tolerates_missing_underlying_stream():
     buffer = windows_launcher.ConsoleBuffer()
     tee = windows_launcher._TeeStream(buffer, None)

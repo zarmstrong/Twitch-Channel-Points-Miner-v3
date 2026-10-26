@@ -43,7 +43,11 @@ from TwitchChannelPointsMiner.data_migration import (
     DataMigrationError,
     migrate_analytics_directory,
 )
-from TwitchChannelPointsMiner.logger import LoggerSettings, configure_loggers
+from TwitchChannelPointsMiner.logger import (
+    LoggerSettings,
+    LoggingFormat,
+    configure_loggers,
+)
 from TwitchChannelPointsMiner.utils import (
     AttemptStrategy,
     _millify,
@@ -2329,8 +2333,15 @@ class TwitchChannelPointsMiner:
                         "continuing shutdown anyway"
                     )
 
+    @staticmethod
+    def _print_report_spacing(text=""):
+        # Blank lines separate the report on the text console; JSON output
+        # stays one object per line.
+        if Settings.logger.console_format is not LoggingFormat.JSON:
+            print(text)
+
     def __print_report(self):
-        print("\n")
+        self._print_report_spacing("\n")
         logger.info(
             f"Ending session: '{self.session_id}'", extra={"emoji": ":stop_sign:"}
         )
@@ -2344,7 +2355,7 @@ class TwitchChannelPointsMiner:
         )
 
         if not Settings.logger.less and self.events_predictions != {}:
-            print("")
+            self._print_report_spacing()
             for event_id in self.events_predictions:
                 event = self.events_predictions[event_id]
                 if (
@@ -2365,7 +2376,7 @@ class TwitchChannelPointsMiner:
                         extra={"emoji": ":bar_chart:"},
                     )
 
-        print("")
+        self._print_report_spacing()
         # Retiring streamers shrinks both lists under config_reload_lock, so
         # pair them under it too.
         with self.config_reload_lock:
@@ -2400,7 +2411,7 @@ class TwitchChannelPointsMiner:
             self.twitch.drop_report_snapshot(),
         )
         if drop_entries:
-            print("")
+            self._print_report_spacing()
             reward_label = "reward" if len(drop_entries) == 1 else "rewards"
             logger.info(
                 f"Drop progress gained this session "
