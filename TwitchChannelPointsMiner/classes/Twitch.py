@@ -86,6 +86,11 @@ CHANNEL_VERDICT_FRESHNESS_SECONDS = 600
 # status (401/403 included: an expired token or a Cloudflare streak clears up)
 # is treated as a failed request.
 HELIX_PERMANENT_STATUS_CODES = {400, 404, 410, 422}
+# Something that can be a Twitch login at all. Helix rejects a whole batched
+# `streams` request (HTTP 400) when one login in it is malformed; this drops
+# the entries that clearly are not logins (display names with spaces, other
+# punctuation, non-ASCII, too long), as catalog records sometimes carry.
+TWITCH_LOGIN_PATTERN = re.compile(r"[a-z0-9_][a-z0-9_-]{0,24}")
 # Outcome of the calling thread's latest drops dashboard request. Thread-local
 # so the campaign sync thread's dashboard calls cannot be mistaken for the
 # category discovery pass's own.
@@ -488,11 +493,16 @@ class Twitch(object):
                 }
             )
             self.category_campaign_eligibility = updated_eligibility
-            evaluated_categories = getattr(self, "evaluated_category_campaigns", None)
-            if evaluated_categories is None:
-                evaluated_categories = set()
-                self.evaluated_category_campaigns = evaluated_categories
-            evaluated_categories.add(game_slug)
+            # A lookup that failed part-way did not evaluate the game, so a
+            # kept streamer without an entry must not read as ruled out.
+            if not keep_undiscovered:
+                evaluated_categories = getattr(
+                    self, "evaluated_category_campaigns", None
+                )
+                if evaluated_categories is None:
+                    evaluated_categories = set()
+                    self.evaluated_category_campaigns = evaluated_categories
+                evaluated_categories.add(game_slug)
 
         if fresh_verdicts:
             self.__log_drop_check(
@@ -3674,8 +3684,9 @@ class Twitch(object):
                 # return 400 every cycle). Reporting that as a failed request
                 # would leave the category unevaluated forever, so it counts
                 # as an evaluated empty page, as it did before failures were
-                # told apart from empty results.
-                return {"data": []}
+                # told apart from empty results. The status rides along so a
+                # batched lookup can tell its logins were not actually checked.
+                return {"data": [], "rejected_status": status_code}
             return {}
 
     @staticmethod
@@ -3941,6 +3952,57 @@ class Twitch(object):
         else:
             search_window = min(discovered_room * 3, 300)
 
+        total_campaigns = len(fallback_campaigns) or 1
+
+        def selection_eligibility(discovered):
+            # Twitch's own allow-list vouches for the allow-listed channels
+            # regardless of the Drops-enabled directory filter.
+            eligibility = {
+                username: restricted_eligibility[username] for username in allow_listed
+            }
+            if drops_enabled is True:
+                for username in discovered:
+                    eligibility[username] = (
+                        self.__campaign_eligibility(username, campaign_login_sets)
+                        if campaign_login_sets
+                        else (total_campaigns, total_campaigns)
+                    )
+            return eligibility
+
+        def lookup_failed(reason):
+            """The exception for a lookup that failed part-way. The category
+            stays unevaluated (nothing is retired for it), but the channels
+            found so far are still worth adding this cycle: allow-listed ones
+            first, then what earlier pages found, in the same order, limit and
+            Drops-pick retention as a complete lookup."""
+            found_logins = {
+                (stream.get("user_login") or "").lower().strip()
+                for stream in stream_candidates
+            }
+            partial_discovered = [
+                username
+                for stream in self.__order_stream_candidates(
+                    stream_candidates, sort_key
+                )[: max(discovered_room, 0)]
+                if (username := (stream.get("user_login") or "").lower().strip())
+            ]
+            drop_pick = getattr(self, "last_drop_pick_streamer", None)
+            if drops_enabled is True and drop_pick in found_logins:
+                partial_discovered = self.__keep_drop_pick(
+                    partial_discovered, drop_pick, discovered_room
+                )
+            partial_usernames = allow_listed + partial_discovered
+            partial_eligibility = selection_eligibility(partial_discovered)
+            if partial_eligibility:
+                self.__replace_category_campaign_eligibility(
+                    game_slug, partial_eligibility, keep_undiscovered=True
+                )
+            if partial_usernames:
+                reason += f" after {len(partial_usernames)} live channels were found"
+            return CategoryLookupFailedException(
+                reason, game_slug=game_slug, usernames=partial_usernames
+            )
+
         while len(stream_candidates) < search_window:
             # Allow-listed channels are already placed and get rejected as
             # seen, so make room for them rather than paging one at a time.
@@ -3955,64 +4017,20 @@ class Twitch(object):
 
             streams_response = self.__helix_get("streams", params)
             if self.__helix_request_failed(streams_response):
-                # The category stays unevaluated (nothing is retired for it),
-                # but the channels the earlier pages found are still worth
-                # adding this cycle rather than waiting for the next refresh.
-                # Same order, limit and Drops-pick retention as a complete
-                # lookup, restricted to what the earlier pages found.
-                found_logins = {
-                    (stream.get("user_login") or "").lower().strip()
-                    for stream in stream_candidates
-                }
-                # Allow-listed channels keep their place ahead of the
-                # discovered share of the limit, as in a complete lookup.
-                partial_discovered = [
-                    username
-                    for stream in self.__order_stream_candidates(
-                        stream_candidates, sort_key
-                    )[:discovered_room]
-                    if (username := (stream.get("user_login") or "").lower().strip())
-                ]
-                drop_pick = getattr(self, "last_drop_pick_streamer", None)
-                if drops_enabled is True and drop_pick in found_logins:
-                    partial_discovered = self.__keep_drop_pick(
-                        partial_discovered, drop_pick, discovered_room
-                    )
-                partial_usernames = allow_listed + partial_discovered
-                partial_eligibility = {
-                    username: restricted_eligibility[username]
-                    for username in allow_listed
-                }
-                if drops_enabled is True:
-                    total_campaigns = len(fallback_campaigns) or 1
-                    for username in partial_discovered:
-                        partial_eligibility[username] = (
-                            self.__campaign_eligibility(username, campaign_login_sets)
-                            if campaign_login_sets
-                            else (total_campaigns, total_campaigns)
-                        )
-                if partial_eligibility:
-                    self.__replace_category_campaign_eligibility(
-                        game_slug, partial_eligibility, keep_undiscovered=True
-                    )
-                raise CategoryLookupFailedException(
+                raise lookup_failed(
                     f"Twitch live-stream lookup for '{game_name}' failed"
-                    + (
-                        f" after {len(partial_usernames)} live channels were found"
-                        if partial_usernames
-                        else ""
-                    ),
-                    game_slug=game_slug,
-                    usernames=partial_usernames,
                 )
             streams = streams_response.get("data", []) or []
             if streams == []:
                 break
 
             if drops_enabled is True and drops_enabled_logins is None:
-                drops_enabled_logins = self.__get_drops_enabled_directory_logins(
-                    game_slug
-                )
+                try:
+                    drops_enabled_logins = self.__get_drops_enabled_directory_logins(
+                        game_slug
+                    )
+                except CategoryLookupFailedException as error:
+                    raise lookup_failed(str(error)) from error
                 # Allow-listed channels in the directory were seeded as seen
                 # and can never become candidates; sizing the window by them
                 # would page the whole category looking for channels that
@@ -4089,20 +4107,9 @@ class Twitch(object):
                 # evaluated category would otherwise retire as stale.
                 discovered = self.__keep_drop_pick(discovered, drop_pick, None)
 
-        total_campaigns = len(fallback_campaigns) or 1
-        # Twitch's own allow-list vouches for the allow-listed channels
-        # regardless of the Drops-enabled directory filter.
-        eligibility = {
-            username: restricted_eligibility[username] for username in allow_listed
-        }
-        if drops_enabled is True:
-            for username in discovered:
-                eligibility[username] = (
-                    self.__campaign_eligibility(username, campaign_login_sets)
-                    if campaign_login_sets
-                    else (total_campaigns, total_campaigns)
-                )
-        self.__replace_category_campaign_eligibility(game_slug, eligibility)
+        self.__replace_category_campaign_eligibility(
+            game_slug, selection_eligibility(discovered)
+        )
         usernames = allow_listed + discovered
 
         if drops_enabled is True and allow_listed and discovered_room <= 0:
@@ -4280,25 +4287,101 @@ class Twitch(object):
         def campaign_eligibility_of(login):
             return self.__campaign_eligibility(login, campaign_login_sets_by_campaign)
 
+        # A malformed login would make Helix reject (HTTP 400) the whole batch
+        # holding it, hiding every other channel there, and cannot be a live
+        # channel anyway: leave it out of the lookup and count it as checked.
+        queried_logins = [
+            login for login in ranked_logins if TWITCH_LOGIN_PATTERN.fullmatch(login)
+        ]
         live_streams = {}
         checked = 0
-        checked_logins = set()
+        checked_logins = set(ranked_logins).difference(queried_logins)
+        drop_pick = getattr(self, "last_drop_pick_streamer", None)
         # Chunks fetched after the cap was met while some campaign still had
         # no live channel; bounded so a big, fully offline allow-list cannot
         # page through every login on each refresh.
         chunks_past_cap = 0
         allow_cross_category = game_slug == "special-events"
-        for login_chunk in create_chunks(ranked_logins, 100):
+
+        def select_usernames():
+            """The channels to return from live_streams as found so far: up to
+            target_per_campaign per restricted campaign, one campaign per
+            round so a cap reaches every campaign, most widely eligible first,
+            with the Drops pick kept when it is live."""
+            sorted_live_streams = sorted(
+                live_streams.values(),
+                key=lambda stream: stream.get("viewer_count", 0),
+                reverse=True,
+            )
+            eligible_campaign_counts = {
+                login: campaign_eligibility_of(login)[0] for login in live_streams
+            }
+            # Each restricted campaign's live channels, most viewers first, up to
+            # the per-campaign target.
+            per_campaign = []
+            for logins in campaign_logins:
+                campaign_streams = []
+                for stream in sorted_live_streams:
+                    login = (stream.get("user_login") or "").lower().strip()
+                    if login in logins:
+                        campaign_streams.append(login)
+                        if len(campaign_streams) >= target_per_campaign:
+                            break
+                per_campaign.append(campaign_streams)
+            usernames = []
+            selected = set()
+            # Take one channel per campaign per round, so a cap cannot spend every
+            # slot on the first campaign and leave a later one with none.
+            positions = [0] * len(per_campaign)
+            while max_total is None or len(usernames) < max_total:
+                added = False
+                for index, campaign_streams in enumerate(per_campaign):
+                    while positions[index] < len(campaign_streams):
+                        login = campaign_streams[positions[index]]
+                        positions[index] += 1
+                        if login not in selected:
+                            selected.add(login)
+                            usernames.append(login)
+                            added = True
+                            break
+                    if max_total is not None and len(usernames) >= max_total:
+                        break
+                if not added:
+                    break
+            usernames.sort(key=lambda login: -eligible_campaign_counts.get(login, 0))
+            if drop_pick in live_streams and drop_pick not in usernames:
+                if max_total is None or len(usernames) < max_total:
+                    usernames.append(drop_pick)
+                elif max_total > 0:
+                    # Make room by evicting, from the end, a channel whose
+                    # campaigns all keep another channel (the pick included), so
+                    # keeping the pick never costs a campaign its only channel.
+                    kept = usernames + [drop_pick]
+
+                    def replaceable(login):
+                        return all(
+                            any(other != login and other in logins for other in kept)
+                            for logins in campaign_logins
+                            if login in logins
+                        )
+
+                    victim = next(
+                        (login for login in reversed(usernames) if replaceable(login)),
+                        usernames[-1],
+                    )
+                    usernames.remove(victim)
+                    usernames.append(drop_pick)
+            return usernames
+
+        for login_chunk in create_chunks(queried_logins, 100):
             response = self.__helix_get(
                 "streams", {"user_login": login_chunk, "first": 100}
             )
             if self.__helix_request_failed(response):
                 # The category stays unevaluated (nothing is retired for it),
-                # but the live channels found so far are still added.
-                partial_usernames = sorted(
-                    live_streams,
-                    key=lambda login: -live_streams[login].get("viewer_count", 0),
-                )[:max_total]
+                # but the live channels found so far are still added, chosen
+                # the same way as a complete lookup's.
+                partial_usernames = select_usernames()
                 if partial_usernames:
                     self.__replace_category_campaign_eligibility(
                         game_slug,
@@ -4315,7 +4398,10 @@ class Twitch(object):
                     usernames=partial_usernames,
                 )
             checked += len(login_chunk)
-            checked_logins.update(login_chunk)
+            if "rejected_status" not in response:
+                # A rejected batch was not looked at, so a Drops pick in it
+                # still gets its own lookup below.
+                checked_logins.update(login_chunk)
             for stream in response.get("data", []) or []:
                 if not allow_cross_category and str(stream.get("game_id") or "") != str(
                     game_id
@@ -4342,7 +4428,6 @@ class Twitch(object):
                 if chunks_past_cap >= 2:
                     break
 
-        drop_pick = getattr(self, "last_drop_pick_streamer", None)
         # The pick only needs its own lookup when the chunked search stopped
         # before reaching it; a pick it did check and not find is offline.
         unverified_pick = None
@@ -4354,85 +4439,26 @@ class Twitch(object):
             try:
                 pick_stream = self.__live_stream_for(drop_pick)
             except CategoryLookupFailedException as error:
-                # Unknown, not offline: the pick is kept, but added after
-                # selection so it competes for no slot.
-                self.__log_category(
-                    f"Keeping Drops pick '{drop_pick}' although its live check "
-                    f"failed: {error}",
-                    extra={"emoji": ":warning:"},
-                )
-                unverified_pick = drop_pick
                 pick_stream = None
+                # Unknown, not offline: the pick is kept, but added after
+                # selection so it competes for no slot. The pick is global,
+                # so only when it was already eligible in this game: being on
+                # one of its allow-lists says nothing about what it streams.
+                if self.__has_positive_eligibility(game_slug, drop_pick):
+                    self.__log_category(
+                        f"Keeping Drops pick '{drop_pick}' although its live "
+                        f"check failed: {error}",
+                        extra={"emoji": ":warning:"},
+                    )
+                    unverified_pick = drop_pick
             if pick_stream is not None and (
                 allow_cross_category
                 or str(pick_stream.get("game_id") or "") == str(game_id)
             ):
                 live_streams[drop_pick] = pick_stream
 
-        sorted_live_streams = sorted(
-            live_streams.values(),
-            key=lambda stream: stream.get("viewer_count", 0),
-            reverse=True,
-        )
-        eligible_campaign_counts = {
-            login: campaign_eligibility_of(login)[0] for login in live_streams
-        }
-        # Each restricted campaign's live channels, most viewers first, up to
-        # the per-campaign target.
-        per_campaign = []
-        for logins in campaign_logins:
-            campaign_streams = []
-            for stream in sorted_live_streams:
-                login = (stream.get("user_login") or "").lower().strip()
-                if login in logins:
-                    campaign_streams.append(login)
-                    if len(campaign_streams) >= target_per_campaign:
-                        break
-            per_campaign.append(campaign_streams)
-        usernames = []
-        selected = set()
-        # Take one channel per campaign per round, so a cap cannot spend every
-        # slot on the first campaign and leave a later one with none.
-        positions = [0] * len(per_campaign)
-        while max_total is None or len(usernames) < max_total:
-            added = False
-            for index, campaign_streams in enumerate(per_campaign):
-                while positions[index] < len(campaign_streams):
-                    login = campaign_streams[positions[index]]
-                    positions[index] += 1
-                    if login not in selected:
-                        selected.add(login)
-                        usernames.append(login)
-                        added = True
-                        break
-                if max_total is not None and len(usernames) >= max_total:
-                    break
-            if not added:
-                break
-        usernames.sort(key=lambda login: -eligible_campaign_counts.get(login, 0))
-        if drop_pick in live_streams and drop_pick not in usernames:
-            if max_total is None or len(usernames) < max_total:
-                usernames.append(drop_pick)
-            elif max_total > 0:
-                # Make room by evicting, from the end, a channel whose
-                # campaigns all keep another channel (the pick included), so
-                # keeping the pick never costs a campaign its only channel.
-                kept = usernames + [drop_pick]
-
-                def replaceable(login):
-                    return all(
-                        any(other != login and other in logins for other in kept)
-                        for logins in campaign_logins
-                        if login in logins
-                    )
-
-                victim = next(
-                    (login for login in reversed(usernames) if replaceable(login)),
-                    usernames[-1],
-                )
-                usernames.remove(victim)
-                usernames.append(drop_pick)
-        elif unverified_pick is not None and unverified_pick not in usernames:
+        usernames = select_usernames()
+        if unverified_pick is not None and unverified_pick not in usernames:
             # Beyond max_total for this cycle instead of displacing a channel
             # confirmed live, which this evaluated category would then retire.
             usernames.append(unverified_pick)

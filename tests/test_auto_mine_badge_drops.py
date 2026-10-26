@@ -365,6 +365,46 @@ def test_auto_mine_badge_campaigns_falls_back_when_inventory_fetch_fails():
     assert miner.streamers == []
 
 
+def test_auto_mine_badge_campaigns_adds_channels_a_failed_lookup_still_found():
+    from TwitchChannelPointsMiner.classes.Exceptions import (
+        CategoryLookupFailedException,
+    )
+
+    class PartialTwitch(FakeTwitch):
+        def get_live_streamers_for_category(self, selector, **kwargs):
+            self.selectors.append((selector, kwargs))
+            if kwargs.get("restricted_campaigns"):
+                raise CategoryLookupFailedException(
+                    "second batch failed", usernames=["partialchannel"]
+                )
+            return ["allchannel"]
+
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.bet.default()
+    Settings.streamer_settings = defaults
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.username = "testuser"
+    miner.twitch = PartialTwitch()
+    miner.streamers = []
+    miner.original_streamers = []
+    miner.ws_pool = FakeWebSocketsPool()
+    miner.drop_badge_catalog = FakeCatalog()
+    miner.badge_drop_streamer_limit = 2
+    miner.badge_drop_category_chat = ChatPresence.NEVER
+    miner.badge_drop_category_sort = "VIEWERS_DESC"
+    miner.badge_drop_blacklist = set()
+    miner.config_reload_lock = threading.Lock()
+    miner.sync_campaigns_thread = object()
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert [streamer.username for streamer in miner.streamers] == [
+        "allchannel",
+        "partialchannel",
+    ]
+
+
 def test_category_discovery_keeps_point_baselines_aligned():
     defaults = StreamerSettings(chat=ChatPresence.NEVER)
     defaults.default()

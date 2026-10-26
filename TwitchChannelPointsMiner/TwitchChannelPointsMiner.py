@@ -255,6 +255,11 @@ def _capture_drop_progress_baseline(twitch, progress_scraped=False):
 
 
 DAILY_REPORT_STATE_VERSION = 1
+# Consecutive category refreshes a category may stay unevaluated (its lookup
+# kept failing) before it is treated as evaluated: a lookup that never
+# recovers, such as an expired token, must not keep stale streamers forever
+# or hold wildcard discovery off indefinitely.
+CATEGORY_LOOKUP_FAILURE_LIMIT = 3
 
 
 def _load_daily_report_state(path):
@@ -325,6 +330,7 @@ def _save_daily_report_state(path, report_date, streamers, drop_progress):
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
+        "category_lookup_failure_streaks",
         "twitch",
         "claim_drops_startup",
         "enable_analytics",
@@ -465,6 +471,7 @@ class TwitchChannelPointsMiner:
             _migrate_analytics_data(Settings.analytics_path)
 
         self.username = username
+        self.category_lookup_failure_streaks = {}
 
         # Set as global config
         Settings.logger = logger_settings
@@ -1609,6 +1616,8 @@ class TwitchChannelPointsMiner:
                 )
             except Exception as error:
                 discovery_failed = True
+                # A lookup that failed part-way still reports what it found.
+                discovered_usernames.extend(getattr(error, "usernames", None) or ())
                 logger.warning(
                     f"Unable to find a live channel for badge Drop campaign "
                     f"'{game_slug}': {error}",
@@ -1628,6 +1637,7 @@ class TwitchChannelPointsMiner:
                 )
             except Exception as error:
                 discovery_failed = True
+                discovered_usernames.extend(getattr(error, "usernames", None) or ())
                 logger.warning(
                     f"Unable to find restricted live channels for badge Drop "
                     f"campaign '{game_slug}': {error}",
@@ -1950,6 +1960,40 @@ class TwitchChannelPointsMiner:
             return [], set(), True
         return categories, self.__unevaluated_filter_category_slugs(), False
 
+    def __expire_unevaluated_slugs(self, kind, unevaluated_slugs):
+        """`unevaluated_slugs` without the categories that have now stayed
+        unevaluated for CATEGORY_LOOKUP_FAILURE_LIMIT refreshes in a row.
+
+        Those are treated as evaluated from then on, so their stale streamers
+        are retired and wildcard discovery can run again, until their lookup
+        succeeds and the count starts over. `kind` keeps the preferred and
+        wildcard passes' counts apart.
+        """
+        streaks = getattr(self, "category_lookup_failure_streaks", None)
+        if streaks is None:
+            streaks = {}
+            self.category_lookup_failure_streaks = streaks
+        previous = streaks.get(kind, {})
+        current = {slug: previous.get(slug, 0) + 1 for slug in unevaluated_slugs}
+        streaks[kind] = current
+        expired = {
+            slug
+            for slug, count in current.items()
+            if count >= CATEGORY_LOOKUP_FAILURE_LIMIT
+        }
+        newly_expired = sorted(
+            slug for slug in expired if current[slug] == CATEGORY_LOOKUP_FAILURE_LIMIT
+        )
+        if newly_expired:
+            logger.warning(
+                f"Category lookups for {', '.join(newly_expired)} failed "
+                f"{CATEGORY_LOOKUP_FAILURE_LIMIT} refreshes in a row; treating "
+                "them as evaluated so their stale streamers can be retired and "
+                "wildcard discovery can run",
+                extra={"emoji": ":warning:", "category_log": True},
+            )
+        return set(unevaluated_slugs) - expired
+
     def __unevaluated_filter_category_slugs(self):
         """Category slugs the latest discovery filter call reported as not
         evaluated (its Twitch campaign lookup failed and no other source
@@ -2175,6 +2219,10 @@ class TwitchChannelPointsMiner:
         # Requested categories the campaign lookup could not evaluate (a
         # secondary source covered the others) are not stale either.
         unevaluated_category_slugs |= filter_unevaluated_slugs
+        if not discovery_unavailable:
+            unevaluated_category_slugs = self.__expire_unevaluated_slugs(
+                "preferred", unevaluated_category_slugs
+            )
 
         added = self.__add_discovered_category_streamers(
             discovered_usernames,
@@ -2269,6 +2317,10 @@ class TwitchChannelPointsMiner:
                 sort_by=sort_by,
             )
             unevaluated_wildcard_slugs |= wildcard_filter_unevaluated_slugs
+            if wildcard_discovery_ran:
+                unevaluated_wildcard_slugs = self.__expire_unevaluated_slugs(
+                    "wildcard", unevaluated_wildcard_slugs
+                )
         wildcard_standing_down = wildcard_categories and not wildcard_discovery_ran
 
         added += self.__add_discovered_category_streamers(

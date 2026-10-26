@@ -1668,6 +1668,54 @@ def test_wildcard_pass_does_not_run_when_every_preferred_lookup_failed():
     assert miner.ws_pool.removed == []
 
 
+def test_category_that_keeps_failing_is_treated_as_evaluated_after_the_limit(
+    caplog,
+):
+    # A lookup that never recovers (an expired token, say) must not keep
+    # stale streamers forever or hold wildcard discovery off indefinitely.
+    twitch = LookupFailureTwitch(
+        ["overwatch-2", "rust"],
+        eligible_categories=["overwatch-2", "rust"],
+        wildcard_categories=["gamex"],
+    )
+    miner = _bare_miner(twitch)
+    ow_esports = _tracked_in_game("ow_esports", "Overwatch 2")
+    rust_streamer = _tracked_in_game("rust_streamer", "Rust")
+    miner.streamers = [ow_esports, rust_streamer]
+    miner.original_streamers = [10, 20]
+
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2", "rust"], wildcard_categories=True)
+    assert miner.streamers == [ow_esports, rust_streamer]
+    assert twitch.wildcard_calls == []
+
+    with caplog.at_level(logging.WARNING):
+        _refresh(miner, ["overwatch-2", "rust"], wildcard_categories=True)
+
+    assert ow_esports not in miner.streamers
+    assert rust_streamer not in miner.streamers
+    assert twitch.wildcard_calls != []
+    assert any(
+        "failed 3 refreshes in a row" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_failure_count_starts_over_once_a_lookup_succeeds():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    expire = miner._TwitchChannelPointsMiner__expire_unevaluated_slugs
+
+    assert expire("preferred", {"rust"}) == {"rust"}
+    assert expire("preferred", {"rust"}) == {"rust"}
+    # Rust's lookup worked this time, so its count starts over.
+    assert expire("preferred", set()) == set()
+    assert expire("preferred", {"rust"}) == {"rust"}
+    assert expire("preferred", {"rust"}) == {"rust"}
+    assert expire("preferred", {"rust"}) == set()
+    # The wildcard pass keeps its own count.
+    assert expire("wildcard", {"rust"}) == {"rust"}
+
+
 def test_wildcard_pass_runs_once_preferred_is_evaluated_and_empty():
     # Guard for the rule above: an evaluated, genuinely empty preferred pass
     # still hands idle capacity to the wildcard pass.

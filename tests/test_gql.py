@@ -2153,6 +2153,98 @@ def test_failed_discovery_page_keeps_allow_listed_channels_in_a_mixed_game(
     ] == (2, 2)
 
 
+def test_failed_drops_directory_keeps_allow_listed_channels_in_a_mixed_game(
+    monkeypatch,
+):
+    # The allow-list lookup worked but the Drops-enabled directory query
+    # failed: the allow-listed channel already found live is still reported,
+    # as for a failed stream page.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch, live={"grayzonewarfare": 5, "big": 300}
+    )
+
+    def failed_directory(self, game_slug):
+        raise CategoryLookupFailedException("directory down", game_slug=game_slug)
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_enabled_directory_logins", failed_directory
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category(
+            "Gray Zone Warfare", drops_enabled=True, limit=2
+        )
+
+    assert error.value.usernames == ["grayzonewarfare"]
+    assert twitch.category_campaign_eligibility[
+        ("gray-zone-warfare", "grayzonewarfare")
+    ] == (2, 2)
+    # A failed lookup does not mark the game as evaluated.
+    assert "gray-zone-warfare" not in (
+        getattr(twitch, "evaluated_category_campaigns", None) or set()
+    )
+
+
+def _restricted_partial_twitch(monkeypatch):
+    # Campaign A allow-lists 150 busy channels, campaign B one quiet channel
+    # and campaign C 120 offline ones. The first 100-login batch finds A's
+    # channels and B's; C has none live yet, so the search goes on, and the
+    # second batch fails.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    twitch.last_drop_pick_streamer = None
+    batches = []
+
+    def helix_get(self, endpoint, params):
+        batches.append(params["user_login"])
+        if len(batches) > 1:
+            return {}
+        return {
+            "data": [
+                {
+                    "user_login": login,
+                    "game_id": "game-id",
+                    "viewer_count": 1 if login == "b-0" else 1000 - index,
+                }
+                for index, login in enumerate(params["user_login"])
+                if not login.startswith("c-")
+            ]
+        }
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", helix_get)
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+    campaigns = [
+        {"channels": [f"a-{index}" for index in range(150)]},
+        {"channels": ["b-0"]},
+        {"channels": [f"c-{index}" for index in range(120)]},
+    ]
+    return twitch, campaigns
+
+
+@pytest.mark.parametrize(
+    "max_total, expected_count",
+    [
+        # Capped: one slot per campaign before any campaign gets a second.
+        (2, 2),
+        # Uncapped: at most target_per_campaign per campaign, not every live
+        # channel found so far.
+        (None, 21),
+    ],
+)
+def test_restricted_partial_failure_selects_like_a_complete_lookup(
+    monkeypatch, max_total, expected_count
+):
+    twitch, campaigns = _restricted_partial_twitch(monkeypatch)
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch._Twitch__get_live_restricted_campaign_streamers(
+            campaigns, "game-id", "Game", max_total=max_total
+        )
+
+    assert len(error.value.usernames) == expected_count
+    assert "b-0" in error.value.usernames
+
+
 def test_category_search_lets_allow_listed_channels_fill_a_mixed_limit(monkeypatch):
     # The per-campaign target of 20 is for restricted-only games; in a mixed
     # game allow-listed channels come first and may fill the whole limit.
@@ -2528,6 +2620,8 @@ def test_restricted_search_keeps_pick_when_its_live_check_fails(monkeypatch):
     # check runs, and fails. It is kept as unknown beside big, beyond
     # max_total for this cycle, instead of displacing the live channel.
     twitch = _restricted_pick_twitch(monkeypatch, pick_lookup_fails=True)
+    # The pick was already eligible in this game.
+    twitch.category_campaign_eligibility = {("game", "pick"): (1, 1)}
     channels = ["big"] + [f"filler-{index}" for index in range(99)] + ["pick"]
 
     usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
@@ -2537,6 +2631,55 @@ def test_restricted_search_keeps_pick_when_its_live_check_fails(monkeypatch):
     assert usernames == ["big", "pick"]
     # Recording is the caller's job; the helper returns the counts for both.
     assert eligibility == {"big": (1, 1), "pick": (1, 1)}
+
+
+def test_restricted_search_drops_an_unverified_pick_from_another_game(monkeypatch):
+    # The pick is global: on this game's allow-list, but never eligible here
+    # (it is being watched for another game). A failed live check must not
+    # pull it into this game.
+    twitch = _restricted_pick_twitch(monkeypatch, pick_lookup_fails=True)
+    channels = ["big"] + [f"filler-{index}" for index in range(99)] + ["pick"]
+
+    usernames, eligibility = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": channels}], "game-id", "Game", max_total=1
+    )
+
+    assert usernames == ["big"]
+    assert "pick" not in eligibility
+
+
+def test_restricted_search_skips_malformed_logins_and_rereads_a_rejected_batch(
+    monkeypatch,
+):
+    # A display name with a space is left out of the batched lookup. A batch
+    # Helix still rejects is not counted as checked, so the pick in it gets
+    # its own lookup instead of being taken for offline.
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    twitch.last_drop_pick_streamer = "pick"
+    batches = []
+
+    def helix_get(self, endpoint, params):
+        logins = params["user_login"]
+        if isinstance(logins, list):
+            batches.append(list(logins))
+            return {"data": [], "rejected_status": 400}
+        return {
+            "data": [{"user_login": logins, "game_id": "game-id", "viewer_count": 5}]
+        }
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", helix_get)
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    usernames, _ = twitch._Twitch__get_live_restricted_campaign_streamers(
+        [{"channels": ["Gray Zone Warfare", "pick", "other"]}],
+        "game-id",
+        "Game",
+        max_total=1,
+    )
+
+    assert batches == [["pick", "other"]]
+    assert usernames == ["pick"]
 
 
 def test_restricted_search_verified_pick_still_takes_the_last_slot(monkeypatch):
@@ -3386,7 +3529,8 @@ def test_helix_get_reports_permanent_client_errors_as_empty_page(
 
     response = twitch._Twitch__helix_get("streams", {"user_login": ["bad login"]})
 
-    assert response == {"data": []}
+    # The status rides along so a batched lookup knows its logins went unread.
+    assert response == {"data": [], "rejected_status": status_code}
     assert twitch._Twitch__helix_request_failed(response) is False
 
 
@@ -3600,7 +3744,10 @@ def test_partial_page_failure_reseeds_stale_negative_eligibility(monkeypatch):
         ("overwatch-2", "two"),
         ("overwatch-2", "unreached"),
     }
-    assert "overwatch-2" in twitch.evaluated_category_campaigns
+    # A lookup that failed part-way did not evaluate the game.
+    assert "overwatch-2" not in (
+        getattr(twitch, "evaluated_category_campaigns", None) or set()
+    )
 
 
 def test_restricted_partial_failure_reseeds_stale_negative_eligibility(monkeypatch):
