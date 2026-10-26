@@ -5,6 +5,7 @@
 
 
 import copy
+import functools
 import json
 import logging
 import os
@@ -145,7 +146,8 @@ class Twitch(object):
         "last_wildcard_category_drop_selection",
         "last_drop_pick_streamer",
         "last_drop_conflict_key",
-        "drop_slot_covering_streamer",
+        "drop_slot_cover",
+        "drop_cover_revoked",
         "configured_category_slugs",
         "category_drops_override_streamers",
         "evaluated_category_campaigns",
@@ -246,9 +248,14 @@ class Twitch(object):
         self.last_wildcard_category_drop_selection = None
         self.last_drop_pick_streamer = None
         self.last_drop_conflict_key = None
-        # A configured/followed stream holding the Drops slot in place of a
-        # discovered pick it covers; the stall check watches it too.
-        self.drop_slot_covering_streamer = None
+        # (covering username, covered usernames) while a configured or
+        # followed stream holds the Drops slot in place of a discovered pick
+        # it covers; the stall check watches the covering stream.
+        self.drop_slot_cover = None
+        # (game slug, username, broadcast id) of covering streams Twitch
+        # did not credit: they no longer replace the discovered pick for
+        # that broadcast.
+        self.drop_cover_revoked = set()
         # Slugs of the user's configured categories, and whether a
         # category-tier Drops stream outranks a configured/followed streamer's
         # Drops stream for a game outside that list (see
@@ -664,10 +671,14 @@ class Twitch(object):
             }
 
         # A configured or followed stream that took the Drops slot from a
-        # discovered pick it covers is watched for stalls too: when Twitch
-        # does not credit it, it is benched like a stalled discovered stream
-        # so a verified category channel gets the slot back.
-        covering_streamer = getattr(self, "drop_slot_covering_streamer", None)
+        # discovered pick it covers is watched for stalls too. When Twitch
+        # does not credit it, it stops covering that pick for the rest of the
+        # broadcast, so the verified discovered channel is watched for the
+        # Drop again; the stream itself keeps its points slot.
+        cover = getattr(self, "drop_slot_cover", None)
+        covering_streamer = cover[0] if cover is not None else None
+        revoked = getattr(self, "drop_cover_revoked", None) or set()
+        self.drop_cover_revoked = {key for key in revoked if key[0] in progress_by_game}
         watched_streamers = [
             streamer
             for streamer in streamers
@@ -728,6 +739,31 @@ class Twitch(object):
 
             stalled_for = now - state["last_progress_at"]
             if stalled_for < stall_seconds:
+                continue
+
+            if streamer.username == covering_streamer:
+                self.drop_cover_revoked.add(
+                    (
+                        game_slug,
+                        streamer.username,
+                        getattr(streamer.stream, "broadcast_id", None),
+                    )
+                )
+                state["username"] = None
+                state["rotation_from"] = streamer.username
+                state["waiting_for_alternative"] = None
+                logger.warning(
+                    f"{Fore.YELLOW}Drop progress has not changed for "
+                    f"{stalled_for / 60:.0f}m on {streamer.username}, which was "
+                    "standing in for the discovered Drops pick; watching the "
+                    f"discovered {game_name} channel for this Drop again. "
+                    f"Current progress: {self.__drop_progress_label(progress)}"
+                    f"{Fore.RESET}",
+                    extra={
+                        "emoji": ":arrows_counterclockwise:",
+                        "event": Events.DROP_STATUS,
+                    },
+                )
                 continue
 
             alternatives = []
@@ -3232,6 +3268,12 @@ class Twitch(object):
         previous = getattr(self, "last_drop_pick_streamer", None)
         if previous is None or streamer.username != previous:
             return False
+        # A pick a configured or followed stream covers is not watched: the
+        # in-progress drop below is being earned by the covering stream, so
+        # it says nothing about the pick's own eligibility.
+        cover = getattr(self, "drop_slot_cover", None)
+        if cover is not None and streamer.username in cover[1]:
+            return False
         if streamer.is_online is not True:
             return False
         settings = getattr(streamer, "settings", None)
@@ -4838,15 +4880,15 @@ class Twitch(object):
                 # evict the rest; their slots are backfilled with points-only
                 # streams below.
                 discovered_tiers = preferred_tier | wildcard_tier | badge_tier
-                drop_stream_cache = {}
 
+                # The helpers below are memoized per cycle: the same indexes
+                # are asked about repeatedly while the slots are settled.
+                @functools.lru_cache(maxsize=None)
                 def _is_drop_stream(index):
-                    if index not in drop_stream_cache:
-                        drop_stream_cache[index] = (
-                            index in discovered_tiers
-                            or self.__drops_condition(streamers_snapshot[index]) is True
-                        )
-                    return drop_stream_cache[index]
+                    return (
+                        index in discovered_tiers
+                        or self.__drops_condition(streamers_snapshot[index]) is True
+                    )
 
                 override_streamer_drops = (
                     getattr(self, "category_drops_override_streamers", False) is True
@@ -4886,51 +4928,50 @@ class Twitch(object):
                         if campaign.has_watchable_drops()
                     ]
 
-                drop_campaign_key_cache = {}
-
+                @functools.lru_cache(maxsize=None)
                 def _drop_campaign_key(index):
                     # The campaign IDs a stream would earn, or None when that
                     # is unknown or any campaign is limited to listed
                     # channels (sharing the game is not enough: per-channel
                     # campaigns of one game are still separate campaigns).
-                    if index not in drop_campaign_key_cache:
-                        campaigns = _watchable_campaigns(index)
-                        drop_campaign_key_cache[index] = (
-                            None
-                            if not campaigns
-                            or any(
-                                getattr(campaign, "channels", None)
-                                for campaign in campaigns
-                            )
-                            else frozenset(campaign.id for campaign in campaigns)
-                        )
-                    return drop_campaign_key_cache[index]
+                    campaigns = _watchable_campaigns(index)
+                    if not campaigns or any(
+                        getattr(campaign, "channels", None) for campaign in campaigns
+                    ):
+                        return None
+                    return frozenset(campaign.id for campaign in campaigns)
 
-                channel_earned_cache = {}
+                drop_cover_revoked = getattr(self, "drop_cover_revoked", None) or set()
 
+                @functools.lru_cache(maxsize=None)
                 def _channel_earned_campaign_ids(index):
                     # The campaigns a stream provably earns on its own
                     # channel: ones Twitch's channel query advertised for
                     # this broadcast (game-level fallback IDs do not prove
                     # Drops are enabled on it), unrestricted or allow-listing
-                    # this channel.
-                    if index not in channel_earned_cache:
-                        streamer = streamers_snapshot[index]
-                        advertised = set(
-                            getattr(streamer.stream, "channel_campaign_ids", None) or []
+                    # this channel. Empty once Twitch failed to credit the
+                    # stream while it stood in for a discovered pick.
+                    streamer = streamers_snapshot[index]
+                    if (
+                        self.__slugify(streamer.stream.game_name() or ""),
+                        streamer.username,
+                        getattr(streamer.stream, "broadcast_id", None),
+                    ) in drop_cover_revoked:
+                        return frozenset()
+                    advertised = set(
+                        getattr(streamer.stream, "channel_campaign_ids", None) or []
+                    )
+                    channel_id = str(getattr(streamer, "channel_id", "") or "")
+                    return frozenset(
+                        campaign.id
+                        for campaign in _watchable_campaigns(index)
+                        if campaign.id in advertised
+                        and (
+                            not getattr(campaign, "channels", None)
+                            or channel_id
+                            in {str(channel) for channel in campaign.channels}
                         )
-                        channel_id = str(getattr(streamer, "channel_id", "") or "")
-                        channel_earned_cache[index] = frozenset(
-                            campaign.id
-                            for campaign in _watchable_campaigns(index)
-                            if campaign.id in advertised
-                            and (
-                                not getattr(campaign, "channels", None)
-                                or channel_id
-                                in {str(channel) for channel in campaign.channels}
-                            )
-                        )
-                    return channel_earned_cache[index]
+                    )
 
                 def _covers_discovered(index, discovered_index):
                     # A discovered (category/wildcard/badge) stream is only
@@ -5031,15 +5072,25 @@ class Twitch(object):
                     for index in filtered_streamers_watching
                     if index not in evicted
                 ]
-                # Forget an evicted pick, a redundant one too: otherwise
-                # __previous_pick_still_farming keeps rescuing it on the
-                # strength of progress the covering stream is earning.
-                if kept_pick_index in evicted:
+                # A redundant pick stays the remembered pick, so stickiness
+                # and discovery keep the same verified channel for when the
+                # covering stream stops covering it (__previous_pick_still_farming
+                # does not rescue it meanwhile, see drop_slot_cover).
+                if kept_pick_index in conflicting:
                     self.last_drop_pick_streamer = None
                 covering_username = (
                     streamers_snapshot[kept_drop_index].username if redundant else None
                 )
-                self.drop_slot_covering_streamer = covering_username
+                self.drop_slot_cover = (
+                    (
+                        covering_username,
+                        frozenset(
+                            streamers_snapshot[index].username for index in redundant
+                        ),
+                    )
+                    if redundant
+                    else None
+                )
 
                 def _describe(indexes):
                     return ", ".join(
@@ -5539,15 +5590,17 @@ class Twitch(object):
         itself (stream.channel_campaign_ids). It is assigned once, after the
         network calls, so a concurrent watch loop never sees it cleared
         mid-refresh. A channel query that failed outright is not a verdict:
-        IDs advertised before stay recorded while they still resolve.
+        IDs advertised before on the same broadcast stay recorded while they
+        still resolve (Stream.update clears them for a new broadcast).
         """
-        channel_result = {"advertised": None, "answered": False}
-        campaign_ids = self.__resolve_campaign_ids_from_streamer(
-            streamer, channel_result
-        )
-        if channel_result["advertised"] is not None:
-            channel_campaign_ids = channel_result["advertised"]
-        elif channel_result["answered"]:
+        (
+            campaign_ids,
+            advertised_ids,
+            channel_query_answered,
+        ) = self.__resolve_campaign_ids_from_streamer(streamer)
+        if advertised_ids is not None:
+            channel_campaign_ids = advertised_ids
+        elif channel_query_answered:
             channel_campaign_ids = []
         else:
             channel_campaign_ids = [
@@ -5560,10 +5613,12 @@ class Twitch(object):
         streamer.stream.channel_campaign_ids = channel_campaign_ids
         return campaign_ids
 
-    def __resolve_campaign_ids_from_streamer(self, streamer, channel_result):
+    def __resolve_campaign_ids_from_streamer(self, streamer):
+        """Return (campaign IDs, channel-advertised IDs or None, whether the
+        channel query was answered)."""
         game_slug = self.__slugify(streamer.stream.game_name() or "")
         if game_slug == "":
-            return []
+            return [], None, False
         fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
 
         advertised_campaigns = []
@@ -5572,7 +5627,6 @@ class Twitch(object):
             campaign_data_available,
             channel_query_answered,
         ) = self.__get_campaigns_from_channel_id(streamer.channel_id)
-        channel_result["answered"] = channel_query_answered
         if channel_query_answered:
             self.__reset_channel_query_failures(game_slug, streamer.username)
         for campaign in channel_campaigns:
@@ -5694,7 +5748,7 @@ class Twitch(object):
                     "Twitch advertised a different campaign",
                     level=logging.DEBUG,
                 )
-                return []
+                return [], None, channel_query_answered
 
             if is_drop_discovered(streamer):
                 completed_drop_ids = self.__finished_drop_ids()
@@ -5728,10 +5782,8 @@ class Twitch(object):
                 )
 
             # Only this branch proves the campaigns run on this channel.
-            channel_result["advertised"] = [
-                str(campaign["id"]) for campaign in advertised_campaigns
-            ]
-            return list(channel_result["advertised"])
+            advertised_ids = [str(campaign["id"]) for campaign in advertised_campaigns]
+            return list(advertised_ids), advertised_ids, channel_query_answered
 
         # Campaign-restricted categories (e.g. Pokémon GO) resolve their
         # allow-listed channels from Twitch's own authoritative campaign data
@@ -5789,7 +5841,7 @@ class Twitch(object):
                 "the external campaign on that channel",
                 level=logging.DEBUG,
             )
-            return []
+            return [], None, channel_query_answered
         if campaign_data_available:
             if not is_drop_discovered(streamer) or (
                 fallback_campaigns == [] and not allowlisted_elsewhere
@@ -5801,7 +5853,7 @@ class Twitch(object):
                     f"campaign for {streamer.stream.game_name()}",
                     level=logging.DEBUG,
                 )
-                return []
+                return [], None, channel_query_answered
 
             if fallback_campaigns:
                 # Twitch can omit an account-ineligible campaign from the
@@ -5934,7 +5986,7 @@ class Twitch(object):
                 streamer.username,
                 (len(eligible_ids), len(campaign_ids)),
             )
-        return list(campaign_ids)
+        return list(campaign_ids), None, channel_query_answered
 
     def __full_campaign_with_drops(self, campaign_id: str) -> Optional[dict]:
         """Return the full Twitch campaign (with its drops) for an ID, when
