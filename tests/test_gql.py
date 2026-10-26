@@ -917,6 +917,156 @@ def test_stream_info_parser_accepts_null_user():
     assert gql.video_player_stream_info_overlay_channel("deleted-channel").user is None
 
 
+def test_stream_live_status_parser_reads_broadcast_creation_time():
+    payload = {
+        "data": {
+            "user": {
+                "id": "channel-1",
+                "stream": {
+                    "id": "broadcast-1",
+                    "createdAt": "2026-10-26T17:45:07Z",
+                },
+            }
+        },
+        "extensions": {"operationName": "WithIsStreamLiveQuery"},
+    }
+
+    response = Parser().parse_stream_live_status_response(payload)
+
+    assert response.channel_id == "channel-1"
+    assert response.stream.id == "broadcast-1"
+    assert response.stream.created_at == datetime(2026, 10, 26, 17, 45, 7)
+
+
+def test_stream_live_status_parser_accepts_offline_user():
+    payload = {
+        "data": {"user": {"id": "channel-1", "stream": None}},
+        "extensions": {"operationName": "WithIsStreamLiveQuery"},
+    }
+
+    response = Parser().parse_stream_live_status_response(payload)
+
+    assert response.channel_id == "channel-1"
+    assert response.stream is None
+
+
+def test_reward_list_parser_reads_watch_streak_milestone():
+    payload = {
+        "data": {
+            "channel": {
+                "self": {
+                    "watchStreakMilestone": {
+                        "watchStreakMilestone": {
+                            "value": "5",
+                            "achievementTimestamp": "2026-10-26T18:00:00Z",
+                        },
+                        "expiresAt": "2026-10-27T18:00:00Z",
+                    }
+                }
+            }
+        },
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    milestone = response.watch_streak_milestone
+    assert milestone.value == "5"
+    assert milestone.achievement_timestamp == datetime(2026, 10, 26, 18, 0, 0)
+    assert milestone.expires_at == datetime(2026, 10, 27, 18, 0, 0)
+
+
+def test_reward_list_parser_accepts_null_optional_milestone_fields():
+    payload = {
+        "data": {
+            "channel": {
+                "self": {
+                    "watchStreakMilestone": {
+                        "watchStreakMilestone": {
+                            "value": None,
+                            "achievementTimestamp": "2026-10-26T18:00:00Z",
+                        },
+                        "expiresAt": None,
+                    }
+                }
+            }
+        },
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    milestone = response.watch_streak_milestone
+    assert milestone.value is None
+    assert milestone.expires_at is None
+    assert milestone.achievement_timestamp == datetime(2026, 10, 26, 18, 0, 0)
+
+
+def test_reward_list_parser_ignores_milestone_without_achievement_time():
+    payload = {
+        "data": {
+            "channel": {
+                "self": {
+                    "watchStreakMilestone": {
+                        "watchStreakMilestone": {
+                            "value": "5",
+                            "achievementTimestamp": None,
+                        },
+                        "expiresAt": "2026-10-27T18:00:00Z",
+                    }
+                }
+            }
+        },
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    assert response.watch_streak_milestone is None
+
+
+def test_reward_list_parser_accepts_missing_milestone():
+    payload = {
+        "data": {"channel": {"self": {"watchStreakMilestone": None}}},
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    assert response.watch_streak_milestone is None
+
+
+def test_watch_streak_operations_use_current_persisted_queries():
+    calls = []
+
+    def post(url, json, headers):
+        calls.append(json)
+        return FakeResponse({})
+
+    gql = GQL(client_session(), post_request=post)
+    gql.parser = SimpleNamespace(
+        parse_stream_live_status_response=lambda response: response,
+        parse_reward_list_response=lambda response: response,
+    )
+
+    gql.get_stream_live_status("channel-1")
+    gql.get_reward_list("channel-1")
+
+    assert calls[0]["variables"] == {"id": "channel-1"}
+    assert (
+        calls[0]["extensions"]["persistedQuery"]["sha256Hash"]
+        == "04e46329a6786ff3a81c01c50bfa5d725902507a0deb83b0edbf7abe7a3716ea"
+    )
+    assert calls[1]["variables"] == {
+        "channelID": "channel-1",
+        "shouldIncludeAllSuspendedStreaks": False,
+    }
+    assert (
+        calls[1]["extensions"]["persistedQuery"]["sha256Hash"]
+        == "0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4"
+    )
+
+
 def test_playback_authorization_accepts_null_forbidden_reason():
     payload = {
         "data": {

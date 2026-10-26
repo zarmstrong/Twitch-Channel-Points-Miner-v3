@@ -1834,6 +1834,7 @@ class Twitch(object):
                 if streamer.stream.update_required() is True:
                     return
                 streamer.set_online(self.__streamer_drops_description(streamer))
+                self.reconcile_watch_streak(streamer)
             except StreamerIsOfflineException:
                 streamer.set_offline()
         else:
@@ -1845,6 +1846,90 @@ class Twitch(object):
                     self.get_spade_url(streamer)
             except StreamerIsOfflineException:
                 streamer.set_offline()
+
+    def reconcile_watch_streak(self, streamer):
+        """Clear a pending streak Twitch already awarded for this broadcast.
+
+        The local cache only knows about streak awards the miner observed, so a
+        streak granted before the miner connected (or before the first visit to
+        a channel) still looks pending. The milestone's achievement timestamp
+        identifies that case without waiting another five minutes.
+        """
+        settings = getattr(streamer, "settings", None)
+        stream = getattr(streamer, "stream", None)
+        if (
+            getattr(settings, "watch_streak", False) is not True
+            or getattr(stream, "watch_streak_missing", False) is not True
+            or getattr(streamer, "channel_id", None) in (None, "")
+            or getattr(stream, "broadcast_id", None) in (None, "")
+        ):
+            return False
+
+        logger.debug(
+            "[watch-streak] checking Twitch milestone for "
+            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+        )
+        try:
+            live_status = self.gql.get_stream_live_status(streamer.channel_id)
+            live_stream = live_status.stream
+            if (
+                live_stream is None
+                or live_stream.id != stream.broadcast_id
+                or live_stream.created_at is None
+            ):
+                logger.debug(
+                    "[watch-streak] broadcast changed while checking "
+                    f"streamer={streamer.username}; local={stream.broadcast_id}, "
+                    f"twitch={getattr(live_stream, 'id', None)}"
+                )
+                return False
+            milestone = self.gql.get_reward_list(
+                streamer.channel_id
+            ).watch_streak_milestone
+        except GQLError as error:
+            logger.warning(
+                "[watch-streak] unable to check Twitch milestone for "
+                f"streamer={streamer.username}: {error}"
+            )
+            return False
+
+        if milestone is None:
+            logger.info(
+                "[watch-streak] no Twitch milestone for "
+                f"streamer={streamer.username}; broadcast={stream.broadcast_id} "
+                "still pending"
+            )
+            return False
+
+        if milestone.achievement_timestamp < live_stream.created_at:
+            logger.info(
+                "[watch-streak] last milestone for "
+                f"streamer={streamer.username} "
+                f"({milestone.achievement_timestamp.isoformat()}Z) predates "
+                f"broadcast={stream.broadcast_id} "
+                f"({live_stream.created_at.isoformat()}Z); still pending"
+            )
+            return False
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if milestone.expires_at is not None and milestone.expires_at <= now:
+            logger.info(
+                "[watch-streak] milestone for "
+                f"streamer={streamer.username} expired at "
+                f"{milestone.expires_at.isoformat()}Z; still pending"
+            )
+            return False
+
+        stream.watch_streak_missing = False
+        if getattr(streamer, "watch_streak_cache", None) is not None:
+            streamer.watch_streak_cache.mark_claimed(
+                streamer.username, stream.broadcast_id
+            )
+        logger.info(
+            "[watch-streak] Twitch already confirmed streak for "
+            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+        )
+        return True
 
     def __streamer_drops_description(self, streamer):
         if not is_drop_discovered(streamer):

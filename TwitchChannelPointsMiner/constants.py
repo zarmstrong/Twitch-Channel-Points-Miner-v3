@@ -59,6 +59,15 @@ class GQLOperations:
             }
         },
     }
+    RewardList = {
+        "operationName": "RewardList",
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4",
+            }
+        },
+    }
     PlaybackAccessToken = {
         "operationName": "PlaybackAccessToken",
         "extensions": {

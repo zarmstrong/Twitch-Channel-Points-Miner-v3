@@ -37,6 +37,12 @@ from TwitchChannelPointsMiner.classes.gql.data.response.PlaybackAccessToken impo
 from TwitchChannelPointsMiner.classes.gql.data.response.Predictions import (
     MakePredictionResponse,
 )
+from TwitchChannelPointsMiner.classes.gql.data.response.RewardList import (
+    RewardListResponse,
+)
+from TwitchChannelPointsMiner.classes.gql.data.response.StreamLiveStatus import (
+    StreamLiveStatusResponse,
+)
 from TwitchChannelPointsMiner.classes.gql.data.response.VideoPlayerStreamInfoOverlayChannel import (
     VideoPlayerStreamInfoOverlayChannelResponse,
 )
@@ -504,6 +510,39 @@ class GQL:
             GQLOperations.VideoPlayerStreamInfoOverlayChannel["operationName"],
             json_data,
             self.parser.parse_video_player_stream_info_overlay_channel_data,
+        )
+
+    def get_stream_live_status(self, channel_id: str) -> StreamLiveStatusResponse:
+        """
+        Gets the live status and broadcast creation time for the given channel.
+        :param channel_id: The numeric channel id.
+        :return: The live stream status.
+        :raises RetryError: If one or more errors occurred while attempting the request.
+        """
+        json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
+        json_data["variables"] = {"id": channel_id}
+        return self.post_gql_request_single(
+            GQLOperations.WithIsStreamLiveQuery["operationName"],
+            json_data,
+            self.parser.parse_stream_live_status_response,
+        )
+
+    def get_reward_list(self, channel_id: str) -> RewardListResponse:
+        """
+        Gets the viewer's rewards for the given channel, including watch streaks.
+        :param channel_id: The numeric channel id.
+        :return: The reward list response.
+        :raises RetryError: If one or more errors occurred while attempting the request.
+        """
+        json_data = copy.deepcopy(GQLOperations.RewardList)
+        json_data["variables"] = {
+            "channelID": channel_id,
+            "shouldIncludeAllSuspendedStreaks": False,
+        }
+        return self.post_gql_request_single(
+            GQLOperations.RewardList["operationName"],
+            json_data,
+            self.parser.parse_reward_list_response,
         )
 
     def get_id_from_login(self, streamer_username: str) -> GetIdFromLoginResponse:

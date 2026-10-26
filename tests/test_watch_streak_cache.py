@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -9,10 +10,42 @@ from TwitchChannelPointsMiner.WatchStreakCache import (
 )
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.Twitch import Twitch
 
 
 def make_streamer(username):
     return Streamer(username, settings=SimpleNamespace(chat=ChatPresence.NEVER))
+
+
+def make_streak_streamer(tmp_path, username="channel", broadcast_id="broadcast-1"):
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = Streamer(
+        username,
+        settings=SimpleNamespace(
+            chat=ChatPresence.NEVER,
+            watch_streak=True,
+        ),
+    )
+    streamer.channel_id = "channel-1"
+    streamer.watch_streak_cache = cache
+    streamer.stream.broadcast_id = broadcast_id
+    streamer.stream.watch_streak_missing = True
+    return streamer, cache
+
+
+def twitch_with_streak_responses(live_stream, milestone):
+    gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: SimpleNamespace(
+            channel_id=channel_id, stream=live_stream
+        ),
+        get_reward_list=lambda channel_id: SimpleNamespace(
+            watch_streak_milestone=milestone
+        ),
+    )
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = gql
+    return twitch
 
 
 def test_claimed_broadcast_is_restored_after_restart(tmp_path, monkeypatch):
@@ -124,6 +157,78 @@ def test_streak_confirmed_before_previous_broadcast_ended_is_refarmed(
 
     assert streamer.stream.watch_streak_missing is True
     assert cache.get("channel", "broadcast-2").claimed is False
+
+
+def test_streak_awarded_before_miner_connected_is_treated_as_claimed(tmp_path):
+    streamer, cache = make_streak_streamer(tmp_path)
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0),
+        expires_at=datetime(2099, 1, 1, 0, 0, 0),
+    )
+    twitch = twitch_with_streak_responses(live_stream, milestone)
+
+    reconciled = twitch.reconcile_watch_streak(streamer)
+
+    assert reconciled is True
+    assert streamer.stream.watch_streak_missing is False
+    assert cache.get("channel", "broadcast-1").claimed is True
+
+
+def test_streak_from_previous_broadcast_stays_pending(tmp_path, caplog):
+    caplog.set_level("INFO")
+    streamer, cache = make_streak_streamer(tmp_path)
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 25, 17, 50, 0),
+        expires_at=datetime(2099, 1, 1, 0, 0, 0),
+    )
+    twitch = twitch_with_streak_responses(live_stream, milestone)
+
+    reconciled = twitch.reconcile_watch_streak(streamer)
+
+    assert reconciled is False
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-1") is None
+    assert "predates broadcast=broadcast-1" in caplog.text
+
+
+def test_streak_check_skips_channels_without_streak_tracking(tmp_path):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.settings.watch_streak = False
+    calls = []
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        raise AssertionError("watch streak lookup should not run")
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    assert twitch.reconcile_watch_streak(streamer) is False
+    assert calls == []
+
+
+def test_streak_check_failure_leaves_streak_pending(tmp_path):
+    streamer, cache = make_streak_streamer(tmp_path)
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: (_ for _ in ()).throw(
+            RetryError("WithIsStreamLiveQuery", [])
+        )
+    )
+
+    reconciled = twitch.reconcile_watch_streak(streamer)
+
+    assert reconciled is False
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-1") is None
 
 
 def test_offline_transition_is_persisted(tmp_path, monkeypatch):

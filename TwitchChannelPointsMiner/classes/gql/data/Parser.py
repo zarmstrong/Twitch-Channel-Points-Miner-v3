@@ -10,6 +10,8 @@ from TwitchChannelPointsMiner.classes.gql.data.response import (
     Drops,
     PlaybackAccessToken,
     Predictions,
+    RewardList,
+    StreamLiveStatus,
 )
 from TwitchChannelPointsMiner.classes.gql.data.response.BroadcastSettings import (
     BroadcastSettings,
@@ -340,6 +342,42 @@ def stream_parser(value: Any) -> Stream:
     )
 
 
+def live_stream_parser(value: Any) -> StreamLiveStatus.LiveStream:
+    expect_dict(value)
+    return StreamLiveStatus.LiveStream(
+        _id=parse_expected_value(value, "id", expect_str),
+        created_at=parse_expected_value(
+            value, "createdAt", optional_parser(expect_iso_8601)
+        ),
+    )
+
+
+def watch_streak_milestone_parser(
+    value: Any,
+) -> RewardList.WatchStreakMilestone | None:
+    expect_dict(value)
+    milestone = parse_value(
+        value, "watchStreakMilestone", optional_parser(expect_dict)
+    )
+    if milestone is None:
+        return None
+
+    with JsonParentContext("watchStreakMilestone"):
+        achievement_timestamp = parse_value(
+            milestone, "achievementTimestamp", optional_parser(expect_iso_8601)
+        )
+    if achievement_timestamp is None:
+        return None
+
+    return RewardList.WatchStreakMilestone(
+        value=parse_value(milestone, "value", optional_parser(expect_str)),
+        achievement_timestamp=achievement_timestamp,
+        expires_at=parse_value(
+            value, "expiresAt", optional_parser(expect_iso_8601)
+        ),
+    )
+
+
 def user_parser(value: Any) -> User:
     expect_dict(value)
     _id = parse_expected_value(value, "id", expect_str)
@@ -654,6 +692,55 @@ class Parser:
             raise GQLResponseErrors(operation_name, errors)
         data = parse_value(response_dict, "data", expect_dict)
         return errors or [], operation_name, data or {}
+
+    def parse_stream_live_status_response(self, response: Any):
+        """
+        Parses responses to WithIsStreamLiveQuery requests.
+        :param response: The response to parse.
+        :return: The live stream status, including the broadcast creation time.
+        :raises: GQLError: If the response contains errors or there is an issue parsing the response.
+        """
+        _, _, data = self.parse_base_response(response, True)
+        with JsonParentContext("data"):
+            user = parse_expected_value(data, "user", optional_parser(expect_dict))
+            if user is None:
+                return StreamLiveStatus.StreamLiveStatusResponse(None, None)
+            with JsonParentContext("user"):
+                return StreamLiveStatus.StreamLiveStatusResponse(
+                    channel_id=parse_value(user, "id", expect_str),
+                    stream=parse_value(
+                        user, "stream", optional_parser(live_stream_parser)
+                    ),
+                )
+
+    def parse_reward_list_response(self, response: Any):
+        """
+        Parses responses to RewardList requests.
+        :param response: The response to parse.
+        :return: The viewer's watch-streak milestone for the requested channel.
+        :raises: GQLError: If the response contains errors or there is an issue parsing the response.
+        """
+        _, _, data = self.parse_base_response(response, True)
+        with JsonParentContext("data"):
+            channel = parse_expected_value(
+                data, "channel", optional_parser(expect_dict)
+            )
+            if channel is None:
+                return RewardList.RewardListResponse(None)
+            with JsonParentContext("channel"):
+                channel_self = parse_value(
+                    channel, "self", optional_parser(expect_dict)
+                )
+                if channel_self is None:
+                    return RewardList.RewardListResponse(None)
+                with JsonParentContext("self"):
+                    return RewardList.RewardListResponse(
+                        watch_streak_milestone=parse_value(
+                            channel_self,
+                            "watchStreakMilestone",
+                            optional_parser(watch_streak_milestone_parser),
+                        )
+                    )
 
     def parse_video_player_stream_info_overlay_channel_data(self, response: Any):
         """
