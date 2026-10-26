@@ -2284,7 +2284,6 @@ def test_previous_pick_hold_applies_to_category_tier_not_badge_streamers():
     )
 
 
-
 def test_previous_pick_hold_does_not_rescue_a_covered_pick():
     # While a configured or followed stream covers the pick, the game's
     # in-progress drop is being earned by that stream, so it is no evidence
