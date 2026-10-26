@@ -2284,27 +2284,6 @@ def test_previous_pick_hold_applies_to_category_tier_not_badge_streamers():
     )
 
 
-def test_previous_pick_hold_does_not_rescue_a_covered_pick():
-    # While a configured or followed stream covers the pick, the game's
-    # in-progress drop is being earned by that stream, so it is no evidence
-    # the unwatched pick itself is still eligible.
-    twitch = twitch_with_gql(SimpleNamespace())
-    twitch._Twitch__cache_drop_inventory_progress(_restricted_game_inventory())
-    twitch.drop_inventory_progress_updated_at = time.time()
-    twitch.last_drop_pick_streamer = "mystreamer"
-    pick = SimpleNamespace(
-        username="mystreamer",
-        is_online=True,
-        settings=SimpleNamespace(claim_drops=True),
-        stream=SimpleNamespace(game_name=lambda: "Example Game"),
-        from_category=True,
-    )
-
-    assert twitch._Twitch__previous_pick_still_farming(pick) is True
-    twitch.drop_slot_cover = ("followed", frozenset({"mystreamer"}))
-    assert twitch._Twitch__previous_pick_still_farming(pick) is False
-
-
 def test_category_search_uses_active_twitch_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {

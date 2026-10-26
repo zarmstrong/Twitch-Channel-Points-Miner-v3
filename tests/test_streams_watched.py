@@ -161,7 +161,7 @@ def _run_one_watch_iteration(
     completed_drop_campaigns=None,
     category_drops_override_streamers=False,
     configured_category_slugs=None,
-    drop_slot_cover=None,
+    drop_slot_covering_streamer=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -188,7 +188,7 @@ def _run_one_watch_iteration(
     twitch.drop_watch_health = drop_watch_health or {}
     twitch.category_drops_override_streamers = category_drops_override_streamers
     twitch.configured_category_slugs = set(configured_category_slugs or [])
-    twitch.drop_slot_cover = drop_slot_cover
+    twitch.drop_slot_covering_streamer = drop_slot_covering_streamer
     if twitch_out is not None:
         twitch_out.append(twitch)
     posted = []
@@ -2441,6 +2441,12 @@ def _followed_drop_streamer(
     return streamer
 
 
+def _cover_progress():
+    # Covering is only allowed while the stall check can watch the
+    # game, which needs its progress in the inventory.
+    return {"shared-game": _drop_progress()}
+
+
 def _watched_for_drops(messages):
     lines = [message for message in messages if "watching for drops:" in message]
     return lines[-1].split("watching for drops:")[1] if lines else ""
@@ -2479,6 +2485,7 @@ def test_followed_stream_covering_the_discovered_campaign_replaces_the_pick(
         streams_watched=2,
         priority=[Priority.DROPS, Priority.ORDER],
         source_priority=source_priority,
+        drop_inventory_progress=_cover_progress(),
         twitch_out=twitch_out,
     )
 
@@ -2502,10 +2509,7 @@ def test_followed_stream_covering_the_discovered_campaign_replaces_the_pick(
     # channel for when the followed channel stops covering it, and the stall
     # check now watches the followed channel.
     assert twitch_out[0].last_drop_pick_streamer == "category-streamer"
-    assert twitch_out[0].drop_slot_cover == (
-        "followed-streamer",
-        frozenset({"category-streamer"}),
-    )
+    assert twitch_out[0].drop_slot_covering_streamer == "followed-streamer"
 
 
 def test_covering_decision_is_logged_once_across_discovery_refreshes(monkeypatch):
@@ -2518,6 +2522,7 @@ def test_covering_decision_is_logged_once_across_discovery_refreshes(monkeypatch
         monkeypatch,
         [_category_drop_streamer("category-one", "campaign-a"), follower],
         streams_watched=2,
+        drop_inventory_progress=_cover_progress(),
         priority=[Priority.DROPS, Priority.ORDER],
         twitch_out=twitch_out,
     )
@@ -2534,10 +2539,7 @@ def test_covering_decision_is_logged_once_across_discovery_refreshes(monkeypatch
     )
 
     # The second cycle made the same covering decision for the new channel.
-    assert twitch.drop_slot_cover == (
-        "followed-streamer",
-        frozenset({"category-two"}),
-    )
+    assert twitch.drop_slot_covering_streamer == "followed-streamer"
     assert "category-two" not in _watched_for_drops(messages)
 
     assert (
@@ -2546,75 +2548,106 @@ def test_covering_decision_is_logged_once_across_discovery_refreshes(monkeypatch
     )
 
 
-@pytest.mark.parametrize(
-    "was_covering, expected",
-    [
-        # The followed channel stood in for the discovered pick but Twitch
-        # stopped crediting it: it stops covering the pick for this
-        # broadcast, so the category channel is watched for the Drop again
-        # next to it. The followed channel keeps its points slot.
-        (
-            True,
-            [
-                "https://spade.test/category-streamer",
-                "https://spade.test/followed-streamer",
-            ],
-        ),
-        # A followed channel that was not covering anything is not part of
-        # the stall check, as before.
-        (False, ["https://spade.test/followed-streamer", "https://spade.test/points"]),
-    ],
-)
-def test_stalled_covering_stream_stops_covering_but_keeps_its_points_slot(
-    monkeypatch, caplog, was_covering, expected
-):
+def _stall_scenario(follower_campaign_ids):
     category = _category_drop_streamer("category-streamer", "campaign-a")
     category.stream.game_name = lambda: "Game"
     follower = _followed_drop_streamer(
-        "followed-streamer", _drop_campaigns("campaign-a")
+        "followed-streamer", _drop_campaigns(*follower_campaign_ids)
     )
     follower.stream.game_name = lambda: "Game"
     follower.is_watching = True
     points = _watch_streamer("points", from_followers=True)
+    return [category, follower, points]
+
+
+@pytest.mark.parametrize(
+    "source_priority, follower_campaign_ids",
+    [
+        ([StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS], ("campaign-a",)),
+        # Followers first is the default order.
+        ([StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES], ("campaign-a",)),
+        (
+            [StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES],
+            ("campaign-a", "campaign-b"),
+        ),
+    ],
+)
+def test_stalled_covering_stream_falls_back_to_the_slot_rules_without_covering(
+    monkeypatch, caplog, source_priority, follower_campaign_ids
+):
+    run = {
+        "streams_watched": 2,
+        "priority": [Priority.DROPS, Priority.ORDER],
+        "source_priority": source_priority,
+        "drop_watch_health": _drop_watch_health("followed-streamer"),
+        "now": 600,
+    }
     twitch_out = []
 
+    # The followed channel stood in for the discovered pick, but Twitch has
+    # not credited it for the whole stall window.
     posted = _run_one_watch_iteration(
         monkeypatch,
-        [category, follower, points],
-        streams_watched=2,
-        priority=[Priority.DROPS, Priority.ORDER],
-        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        _stall_scenario(follower_campaign_ids),
         drop_inventory_progress={"game": _drop_progress()},
-        drop_watch_health=_drop_watch_health("followed-streamer"),
-        drop_slot_cover=(
-            ("followed-streamer", frozenset({"category-streamer"}))
-            if was_covering
-            else None
-        ),
-        now=600,
+        drop_slot_covering_streamer="followed-streamer",
         twitch_out=twitch_out,
+        **run,
     )
 
-    assert sorted(posted) == expected
+    # It stops covering the pick for the rest of the broadcast. It is not
+    # benched, so it keeps its points slot; and the slots are what they
+    # would be if covering did not exist (here: no inventory progress, so
+    # no cover is allowed).
+    assert "no longer replaces the discovered pick on this broadcast" in caplog.text
     twitch = twitch_out[0]
-    if was_covering:
-        assert "standing in for the discovered Drops pick" in caplog.text
-        assert twitch.drop_cover_revoked == {("game", "followed-streamer", None)}
-        assert twitch.drop_slot_cover is None
+    assert twitch.drop_cover_revoked == {("game", "followed-streamer", None)}
+    assert twitch.drop_slot_covering_streamer is None
+    assert "https://spade.test/followed-streamer" in posted
+    without_covering = _run_one_watch_iteration(
+        monkeypatch, _stall_scenario(follower_campaign_ids), **run
+    )
+    assert sorted(posted) == sorted(without_covering)
 
-        # The revocation lasts for the broadcast: the next cycle still
-        # watches the category channel for the Drop.
+
+def test_cover_revocation_lasts_for_the_broadcast(monkeypatch):
+    scenario = _stall_scenario(("campaign-a",))
+    follower = scenario[1]
+    follower.stream.broadcast_id = "broadcast-1"
+    run = {
+        "streams_watched": 2,
+        "priority": [Priority.DROPS, Priority.ORDER],
+        "source_priority": [StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+    }
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        scenario,
+        drop_inventory_progress={"game": _drop_progress()},
+        drop_watch_health=_drop_watch_health("followed-streamer"),
+        drop_slot_covering_streamer="followed-streamer",
+        now=600,
+        twitch_out=twitch_out,
+        **run,
+    )
+    twitch = twitch_out[0]
+    revoked = {("game", "followed-streamer", "broadcast-1")}
+    assert twitch.drop_cover_revoked == revoked
+
+    def next_cycle():
         twitch.running = True
-        twitch.send_minute_watched_events(
-            [category, follower, points],
-            [Priority.DROPS, Priority.ORDER],
-            streams_watched=2,
-            source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
-        )
-        assert "https://spade.test/category-streamer" in posted[2:]
-    else:
-        assert "standing in" not in caplog.text
-        assert twitch.drop_cover_revoked == set()
+        twitch.send_minute_watched_events(scenario, **run)
+
+    # Same broadcast: the cover stays revoked.
+    next_cycle()
+    assert twitch.drop_cover_revoked == revoked
+    assert twitch.drop_slot_covering_streamer is None
+
+    # A new broadcast gets a fresh chance to cover the pick.
+    follower.stream.broadcast_id = "broadcast-2"
+    next_cycle()
+    assert twitch.drop_cover_revoked == set()
+    assert twitch.drop_slot_covering_streamer == "followed-streamer"
 
 
 def test_new_broadcast_clears_channel_advertised_campaigns():
@@ -2644,6 +2677,7 @@ def test_covering_stream_outside_the_capped_selection_replaces_the_pick(
         monkeypatch,
         [category, points, follower],
         streams_watched=2,
+        drop_inventory_progress=_cover_progress(),
         priority=[Priority.ORDER],
         source_priority=[
             StreamerSource.CATEGORIES,
@@ -2675,6 +2709,7 @@ def test_backfill_does_not_add_a_covering_stream_next_to_the_discovered_pick(
         monkeypatch,
         [category, first_points, second_points, follower],
         streams_watched=3,
+        drop_inventory_progress=_cover_progress(),
         priority=[Priority.ORDER],
         source_priority=[
             StreamerSource.CATEGORIES,
@@ -2701,6 +2736,11 @@ def test_backfill_does_not_add_a_covering_stream_next_to_the_discovered_pick(
         # category_drops_override_streamers ranks the followed channel's
         # Drops (a game outside the configured categories) below the pick.
         ({}, {"category_drops_override_streamers": True}),
+        # The stall check could not watch the followed channel: the
+        # campaign has no progress in the inventory yet, or stall
+        # detection is off.
+        ({}, {"drop_inventory_progress": None}),
+        ({}, {"drop_progress_stall_minutes": 0}),
     ],
 )
 def test_unproven_or_demoted_followed_stream_does_not_replace_the_pick(
@@ -2720,7 +2760,7 @@ def test_unproven_or_demoted_followed_stream_does_not_replace_the_pick(
         priority=[Priority.DROPS, Priority.ORDER],
         source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
         twitch_out=twitch_out,
-        **run_kwargs,
+        **{"drop_inventory_progress": _cover_progress(), **run_kwargs},
     )
 
     # Unchanged behavior: the discovered pick keeps the Drops slot.
@@ -2744,6 +2784,7 @@ def test_followed_stream_earning_part_of_the_campaigns_does_not_replace_the_pick
         streams_watched=2,
         priority=[Priority.DROPS, Priority.ORDER],
         source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
     )
 
     assert posted == [
@@ -2773,6 +2814,7 @@ def test_stream_sharing_the_replaced_pick_is_evicted_by_a_larger_covering_set(
         monkeypatch,
         [category, configured, follower],
         streams_watched=3,
+        drop_inventory_progress=_cover_progress(),
         priority=[Priority.DROPS, Priority.ORDER],
         source_priority=[
             StreamerSource.CATEGORIES,
