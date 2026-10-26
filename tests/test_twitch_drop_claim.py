@@ -2790,3 +2790,80 @@ def test_listed_campaign_rejected_by_the_channel_check_is_not_readmitted(
         0,
         0,
     )
+
+
+def timed_campaign(campaign_id, minutes, ends_at):
+    campaign = zero_minute_badge_campaign()
+    campaign["id"] = campaign_id
+    campaign["timeBasedDrops"][0]["requiredMinutesWatched"] = minutes
+    campaign["timeBasedDrops"][0]["endAt"] = ends_at
+    return campaign
+
+
+@pytest.mark.parametrize(
+    "dashboard_campaign, authoritative_extra",
+    [
+        # A purchase-gated reward summary: dashboard summaries carry no
+        # allow-list, so it would look game-wide.
+        (
+            {"id": "reward-1", "name": "Sub Reward", "game": {"name": "Example Game"}},
+            [],
+        ),
+        # The dashboard copy of a campaign the account-wide evaluation knows
+        # is limited to other channels.
+        (
+            {
+                "id": "restricted-1",
+                "name": "Restricted",
+                "game": {"name": "Example Game"},
+            },
+            [{"id": "restricted-1", "name": "Restricted", "channels": ["a", "b"]}],
+        ),
+    ],
+)
+def test_badge_listing_admits_only_account_evaluated_game_wide_campaigns(
+    monkeypatch, dashboard_campaign, authoritative_extra
+):
+    twitch = game_wide_campaign_twitch(monkeypatch, [zero_minute_badge_campaign()])
+    twitch.discovered_open_drop_campaigns = [dashboard_campaign]
+    twitch.active_drop_campaigns["example-game"].extend(authoritative_extra)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "launch-campaign"
+    ]
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        # A rejected listing that needs watch time may be a per-streamer
+        # campaign (the #138 Rust case), so it proves nothing.
+        timed_campaign("own-campaign", 30, "2020-06-01T00:00:00Z"),
+        # A badge outside its date window proves nothing about now.
+        timed_campaign("old-badge", 0, "2020-06-01T00:00:00Z"),
+    ],
+)
+def test_listing_that_is_not_a_running_badge_keeps_game_wide_campaign_blocked(
+    monkeypatch, listed
+):
+    twitch = game_wide_campaign_twitch(monkeypatch, [listed])
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
+def test_gist_copy_of_a_rejected_listed_campaign_is_not_readmitted(monkeypatch):
+    listed = timed_campaign("launch-campaign", 30, "2020-06-01T00:00:00Z")
+    twitch = game_wide_campaign_twitch(monkeypatch, [listed])
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [{"id": "launch-campaign", "name": "Launch", "channels": []}]
+    }
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
