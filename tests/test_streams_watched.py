@@ -161,6 +161,7 @@ def _run_one_watch_iteration(
     completed_drop_campaigns=None,
     category_drops_override_streamers=False,
     configured_category_slugs=None,
+    drop_slot_covering_streamer=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -187,6 +188,7 @@ def _run_one_watch_iteration(
     twitch.drop_watch_health = drop_watch_health or {}
     twitch.category_drops_override_streamers = category_drops_override_streamers
     twitch.configured_category_slugs = set(configured_category_slugs or [])
+    twitch.drop_slot_covering_streamer = drop_slot_covering_streamer
     if twitch_out is not None:
         twitch_out.append(twitch)
     posted = []
@@ -2400,6 +2402,436 @@ def test_drop_streams_earning_the_same_unrestricted_campaigns_share_the_slot(
     )
 
     assert posted == ["https://spade.test/drops-one", "https://spade.test/drops-two"]
+
+
+def _capture_info(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    return messages
+
+
+def _category_drop_streamer(username, *campaign_ids):
+    streamer = _watch_streamer(username, from_category=True, drops_eligible=True)
+    streamer.stream.game_name = lambda: "Shared Game"
+    streamer.stream.campaigns = _drop_campaigns(*campaign_ids)
+    return streamer
+
+
+def _followed_drop_streamer(
+    username, campaigns, advertised=True, source="followers", channel_id="42"
+):
+    streamer = _watch_streamer(
+        username,
+        from_followers=source == "followers",
+        explicitly_configured=source == "streamers",
+        drops_eligible=True,
+    )
+    streamer.channel_id = channel_id
+    streamer.stream.game_name = lambda: "Shared Game"
+    streamer.stream.campaigns = campaigns
+    # Campaign IDs Twitch's own channel query advertised for this broadcast.
+    streamer.stream.channel_campaign_ids = (
+        [campaign.id for campaign in campaigns] if advertised else []
+    )
+    return streamer
+
+
+def _cover_progress():
+    # Covering is only allowed while the stall check can watch the
+    # game, which needs its progress in the inventory.
+    return {"shared-game": _drop_progress()}
+
+
+def _watched_for_drops(messages):
+    lines = [message for message in messages if "watching for drops:" in message]
+    return lines[-1].split("watching for drops:")[1] if lines else ""
+
+
+@pytest.mark.parametrize(
+    "follower_campaigns",
+    [
+        # The followed channel earns exactly the discovered pick's campaign.
+        _drop_campaigns("campaign-a"),
+        # Or every one of its campaigns plus another one.
+        _drop_campaigns("campaign-a", "campaign-b"),
+        # An extra campaign allow-listing the followed channel itself counts.
+        _drop_campaigns("campaign-a") + _drop_campaigns("campaign-c", channels=("42",)),
+    ],
+)
+@pytest.mark.parametrize(
+    "source_priority",
+    [
+        [StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        [StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES],
+    ],
+)
+def test_followed_stream_covering_the_discovered_campaign_replaces_the_pick(
+    monkeypatch, follower_campaigns, source_priority
+):
+    messages = _capture_info(monkeypatch)
+    category = _category_drop_streamer("category-streamer", "campaign-a")
+    follower = _followed_drop_streamer("followed-streamer", follower_campaigns)
+    points = _watch_streamer("points", from_followers=True)
+    twitch_out = []
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=source_priority,
+        drop_inventory_progress=_cover_progress(),
+        twitch_out=twitch_out,
+    )
+
+    # Whichever source ranks first, the followed channel earns the same Drop
+    # and the points the user wants, so the discovered pick's slot goes to a
+    # points stream.
+    assert sorted(posted) == [
+        "https://spade.test/followed-streamer",
+        "https://spade.test/points",
+    ]
+    assert "category-streamer" not in _watched_for_drops(messages)
+    assert any(
+        "followed-streamer (followers) already earns the same Drops campaign(s)"
+        in message
+        and "skipping category-streamer (categories)" in message
+        for message in messages
+    )
+    # The skipped pick was not starved of a slot.
+    assert not any("no watch slot free" in message for message in messages)
+    # It stays the remembered pick, so discovery keeps the same verified
+    # channel for when the followed channel stops covering it, and the stall
+    # check now watches the followed channel.
+    assert twitch_out[0].last_drop_pick_streamer == "category-streamer"
+    assert twitch_out[0].drop_slot_covering_streamer == "followed-streamer"
+
+
+def test_covering_decision_is_logged_once_across_discovery_refreshes(monkeypatch):
+    messages = _capture_info(monkeypatch)
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns("campaign-a")
+    )
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_category_drop_streamer("category-one", "campaign-a"), follower],
+        streams_watched=2,
+        drop_inventory_progress=_cover_progress(),
+        priority=[Priority.DROPS, Priority.ORDER],
+        twitch_out=twitch_out,
+    )
+    twitch = twitch_out[0]
+
+    # A discovery refresh offers a different channel for the same campaign.
+    second = _category_drop_streamer("category-two", "campaign-a")
+    twitch.category_campaign_eligibility[("shared-game", "category-two")] = (1, 1)
+    twitch.running = True
+    twitch.send_minute_watched_events(
+        [second, follower],
+        [Priority.DROPS, Priority.ORDER],
+        streams_watched=2,
+    )
+
+    # The second cycle made the same covering decision for the new channel.
+    assert twitch.drop_slot_covering_streamer == "followed-streamer"
+    assert "category-two" not in _watched_for_drops(messages)
+
+    assert (
+        len([message for message in messages if "already earns the same" in message])
+        == 1
+    )
+
+
+def _stall_scenario(follower_campaign_ids):
+    category = _category_drop_streamer("category-streamer", "campaign-a")
+    category.stream.game_name = lambda: "Game"
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns(*follower_campaign_ids)
+    )
+    follower.stream.game_name = lambda: "Game"
+    follower.is_watching = True
+    points = _watch_streamer("points", from_followers=True)
+    return [category, follower, points]
+
+
+@pytest.mark.parametrize(
+    "source_priority, follower_campaign_ids",
+    [
+        ([StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS], ("campaign-a",)),
+        # Followers first is the default order.
+        ([StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES], ("campaign-a",)),
+        (
+            [StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES],
+            ("campaign-a", "campaign-b"),
+        ),
+    ],
+)
+def test_stalled_covering_stream_falls_back_to_the_slot_rules_without_covering(
+    monkeypatch, caplog, source_priority, follower_campaign_ids
+):
+    run = {
+        "streams_watched": 2,
+        "priority": [Priority.DROPS, Priority.ORDER],
+        "source_priority": source_priority,
+        "drop_watch_health": _drop_watch_health("followed-streamer"),
+        "now": 600,
+    }
+    twitch_out = []
+
+    # The followed channel stood in for the discovered pick, but Twitch has
+    # not credited it for the whole stall window.
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        _stall_scenario(follower_campaign_ids),
+        drop_inventory_progress={"game": _drop_progress()},
+        drop_slot_covering_streamer="followed-streamer",
+        twitch_out=twitch_out,
+        **run,
+    )
+
+    # It stops covering the pick for the rest of the broadcast. It is not
+    # benched, so it keeps its points slot; and the slots are what they
+    # would be if covering did not exist (here: no inventory progress, so
+    # no cover is allowed).
+    assert "no longer replaces the discovered pick on this broadcast" in caplog.text
+    twitch = twitch_out[0]
+    assert twitch.drop_cover_revoked == {("game", "followed-streamer", None)}
+    assert twitch.drop_slot_covering_streamer is None
+    assert "https://spade.test/followed-streamer" in posted
+    without_covering = _run_one_watch_iteration(
+        monkeypatch, _stall_scenario(follower_campaign_ids), **run
+    )
+    assert sorted(posted) == sorted(without_covering)
+
+
+def test_cover_revocation_lasts_for_the_broadcast(monkeypatch):
+    scenario = _stall_scenario(("campaign-a",))
+    follower = scenario[1]
+    follower.stream.broadcast_id = "broadcast-1"
+    run = {
+        "streams_watched": 2,
+        "priority": [Priority.DROPS, Priority.ORDER],
+        "source_priority": [StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+    }
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        scenario,
+        drop_inventory_progress={"game": _drop_progress()},
+        drop_watch_health=_drop_watch_health("followed-streamer"),
+        drop_slot_covering_streamer="followed-streamer",
+        now=600,
+        twitch_out=twitch_out,
+        **run,
+    )
+    twitch = twitch_out[0]
+    revoked = {("game", "followed-streamer", "broadcast-1")}
+    assert twitch.drop_cover_revoked == revoked
+
+    def next_cycle():
+        twitch.running = True
+        twitch.send_minute_watched_events(scenario, **run)
+
+    # Same broadcast: the cover stays revoked.
+    next_cycle()
+    assert twitch.drop_cover_revoked == revoked
+    assert twitch.drop_slot_covering_streamer is None
+
+    # A new broadcast gets a fresh chance to cover the pick.
+    follower.stream.broadcast_id = "broadcast-2"
+    next_cycle()
+    assert twitch.drop_cover_revoked == set()
+    assert twitch.drop_slot_covering_streamer == "followed-streamer"
+
+
+def test_new_broadcast_clears_channel_advertised_campaigns():
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    stream.update("broadcast-1", "title", {}, [], 1)
+    stream.channel_campaign_ids = ["campaign-a"]
+
+    stream.update("broadcast-1", "title", {}, [], 2)
+    assert stream.channel_campaign_ids == ["campaign-a"]
+
+    stream.update("broadcast-2", "title", {}, [], 3)
+    assert stream.channel_campaign_ids == []
+
+
+def test_covering_stream_outside_the_capped_selection_replaces_the_pick(
+    monkeypatch,
+):
+    category = _category_drop_streamer("category-streamer", "campaign-a")
+    points = _watch_streamer("points", explicitly_configured=True)
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns("campaign-a")
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, points, follower],
+        streams_watched=2,
+        drop_inventory_progress=_cover_progress(),
+        priority=[Priority.ORDER],
+        source_priority=[
+            StreamerSource.CATEGORIES,
+            StreamerSource.STREAMERS,
+            StreamerSource.FOLLOWERS,
+        ],
+    )
+
+    # The followed channel missed the first two slots, but it takes the
+    # discovered pick's place instead of being backfilled next to it.
+    assert sorted(posted) == [
+        "https://spade.test/followed-streamer",
+        "https://spade.test/points",
+    ]
+
+
+def test_backfill_does_not_add_a_covering_stream_next_to_the_discovered_pick(
+    monkeypatch,
+):
+    messages = _capture_info(monkeypatch)
+    category = _category_drop_streamer("category-streamer", "campaign-a")
+    first_points = _watch_streamer("points-one", explicitly_configured=True)
+    second_points = _watch_streamer("points-two", explicitly_configured=True)
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns("campaign-a")
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, first_points, second_points, follower],
+        streams_watched=3,
+        drop_inventory_progress=_cover_progress(),
+        priority=[Priority.ORDER],
+        source_priority=[
+            StreamerSource.CATEGORIES,
+            StreamerSource.STREAMERS,
+            StreamerSource.FOLLOWERS,
+        ],
+    )
+
+    assert sorted(posted) == [
+        "https://spade.test/followed-streamer",
+        "https://spade.test/points-one",
+        "https://spade.test/points-two",
+    ]
+    assert "category-streamer" not in _watched_for_drops(messages)
+
+
+@pytest.mark.parametrize(
+    "follower_kwargs, run_kwargs",
+    [
+        # The followed channel's campaign IDs came from the game-level
+        # fallback, not its own channel query: Drops may not even be enabled
+        # on that broadcast, so it cannot take over the verified pick.
+        ({"advertised": False}, {}),
+        # category_drops_override_streamers ranks the followed channel's
+        # Drops (a game outside the configured categories) below the pick.
+        ({}, {"category_drops_override_streamers": True}),
+        # The stall check could not watch the followed channel: the
+        # campaign has no progress in the inventory yet, or stall
+        # detection is off.
+        ({}, {"drop_inventory_progress": None}),
+        ({}, {"drop_progress_stall_minutes": 0}),
+    ],
+)
+def test_unproven_or_demoted_followed_stream_does_not_replace_the_pick(
+    monkeypatch, follower_kwargs, run_kwargs
+):
+    category = _category_drop_streamer("category-streamer", "campaign-a")
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns("campaign-a"), **follower_kwargs
+    )
+    points = _watch_streamer("points", from_followers=True)
+    twitch_out = []
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        twitch_out=twitch_out,
+        **{"drop_inventory_progress": _cover_progress(), **run_kwargs},
+    )
+
+    # Unchanged behavior: the discovered pick keeps the Drops slot.
+    assert "https://spade.test/category-streamer" in posted
+    assert twitch_out[0].last_drop_pick_streamer == "category-streamer"
+
+
+def test_followed_stream_earning_part_of_the_campaigns_does_not_replace_the_pick(
+    monkeypatch,
+):
+    category = _category_drop_streamer("category-streamer", "campaign-a", "campaign-b")
+    # Only part of the discovered pick's campaigns: not a replacement.
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns("campaign-a")
+    )
+    points = _watch_streamer("points", from_followers=True)
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
+    )
+
+    assert posted == [
+        "https://spade.test/category-streamer",
+        "https://spade.test/points",
+    ]
+
+
+def test_stream_sharing_the_replaced_pick_is_evicted_by_a_larger_covering_set(
+    monkeypatch,
+):
+    messages = _capture_info(monkeypatch)
+    category = _category_drop_streamer("category-streamer", "campaign-a")
+    # Shares campaign-a with the discovered pick, but its own channel query
+    # did not advertise it, so it cannot replace the pick itself.
+    configured = _followed_drop_streamer(
+        "configured-streamer",
+        _drop_campaigns("campaign-a"),
+        advertised=False,
+        source="streamers",
+    )
+    follower = _followed_drop_streamer(
+        "followed-streamer", _drop_campaigns("campaign-a", "campaign-b")
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [category, configured, follower],
+        streams_watched=3,
+        drop_inventory_progress=_cover_progress(),
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[
+            StreamerSource.CATEGORIES,
+            StreamerSource.STREAMERS,
+            StreamerSource.FOLLOWERS,
+        ],
+    )
+
+    # Only identical campaign sets may share the Drops slot: if Twitch
+    # credited the configured stream, campaign-b would get no progress.
+    assert posted == ["https://spade.test/followed-streamer"]
+    assert any(
+        "Drops progress only counts on one channel at a time: keeping "
+        "followed-streamer (followers), skipping configured-streamer (streamers)"
+        in message
+        for message in messages
+    )
 
 
 @pytest.mark.parametrize(
