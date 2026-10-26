@@ -4,6 +4,8 @@ import time
 from threading import Lock
 from types import SimpleNamespace
 
+import pytest
+
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Twitch import (
@@ -2690,3 +2692,101 @@ def test_failed_channel_query_keeps_previously_advertised_campaigns(monkeypatch)
     assert twitch._Twitch__get_campaign_ids_from_streamer(followed) == ["campaign-1"]
     # One failed query is not a verdict on the channel.
     assert followed.stream.channel_campaign_ids == ["campaign-1"]
+
+
+def zero_minute_badge_campaign(game="Example Game"):
+    # Mirrors what Twitch's channel query returned for Call of Duty: Modern
+    # Warfare 4 channels: only the game's zero-minute badge campaign, while
+    # the game-wide "Launch" campaign the account was earning also ran there.
+    return {
+        "id": "badge-campaign-1",
+        "name": "Example Badge",
+        "game": {"name": game},
+        "timeBasedDrops": [
+            {
+                "id": "badge-drop-1",
+                "name": "Example Badge",
+                "requiredMinutesWatched": 0,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+            }
+        ],
+    }
+
+
+def game_wide_campaign_twitch(monkeypatch, channel_campaigns):
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=channel_campaigns, campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.active_drop_campaigns = {
+        "example-game": [{"id": "launch-campaign", "name": "Launch", "channels": []}]
+    }
+    return twitch
+
+
+def test_same_game_listing_lets_game_wide_twitch_campaign_apply(monkeypatch):
+    twitch = game_wide_campaign_twitch(monkeypatch, [zero_minute_badge_campaign()])
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "launch-campaign"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    "channel_campaigns",
+    [
+        # Nothing listed: the per-streamer Rust case from #138 stays blocked.
+        [],
+        # A listing for another game proves nothing about this one.
+        [zero_minute_badge_campaign(game="Another Game")],
+    ],
+)
+def test_no_same_game_listing_keeps_game_wide_twitch_campaign_blocked(
+    monkeypatch, channel_campaigns
+):
+    twitch = game_wide_campaign_twitch(monkeypatch, channel_campaigns)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
+def test_same_game_listing_still_excludes_completed_game_wide_campaign(monkeypatch):
+    twitch = game_wide_campaign_twitch(monkeypatch, [zero_minute_badge_campaign()])
+    twitch.completed_drop_campaigns = {"launch-campaign"}
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "launch-campaign"
+    ]
+    # Resolved, but nothing left to earn there.
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
+def test_listed_campaign_rejected_by_the_channel_check_is_not_readmitted(
+    monkeypatch,
+):
+    # The channel lists the game-wide campaign itself, and the channel check
+    # rejects it (here: nothing watchable). Its game-wide copy must not slip
+    # back in through the fallback, which would skip that check.
+    listed = zero_minute_badge_campaign()
+    listed["id"] = "launch-campaign"
+    twitch = game_wide_campaign_twitch(monkeypatch, [listed])
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )

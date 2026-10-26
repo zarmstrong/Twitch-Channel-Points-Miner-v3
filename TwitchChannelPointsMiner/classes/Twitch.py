@@ -5617,6 +5617,16 @@ class Twitch(object):
         fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
 
         advertised_campaigns = []
+        # Whether Twitch listed any Drops campaign for this game on this
+        # channel, watchable or not. Twitch can list only one campaign per
+        # channel, such as a zero-minute badge, while a game-wide campaign of
+        # the same game also runs there; the listing still proves Drops are
+        # enabled for the game on this broadcast.
+        same_game_campaign_listed = False
+        # Listed campaigns the check below rejected (nothing watchable left,
+        # or no time to finish); the game-wide fallback must not re-admit
+        # them.
+        rejected_listed_ids = set()
         (
             channel_campaigns,
             campaign_data_available,
@@ -5641,6 +5651,8 @@ class Twitch(object):
                 # A campaign already confirmed subscription/gift/cheer-gated
                 # by the account-wide evaluation is excluded here by ID.
                 continue
+            if campaign_game_slug == game_slug:
+                same_game_campaign_listed = True
             # Finished drops are deliberately not passed here: dropping a
             # finished campaign at this point would send the channel to the
             # fallback campaigns below instead of the count that rules it out.
@@ -5668,6 +5680,7 @@ class Twitch(object):
                 # to it instead of falling through to the gist/authoritative
                 # fallback below, which may know about a separate, genuinely
                 # incomplete campaign for this same channel.
+                rejected_listed_ids.add(campaign_id)
                 continue
             normalized_campaign = self.__normalize_advertised_campaign(campaign)
             advertised_campaigns.append(normalized_campaign)
@@ -5839,7 +5852,9 @@ class Twitch(object):
             return [], None, channel_query_answered
         if campaign_data_available:
             if not is_drop_discovered(streamer) or (
-                fallback_campaigns == [] and not allowlisted_elsewhere
+                fallback_campaigns == []
+                and not allowlisted_elsewhere
+                and not same_game_campaign_listed
             ):
                 if is_drop_discovered(streamer):
                     self.__record_channel_verdict(game_slug, streamer.username, (0, 0))
@@ -5862,6 +5877,14 @@ class Twitch(object):
                     "checking the fallback campaigns instead",
                     level=logging.DEBUG,
                 )
+            elif same_game_campaign_listed and not allowlisted_elsewhere:
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' lists no watchable "
+                    f"campaign for {streamer.stream.game_name()}, but its "
+                    "same-game listing shows Drops are enabled there; checking "
+                    "the game-wide Twitch campaigns",
+                    level=logging.DEBUG,
+                )
             else:
                 # No gist fallback exists here at all (it's intentionally
                 # skipped once Twitch's inventory is authoritative for this
@@ -5876,14 +5899,22 @@ class Twitch(object):
                 )
 
         # Twitch answered this channel's query without advertising any
-        # campaign. A Twitch-sourced campaign with no allow-list then says
-        # nothing about this channel: some campaigns (e.g. per-streamer Rust
-        # item drops) expose no allow-list yet only progress on the channels
-        # whose own query advertises them. Only an explicit allow-list entry
-        # still qualifies. The external gist index is kept as before, since
-        # Twitch can omit its campaigns from the channel query.
-        require_twitch_allowlist = channel_query_answered and is_category_tier(streamer)
-        twitch_campaigns = list(self.discovered_open_drop_campaigns or [])
+        # watchable campaign. When it listed no campaign for this game at
+        # all, a Twitch-sourced campaign with no allow-list says nothing
+        # about this channel: some campaigns (e.g. per-streamer Rust item
+        # drops) expose no allow-list yet only progress on the channels whose
+        # own query advertises them, so only an explicit allow-list entry
+        # still qualifies. A listed same-game campaign (often a zero-minute
+        # badge) proves Drops are enabled for the game here, so game-wide
+        # campaigns apply as usual. The external gist index is kept as
+        # before, since Twitch can omit its campaigns from the channel query.
+        answered_category_check = channel_query_answered and is_category_tier(streamer)
+        require_twitch_allowlist = (
+            answered_category_check and not same_game_campaign_listed
+        )
+        twitch_campaigns = list(
+            getattr(self, "discovered_open_drop_campaigns", None) or []
+        )
         twitch_campaigns.extend(authoritative_campaigns)
         campaign_ids = set()
         possible_campaigns = [(campaign, False) for campaign in fallback_campaigns]
@@ -5904,12 +5935,16 @@ class Twitch(object):
             campaign_id = campaign.get("id")
             if not campaign_id:
                 continue
+            if from_twitch and str(campaign_id) in rejected_listed_ids:
+                # The channel listed this campaign and it was already judged
+                # above; the game-wide copy carries no channel progress.
+                continue
             if streamer.username in channels or (
                 not channels and not (from_twitch and require_twitch_allowlist)
             ):
                 campaign_ids.add(str(campaign_id))
 
-        if require_twitch_allowlist and not campaign_ids:
+        if answered_category_check and not campaign_ids:
             self.__record_channel_verdict(game_slug, streamer.username, (0, 0))
             self.__log_drop_check(
                 f"Twitch channel '{streamer.username}' advertises no active "
