@@ -1,6 +1,7 @@
 import re
 import socket
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from os import path
@@ -175,20 +176,22 @@ def _utf16_width(character: str) -> int:
 def utf16_length(text: str) -> int:
     """Return the length of ``text`` in UTF-16 code units.
 
-    Chat services such as Discord, Telegram, and Pushover count message length
+    Chat services such as Discord and Telegram count message length
     this way, so characters outside the Basic Multilingual Plane (most emoji)
     count twice.
     """
     return sum(_utf16_width(character) for character in text)
 
 
-def _wrap_line(line: str, limit: int) -> list[tuple[str, int]]:
-    """Hard-wrap ``line`` into ``(segment, utf16_length)`` pairs within ``limit``."""
+def _wrap_line(
+    line: str, limit: int, length_func: Callable[[str], int]
+) -> list[tuple[str, int]]:
+    """Hard-wrap ``line`` into ``(segment, length)`` pairs within ``limit``."""
     segments = []
     start = 0
     length = 0
     for index, character in enumerate(line):
-        width = _utf16_width(character)
+        width = length_func(character)
         if length and length + width > limit:
             segments.append((line[start:index], length))
             start, length = index, 0
@@ -197,8 +200,17 @@ def _wrap_line(line: str, limit: int) -> list[tuple[str, int]]:
     return segments
 
 
-def split_message_lines(message: str, limit: int, prefix: str = "") -> list[str]:
-    """Split a message into pieces of at most ``limit`` UTF-16 code units.
+def split_message_lines(
+    message: str,
+    limit: int,
+    prefix: str = "",
+    *,
+    length_func: Callable[[str], int] = utf16_length,
+) -> list[str]:
+    """Split a message into pieces of at most ``limit`` units.
+
+    Length defaults to UTF-16 code units. Pass ``length_func=len`` for services
+    such as Pushover that count Unicode characters instead.
 
     A message that already fits is returned unchanged as the only piece.
     Otherwise pieces break on line boundaries whenever possible, and a single
@@ -212,23 +224,25 @@ def split_message_lines(message: str, limit: int, prefix: str = "") -> list[str]
     """
     if limit < 1:
         raise ValueError("limit must be a positive integer")
-    if utf16_length(message) <= limit:
+    if length_func(message) <= limit:
         return [message]
     if prefix and message.startswith(prefix):
-        prefix_length = utf16_length(prefix)
+        prefix_length = length_func(prefix)
         if prefix_length <= limit // 2:
             body = message[len(prefix) :]  # noqa: E203
-            pieces = _split_lines(body, limit - prefix_length)
+            pieces = _split_lines(body, limit - prefix_length, length_func)
             return [prefix + piece for piece in pieces]
-    return _split_lines(message, limit)
+    return _split_lines(message, limit, length_func)
 
 
-def _split_lines(message: str, limit: int) -> list[str]:
+def _split_lines(
+    message: str, limit: int, length_func: Callable[[str], int]
+) -> list[str]:
     pieces = []
     current = []
     current_length = 0
     for line in message.split("\n"):
-        for segment, segment_length in _wrap_line(line, limit):
+        for segment, segment_length in _wrap_line(line, limit, length_func):
             if current and current_length + 1 + segment_length > limit:
                 pieces.append("\n".join(current))
                 current, current_length = [], 0

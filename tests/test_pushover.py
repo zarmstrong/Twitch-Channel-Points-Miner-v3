@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
 
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
@@ -93,6 +94,34 @@ def test_pushover_wraps_single_line_longer_than_limit():
     texts = [call.kwargs["data"]["message"] for call in post.call_args_list]
     assert [len(text) for text in texts] == [1024, 476]
     assert "".join(texts) == message
+
+
+@pytest.mark.parametrize("emoji_count", [100, 124])
+def test_pushover_keeps_unicode_message_within_character_limit_whole(emoji_count):
+    pushover = make_pushover([Events.DAILY_REPORT])
+    message = "a" * 900 + "\U0001f3c6" * emoji_count
+
+    with patched_post() as post:
+        assert pushover.send(message, Events.DAILY_REPORT) == (True, None)
+
+    post.assert_called_once()
+    assert post.call_args.kwargs["data"]["message"] == message
+
+
+def test_pushover_wraps_unicode_message_by_character_count():
+    pushover = make_pushover([Events.DAILY_REPORT])
+    prefix = "[\U0001f3c6] "
+    body = "a" * 900 + "\U0001f3c6" * 600
+
+    with patch.object(
+        Settings, "logger", SimpleNamespace(username=prefix)
+    ), patched_post() as post:
+        assert pushover.send(prefix + body, Events.DAILY_REPORT) == (True, None)
+
+    texts = [call.kwargs["data"]["message"] for call in post.call_args_list]
+    assert [len(text) for text in texts] == [1024, 484]
+    assert all(text.startswith(prefix) for text in texts)
+    assert "".join(text[len(prefix) :] for text in texts) == body
 
 
 def test_pushover_reports_failure_when_a_later_chunk_fails():

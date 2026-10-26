@@ -10,7 +10,8 @@ from TwitchChannelPointsMiner.classes.NotificationError import (
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.utils import split_message_lines
 
-# Pushover rejects messages whose ``message`` exceeds this many characters
+# Pushover counts Unicode characters, including astral emoji as one character.
+# It rejects messages whose ``message`` exceeds this many characters
 # (the ``title`` limit is 250, which the fixed title stays well under).
 PUSHOVER_MESSAGE_LIMIT = 1024
 
@@ -28,7 +29,10 @@ class Pushover(object):
     def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             texts = split_message_lines(
-                dedent(message), PUSHOVER_MESSAGE_LIMIT, notification_prefix()
+                dedent(message),
+                PUSHOVER_MESSAGE_LIMIT,
+                notification_prefix(),
+                length_func=len,
             )
             # Only the first part alerts as configured. Later parts are sent at
             # normal priority with the default sound, so a long report does not

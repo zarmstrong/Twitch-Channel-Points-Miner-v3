@@ -118,6 +118,25 @@ def test_split_message_lines_rejects_non_positive_limit():
         utils.split_message_lines("abc", 0)
 
 
+def test_split_message_lines_can_count_unicode_characters():
+    trophy = "\U0001f3c6"
+    assert utils.split_message_lines(trophy * 5, 4, length_func=len) == [
+        trophy * 4,
+        trophy,
+    ]
+    assert utils.split_message_lines(f"{trophy}\n{trophy}\nab", 5, length_func=len) == [
+        f"{trophy}\n{trophy}",
+        "ab",
+    ]
+    assert utils.split_message_lines(trophy * 2 + "\nab", 5, length_func=len) == [
+        trophy * 2 + "\nab"
+    ]
+    prefix = trophy + " "
+    assert utils.split_message_lines(
+        prefix + "abcd", 5, prefix, length_func=len
+    ) == [prefix + "abc", prefix + "d"]
+
+
 def test_get_streamer_index_compares_channel_ids_as_strings():
     streamers = [SimpleNamespace(channel_id="10"), SimpleNamespace(channel_id=20)]
 
