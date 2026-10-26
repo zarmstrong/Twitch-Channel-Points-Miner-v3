@@ -90,13 +90,16 @@ def test_split_message_lines_repeats_prefix_on_later_pieces():
     ]
 
 
-def test_split_message_lines_keeps_whitespace_segments_of_wrapped_lines():
+def test_split_message_lines_skips_blank_segments_of_wrapped_lines():
     padded = "a" + " " * 10 + "b"
     pieces = utils.split_message_lines(padded, 5)
 
-    assert pieces == ["a    ", "     ", " b"]
-    assert "".join(pieces) == padded
-    # A blank line, unlike whitespace from wrapping a line, never starts a part.
+    assert pieces == ["a    ", " b"]
+    assert all(piece.strip() for piece in pieces)
+    assert utils.split_message_lines("[u] " + padded, 9, prefix="[u] ") == [
+        "[u] a    ",
+        "[u]  b",
+    ]
     assert utils.split_message_lines("x\n     \ny", 5) == ["x", "y"]
 
 

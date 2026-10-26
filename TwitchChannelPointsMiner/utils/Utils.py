@@ -202,10 +202,10 @@ def split_message_lines(message: str, limit: int, prefix: str = "") -> list[str]
 
     A message that already fits is returned unchanged as the only piece.
     Otherwise pieces break on line boundaries whenever possible, and a single
-    line that is longer than ``limit`` on its own is hard-wrapped with every
-    character preserved. Blank lines are kept inside a piece but never start
-    one, so no piece is blank; the only exception is a whitespace run within a
-    single line that is longer than ``limit``, which is kept rather than lost.
+    line that is longer than ``limit`` on its own is hard-wrapped. Blank lines
+    are kept inside a piece but never start one. Whitespace-only segments from
+    hard-wrapping are also skipped when they would start a piece, so a long
+    whitespace run cannot produce a blank notification.
 
     When the message starts with ``prefix`` (such as the username the logger
     adds), every later piece starts with it too, within the limit.
@@ -228,12 +228,11 @@ def _split_lines(message: str, limit: int) -> list[str]:
     current = []
     current_length = 0
     for line in message.split("\n"):
-        blank = not line.strip()
         for segment, segment_length in _wrap_line(line, limit):
             if current and current_length + 1 + segment_length > limit:
                 pieces.append("\n".join(current))
                 current, current_length = [], 0
-            if blank and not current:
+            if not current and not segment.strip():
                 continue
             current_length += segment_length + (1 if current else 0)
             current.append(segment)

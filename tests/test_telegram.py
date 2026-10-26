@@ -208,6 +208,25 @@ def test_telegram_repeats_username_prefix_on_later_parts():
     assert "".join(text[len(prefix) :] for text in texts) == "x" * 5000
 
 
+def test_telegram_delivers_content_after_a_blank_wrapped_segment():
+    telegram = Telegram(chat_id=123, token="token", events=[Events.DAILY_REPORT])
+    message = "Header" + " " * 8192 + "Footer"
+
+    def reject_blank_text(**kwargs):
+        if not kwargs["data"]["text"].strip():
+            raise requests.HTTPError(response=SimpleNamespace(status_code=400))
+        return Mock()
+
+    with patched_post(side_effect=reject_blank_text) as post:
+        assert telegram.send(message, Events.DAILY_REPORT) == (True, None)
+
+    texts = [call.kwargs["data"]["text"] for call in post.call_args_list]
+    assert len(texts) == 2
+    assert all(text.strip() and len(text) <= 4096 for text in texts)
+    assert texts[0].startswith("Header")
+    assert texts[-1].endswith("Footer")
+
+
 def test_telegram_retries_after_body_retry_after_hint():
     telegram = Telegram(chat_id=123, token="token", events=[Events.DROP_STATUS])
     limited_response = requests.Response()
