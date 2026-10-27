@@ -819,6 +819,44 @@ def test_gist_fallback_keeps_suppressing_completed_campaign_from_cached_inventor
     assert len(front_page_calls) == 2
 
 
+@pytest.mark.parametrize("prior_load", [False, True])
+@pytest.mark.parametrize("unusable_inventory", [{}, PARTIAL_INVENTORY])
+def test_inventory_reader_keeps_gist_completion_cache_current(
+    monkeypatch, prior_load, unusable_inventory
+):
+    gql = _badge_gql()
+    gql.get_inventory = lambda: SimpleNamespace(
+        inventory=COMPLETED_MINECRAFT_INVENTORY, errors=[]
+    )
+    twitch = bare_twitch(gql)
+    twitch.completed_drop_campaigns = set()
+    front_page_calls = _minecraft_gist(monkeypatch)
+    if prior_load:
+        twitch.completed_badge_campaign_signatures_or_cached(EMPTY_INVENTORY)
+
+    # Background campaign sync uses this reader without running badge or gist
+    # discovery. Its completion evidence must still reach both consumers.
+    twitch._Twitch__get_inventory()
+
+    def unavailable():
+        if not unusable_inventory:
+            raise RetryError("Inventory", [])
+        return SimpleNamespace(inventory=unusable_inventory, errors=[])
+
+    gql.get_inventory = unavailable
+    inventory = twitch.get_drops_inventory()
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["minecraft"], set(), inventory
+    )
+
+    assert deadlines == {}
+    assert twitch.twitchdrops_app_campaigns == {}
+    assert front_page_calls == [True]
+    assert twitch.completed_badge_campaign_signature_cache == (
+        twitch.completed_badge_campaign_signatures(COMPLETED_MINECRAFT_INVENTORY)
+    )
+
+
 def test_gist_fallback_stands_down_without_any_completion_evidence(monkeypatch, caplog):
     twitch = bare_twitch(_badge_gql())
     twitch.category_log_level = logging.INFO

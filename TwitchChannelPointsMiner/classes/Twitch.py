@@ -2845,8 +2845,8 @@ class Twitch(object):
         campaign completed". The cache only grows, like
         completed_drop_campaigns: completing a campaign is permanent, so a
         partial response that omits an entry or its signature metadata must
-        not erase prior completion evidence. The badge check and category
-        discovery both write it from their own threads, hence the lock.
+        not erase prior completion evidence. Inventory sync, badge checks,
+        and category discovery write it from their own threads, hence the lock.
         """
         # Defensive getattr: some tests construct Twitch via __new__ and skip
         # __init__ (mirroring __claim_lock).
@@ -6577,6 +6577,9 @@ class Twitch(object):
             self.completed_drop_campaigns.update(
                 self.__completed_campaign_ids_from_inventory(inventory)
             )
+            # Sync and startup inventory reads also observe completions. Keep
+            # their evidence even if the next discovery-specific fetch fails.
+            self.completed_badge_campaign_signatures_or_cached(inventory)
             if self.log_drop_checks is True:
                 campaigns_in_progress = (
                     inventory.get("dropCampaignsInProgress", []) or []
