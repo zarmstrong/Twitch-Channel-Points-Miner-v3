@@ -222,3 +222,25 @@ def test_split_message_lines_cap_keeps_the_prefix_on_every_piece():
     assert len(pieces) == 2
     assert all(piece.startswith("[u] ") and len(piece) <= 30 for piece in pieces)
     assert "more parts not sent]" in pieces[-1]
+
+
+def test_split_message_lines_cap_trims_a_long_last_line_instead_of_dropping_it():
+    message = "\n".join(["a" * 50, "s", "x" * 45, "b" * 50, "c" * 50])
+
+    pieces = utils.split_message_lines(message, 50, max_pieces=2)
+
+    # Only the characters the notice needs are cut from the long last line.
+    assert pieces == ["a" * 50, "s\n" + "x" * 24 + "\n[2 more parts not sent]"]
+
+
+def test_split_message_lines_cap_keeps_a_one_line_piece_on_one_line():
+    # Parts of one long line have no line break (Discord shows them as inline
+    # code), so the notice joins the same line.
+    pieces = utils.split_message_lines("z" * 200, 50, max_pieces=2)
+
+    assert pieces == ["z" * 50, "z" * 26 + " [2 more parts not sent]"]
+
+
+def test_split_message_lines_rejects_an_invalid_cap_for_any_message():
+    with pytest.raises(ValueError):
+        utils.split_message_lines("short", 10, max_pieces=0)

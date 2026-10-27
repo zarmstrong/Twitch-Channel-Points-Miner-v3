@@ -227,6 +227,8 @@ def split_message_lines(
     """
     if limit < 1:
         raise ValueError("limit must be a positive integer")
+    if max_pieces is not None and max_pieces < 1:
+        raise ValueError("max_pieces must be a positive integer")
     if length_func(message) <= limit:
         return [message]
     if prefix and message.startswith(prefix):
@@ -255,18 +257,28 @@ def _truncate_pieces(
     """Keep at most ``max_pieces`` pieces, ending the last with a notice."""
     if max_pieces is None or len(pieces) <= max_pieces:
         return pieces
-    if max_pieces < 1:
-        raise ValueError("max_pieces must be a positive integer")
     omitted = len(pieces) - max_pieces
     notice = f"[{omitted} more part{'s' if omitted != 1 else ''} not sent]"
     kept = pieces[:max_pieces]
     if length_func(notice) > limit:
         return kept
     last = kept[-1]
-    # Drop whole lines first, then characters, until the notice fits.
-    while last and length_func(last) + 1 + length_func(notice) > limit:
-        last = last.rsplit("\n", 1)[0] if "\n" in last else last[:-1]
-    kept[-1] = f"{last}\n{notice}" if last else notice
+    # A piece without a line break (part of one long line, which Discord shows
+    # as inline code) gets the notice on the same line.
+    separator = "\n" if "\n" in last else " "
+    notice_length = length_func(separator) + length_func(notice)
+    # Make room by dropping trailing lines whole while they are short or fit
+    # inside the overflow, so no short line is left cut off mid-way, and by
+    # cutting characters only from a long last line, which keeps all it can.
+    while last and length_func(last) + notice_length > limit:
+        overflow = length_func(last) + notice_length - limit
+        head, newline, tail = last.rpartition("\n")
+        tail_length = length_func(tail)
+        if newline and (tail_length <= overflow or tail_length <= notice_length):
+            last = head
+        else:
+            last = last[: max(len(last) - overflow, 0)]
+    kept[-1] = f"{last}{separator}{notice}" if last else notice
     return kept
 
 
