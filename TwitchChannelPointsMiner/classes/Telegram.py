@@ -50,7 +50,7 @@ class Telegram(object):
             )
             # Only the first part notifies as configured. Later parts are sent
             # silently, so a long report does not buzz the device once per
-            # part (like Pushover's later parts at normal priority).
+            # part (like Pushover's later parts at quiet priority).
             parts = [(texts[0], self.disable_notification)] + [
                 (text, True) for text in texts[1:]
             ]

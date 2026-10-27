@@ -37,10 +37,9 @@ class Pushover(object):
                 max_pieces=MAX_NOTIFICATION_PARTS,
             )
             # Only the first part alerts at the configured priority. Later
-            # parts are sent at normal priority, so a long report does not
-            # become several high-priority alerts that bypass quiet hours; they
-            # keep the configured sound (which may be "none" for silence).
-            follow_up_priority = 0 if _alerts(self.priority) else self.priority
+            # parts are sent quietly (no sound or vibration), so a long report
+            # alerts once rather than once per part, as on Telegram.
+            follow_up_priority = _quiet(self.priority)
             parts = [(texts[0], self.priority)] + [
                 (text, follow_up_priority) for text in texts[1:]
             ]
@@ -68,9 +67,10 @@ class Pushover(object):
         response.raise_for_status()
 
 
-def _alerts(priority) -> bool:
-    """Return True when a Pushover priority is above normal (0)."""
+def _quiet(priority) -> int:
+    """Pushover's quiet priority (-1: no sound or vibration), or the
+    configured one when it is quieter still (-2: no notification at all)."""
     try:
-        return int(priority) > 0
+        return min(int(priority), -1)
     except (TypeError, ValueError):
-        return False
+        return -1

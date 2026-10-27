@@ -155,11 +155,12 @@ def test_pushover_reports_single_part_failure_without_part_suffix():
     assert result == (False, "The connection to Pushover timed out.")
 
 
+@pytest.mark.parametrize("priority", [0, 1, "1"])
 @pytest.mark.parametrize("sound", ["siren", "none"])
-def test_pushover_sends_later_parts_at_normal_priority_with_configured_sound(sound):
-    # A user who set sound "none" for silent high-priority alerts must not
-    # hear the default chime on the later parts of a long notification.
-    pushover = make_pushover([Events.DROP_STATUS], priority=1, sound=sound)
+def test_pushover_sends_later_parts_at_quiet_priority(priority, sound):
+    # A long report alerts once: the first part at the configured priority
+    # and sound, later parts quietly (no sound or vibration), as on Telegram.
+    pushover = make_pushover([Events.DROP_STATUS], priority=priority, sound=sound)
     message = "x" * 3000
 
     with patched_post() as post:
@@ -167,10 +168,31 @@ def test_pushover_sends_later_parts_at_normal_priority_with_configured_sound(sou
 
     data = [call.kwargs["data"] for call in post.call_args_list]
     assert len(data) == 3
-    assert (data[0]["priority"], data[0]["sound"]) == (1, sound)
+    assert (data[0]["priority"], data[0]["sound"]) == (priority, sound)
     for later in data[1:]:
-        assert (later["priority"], later["sound"]) == (0, sound)
+        assert (later["priority"], later["sound"]) == (-1, sound)
     assert "".join(item["message"] for item in data) == message
+
+
+@pytest.mark.parametrize(
+    "priority, later_priority",
+    [
+        # Already quieter than quiet: no notification at all stays that way.
+        (-2, -2),
+        # An unreadable setting still keeps later parts quiet.
+        ("loud", -1),
+        (None, -1),
+    ],
+)
+def test_pushover_later_part_priority_edge_cases(priority, later_priority):
+    pushover = make_pushover([Events.DROP_STATUS], priority=priority)
+
+    with patched_post() as post:
+        assert pushover.send("x" * 3000, Events.DROP_STATUS) == (True, None)
+
+    data = [call.kwargs["data"] for call in post.call_args_list]
+    assert data[0]["priority"] == priority
+    assert [item["priority"] for item in data[1:]] == [later_priority] * 2
 
 
 def test_pushover_keeps_quiet_priority_and_sound_on_later_parts():
