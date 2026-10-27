@@ -277,3 +277,31 @@ def test_split_message_lines_cap_drops_a_line_cut_down_to_spaces():
     pieces = utils.split_message_lines(message, 50, max_pieces=2)
 
     assert pieces == ["p" * 50, "a" * 24 + "\n[1 more part not sent]"]
+
+
+@pytest.mark.parametrize("length_func", [len, utils.utf16_length])
+def test_split_message_lines_cap_drops_a_one_line_piece_cut_down_to_spaces(
+    length_func,
+):
+    # Found in review: a single-line piece that starts with a long run of
+    # spaces could be cut down to only spaces, leaving the notice after them.
+    message = "\n".join(["x" * 1024, " " * 1010 + "y" * 14, "z" * 1024])
+
+    pieces = utils.split_message_lines(
+        message, 1024, max_pieces=2, length_func=length_func
+    )
+
+    assert pieces == ["x" * 1024, "[1 more part not sent]"]
+
+
+@pytest.mark.parametrize("separator", ["\n", " "])
+def test_split_message_lines_cap_leaves_no_trailing_spaces_before_the_notice(
+    separator,
+):
+    message = "\n".join(["p" * 40, "abc   ", "q" * 40])
+
+    pieces = utils.split_message_lines(
+        message, 40, max_pieces=2, notice_separator=separator
+    )
+
+    assert pieces[-1] == "abc" + separator + "[1 more part not sent]"

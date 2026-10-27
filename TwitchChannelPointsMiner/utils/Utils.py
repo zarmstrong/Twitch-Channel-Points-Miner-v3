@@ -271,7 +271,9 @@ def _truncate_pieces(
     kept = pieces[:max_pieces]
     if length_func(notice) > limit:
         return kept
-    last = _without_trailing_blank_lines(kept[-1])
+    # Trailing whitespace (blank lines, or spaces a cut leaves behind) would
+    # put the notice after an empty line or a visible gap.
+    last = kept[-1].rstrip()
     notice_length = length_func(separator) + length_func(notice)
     # Make room by dropping trailing lines whole while they are short or fit
     # inside the overflow, so no short line is left cut off mid-way, and by
@@ -281,7 +283,7 @@ def _truncate_pieces(
         head, newline, tail = last.rpartition("\n")
         tail_length = length_func(tail)
         if newline and (tail_length <= overflow or tail_length <= notice_length):
-            last = _without_trailing_blank_lines(head)
+            last = head.rstrip()
         else:
             # Free `overflow` units, counted per character: a character can
             # be wider than one unit (an emoji is two UTF-16 units).
@@ -289,20 +291,9 @@ def _truncate_pieces(
             while cut > 0 and freed < overflow:
                 cut -= 1
                 freed += length_func(last[cut])
-            # A cut that leaves the line empty or only spaces would put the
-            # notice after a blank line.
-            last = _without_trailing_blank_lines(last[:cut])
+            last = last[:cut].rstrip()
     kept[-1] = f"{last}{separator}{notice}" if last else notice
     return kept
-
-
-def _without_trailing_blank_lines(text: str) -> str:
-    """``text`` without blank lines at its end (line breaks included)."""
-    head, newline, tail = text.rpartition("\n")
-    while newline and not tail.strip():
-        text = head
-        head, newline, tail = text.rpartition("\n")
-    return text
 
 
 def _split_lines(

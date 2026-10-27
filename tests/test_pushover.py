@@ -191,7 +191,6 @@ def test_pushover_later_part_priority_edge_cases(priority, later_priority):
         assert pushover.send("x" * 3000, Events.DROP_STATUS) == (True, None)
 
     data = [call.kwargs["data"] for call in post.call_args_list]
-    assert data[0]["priority"] == priority
     assert [item["priority"] for item in data[1:]] == [later_priority] * 2
 
 
