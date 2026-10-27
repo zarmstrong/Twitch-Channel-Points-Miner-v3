@@ -68,9 +68,9 @@ class Pushover(object):
 
 
 def _quiet(priority) -> int:
-    """Pushover's quiet priority (-1: no sound or vibration), or the
-    configured one when it is quieter still (-2: no notification at all)."""
+    """Pushover's quiet priority (-1: no sound or vibration), or its lowest
+    (-2: no notification at all) when the configured one is that low."""
     try:
-        return min(int(priority), -1)
+        return -2 if int(priority) <= -2 else -1
     except (TypeError, ValueError):
         return -1

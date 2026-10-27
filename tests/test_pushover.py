@@ -179,6 +179,8 @@ def test_pushover_sends_later_parts_at_quiet_priority(priority, sound):
     [
         # Already quieter than quiet: no notification at all stays that way.
         (-2, -2),
+        # Below Pushover's range, later parts still get a valid priority.
+        (-3, -2),
         # An unreadable setting still keeps later parts quiet.
         ("loud", -1),
         (None, -1),
@@ -191,6 +193,9 @@ def test_pushover_later_part_priority_edge_cases(priority, later_priority):
         assert pushover.send("x" * 3000, Events.DROP_STATUS) == (True, None)
 
     data = [call.kwargs["data"] for call in post.call_args_list]
+    if isinstance(priority, int):
+        # The first part keeps the configured priority.
+        assert data[0]["priority"] == priority
     assert [item["priority"] for item in data[1:]] == [later_priority] * 2
 
 
