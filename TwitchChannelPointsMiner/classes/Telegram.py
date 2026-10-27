@@ -10,8 +10,8 @@ from TwitchChannelPointsMiner.classes.NotificationError import (
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.utils import split_message_lines
 
-# Telegram rejects sendMessage requests whose ``text`` exceeds this many
-# characters (counted in UTF-16 code units).
+# Telegram counts Unicode characters for ``text`` length; only entity offsets
+# and lengths use UTF-16 code units.
 TELEGRAM_TEXT_LIMIT = 4096
 
 
@@ -41,7 +41,10 @@ class Telegram(object):
     def send(self, message: str, event: Events) -> tuple[bool, str | None]:
         if str(event) in self.events:
             texts = split_message_lines(
-                dedent(message), TELEGRAM_TEXT_LIMIT, notification_prefix()
+                dedent(message),
+                TELEGRAM_TEXT_LIMIT,
+                notification_prefix(),
+                length_func=len,
             )
             session = requests.Session()
             try:

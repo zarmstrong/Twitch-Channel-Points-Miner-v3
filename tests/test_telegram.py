@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
 
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
@@ -150,17 +151,44 @@ def test_telegram_does_not_send_empty_trailing_part():
     assert post.call_args.kwargs["data"]["text"] == "x" * 4096
 
 
-def test_telegram_counts_astral_emoji_as_two_characters():
+@pytest.mark.parametrize("emoji_count", [3000, 4096])
+def test_telegram_keeps_astral_emoji_message_within_limit_whole(emoji_count):
     telegram = Telegram(chat_id=123, token="token", events=[Events.DROP_STATUS])
-    message = "\U0001f3c6" * 3000
-    assert len(message) < 4096
+    message = "\U0001f3c6" * emoji_count
+
+    with patched_post() as post:
+        assert telegram.send(message, Events.DROP_STATUS) == (True, None)
+
+    post.assert_called_once()
+    assert post.call_args.kwargs["data"]["text"] == message
+
+
+def test_telegram_wraps_astral_emoji_message_by_character_count():
+    telegram = Telegram(chat_id=123, token="token", events=[Events.DROP_STATUS])
+    message = "\U0001f3c6" * 5000
 
     with patched_post() as post:
         assert telegram.send(message, Events.DROP_STATUS) == (True, None)
 
     texts = [call.kwargs["data"]["text"] for call in post.call_args_list]
-    assert [len(text.encode("utf-16-le")) // 2 for text in texts] == [4096, 1904]
+    assert [len(text) for text in texts] == [4096, 904]
     assert "".join(texts) == message
+
+
+def test_telegram_counts_unicode_prefix_within_each_parts_character_limit():
+    telegram = Telegram(chat_id=123, token="token", events=[Events.DROP_STATUS])
+    prefix = "[\U0001f3c6] "
+    body = "\U0001f3c6" * 5000
+
+    with patch.object(
+        Settings, "logger", SimpleNamespace(username=prefix)
+    ), patched_post() as post:
+        assert telegram.send(prefix + body, Events.DROP_STATUS) == (True, None)
+
+    texts = [call.kwargs["data"]["text"] for call in post.call_args_list]
+    assert [len(text) for text in texts] == [4096, 912]
+    assert all(text.startswith(prefix) for text in texts)
+    assert "".join(text[len(prefix) :] for text in texts) == body
 
 
 def test_telegram_drops_leading_blank_line_of_long_message():

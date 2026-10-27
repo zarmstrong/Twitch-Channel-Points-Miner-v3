@@ -176,9 +176,8 @@ def _utf16_width(character: str) -> int:
 def utf16_length(text: str) -> int:
     """Return the length of ``text`` in UTF-16 code units.
 
-    Chat services such as Discord and Telegram count message length
-    this way, so characters outside the Basic Multilingual Plane (most emoji)
-    count twice.
+    Discord counts message length this way, so characters outside the Basic
+    Multilingual Plane (most emoji) count twice.
     """
     return sum(_utf16_width(character) for character in text)
 
@@ -210,7 +209,7 @@ def split_message_lines(
     """Split a message into pieces of at most ``limit`` units.
 
     Length defaults to UTF-16 code units. Pass ``length_func=len`` for services
-    such as Pushover that count Unicode characters instead.
+    such as Telegram and Pushover that count Unicode characters instead.
 
     A message that already fits is returned unchanged as the only piece.
     Otherwise pieces break on line boundaries whenever possible, and a single
