@@ -155,8 +155,11 @@ def test_pushover_reports_single_part_failure_without_part_suffix():
     assert result == (False, "The connection to Pushover timed out.")
 
 
-def test_pushover_sends_later_parts_at_normal_priority_with_default_sound():
-    pushover = make_pushover([Events.DROP_STATUS], priority=1, sound="siren")
+@pytest.mark.parametrize("sound", ["siren", "none"])
+def test_pushover_sends_later_parts_at_normal_priority_with_configured_sound(sound):
+    # A user who set sound "none" for silent high-priority alerts must not
+    # hear the default chime on the later parts of a long notification.
+    pushover = make_pushover([Events.DROP_STATUS], priority=1, sound=sound)
     message = "x" * 3000
 
     with patched_post() as post:
@@ -164,13 +167,10 @@ def test_pushover_sends_later_parts_at_normal_priority_with_default_sound():
 
     data = [call.kwargs["data"] for call in post.call_args_list]
     assert len(data) == 3
-    assert (data[0]["priority"], data[0]["sound"]) == (1, "siren")
+    assert (data[0]["priority"], data[0]["sound"]) == (1, sound)
     for later in data[1:]:
-        assert later["priority"] == 0
-        assert later["sound"] is None
+        assert (later["priority"], later["sound"]) == (0, sound)
     assert "".join(item["message"] for item in data) == message
-    sent = requests.Request("POST", "https://example.com", data=data[1]).prepare()
-    assert "sound=" not in sent.body
 
 
 def test_pushover_keeps_quiet_priority_and_sound_on_later_parts():

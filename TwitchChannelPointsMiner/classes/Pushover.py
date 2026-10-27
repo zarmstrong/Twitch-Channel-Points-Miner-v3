@@ -34,14 +34,13 @@ class Pushover(object):
                 notification_prefix(),
                 length_func=len,
             )
-            # Only the first part alerts as configured. Later parts are sent at
-            # normal priority with the default sound, so a long report does not
-            # become several high-priority alerts that bypass quiet hours.
-            follow_up = (
-                (0, None) if _alerts(self.priority) else (self.priority, self.sound)
-            )
-            parts = [(texts[0], self.priority, self.sound)] + [
-                (text, *follow_up) for text in texts[1:]
+            # Only the first part alerts at the configured priority. Later
+            # parts are sent at normal priority, so a long report does not
+            # become several high-priority alerts that bypass quiet hours; they
+            # keep the configured sound (which may be "none" for silence).
+            follow_up_priority = 0 if _alerts(self.priority) else self.priority
+            parts = [(texts[0], self.priority)] + [
+                (text, follow_up_priority) for text in texts[1:]
             ]
             session = requests.Session()
             try:
@@ -51,7 +50,7 @@ class Pushover(object):
         return False, "This event is not enabled for Pushover."
 
     def _post(self, session: requests.Session, part: tuple) -> None:
-        text, priority, sound = part
+        text, priority = part
         response = session.post(
             url="https://api.pushover.net/1/messages.json",
             data={
@@ -60,9 +59,7 @@ class Pushover(object):
                 "message": text,
                 "title": "Twitch Channel Points Miner",
                 "priority": priority,
-                # requests leaves out None values, so Pushover uses the
-                # default sound.
-                "sound": sound,
+                "sound": self.sound,
             },
             timeout=(5, 15),
         )
