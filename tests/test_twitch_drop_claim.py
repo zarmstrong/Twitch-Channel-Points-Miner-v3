@@ -2892,6 +2892,68 @@ def _stub_campaign_sources(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("outcome", ["failed", "partial", "loaded", "completed"])
+def test_campaign_refresh_preserves_allowlist_only_for_unevaluated_games(
+    monkeypatch, outcome
+):
+    twitch = bare_twitch(monkeypatch)
+    cached_campaign = {
+        "id": "restricted-campaign-1",
+        "name": "Restricted Campaign",
+        "channels": ["drops-channel"],
+    }
+    twitch.active_drop_campaigns = {"example-game": [cached_campaign]}
+    twitch.discovered_open_drop_campaigns = []
+    twitch.category_campaign_eligibility[("example-game", "drops-channel")] = (1, 1)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[], campaigns_available=True
+        )
+    )
+    monkeypatch.setattr(
+        _drops_dashboard_state, "unavailable", outcome != "loaded", raising=False
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", lambda self, **kw: [])
+    _stub_campaign_sources(monkeypatch)
+    inventory = {}
+    if outcome == "completed":
+        inventory["completedRewardCampaigns"] = [
+            {"id": cached_campaign["id"], "game": {"displayName": "Example Game"}}
+        ]
+    elif outcome == "partial":
+        other_campaign = campaign_data()
+        other_campaign["id"] = "other-campaign"
+        other_campaign["game"] = {"displayName": "Other Game"}
+        monkeypatch.setattr(
+            Twitch,
+            "_Twitch__get_open_drop_campaigns_from_helix",
+            lambda self: ([other_campaign], []),
+        )
+
+    deadlines, evaluated_games = (
+        twitch._Twitch__active_drop_category_slugs_from_campaigns(
+            inventory, {"example-game", "other-game"}
+        )
+    )
+
+    kept = outcome in {"failed", "partial"}
+    assert "example-game" not in deadlines
+    assert ("example-game" in evaluated_games) == (outcome == "completed")
+    assert twitch.active_drop_campaigns.get("example-game", []) == (
+        [cached_campaign] if kept else []
+    )
+    # The next channel refresh may answer empty for an official co-stream.
+    # Losing its cached allow-list would turn that answer into a negative verdict.
+    streamer = category_streamer()
+    streamer.is_online = True
+    streamer.settings = SimpleNamespace(claim_drops=True)
+    streamer.stream.campaigns_ids = []
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == (
+        [cached_campaign["id"]] if kept else []
+    )
+    assert twitch._Twitch__category_drops_condition(streamer) is kept
+
+
 def test_campaign_discovery_snapshots_its_own_dashboard_outcome(monkeypatch):
     # Issue #175: the dashboard outcome is thread-local, so another thread's
     # dashboard call (the campaign sync thread) succeeding in the very window

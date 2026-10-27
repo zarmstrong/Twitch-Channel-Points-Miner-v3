@@ -2171,6 +2171,15 @@ class Twitch(object):
             category_log=True,
         )
 
+        if self.campaign_lookup_unavailable:
+            # Retained co-streams still need the last known allow-list when
+            # their own channel query omits the campaign. Only replace games
+            # a source actually evaluated; missing data is not a negative verdict.
+            for game_slug, campaigns in (
+                getattr(self, "active_drop_campaigns", None) or {}
+            ).items():
+                if game_slug not in twitch_category_slugs:
+                    active_campaigns.setdefault(game_slug, campaigns)
         self.active_drop_campaigns = active_campaigns
         self.twitch_campaign_names_by_game = twitch_campaign_names
 
