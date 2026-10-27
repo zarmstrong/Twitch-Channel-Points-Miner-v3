@@ -745,13 +745,30 @@ def test_drops_inventory_completions_loaded_requires_a_list():
     )
 
 
+def _record(twitch, inventory):
+    """What __get_inventory does with every inventory it loads."""
+    twitch._Twitch__record_completed_badge_campaigns(inventory)
+    return inventory
+
+
+def test_drops_inventory_completions_state_tells_missing_from_errored():
+    assert Twitch.drops_inventory_completions_state(None) == "unavailable"
+    assert Twitch.drops_inventory_completions_state({}) == "unavailable"
+    assert Twitch.drops_inventory_completions_state(EMPTY_INVENTORY) == "loaded"
+    assert Twitch.drops_inventory_completions_state(PARTIAL_INVENTORY) == "errored"
+    assert (
+        Twitch.drops_inventory_completions_state({"dropCampaignsInProgress": []})
+        == "missing"
+    )
+
+
 def test_completed_badge_campaign_signatures_or_cached_keeps_last_good_load():
     twitch = bare_twitch(SimpleNamespace())
 
     assert twitch.completed_badge_campaign_signatures_or_cached({}) is None
 
     signatures = twitch.completed_badge_campaign_signatures_or_cached(
-        COMPLETED_MINECRAFT_INVENTORY
+        _record(twitch, COMPLETED_MINECRAFT_INVENTORY)
     )
     assert len(signatures) == 1
     assert twitch.completed_badge_campaign_signature_cache == signatures
@@ -763,35 +780,73 @@ def test_completed_badge_campaign_signatures_or_cached_keeps_last_good_load():
     # A later good load that leaves the campaign out (for example because
     # its entry errored and was dropped) does not forget it: completing a
     # campaign is permanent, so the cache only grows.
-    assert (
-        twitch.completed_badge_campaign_signatures_or_cached(
-            {"completedRewardCampaigns": []}
-        )
-        == signatures
-    )
+    later = _record(twitch, {"completedRewardCampaigns": []})
+    assert twitch.completed_badge_campaign_signatures_or_cached(later) == signatures
     assert twitch.completed_badge_campaign_signature_cache == signatures
 
 
-def test_completed_badge_campaign_signatures_or_cached_merges_new_completions(
+def test_completed_badge_campaign_signatures_or_cached_is_read_only():
+    """Only __get_inventory records completions, so consumers never re-parse
+    and re-write the same inventory."""
+    twitch = bare_twitch(SimpleNamespace())
+
+    signatures = twitch.completed_badge_campaign_signatures_or_cached(
+        COMPLETED_MINECRAFT_INVENTORY
+    )
+
+    assert len(signatures) == 1
+    assert twitch.completed_badge_campaign_signature_cache is None
+
+
+def test_completed_badge_campaign_signatures_or_cached_reuses_recorded_read(
     monkeypatch,
 ):
     twitch = bare_twitch(SimpleNamespace())
-    twitch.completed_badge_campaign_signatures_or_cached(COMPLETED_MINECRAFT_INVENTORY)
+    inventory = _record(twitch, dict(COMPLETED_MINECRAFT_INVENTORY))
     monkeypatch.setattr(
         Twitch,
         "completed_badge_campaign_signatures",
-        lambda self, inventory: {"another"},
+        lambda self, inventory: pytest.fail("the recorded read must be reused"),
     )
 
-    merged = twitch.completed_badge_campaign_signatures_or_cached(
-        {"completedRewardCampaigns": [{"campaign": {}}]}
+    assert len(twitch.completed_badge_campaign_signatures_or_cached(inventory)) == 1
+
+
+def test_completed_badge_campaign_signatures_or_cached_merges_new_completions():
+    twitch = bare_twitch(SimpleNamespace())
+    _record(twitch, COMPLETED_MINECRAFT_INVENTORY)
+    another = _record(
+        twitch,
+        {
+            "completedRewardCampaigns": [
+                {
+                    "campaign": {
+                        "name": "Another",
+                        "endAt": "2099-02-01T00:00:00Z",
+                        "game": {"displayName": "Fortnite"},
+                    }
+                }
+            ]
+        },
     )
+
+    merged = twitch.completed_badge_campaign_signatures_or_cached(another)
 
     assert len(merged) == 2
-    assert "another" in merged
+    assert ("fortnite", "another", 4073587200.0) in merged
     # Callers get a copy, so changing it cannot change the cache.
     merged.clear()
     assert len(twitch.completed_badge_campaign_signature_cache) == 2
+
+
+def test_missing_completions_field_falls_back_without_standing_down():
+    twitch = bare_twitch(SimpleNamespace())
+    missing = {"dropCampaignsInProgress": []}
+
+    # Never loaded: proceed with no evidence rather than stand down forever.
+    assert twitch.completed_badge_campaign_signatures_or_cached(missing) == set()
+    _record(twitch, COMPLETED_MINECRAFT_INVENTORY)
+    assert len(twitch.completed_badge_campaign_signatures_or_cached(missing)) == 1
 
 
 @pytest.mark.parametrize("unusable_inventory", [{}, PARTIAL_INVENTORY])
@@ -806,7 +861,7 @@ def test_gist_fallback_keeps_suppressing_completed_campaign_from_cached_inventor
 
     assert (
         twitch._Twitch__twitchdrops_app_fallback(
-            ["minecraft"], set(), COMPLETED_MINECRAFT_INVENTORY
+            ["minecraft"], set(), _record(twitch, COMPLETED_MINECRAFT_INVENTORY)
         )
         == {}
     )
@@ -832,7 +887,7 @@ def test_inventory_reader_keeps_gist_completion_cache_current(
     twitch.completed_drop_campaigns = set()
     front_page_calls = _minecraft_gist(monkeypatch)
     if prior_load:
-        twitch.completed_badge_campaign_signatures_or_cached(EMPTY_INVENTORY)
+        _record(twitch, EMPTY_INVENTORY)
 
     # Background campaign sync uses this reader without running badge or gist
     # discovery. Its completion evidence must still reach both consumers.
@@ -1399,3 +1454,191 @@ def test_twitchdrops_app_keeps_campaigns_twitch_did_not_report(monkeypatch):
         campaign["name"] for campaign in twitch.twitchdrops_app_campaigns["rust"]
     ] == ["Rust Isles Tac Gloves"]
     assert twitch.twitchdrops_app_campaign_filtered_slugs == {"rust"}
+
+
+ERRORED_GAME_PATH = [
+    "currentUser",
+    "inventory",
+    "completedRewardCampaigns",
+    0,
+    "campaign",
+    "game",
+]
+
+
+def test_errored_game_still_suppresses_completed_gist_campaign(monkeypatch):
+    """A campaign that completes while its entry's game keeps erroring was
+    never in the cache, so the remaining fields must identify it: the game
+    becomes a wildcard, the end time never does."""
+    twitch = _inventory_twitch(
+        monkeypatch,
+        {
+            "dropCampaignsInProgress": [],
+            "gameEventDrops": [],
+            "completedRewardCampaigns": [
+                {
+                    "campaign": {
+                        "id": "campaign-1",
+                        "name": "Corrupted Creeper Cape",
+                        "endAt": "2099-01-01T00:00:00Z",
+                        "game": None,
+                    }
+                }
+            ],
+        },
+        ERRORED_GAME_PATH,
+    )
+    twitch.gql.post_gql_request_raw = _badge_gql().post_gql_request_raw
+    front_page_calls = _minecraft_gist(monkeypatch)
+
+    inventory = twitch.get_drops_inventory()
+    signatures = twitch.completed_badge_campaign_signatures_or_cached(inventory)
+
+    assert signatures == {(None, "corrupted creeper cape", 4070908800.0)}
+    # The wildcard is for this read only; the permanent cache stays exact.
+    assert twitch.completed_badge_campaign_signature_cache == set()
+    assert (
+        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), inventory)
+        == {}
+    )
+    assert front_page_calls == [True]
+
+
+def test_partial_signature_matches_badge_catalog_campaign():
+    from TwitchChannelPointsMiner.classes.DropBadgeCatalog import DropBadgeCatalog
+
+    ends_at = datetime.fromisoformat("2099-01-01T00:00:00+00:00")
+    record = {"game_slug": "minecraft"}
+    campaign = {"name": "Corrupted Creeper Cape"}
+
+    assert DropBadgeCatalog._matches_completed_campaign(
+        record, campaign, ends_at, {(None, "corrupted creeper cape", 4070908800.0)}
+    )
+    assert DropBadgeCatalog._matches_completed_campaign(
+        record, campaign, ends_at, {("minecraft", None, 4070908800.0)}
+    )
+    # A different end time is a different run of the campaign.
+    assert not DropBadgeCatalog._matches_completed_campaign(
+        record, campaign, ends_at, {(None, "corrupted creeper cape", 4070908801.5)}
+    )
+
+
+def test_errored_entry_reuses_signature_from_earlier_full_read():
+    twitch = bare_twitch(SimpleNamespace())
+    _record(
+        twitch,
+        {
+            "completedRewardCampaigns": [
+                {
+                    "campaign": {
+                        "id": "campaign-1",
+                        "name": "Corrupted Creeper Cape",
+                        "endAt": "2099-01-01T00:00:00Z",
+                        "game": {"displayName": "Minecraft"},
+                    }
+                }
+            ]
+        },
+    )
+    twitch.completed_badge_campaign_signature_cache = set()
+
+    later = _record(
+        twitch, {"completedRewardCampaigns": [{"campaign": {"id": "campaign-1"}}]}
+    )
+
+    assert twitch.completed_badge_campaign_signatures_or_cached(later) == {
+        ("minecraft", "corrupted creeper cape", 4070908800.0)
+    }
+    assert twitch.completed_badge_campaign_unsignable_count == 0
+
+
+def test_entries_without_end_time_are_reported_once_and_never_wildcarded(caplog):
+    twitch = bare_twitch(SimpleNamespace())
+    inventory = {
+        "completedRewardCampaigns": [
+            None,
+            {"campaign": {"id": "x", "name": "Rerun", "game": None}},
+            # Over already: cannot match an active campaign, so not reported.
+            {"campaign": {"name": "Old", "endAt": "2001-01-01T00:00:00Z"}},
+        ]
+    }
+
+    with caplog.at_level(logging.DEBUG):
+        _record(twitch, inventory)
+        _record(twitch, inventory)
+
+    assert twitch.completed_badge_campaign_signatures_or_cached(inventory) == set()
+    assert twitch.completed_badge_campaign_unsignable_count == 2
+    warnings = [
+        record
+        for record in caplog.records
+        if "lack the name, game and end time" in record.getMessage()
+    ]
+    assert [record.levelno for record in warnings] == [logging.WARNING]
+
+
+def test_errors_without_completions_field_mark_it_errored(monkeypatch):
+    """An error on a parent path can drop the field; that must not read as a
+    response that no longer carries it."""
+    twitch = _inventory_twitch(
+        monkeypatch,
+        {"dropCampaignsInProgress": [], "gameEventDrops": []},
+        ["currentUser", "inventory"],
+    )
+
+    loaded = twitch.get_drops_inventory()
+
+    assert Twitch.drops_inventory_completions_state(loaded) == "errored"
+    assert twitch.completed_badge_campaign_signatures_or_cached(loaded) is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [None, SimpleNamespace(inventory=None, errors=[])],
+    ids=["no-response", "null-inventory"],
+)
+def test_inventory_without_a_dict_is_a_failed_load(monkeypatch, response):
+    twitch = bare_twitch(SimpleNamespace(get_inventory=lambda: response))
+    twitch.completed_drop_campaigns = set()
+
+    assert twitch.get_drops_inventory() == {}
+
+
+def test_gist_stand_down_is_not_repeated_by_wildcard_pass(monkeypatch, caplog):
+    twitch = bare_twitch(_badge_gql())
+    twitch.category_log_level = logging.INFO
+    twitch.twitchdrops_app_catalog_complete = False
+    _minecraft_gist(monkeypatch)
+    calls = []
+    original = Twitch._Twitch__twitchdrops_app_fallback
+
+    def counting(self, *args):
+        calls.append(args[0])
+        return original(self, *args)
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", counting)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        lambda self, inventory, requested: ({}, set()),
+    )
+
+    with caplog.at_level(logging.INFO):
+        twitch.filter_categories_with_active_drops(
+            ["minecraft"], inventory=PARTIAL_INVENTORY
+        )
+        twitch.get_wildcard_categories_with_active_drops(
+            inventory=PARTIAL_INVENTORY, refresh_external_catalog=False
+        )
+
+    assert calls == [["minecraft"]]
+    assert (
+        len(
+            [
+                record
+                for record in caplog.records
+                if "Skipping Twitch Drops gist check" in record.getMessage()
+            ]
+        )
+        == 1
+    )
