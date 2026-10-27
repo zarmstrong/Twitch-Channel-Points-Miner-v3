@@ -2,6 +2,7 @@ import importlib
 import logging
 import threading
 import time
+from datetime import datetime, timedelta
 from threading import Lock
 from types import SimpleNamespace
 
@@ -40,6 +41,8 @@ def campaign_data():
 
 def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     twitch = object.__new__(Twitch)
+    twitch.campaign_lookup_unavailable = False
+    twitch.unevaluated_category_slugs = set()
     twitch.completed_drop_campaigns = set()
     twitch.campaign_game_slugs = {}
     twitch.reward_campaign_ids = set()
@@ -2497,6 +2500,10 @@ def test_drop_report_snapshot_uses_analytics_mutex():
             return False
 
     twitch = object.__new__(Twitch)
+
+    twitch.campaign_lookup_unavailable = False
+
+    twitch.unevaluated_category_slugs = set()
     twitch.analytics_mutex = RecordingLock()
     twitch.drop_report_state = {"drop": {"current_minutes_watched": 25}}
 
@@ -2526,6 +2533,8 @@ def prompt_claim_twitch(monkeypatch, claimed):
         lambda self: claimed.append("claim"),
     )
     twitch = object.__new__(Twitch)
+    twitch.campaign_lookup_unavailable = False
+    twitch.unevaluated_category_slugs = set()
     twitch.prompt_claim_lock = Lock()
     twitch.prompt_claim_pass_lock = Lock()
     twitch.prompt_claim_last = {}
@@ -2603,6 +2612,8 @@ def test_prompt_claim_clears_debounce_when_claim_raises(monkeypatch):
         lambda self: (_ for _ in ()).throw(RuntimeError("transient failure")),
     )
     twitch = object.__new__(Twitch)
+    twitch.campaign_lookup_unavailable = False
+    twitch.unevaluated_category_slugs = set()
     twitch.prompt_claim_lock = Lock()
     twitch.prompt_claim_pass_lock = Lock()
     twitch.prompt_claim_last = {}
@@ -2952,6 +2963,102 @@ def test_campaign_refresh_preserves_allowlist_only_for_unevaluated_games(
         [cached_campaign["id"]] if kept else []
     )
     assert twitch._Twitch__category_drops_condition(streamer) is kept
+
+
+def test_carried_allowlists_still_expire_during_a_dashboard_outage(monkeypatch):
+    # While the dashboard is down, cached allow-lists of games no source
+    # reported are carried over, but not past their campaign's end or once
+    # the inventory reports the campaign completed.
+    twitch = bare_twitch(monkeypatch)
+    now = datetime.utcnow()
+    live = {"id": "live", "name": "Live", "channels": ["a"]}
+    ended = {"id": "ended", "name": "Ended", "channels": ["b"]}
+    done = {"id": "done", "name": "Done", "channels": ["c"]}
+    twitch.active_drop_campaigns = {
+        "example-game": [live, ended],
+        "done-game": [done],
+    }
+    twitch.active_drop_campaign_deadlines = {
+        "live": now + timedelta(hours=1),
+        "ended": now - timedelta(minutes=1),
+        "done": now + timedelta(hours=1),
+    }
+    twitch.completed_drop_campaigns = {"done"}
+    twitch.discovered_open_drop_campaigns = []
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", True, raising=False)
+    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", lambda self, **kw: [])
+    _stub_campaign_sources(monkeypatch)
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {}, {"example-game", "done-game"}
+    )
+
+    assert twitch.active_drop_campaigns == {"example-game": [live]}
+    assert twitch.active_drop_campaign_deadlines == {"live": now + timedelta(hours=1)}
+
+
+def test_active_campaign_records_its_campaign_end_for_later_carrying(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.discovered_open_drop_campaigns = []
+    campaign = campaign_data()
+    campaign["endAt"] = "2099-06-01T00:00:00Z"
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", lambda self, **kw: [])
+    _stub_campaign_sources(monkeypatch)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([campaign], []),
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
+
+    assert [entry["id"] for entry in twitch.active_drop_campaigns["example-game"]] == [
+        "campaign-1"
+    ]
+    # The campaign's end, not its earliest incomplete drop's (2099-01-01).
+    assert twitch.active_drop_campaign_deadlines == {"campaign-1": datetime(2099, 6, 1)}
+
+
+@pytest.mark.parametrize(
+    "raw_response, unavailable",
+    [
+        ({"data": {"currentUser": {"dropCampaigns": []}}}, False),
+        # A non-fatal error beside the campaign list leaves it usable.
+        (
+            {
+                "data": {"currentUser": {"dropCampaigns": []}},
+                "errors": [{"message": "timeout"}],
+            },
+            False,
+        ),
+        # An invalid token or a GraphQL failure answers with no viewer.
+        ({"data": {"currentUser": None}, "errors": [{"message": "x"}]}, True),
+        ({"data": None, "errors": [{"message": "x"}]}, True),
+        ({}, True),
+        # An error that nulled the campaign list.
+        (
+            {
+                "data": {"currentUser": {"dropCampaigns": None}},
+                "errors": [{"message": "x"}],
+            },
+            True,
+        ),
+    ],
+)
+def test_dashboard_without_viewer_data_counts_as_unavailable(
+    monkeypatch, raw_response, unavailable
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_viewer_drops_dashboard=lambda: SimpleNamespace(raw_response=raw_response)
+    )
+    monkeypatch.setattr(
+        _drops_dashboard_state, "unavailable", not unavailable, raising=False
+    )
+
+    assert twitch._Twitch__get_drops_dashboard(status="OPEN") == []
+    assert _drops_dashboard_state.unavailable is unavailable
 
 
 def test_campaign_discovery_snapshots_its_own_dashboard_outcome(monkeypatch):

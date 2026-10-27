@@ -20,6 +20,8 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
     (already covered for the shared helper by test_twitch_drop_claim.py).
     """
     twitch = object.__new__(Twitch)
+    twitch.campaign_lookup_unavailable = False
+    twitch.unevaluated_category_slugs = set()
     twitch.category_campaign_deadlines = {}
     twitch.category_log_level = logging.DEBUG
     twitch.twitchdrops_app_deadlines = {}
@@ -48,6 +50,8 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
 
 def test_get_category_slugs_treats_none_as_empty():
     twitch = object.__new__(Twitch)
+    twitch.campaign_lookup_unavailable = False
+    twitch.unevaluated_category_slugs = set()
 
     assert twitch.get_category_slugs(None) == set()
 
@@ -365,6 +369,7 @@ class FakeTwitch:
         self.selectors = []
         self.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
         self.discovered_open_drop_campaigns = None
+        self.unevaluated_category_slugs = set()
 
     def get_drops_inventory(self):
         self.inventory_fetch_count += 1
@@ -407,6 +412,8 @@ def _bare_miner(twitch):
     Settings.streamer_settings = defaults
 
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+
+    miner.category_lookup_failure_streaks = {}
     miner.username = "testuser"
     miner.twitch = twitch
     miner.streamers = []
@@ -773,6 +780,7 @@ def test_wildcard_disabled_retires_previously_discovered_wildcard_streamers():
 
 def test_reconcile_scoped_to_wildcard_does_not_evict_preferred_streamers():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.category_lookup_failure_streaks = {}
     preferred = Streamer("preferred", from_category=True)
     wildcard = Streamer("wild", from_category=True, from_wildcard_category=True)
     miner.streamers = [preferred, wildcard]
@@ -808,6 +816,8 @@ def test_reconcile_never_exposes_retiring_streamers_as_configured():
             )
 
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+
+    miner.category_lookup_failure_streaks = {}
     first = Streamer("first-retired", from_category=True)
     second = Streamer("second-retired", from_category=True)
     configured = Streamer("configured", from_category=True)
@@ -830,6 +840,7 @@ def test_reconcile_never_exposes_retiring_streamers_as_configured():
 
 def test_reconcile_scoped_to_preferred_does_not_evict_wildcard_streamers():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.category_lookup_failure_streaks = {}
     preferred = Streamer("preferred", from_category=True)
     wildcard = Streamer("wild", from_category=True, from_wildcard_category=True)
     miner.streamers = [preferred, wildcard]
@@ -902,6 +913,68 @@ def test_failed_inventory_load_keeps_preferred_and_wildcard_streamers():
     assert wildcard.from_wildcard_category is True
     # Wildcard discovery can't succeed without the inventory either.
     assert twitch.wildcard_calls == []
+
+
+def test_inventory_that_never_loads_retires_streamers_after_the_limit(caplog):
+    # An expired or revoked token breaks the inventory along with every other
+    # lookup. Kept forever, the tracked streamers would never be retired, so
+    # the inventory outage is bounded like the campaign and channel lookups.
+    twitch = InventoryFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    wildcard = _tracked("wild", wildcard=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == [preferred, wildcard]
+    assert twitch.wildcard_calls == []
+
+    with caplog.at_level(logging.WARNING):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+
+    assert miner.streamers == []
+    assert miner.original_streamers == []
+    assert miner.ws_pool.removed == ["ow_esports", "wild"]
+    assert "drops inventory failed 3 refreshes in a row" in caplog.text
+
+
+def test_inventory_recovery_resets_its_failure_limit():
+    class RecoveringInventoryTwitch(InventoryFailureTwitch):
+        unavailable = True
+
+        def get_drops_inventory(self):
+            if self.unavailable:
+                return super().get_drops_inventory()
+            return FakeTwitch.get_drops_inventory(self)
+
+        def filter_categories_with_active_drops(self, categories, **kwargs):
+            if self.unavailable:
+                return super().filter_categories_with_active_drops(categories, **kwargs)
+            return FakeTwitch.filter_categories_with_active_drops(
+                self, categories, **kwargs
+            )
+
+    twitch = RecoveringInventoryTwitch(
+        eligible_categories=["overwatch-2"], wildcard_categories=[]
+    )
+    miner = _bare_miner(twitch)
+    preferred = _tracked("overwatch-2-streamer")
+    miner.streamers = [preferred]
+    miner.original_streamers = [10]
+
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"])
+    twitch.unavailable = False
+    _refresh(miner, ["overwatch-2"])
+    twitch.unavailable = True
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"])
+
+    # Two failures, a success, two more failures: never three in a row.
+    assert miner.streamers == [preferred]
+    assert miner.ws_pool.removed == []
 
 
 def test_failed_inventory_load_still_retires_streamers_of_disabled_categories():
@@ -1054,6 +1127,28 @@ def test_failed_category_lookup_keeps_its_streamers_but_retires_others(caplog):
         for message in messages
     )
     assert any("Category refresh complete" in message for message in messages)
+
+
+def test_stale_streamer_is_not_kept_by_the_failed_game_it_now_streams():
+    # Discovered under rust, which refreshed without it, and now live in
+    # Overwatch 2, whose lookup failed. Its recorded category decides: it is
+    # stale for rust, and overwatch-2 never discovered it.
+    twitch = LookupFailureTwitch(
+        ["overwatch-2"],
+        eligible_categories=["overwatch-2", "rust"],
+        wildcard_categories=[],
+        empty_categories=["rust"],
+    )
+    miner = _bare_miner(twitch)
+    moved = _tracked_in_game("moved", "Overwatch 2")
+    moved.discovery_category_slugs = {"rust"}
+    miner.streamers = [moved]
+    miner.original_streamers = [10]
+
+    _refresh(miner, ["overwatch-2", "rust"])
+
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["moved"]
 
 
 def test_every_category_lookup_failing_keeps_every_streamer():
@@ -1501,7 +1596,7 @@ def test_discovered_streamer_records_its_category_and_survives_next_failed_looku
     assert miner.ws_pool.removed == []
 
 
-def test_rediscovery_accumulates_recorded_categories_of_tracked_streamer():
+def test_rediscovery_replaces_recorded_categories_of_tracked_streamer():
     class SharedStreamerTwitch(FakeTwitch):
         def get_live_streamers_for_category(self, selector, **kwargs):
             self.selectors.append((selector, kwargs))
@@ -1518,8 +1613,46 @@ def test_rediscovery_accumulates_recorded_categories_of_tracked_streamer():
     twitch.eligible_categories = ["rust"]
     _refresh(miner, ["rust"])
 
+    # Judged by where it was found this time: a category it has left must not
+    # keep shielding it from retirement.
     assert miner.streamers == [shared]
-    assert shared.discovery_category_slugs == {"overwatch-2", "rust"}
+    assert shared.discovery_category_slugs == {"rust"}
+
+
+def test_streamer_that_left_a_category_is_retired_when_only_that_one_fails():
+    # Found under overwatch-2, then only under rust. Later rust is evaluated
+    # without it while overwatch-2's lookup fails: its stale overwatch-2
+    # record must not keep it.
+    class MovingStreamerTwitch(FakeTwitch):
+        def __init__(self, found_by_category, **kwargs):
+            super().__init__(**kwargs)
+            self.found_by_category = found_by_category
+            self.failing_categories = set()
+
+        def get_live_streamers_for_category(self, selector, **kwargs):
+            self.selectors.append((selector, kwargs))
+            if selector in self.failing_categories:
+                raise CategoryLookupFailedException(f"lookup for '{selector}' failed")
+            return list(self.found_by_category.get(selector, []))
+
+    twitch = MovingStreamerTwitch(
+        {"overwatch-2": ["shared"]},
+        eligible_categories=["overwatch-2", "rust"],
+        wildcard_categories=[],
+    )
+    miner = _bare_miner(twitch)
+    _refresh(miner, ["overwatch-2", "rust"])
+    shared = miner.streamers[0]
+    twitch.found_by_category = {"rust": ["shared"]}
+    _refresh(miner, ["overwatch-2", "rust"])
+    assert shared.discovery_category_slugs == {"rust"}
+
+    twitch.found_by_category = {"rust": ["other"]}
+    twitch.failing_categories = {"overwatch-2"}
+    _refresh(miner, ["overwatch-2", "rust"])
+
+    assert [streamer.username for streamer in miner.streamers] == ["other"]
+    assert miner.ws_pool.removed == ["shared"]
 
 
 def test_discovery_failure_log_names_the_consequence_per_path(caplog):
@@ -1781,6 +1914,7 @@ def test_category_that_keeps_failing_is_treated_as_evaluated_after_the_limit(
 
 def test_failure_count_starts_over_once_a_lookup_succeeds():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+    miner.category_lookup_failure_streaks = {}
     expire = miner._TwitchChannelPointsMiner__expire_unevaluated_slugs
 
     assert expire("preferred", {"rust"}) == {"rust"}
@@ -1813,9 +1947,12 @@ def test_wildcard_pass_runs_once_preferred_is_evaluated_and_empty():
 
 def test_pick_with_failed_live_check_does_not_retire_a_live_channel(monkeypatch):
     # End to end with the real lookup: limit 1, discovery finds live_a, and
-    # the Drops pick's own live check fails. The pick is kept beside live_a
+    # the Drops pick (eligible here, but missing from the capped Drops
+    # directory) fails its own live check. The pick is kept beside live_a
     # rather than in its place, so the evaluated category retires neither.
     real = object.__new__(Twitch)
+    real.campaign_lookup_unavailable = False
+    real.unevaluated_category_slugs = set()
     real.gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
             "data": {
@@ -1823,7 +1960,7 @@ def test_pick_with_failed_live_check_does_not_retire_a_live_channel(monkeypatch)
                     "streams": {
                         "edges": [
                             {"node": {"broadcaster": {"login": login}}}
-                            for login in ("live_a", "pick")
+                            for login in ("live_a",)
                         ]
                     }
                 }
@@ -1833,7 +1970,7 @@ def test_pick_with_failed_live_check_does_not_retire_a_live_channel(monkeypatch)
     real.active_drop_campaigns = {}
     real.twitchdrops_app_campaigns = {}
     real.twitchdrops_app_game_names = {}
-    real.category_campaign_eligibility = {}
+    real.category_campaign_eligibility = {("overwatch-2", "pick"): (1, 1)}
     real.category_log_level = logging.DEBUG
     real.last_drop_pick_streamer = "pick"
 
@@ -1879,9 +2016,10 @@ def test_pick_with_failed_live_check_does_not_retire_a_live_channel(monkeypatch)
     assert live_a.irc_chat.stopped is False
 
 
-def test_add_discovered_accumulates_recorded_categories_across_passes():
+def test_add_discovered_records_categories_only_for_the_owning_pass():
     # A preferred streamer recorded under bitcraft and re-found by the
-    # wildcard pass under other-game keeps both.
+    # wildcard pass under other-game keeps its bitcraft record: only the
+    # preferred reconcile ever judges it, by the preferred categories.
     miner = _bare_miner(FakeTwitch(eligible_categories=[], wildcard_categories=[]))
     shared = _tracked("shared")
     shared.discovery_category_slugs = {"bitcraft"}
@@ -1898,14 +2036,14 @@ def test_add_discovered_accumulates_recorded_categories_across_passes():
 
     assert added == 0
     assert miner.streamers == [shared]
-    assert shared.discovery_category_slugs == {"bitcraft", "other-game"}
+    assert shared.discovery_category_slugs == {"bitcraft"}
 
 
 def test_cross_pass_rediscovery_keeps_streamer_through_a_later_failed_lookup():
     # A wildcard streamer found under other-game is re-found by the preferred
-    # pass under bitcraft. When other-game's lookup later fails before the
-    # stream has reported a game, its recorded other-game category still
-    # protects it (a replaced record of just {bitcraft} would retire it).
+    # pass under bitcraft. That pass does not own it, so its record stays
+    # {other-game}, and when other-game's lookup later fails before the
+    # stream has reported a game, that record still protects it.
     class MappedLookupTwitch(FakeTwitch):
         def __init__(self, found_by_category, **kwargs):
             super().__init__(**kwargs)
@@ -1933,7 +2071,7 @@ def test_cross_pass_rediscovery_keeps_streamer_through_a_later_failed_lookup():
 
     twitch.eligible_categories = ["bitcraft"]
     _refresh(miner, ["bitcraft"], wildcard_categories=True)
-    assert shared.discovery_category_slugs == {"other-game", "bitcraft"}
+    assert shared.discovery_category_slugs == {"other-game"}
 
     twitch.eligible_categories = []
     twitch.failing_categories = {"other-game"}

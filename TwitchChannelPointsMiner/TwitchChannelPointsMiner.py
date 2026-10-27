@@ -1816,16 +1816,17 @@ class TwitchChannelPointsMiner:
     def __streamer_in_categories(self, streamer, category_slugs):
         """Whether a tracked streamer belongs to one of `category_slugs`.
 
-        The category it was discovered under is recorded on the streamer; the
-        game of the stream it was last seen in is the fallback for streamers
-        tracked from before that was recorded, and also covers a streamer
-        that has since moved to another of the given categories.
+        The categories it was last discovered under are recorded on the
+        streamer and decide on their own: a streamer stale in a category that
+        did refresh is not kept just because it now streams a game whose
+        lookup failed. The game of the stream it was last seen in is only the
+        fallback for streamers tracked from before that was recorded.
         """
         if not category_slugs:
             return False
         recorded = streamer.discovery_category_slugs
-        if recorded and not recorded.isdisjoint(category_slugs):
-            return True
+        if recorded:
+            return not recorded.isdisjoint(category_slugs)
         game_name = streamer.stream.game_name()
         if not game_name:
             return False
@@ -1986,10 +1987,7 @@ class TwitchChannelPointsMiner:
         succeeds and the count starts over. `kind` keeps the preferred and
         wildcard passes' counts apart.
         """
-        streaks = getattr(self, "category_lookup_failure_streaks", None)
-        if streaks is None:
-            streaks = {}
-            self.category_lookup_failure_streaks = streaks
+        streaks = self.category_lookup_failure_streaks
         previous = streaks.get(kind, {})
         current = {slug: previous.get(slug, 0) + 1 for slug in unevaluated_slugs}
         streaks[kind] = current
@@ -2015,7 +2013,7 @@ class TwitchChannelPointsMiner:
         """Category slugs the latest discovery filter call reported as not
         evaluated (its Twitch campaign lookup failed and no other source
         covered them). Empty for a fully evaluated pass."""
-        return set(getattr(self.twitch, "unevaluated_category_slugs", None) or ())
+        return set(self.twitch.unevaluated_category_slugs)
 
     def __discover_live_category_streamers(
         self, categories, drops_enabled, limit, sort_by, tracking=True
@@ -2094,14 +2092,20 @@ class TwitchChannelPointsMiner:
                 continue
             existing = existing_streamers.get(username)
             if existing is not None:
-                # Accumulate rather than replace: a streamer re-found under
-                # another category, possibly by the other pass, still belongs
-                # to the one it was recorded under before.
+                # Replace rather than accumulate: the categories this pass
+                # found the streamer under this cycle are the ones its
+                # reconcile should judge it by, and a category it has left
+                # must not keep shielding it. Only the pass that owns the
+                # streamer records them; the other pass's reconcile never
+                # judges it.
                 new_slugs = category_slugs_by_username.get(username)
-                if existing.from_category is True and new_slugs:
-                    existing.discovery_category_slugs = set(
-                        existing.discovery_category_slugs or ()
-                    ) | set(new_slugs)
+                owner = (
+                    StreamerSource.WILDCARD_CATEGORIES
+                    if wildcard
+                    else StreamerSource.CATEGORIES
+                )
+                if new_slugs and owner in discovery_sources(existing):
+                    existing.discovery_category_slugs = set(new_slugs)
                 continue
 
             try:
@@ -2202,6 +2206,15 @@ class TwitchChannelPointsMiner:
         inventory_unavailable = (
             discovery_inventory is not None
             and not Twitch.drops_inventory_loaded(discovery_inventory)
+        )
+        # Bounded like every other lookup failure: an inventory that never
+        # loads (an expired or revoked token breaks it along with the Helix
+        # lookups) must not keep stale streamers forever. Past the limit the
+        # empty discovery counts as evaluated, so they are retired.
+        inventory_unavailable = bool(
+            self.__expire_unevaluated_slugs(
+                "inventory", {"drops inventory"} if inventory_unavailable else set()
+            )
         )
         # The same goes for a campaign lookup that failed outright (every
         # Twitch campaign source down in one cycle): the filter raises instead

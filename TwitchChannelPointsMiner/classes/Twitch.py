@@ -88,9 +88,10 @@ CHANNEL_VERDICT_FRESHNESS_SECONDS = 600
 HELIX_PERMANENT_STATUS_CODES = {400, 404, 410, 422}
 # Something that can be a Twitch login at all. Helix rejects a whole batched
 # `streams` request (HTTP 400) when one login in it is malformed; this drops
-# the entries that clearly are not logins (display names with spaces, other
-# punctuation, non-ASCII, too long), as catalog records sometimes carry.
-TWITCH_LOGIN_PATTERN = re.compile(r"[a-z0-9_][a-z0-9_-]{0,24}")
+# the entries that clearly are not logins (display names with spaces, hyphens
+# or other punctuation, non-ASCII, too long), as catalog records sometimes
+# carry. Twitch logins are only letters, digits and underscores.
+TWITCH_LOGIN_PATTERN = re.compile(r"[a-z0-9_]{1,25}")
 # Outcome of the calling thread's latest drops dashboard request. Thread-local
 # so the campaign sync thread's dashboard calls cannot be mistaken for the
 # category discovery pass's own.
@@ -150,12 +151,14 @@ class Twitch(object):
         "twitchdrops_app_campaign_filtered_slugs",
         "twitch_campaign_names_by_game",
         "active_drop_campaigns",
+        "active_drop_campaign_deadlines",
         "advertised_drop_campaigns",
         "campaign_channel_ids",
         "campaign_detail_attempts",
         "category_campaign_eligibility",
         "category_campaign_eligibility_lock",
         "category_channel_verdicts",
+        "unverified_drop_picks",
         "channel_query_failures",
         "category_campaign_deadlines",
         "last_category_drop_selection",
@@ -253,11 +256,18 @@ class Twitch(object):
         # latest evaluation, including completed ones remembered this session.
         self.twitch_campaign_names_by_game = {}
         self.active_drop_campaigns = {}
+        # Campaign id -> end time (None when unknown) for each entry in
+        # active_drop_campaigns, so entries carried over through a dashboard
+        # outage still expire.
+        self.active_drop_campaign_deadlines = {}
         self.advertised_drop_campaigns = {}
         self.campaign_channel_ids = {}
         self.campaign_detail_attempts = set()
         self.category_campaign_eligibility = {}
         self.category_channel_verdicts = {}
+        # (game_slug, login) of Drops picks kept by the latest refresh although
+        # their live check failed; a pick is kept that way one refresh at most.
+        self.unverified_drop_picks = set()
         # (game_slug, login) -> (consecutive failed campaign queries, time of
         # the last one) for a provisional wildcard channel.
         self.channel_query_failures = {}
@@ -433,7 +443,11 @@ class Twitch(object):
             }
 
     def __replace_category_campaign_eligibility(
-        self, game_slug: str, eligibility_by_login: dict, keep_undiscovered=False
+        self,
+        game_slug: str,
+        eligibility_by_login: dict,
+        keep_undiscovered=False,
+        unverified_logins=(),
     ):
         """Atomically replace cached eligibility for one game category.
 
@@ -447,6 +461,10 @@ class Twitch(object):
         the logins it did not reach were not evaluated) the entries and
         verdicts of logins absent from eligibility_by_login are left alone;
         the given logins are still seeded with the same per-entry rule.
+
+        `unverified_logins` are given logins kept although their live check
+        failed (a Drops pick, carrying its previous eligibility); they are
+        recorded so the next refresh does not keep them that way again.
         """
 
         def undiscovered(key):
@@ -493,6 +511,12 @@ class Twitch(object):
                 }
             )
             self.category_campaign_eligibility = updated_eligibility
+            # Defensive getattr: some tests construct Twitch via __new__.
+            self.unverified_drop_picks = {
+                key
+                for key in getattr(self, "unverified_drop_picks", None) or ()
+                if key[0] != game_slug or undiscovered(key)
+            } | {(game_slug, login) for login in unverified_logins}
             # A lookup that failed part-way did not evaluate the game, so a
             # kept streamer without an entry must not read as ruled out.
             if not keep_undiscovered:
@@ -1887,6 +1911,7 @@ class Twitch(object):
 
         active_deadlines = {}
         active_campaigns = {}
+        active_campaign_deadlines = {}
         twitch_category_slugs = set()
         twitch_campaign_names = {}
         campaign_names = getattr(self, "campaign_names", None)
@@ -2159,6 +2184,12 @@ class Twitch(object):
                     "channels": self.__campaign_channel_logins(campaign),
                 }
             )
+            # The campaign's own end, not `deadline` (its earliest incomplete
+            # drop's): a later drop keeps the campaign, and its allow-list,
+            # relevant after that one ends.
+            active_campaign_deadlines[campaign_id] = self.__parse_twitch_datetime(
+                campaign.get("endAt")
+            )
 
             current_deadline = active_deadlines.get(game_slug)
             if current_deadline is None or deadline < current_deadline:
@@ -2174,13 +2205,36 @@ class Twitch(object):
         if self.campaign_lookup_unavailable:
             # Retained co-streams still need the last known allow-list when
             # their own channel query omits the campaign. Only replace games
-            # a source actually evaluated; missing data is not a negative verdict.
+            # a source actually evaluated; missing data is not a negative
+            # verdict. A carried campaign still drops out once it ends or the
+            # inventory reports it completed, however long the outage lasts.
+            now = datetime.utcnow()
+            previous_deadlines = (
+                getattr(self, "active_drop_campaign_deadlines", None) or {}
+            )
             for game_slug, campaigns in (
                 getattr(self, "active_drop_campaigns", None) or {}
             ).items():
-                if game_slug not in twitch_category_slugs:
-                    active_campaigns.setdefault(game_slug, campaigns)
+                if game_slug in twitch_category_slugs or game_slug in active_campaigns:
+                    continue
+                carried = [
+                    campaign
+                    for campaign in campaigns
+                    if campaign.get("id") not in self.completed_drop_campaigns
+                    and (
+                        previous_deadlines.get(campaign.get("id")) is None
+                        or previous_deadlines[campaign.get("id")] > now
+                    )
+                ]
+                if carried:
+                    active_campaigns[game_slug] = carried
+                    for campaign in carried:
+                        campaign_id = campaign.get("id")
+                        if campaign_id in previous_deadlines:
+                            deadline = previous_deadlines[campaign_id]
+                            active_campaign_deadlines[campaign_id] = deadline
         self.active_drop_campaigns = active_campaigns
+        self.active_drop_campaign_deadlines = active_campaign_deadlines
         self.twitch_campaign_names_by_game = twitch_campaign_names
 
         return active_deadlines, twitch_category_slugs
@@ -2947,7 +3001,7 @@ class Twitch(object):
             inventory,
             requested_category_slugs,
         )
-        twitch_lookup_failed = getattr(self, "campaign_lookup_unavailable", False)
+        twitch_lookup_failed = self.campaign_lookup_unavailable
         twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         fallback_deadlines = self.__twitchdrops_app_fallback(
             categories,
@@ -3090,9 +3144,7 @@ class Twitch(object):
         """
         # The preferred pass that ran just before may have left categories it
         # could not evaluate; their kept deadlines must survive this pass too.
-        preferred_unevaluated_slugs = set(
-            getattr(self, "unevaluated_category_slugs", None) or ()
-        )
+        preferred_unevaluated_slugs = set(self.unevaluated_category_slugs)
         self.unevaluated_category_slugs = set()
         if drops_enabled is False:
             return []
@@ -3115,7 +3167,7 @@ class Twitch(object):
             active_category_deadlines,
             twitch_category_slugs,
         ) = self.__active_drop_category_slugs_from_campaigns(inventory, None)
-        twitch_lookup_failed = getattr(self, "campaign_lookup_unavailable", False)
+        twitch_lookup_failed = self.campaign_lookup_unavailable
         twitch_candidate_count = len(active_category_deadlines)
         twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         if refresh_external_catalog or not getattr(
@@ -3806,6 +3858,20 @@ class Twitch(object):
         max_results = max(limit, 1)
         restricted_usernames = None
         restricted_eligibility = {}
+        # (login, carried eligibility) of a Drops pick kept although its live
+        # check failed. It is appended after every limit, so it takes no slot
+        # from a channel confirmed live, which this evaluated category would
+        # otherwise retire as stale.
+        unverified_pick = None
+
+        def with_unverified_pick(usernames, eligibility):
+            """usernames and eligibility with the unverified pick appended,
+            plus the logins to record as unverified."""
+            if unverified_pick is None or unverified_pick[0] in usernames:
+                return usernames, eligibility, ()
+            login, carried = unverified_pick
+            return usernames + [login], {**eligibility, login: carried}, (login,)
+
         # One entry per campaign: None when any channel can earn it, else its
         # allow-listed logins (see __campaign_logins_by_campaign); the sets
         # answer membership, the lists keep allow-list order.
@@ -3836,6 +3902,7 @@ class Twitch(object):
                 (
                     restricted_usernames,
                     restricted_eligibility,
+                    unverified_pick,
                 ) = self.__get_live_restricted_campaign_streamers(
                     fallback_campaigns,
                     game_id,
@@ -3849,10 +3916,14 @@ class Twitch(object):
                     campaign_login_sets_by_campaign=campaign_login_sets,
                 )
                 if not open_campaigns:
-                    self.__replace_category_campaign_eligibility(
-                        game_slug, restricted_eligibility
+                    selection = with_unverified_pick(
+                        restricted_usernames, restricted_eligibility
                     )
-                    return restricted_usernames
+                    usernames, eligibility, unverified_logins = selection
+                    self.__replace_category_campaign_eligibility(
+                        game_slug, eligibility, unverified_logins=unverified_logins
+                    )
+                    return usernames
                 # A campaign open to every channel still needs channels
                 # discovered for it when another campaign for the same game is
                 # allow-listed, so fall through to regular discovery and merge.
@@ -4000,11 +4071,20 @@ class Twitch(object):
                 partial_discovered = self.__keep_drop_pick(
                     partial_discovered, drop_pick, discovered_room
                 )
-            partial_usernames = allow_listed + partial_discovered
-            partial_eligibility = selection_eligibility(partial_discovered)
+            (
+                partial_usernames,
+                partial_eligibility,
+                unverified_logins,
+            ) = with_unverified_pick(
+                allow_listed + partial_discovered,
+                selection_eligibility(partial_discovered),
+            )
             if partial_eligibility:
                 self.__replace_category_campaign_eligibility(
-                    game_slug, partial_eligibility, keep_undiscovered=True
+                    game_slug,
+                    partial_eligibility,
+                    keep_undiscovered=True,
+                    unverified_logins=unverified_logins,
                 )
             if partial_usernames:
                 reason += f" after {len(partial_usernames)} live channels were found"
@@ -4106,20 +4186,30 @@ class Twitch(object):
                     for stream in stream_candidates
                 },
             )
+            if pick_live is None and drop_pick in (drops_enabled_logins or set()):
+                # The Drops-enabled directory for this game lists it, which
+                # already shows it live here.
+                pick_live = True
             if pick_live is True:
                 discovered = self.__keep_drop_pick(
                     discovered, drop_pick, discovered_room
                 )
             elif pick_live is None:
-                # Its live check failed: keep it, but alongside the channels
-                # confirmed live rather than in place of one, which this
-                # evaluated category would otherwise retire as stale.
-                discovered = self.__keep_drop_pick(discovered, drop_pick, None)
+                carried = self.__unverified_pick_eligibility(game_slug, drop_pick)
+                if carried is not None:
+                    self.__log_category(
+                        f"Keeping Drops pick '{drop_pick}' for this refresh "
+                        "although its live check failed",
+                        extra={"emoji": ":warning:"},
+                    )
+                    unverified_pick = (drop_pick, carried)
 
-        self.__replace_category_campaign_eligibility(
-            game_slug, selection_eligibility(discovered)
+        usernames, eligibility, unverified_logins = with_unverified_pick(
+            allow_listed + discovered, selection_eligibility(discovered)
         )
-        usernames = allow_listed + discovered
+        self.__replace_category_campaign_eligibility(
+            game_slug, eligibility, unverified_logins=unverified_logins
+        )
 
         if drops_enabled is True and allow_listed and discovered_room <= 0:
             message = (
@@ -4196,16 +4286,17 @@ class Twitch(object):
         """Whether a channel is live in game_id: True, False, or None when its
         lookup failed and that is unknown. live_logins are the channels
         discovery already found live in the game; any other channel is looked
-        up separately. The channel is the current Drops pick, so callers keep
-        it on None: retiring it on missing information is exactly the churn
-        __keep_drop_pick exists to prevent."""
+        up separately. The channel is the current Drops pick, so the caller
+        may keep it on None (see __unverified_pick_eligibility): retiring it
+        on missing information is exactly the churn __keep_drop_pick exists
+        to prevent."""
         if login in live_logins:
             return True
         try:
             stream = self.__live_stream_for(login)
         except CategoryLookupFailedException as error:
             self.__log_category(
-                f"Keeping Drops pick '{login}' although its live check failed: {error}",
+                f"Live check for Drops pick '{login}' failed: {error}",
                 extra={"emoji": ":warning:"},
             )
             return None
@@ -4214,6 +4305,19 @@ class Twitch(object):
     def __has_positive_eligibility(self, game_slug, login):
         eligibility = self.category_campaign_eligibility.get((game_slug, login))
         return eligibility is not None and eligibility[0] > 0
+
+    def __unverified_pick_eligibility(self, game_slug, login):
+        """The eligibility to carry over for a Drops pick kept although its
+        live check failed, or None when it must not be kept that way: it has
+        no positive eligibility in this game, or the previous refresh already
+        kept it unverified, so a check that keeps failing cannot keep it (and
+        re-seed its eligibility) indefinitely."""
+        key = (game_slug, login)
+        if key in (getattr(self, "unverified_drop_picks", None) or ()):
+            return None
+        if not self.__has_positive_eligibility(game_slug, login):
+            return None
+        return self.category_campaign_eligibility[key]
 
     @staticmethod
     def __keep_drop_pick(usernames, drop_pick, limit):
@@ -4245,9 +4349,12 @@ class Twitch(object):
         campaign_login_sets_by_campaign=None,
     ):
         """Live channels from the campaigns' allow-lists, most widely eligible
-        first, plus each one's (eligible campaigns, total campaigns). Recording
-        that eligibility is left to the caller, which may merge these with
-        channels discovered for campaigns open to every channel.
+        first, plus each one's (eligible campaigns, total campaigns), plus
+        (login, carried eligibility) for a Drops pick whose live check failed,
+        else None. That pick is not among the channels: it takes no slot, and
+        the caller appends it after every limit. Recording the eligibility is
+        left to the caller, which may merge these with channels discovered
+        for campaigns open to every channel.
 
         campaigns must already exclude catalog records without a channel list
         (see __campaign_channels_unknown); campaign_logins_by_campaign is
@@ -4449,17 +4556,18 @@ class Twitch(object):
                 pick_stream = self.__live_stream_for(drop_pick)
             except CategoryLookupFailedException as error:
                 pick_stream = None
-                # Unknown, not offline: the pick is kept, but added after
-                # selection so it competes for no slot. The pick is global,
-                # so only when it was already eligible in this game: being on
-                # one of its allow-lists says nothing about what it streams.
-                if self.__has_positive_eligibility(game_slug, drop_pick):
+                # Unknown, not offline: the caller keeps the pick for this
+                # refresh outside every limit. The pick is global, so only
+                # when it was already eligible in this game: being on one of
+                # its allow-lists says nothing about what it streams.
+                carried = self.__unverified_pick_eligibility(game_slug, drop_pick)
+                if carried is not None:
                     self.__log_category(
                         f"Keeping Drops pick '{drop_pick}' although its live "
                         f"check failed: {error}",
                         extra={"emoji": ":warning:"},
                     )
-                    unverified_pick = drop_pick
+                    unverified_pick = (drop_pick, carried)
             if pick_stream is not None and (
                 allow_cross_category
                 or str(pick_stream.get("game_id") or "") == str(game_id)
@@ -4467,17 +4575,17 @@ class Twitch(object):
                 live_streams[drop_pick] = pick_stream
 
         usernames = select_usernames()
-        if unverified_pick is not None and unverified_pick not in usernames:
-            # Beyond max_total for this cycle instead of displacing a channel
-            # confirmed live, which this evaluated category would then retire.
-            usernames.append(unverified_pick)
         self.__log_category(
             f"Checked {checked}/{len(ranked_logins)} campaign-restricted channels for "
             f"'{game_name}'; selected {len(usernames)} live across "
             f"{len(campaign_logins)} allow-listed campaigns",
             extra={"emoji": ":satellite_antenna:"},
         )
-        return usernames, {login: campaign_eligibility_of(login) for login in usernames}
+        return (
+            usernames,
+            {login: campaign_eligibility_of(login) for login in usernames},
+            unverified_pick,
+        )
 
     @staticmethod
     def __campaign_eligibility(login, campaign_logins_by_campaign):
@@ -4518,27 +4626,31 @@ class Twitch(object):
                 game_slug=game_slug,
             ) from error
 
-        # Raw requests retain GraphQL errors even when HTTP succeeded. Partial
-        # directory data cannot establish that the missing channels are offline.
-        if response.get("errors"):
+        game = (response.get("data") or {}).get("game")
+        streams = game.get("streams") if isinstance(game, dict) else None
+        edges = streams.get("edges") if isinstance(streams, dict) else None
+        edges_listed = isinstance(edges, list)
+        edges = edges if edges_listed else []
+
+        def edge_login(edge):
+            node = edge.get("node") if isinstance(edge, dict) else None
+            broadcaster = node.get("broadcaster") if isinstance(node, dict) else None
+            if not isinstance(broadcaster, dict):
+                return ""
+            return str(broadcaster.get("login") or "").lower().strip()
+
+        logins = [edge_login(edge) for edge in edges]
+        # Raw requests retain GraphQL errors even when HTTP succeeded. Twitch
+        # often reports a non-fatal error next to a complete list, which is
+        # still usable; an error that left the list missing, or nulled some
+        # of its entries, cannot establish that the missing channels are not
+        # Drops-enabled.
+        if response.get("errors") and (not edges_listed or not all(logins)):
             raise CategoryLookupFailedException(
                 f"Twitch Drops directory for '{game_slug}' returned GraphQL errors",
                 game_slug=game_slug,
             )
-
-        game = (response.get("data") or {}).get("game") or {}
-        edges = (game.get("streams") or {}).get("edges") or []
-        return {
-            login
-            for edge in edges
-            if isinstance(edge, dict)
-            for node in [edge.get("node") or {}]
-            if isinstance(node, dict)
-            for broadcaster in [node.get("broadcaster") or {}]
-            if isinstance(broadcaster, dict)
-            for login in [str(broadcaster.get("login") or "").lower().strip()]
-            if login
-        }
+        return {login for login in logins if login}
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:
@@ -6836,17 +6948,34 @@ class Twitch(object):
             return {}
 
     def __get_drops_dashboard(self, status=None, return_raw: bool = False):
+        request_failed = False
         try:
             response = self.gql.get_viewer_drops_dashboard().raw_response
-            _drops_dashboard_state.unavailable = False
         except RetryError as error:
             logger.error(f"Unable to load drops dashboard: {error}")
-            # Category discovery reads this to tell "the dashboard reported
-            # no open campaign" apart from "the dashboard request failed".
-            _drops_dashboard_state.unavailable = True
+            request_failed = True
             response = {}
-        data = response.get("data", {}) if isinstance(response, dict) else {}
-        current_user = data.get("currentUser", {})
+        data = response.get("data") if isinstance(response, dict) else None
+        current_user = data.get("currentUser") if isinstance(data, dict) else None
+        # Category discovery reads this to tell "the dashboard reported no
+        # open campaign" apart from "the dashboard request failed". A reply
+        # without the viewer (null currentUser, as an invalid token or a
+        # GraphQL error gives) or whose errors nulled its campaign list
+        # evaluated nothing either.
+        unavailable = not isinstance(current_user, dict) or bool(
+            response.get("errors") and current_user.get("dropCampaigns") is None
+        )
+        if unavailable and not request_failed:
+            errors = response.get("errors") if isinstance(response, dict) else None
+            logger.error(
+                "Unable to load drops dashboard: the response carried no "
+                f"campaign data (errors: {errors})"
+            )
+        _drops_dashboard_state.unavailable = unavailable
+        if not isinstance(data, dict):
+            data = {}
+        if not isinstance(current_user, dict):
+            current_user = {}
         campaigns = []
 
         # Twitch's schema splits campaigns by how they're completed, not by
