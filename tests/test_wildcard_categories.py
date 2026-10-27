@@ -1193,6 +1193,84 @@ def test_failed_wildcard_campaign_lookup_only_spares_wildcard_streamers():
     assert len(twitch.wildcard_calls) == 1
 
 
+def test_total_campaign_outage_expires_each_pass_after_three_failures(caplog):
+    twitch = CampaignLookupFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    wildcard = _tracked("wild", wildcard=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == [preferred, wildcard]
+    assert twitch.wildcard_calls == []
+
+    with caplog.at_level(logging.WARNING):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+
+    assert miner.streamers == [wildcard]
+    assert miner.original_streamers == [20]
+    assert miner.ws_pool.removed == ["ow_esports"]
+    assert len(twitch.wildcard_calls) == 1
+    assert "all configured categories failed 3 refreshes in a row" in caplog.text
+
+    # Wildcard failures have their own count, starting when that pass resumes.
+    _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == [wildcard]
+    _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == []
+    assert miner.original_streamers == []
+    assert miner.ws_pool.removed == ["ow_esports", "wild"]
+    assert len(twitch.wildcard_calls) == 3
+    assert "all wildcard categories failed 3 refreshes in a row" in caplog.text
+
+
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_campaign_lookup_recovery_resets_the_failure_limit(wildcard):
+    class RecoveringTwitch(FakeTwitch):
+        unavailable = True
+
+        def filter_categories_with_active_drops(self, categories, **kwargs):
+            if self.unavailable and not wildcard:
+                raise CategoryLookupFailedException("drop campaign lookup failed")
+            return super().filter_categories_with_active_drops(categories, **kwargs)
+
+        def get_wildcard_categories_with_active_drops(self, **kwargs):
+            if self.unavailable and wildcard:
+                raise CategoryLookupFailedException("drop campaign lookup failed")
+            return super().get_wildcard_categories_with_active_drops(**kwargs)
+
+    twitch = RecoveringTwitch(
+        eligible_categories=[] if wildcard else ["overwatch-2"],
+        wildcard_categories=["gamex"],
+    )
+    miner = _bare_miner(twitch)
+    tracked = _tracked(
+        "gamex-streamer" if wildcard else "overwatch-2-streamer", wildcard=wildcard
+    )
+    miner.streamers = [tracked]
+    miner.original_streamers = [10]
+
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=wildcard)
+    assert miner.streamers == [tracked]
+
+    twitch.unavailable = False
+    _refresh(miner, ["overwatch-2"], wildcard_categories=wildcard)
+    assert miner.streamers == [tracked]
+
+    twitch.unavailable = True
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=wildcard)
+    assert miner.streamers == [tracked]
+    assert miner.ws_pool.removed == []
+
+    _refresh(miner, ["overwatch-2"], wildcard_categories=wildcard)
+    assert tracked not in miner.streamers
+    assert miner.ws_pool.removed == [tracked.username]
+
+
 def test_real_discovery_filters_raise_when_dashboard_failed_and_nothing_found(
     monkeypatch,
 ):

@@ -1941,7 +1941,7 @@ class TwitchChannelPointsMiner:
             self.streamers[index] = streamer
             self.original_streamers[index] = baseline
 
-    def __lookup_campaign_categories(self, label, lookup):
+    def __lookup_campaign_categories(self, label, lookup, track_failures=False):
         """Run one discovery filter (`lookup`, a no-argument call) for the
         `label` pass ("configured" or "wildcard").
 
@@ -1949,7 +1949,12 @@ class TwitchChannelPointsMiner:
         resets the slugs it reports as not evaluated on every call, so they
         are read here, right after it returns. A campaign lookup that failed
         outright is logged and reported as failed, with no categories.
+        During refreshes, track_failures applies the same consecutive-failure
+        limit as live-channel lookups, independently for each pass. Once the
+        limit is reached, an outage counts as evaluated empty until recovery.
         """
+        failed = False
+        unevaluated_slugs = set()
         try:
             categories = lookup()
         except CategoryLookupFailedException as error:
@@ -1957,8 +1962,20 @@ class TwitchChannelPointsMiner:
                 f"Unable to look up drop campaigns for {label} categories: {error}",
                 extra={"emoji": ":warning:", "category_log": True},
             )
-            return [], set(), True
-        return categories, self.__unevaluated_filter_category_slugs(), False
+            categories = []
+            failed = True
+        else:
+            unevaluated_slugs = self.__unevaluated_filter_category_slugs()
+        if track_failures:
+            # A total outage has no per-category result. Bound the whole pass
+            # instead, including tracked channels whose game is not known yet.
+            failed = bool(
+                self.__expire_unevaluated_slugs(
+                    f"{label}_campaigns",
+                    {f"all {label} categories"} if failed else set(),
+                )
+            )
+        return categories, unevaluated_slugs, failed
 
     def __expire_unevaluated_slugs(self, kind, unevaluated_slugs):
         """`unevaluated_slugs` without the categories that have now stayed
@@ -2201,6 +2218,7 @@ class TwitchChannelPointsMiner:
                 drops_enabled=drops_enabled,
                 inventory=discovery_inventory,
             ),
+            track_failures=True,
         )
         discovery_unavailable = inventory_unavailable or campaign_lookup_failed
         # A failed live-channel lookup for one category is handled per
@@ -2303,6 +2321,7 @@ class TwitchChannelPointsMiner:
                     refresh_external_catalog=True,
                     tracked_category_slugs=tracked_wildcard_slugs,
                 ),
+                track_failures=True,
             )
             if wildcard_lookup_failed:
                 wildcard_discovery_ran = False
