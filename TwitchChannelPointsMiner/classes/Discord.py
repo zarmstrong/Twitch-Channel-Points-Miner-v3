@@ -84,6 +84,8 @@ class Discord(object):
             limit,
             notification_prefix(),
             max_pieces=MAX_NOTIFICATION_PARTS,
+            # Inline code must stay on one line; a code block takes a new one.
+            notice_separator="\n" if multiline else " ",
         )
         return [f"{opening}{chunk}{closing}" for chunk in chunks]
 

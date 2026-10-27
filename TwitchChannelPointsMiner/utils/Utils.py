@@ -206,6 +206,7 @@ def split_message_lines(
     *,
     length_func: Callable[[str], int] = utf16_length,
     max_pieces: int | None = None,
+    notice_separator: str = "\n",
 ) -> list[str]:
     """Split a message into pieces of at most ``limit`` units.
 
@@ -223,7 +224,9 @@ def split_message_lines(
     adds), every later piece starts with it too, within the limit.
 
     With ``max_pieces``, at most that many pieces are returned; the last one
-    ends with a line saying how many pieces were left out, trimmed to fit.
+    ends with a notice saying how many pieces were left out, trimmed to fit.
+    The notice follows ``notice_separator``: a new line by default, or a
+    space where the pieces must stay on one line (Discord's inline code).
     """
     if limit < 1:
         raise ValueError("limit must be a positive integer")
@@ -241,10 +244,15 @@ def split_message_lines(
                 body_limit,
                 max_pieces,
                 length_func,
+                notice_separator,
             )
             return [prefix + piece for piece in pieces]
     return _truncate_pieces(
-        _split_lines(message, limit, length_func), limit, max_pieces, length_func
+        _split_lines(message, limit, length_func),
+        limit,
+        max_pieces,
+        length_func,
+        notice_separator,
     )
 
 
@@ -253,6 +261,7 @@ def _truncate_pieces(
     limit: int,
     max_pieces: int | None,
     length_func: Callable[[str], int],
+    separator: str = "\n",
 ) -> list[str]:
     """Keep at most ``max_pieces`` pieces, ending the last with a notice."""
     if max_pieces is None or len(pieces) <= max_pieces:
@@ -262,10 +271,7 @@ def _truncate_pieces(
     kept = pieces[:max_pieces]
     if length_func(notice) > limit:
         return kept
-    last = kept[-1]
-    # A piece without a line break (part of one long line, which Discord shows
-    # as inline code) gets the notice on the same line.
-    separator = "\n" if "\n" in last else " "
+    last = _without_trailing_blank_lines(kept[-1])
     notice_length = length_func(separator) + length_func(notice)
     # Make room by dropping trailing lines whole while they are short or fit
     # inside the overflow, so no short line is left cut off mid-way, and by
@@ -275,11 +281,28 @@ def _truncate_pieces(
         head, newline, tail = last.rpartition("\n")
         tail_length = length_func(tail)
         if newline and (tail_length <= overflow or tail_length <= notice_length):
-            last = head
+            last = _without_trailing_blank_lines(head)
         else:
-            last = last[: max(len(last) - overflow, 0)]
+            # Free `overflow` units, counted per character: a character can
+            # be wider than one unit (an emoji is two UTF-16 units).
+            cut, freed = len(last), 0
+            while cut > 0 and freed < overflow:
+                cut -= 1
+                freed += length_func(last[cut])
+            # A cut that leaves the line empty or only spaces would put the
+            # notice after a blank line.
+            last = _without_trailing_blank_lines(last[:cut])
     kept[-1] = f"{last}{separator}{notice}" if last else notice
     return kept
+
+
+def _without_trailing_blank_lines(text: str) -> str:
+    """``text`` without blank lines at its end (line breaks included)."""
+    head, newline, tail = text.rpartition("\n")
+    while newline and not tail.strip():
+        text = head
+        head, newline, tail = text.rpartition("\n")
+    return text
 
 
 def _split_lines(

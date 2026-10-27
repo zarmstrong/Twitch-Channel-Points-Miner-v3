@@ -289,5 +289,19 @@ def test_telegram_sends_later_parts_silently(disable_notification):
     with patched_post() as post:
         assert telegram.send(message, Events.DROP_STATUS) == (True, None)
 
-    flags = [call.kwargs["data"]["disable_notification"] for call in post.call_args_list]
+    flags = [
+        call.kwargs["data"]["disable_notification"] for call in post.call_args_list
+    ]
     assert flags == [disable_notification, True, True]
+
+
+def test_telegram_capped_long_line_gets_the_notice_on_its_own_line():
+    telegram = Telegram(chat_id=123, token="token", events=[Events.DROP_STATUS])
+
+    with patched_post() as post:
+        assert telegram.send("y" * 50000, Events.DROP_STATUS) == (True, None)
+
+    texts = [call.kwargs["data"]["text"] for call in post.call_args_list]
+    assert len(texts) == 10
+    assert all(len(text) <= 4096 for text in texts)
+    assert texts[-1].endswith("y\n[3 more parts not sent]")

@@ -132,9 +132,10 @@ def test_split_message_lines_can_count_unicode_characters():
         trophy * 2 + "\nab"
     ]
     prefix = trophy + " "
-    assert utils.split_message_lines(
-        prefix + "abcd", 5, prefix, length_func=len
-    ) == [prefix + "abc", prefix + "d"]
+    assert utils.split_message_lines(prefix + "abcd", 5, prefix, length_func=len) == [
+        prefix + "abc",
+        prefix + "d",
+    ]
 
 
 def test_get_streamer_index_compares_channel_ids_as_strings():
@@ -233,14 +234,46 @@ def test_split_message_lines_cap_trims_a_long_last_line_instead_of_dropping_it()
     assert pieces == ["a" * 50, "s\n" + "x" * 24 + "\n[2 more parts not sent]"]
 
 
-def test_split_message_lines_cap_keeps_a_one_line_piece_on_one_line():
-    # Parts of one long line have no line break (Discord shows them as inline
-    # code), so the notice joins the same line.
-    pieces = utils.split_message_lines("z" * 200, 50, max_pieces=2)
+def test_split_message_lines_cap_puts_the_notice_where_the_caller_says():
+    # By default the notice goes on its own line, so it never reads like the
+    # end of a cut line. A caller whose pieces must stay on one line (Discord's
+    # inline code) asks for a space instead.
+    assert utils.split_message_lines("z" * 200, 50, max_pieces=2) == [
+        "z" * 50,
+        "z" * 26 + "\n[2 more parts not sent]",
+    ]
+    assert utils.split_message_lines(
+        "z" * 200, 50, max_pieces=2, notice_separator=" "
+    ) == ["z" * 50, "z" * 26 + " [2 more parts not sent]"]
 
-    assert pieces == ["z" * 50, "z" * 26 + " [2 more parts not sent]"]
+
+def test_split_message_lines_cap_trims_wide_characters_by_width():
+    # 50 UTF-16 units hold 25 emoji. The notice and its line break take 24,
+    # leaving room for exactly 13 emoji, no fewer.
+    pieces = utils.split_message_lines("\U0001f600" * 60, 50, max_pieces=1)
+
+    assert pieces == ["\U0001f600" * 13 + "\n[2 more parts not sent]"]
+    assert utils.utf16_length(pieces[0]) == 50
+
+
+def test_split_message_lines_cap_drops_blank_lines_before_the_notice():
+    message = "a" * 50 + "\nb\n\n" + "c" * 60 + "\n" + "d" * 50
+
+    pieces = utils.split_message_lines(message, 50, max_pieces=2)
+
+    assert pieces[-1] == "b\n[3 more parts not sent]"
 
 
 def test_split_message_lines_rejects_an_invalid_cap_for_any_message():
     with pytest.raises(ValueError):
         utils.split_message_lines("short", 10, max_pieces=0)
+
+
+def test_split_message_lines_cap_drops_a_line_cut_down_to_spaces():
+    # Found by fuzzing: cutting characters from "   bbb..." to fit the notice
+    # left only its leading spaces, so the notice came after a blank line.
+    message = "\n".join(["p" * 50, "a" * 24, "   " + "b" * 21, "q" * 50])
+
+    pieces = utils.split_message_lines(message, 50, max_pieces=2)
+
+    assert pieces == ["p" * 50, "a" * 24 + "\n[1 more part not sent]"]

@@ -333,3 +333,16 @@ def test_discord_caps_a_huge_notification_at_ten_posts():
     assert len(contents) == 10
     assert all(len(content) <= 2000 for content in contents)
     assert contents[-1].endswith("more parts not sent]\n```")
+
+
+def test_discord_capped_one_line_message_keeps_its_inline_code_on_one_line():
+    discord = Discord("https://example.com/discord", [Events.CHAT_MENTION])
+
+    with patched_post() as request:
+        assert discord.send("z" * 25000, Events.CHAT_MENTION) == (True, None)
+
+    contents = [call.kwargs["data"]["content"] for call in request.call_args_list]
+    assert len(contents) == 10
+    assert all(len(content) <= 2000 for content in contents)
+    assert "\n" not in contents[-1]
+    assert contents[-1].endswith("z [3 more parts not sent]`")
