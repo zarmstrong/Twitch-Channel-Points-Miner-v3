@@ -272,3 +272,22 @@ def test_telegram_retries_after_body_retry_after_hint():
 
     sleep.assert_called_once_with(3.0)
     assert post.call_count == 2
+
+
+@pytest.mark.parametrize("disable_notification", [False, True])
+def test_telegram_sends_later_parts_silently(disable_notification):
+    # Only the first part notifies as configured; later parts never buzz the
+    # device again for the same notification.
+    telegram = Telegram(
+        chat_id=123,
+        token="token",
+        events=[Events.DROP_STATUS],
+        disable_notification=disable_notification,
+    )
+    message = "\n".join(["x" * 4000] * 3)
+
+    with patched_post() as post:
+        assert telegram.send(message, Events.DROP_STATUS) == (True, None)
+
+    flags = [call.kwargs["data"]["disable_notification"] for call in post.call_args_list]
+    assert flags == [disable_notification, True, True]

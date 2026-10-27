@@ -48,19 +48,26 @@ class Telegram(object):
                 length_func=len,
                 max_pieces=MAX_NOTIFICATION_PARTS,
             )
+            # Only the first part notifies as configured. Later parts are sent
+            # silently, so a long report does not buzz the device once per
+            # part (like Pushover's later parts at normal priority).
+            parts = [(texts[0], self.disable_notification)] + [
+                (text, True) for text in texts[1:]
+            ]
             session = requests.Session()
             try:
-                return send_parts("Telegram", texts, partial(self._post, session))
+                return send_parts("Telegram", parts, partial(self._post, session))
             finally:
                 session.close()
         return False, "This event is not enabled for Telegram."
 
-    def _post(self, session: requests.Session, text: str) -> None:
+    def _post(self, session: requests.Session, part: tuple) -> None:
+        text, disable_notification = part
         data = {
             "chat_id": self.chat_id,
             "text": text,
             "disable_web_page_preview": True,
-            "disable_notification": self.disable_notification,
+            "disable_notification": disable_notification,
         }
         if self.message_thread_id is not None:
             data["message_thread_id"] = self.message_thread_id
