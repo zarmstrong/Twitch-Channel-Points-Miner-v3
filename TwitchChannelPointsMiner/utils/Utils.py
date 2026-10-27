@@ -225,6 +225,7 @@ def split_message_lines(
 
     With ``max_pieces``, at most that many pieces are returned; the last one
     ends with a notice saying how many pieces were left out, trimmed to fit.
+    A notice longer than ``limit`` on its own is left out.
     The notice follows ``notice_separator``: a new line by default, or a
     space where the pieces must stay on one line (Discord's inline code).
     """

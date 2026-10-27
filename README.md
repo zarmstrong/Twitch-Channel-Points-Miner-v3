@@ -1085,8 +1085,9 @@ Placeholder values are ignored; use real credentials and never commit them.
 Telegram, Discord and Pushover split a message that is too long to send in
 one piece into consecutive messages, breaking at line ends where possible. A
 notification is sent as at most ten messages; the tenth says how many more
-were left out. Only the first message alerts as configured: later ones are
-sent silently on Telegram and at quiet priority on Pushover.
+were left out. On Telegram and Pushover only the first message alerts as
+configured: later ones are sent silently on Telegram and at quiet priority on
+Pushover. Discord posts every message normally.
 
 Delivery failures are logged and do not stop mining. Enable
 `console_username` when several accounts share a destination. The analytics
@@ -1217,7 +1218,7 @@ user key and application API token.
 |---|---|---|---|
 | `userkey` | str | Required | Pushover user or group key. |
 | `token` | str | Required | Application API token. |
-| `priority` | int | Required | [Pushover message priority](https://pushover.net/api#priority). Later messages of a split notification go at quiet priority (-1), or -2 if that is the configured value. |
+| `priority` | int | Required | [Pushover message priority](https://pushover.net/api#priority). Later messages of a split notification go at quiet priority (-1), or -2 when the configured priority is -2 or lower. |
 | `sound` | str | Required | [Pushover sound name](https://pushover.net/api#sounds). |
 | `events` | list | Required | Events to send. |
 
