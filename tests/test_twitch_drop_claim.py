@@ -2345,6 +2345,69 @@ def test_watchable_campaign_survives_alongside_reward_campaign_for_same_game(
     }
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_partial_completed_inventory_does_not_resurrect_category(monkeypatch, wrapped):
+    twitch = bare_twitch(monkeypatch)
+    twitch.awarded_game_event_drops = {}
+    completed = {"id": "campaign-1", "name": "Example Campaign", "game": None}
+    response = SimpleNamespace(
+        inventory={
+            "dropCampaignsInProgress": [],
+            "gameEventDrops": [],
+            "completedRewardCampaigns": [
+                {"campaign": completed} if wrapped else completed
+            ],
+        },
+        errors=[
+            SimpleNamespace(
+                message="Game metadata unavailable",
+                path=["currentUser", "inventory", "completedRewardCampaigns", 0]
+                + (["campaign"] if wrapped else [])
+                + ["game"],
+            )
+        ],
+    )
+    twitch.gql = SimpleNamespace(get_inventory=lambda: response)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__cache_drop_inventory_progress", lambda self, inventory: None
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, status: [campaign_data()]
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns: [campaign_data()] if campaigns else [],
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs, inventory: {},
+    )
+
+    inventory = twitch.get_drops_inventory()
+
+    # Dashboard metadata cannot override the account's explicit completion,
+    # even on the first load before any completion IDs have been cached.
+    assert (
+        twitch.filter_categories_with_active_drops(
+            ["example-game"], inventory=inventory
+        )
+        == []
+    )
+    assert twitch.completed_drop_campaigns == {"campaign-1"}
+    assert twitch.active_drop_campaigns == {}
+
+
 def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
     monkeypatch,
 ):

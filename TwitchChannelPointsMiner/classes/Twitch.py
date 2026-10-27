@@ -2782,9 +2782,10 @@ class Twitch(object):
         """Whether an inventory carries a usable completedRewardCampaigns list.
 
         A partial Inventory response passes drops_inventory_loaded with the
-        field errored to null, and __get_inventory nulls it when a GraphQL
-        error targets one of its entries. An account with no completions
-        gets [] rather than null, so only a list counts as loaded.
+        field errored to null. Errors within individual entries can leave
+        usable completion IDs even without signature metadata. An account
+        with no completions gets [] rather than null, so only a list counts
+        as loaded.
         """
         return Twitch.drops_inventory_loaded(inventory) and isinstance(
             inventory.get("completedRewardCampaigns"), list
@@ -2843,10 +2844,9 @@ class Twitch(object):
         load succeeded, so no consumer mistakes a failed load for "no
         campaign completed". The cache only grows, like
         completed_drop_campaigns: completing a campaign is permanent, so a
-        response that leaves a completed entry out (one errored entry is
-        dropped by __get_inventory) must not forget it. The badge check and
-        category discovery both write it from their own threads, hence the
-        lock.
+        partial response that omits an entry or its signature metadata must
+        not erase prior completion evidence. The badge check and category
+        discovery both write it from their own threads, hence the lock.
         """
         # Defensive getattr: some tests construct Twitch via __new__ and skip
         # __init__ (mirroring __claim_lock).
@@ -6528,10 +6528,11 @@ class Twitch(object):
                 error_paths = {
                     tuple(error.path or []) for error in inventory_response.errors
                 }
-                # An error under completedRewardCampaigns nulls what it names.
-                # Drop only the entries whose index the path carries so the
-                # rest still count as loaded completions, and null the field
-                # only when the error targets the list itself.
+                # Preserve partial entries: a failed metadata field can leave
+                # a valid campaign ID that category discovery must still treat
+                # as completed. Signature matching skips entries missing its
+                # required metadata. Only errors targeting the list itself
+                # make the entire completion result unavailable.
                 completions_path = (
                     "currentUser",
                     "inventory",
@@ -6542,23 +6543,12 @@ class Twitch(object):
                 ]
                 if completions_errors and isinstance(inventory, dict):
                     completed = inventory.get("completedRewardCampaigns")
-                    failed_indexes = {
-                        path[3]
-                        for path in completions_errors
-                        if len(path) > 3 and isinstance(path[3], int)
-                    }
                     list_level = any(
                         len(path) == 3 or not isinstance(path[3], int)
                         for path in completions_errors
                     )
                     if list_level or not isinstance(completed, list):
                         inventory["completedRewardCampaigns"] = None
-                    else:
-                        inventory["completedRewardCampaigns"] = [
-                            entry
-                            for index, entry in enumerate(completed)
-                            if index not in failed_indexes
-                        ]
                 only_optional_errors = error_paths.issubset(
                     {("currentUser", "inventory", "gameEventDrops")}
                 )

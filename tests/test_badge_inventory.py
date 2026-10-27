@@ -883,10 +883,11 @@ def test_inventory_error_on_completed_campaigns_list_marks_completions_unloaded(
     assert twitch.completed_drop_campaigns == set()
 
 
-def test_inventory_error_in_one_completed_campaign_entry_keeps_the_rest(monkeypatch):
+def test_inventory_error_in_one_completed_campaign_entry_preserves_ids(monkeypatch):
     """A persistent per-entry error (one stale campaign failing on every fetch)
     must not stop completions from counting as loaded, or badge discovery and
-    gist matching would stand down forever; only the named entry is dropped."""
+    gist matching would stand down forever. Partial entries still carry valid
+    completion IDs even when their metadata cannot produce a signature."""
     surviving = {
         "campaign": {
             "id": "campaign-1",
@@ -895,28 +896,27 @@ def test_inventory_error_in_one_completed_campaign_entry_keeps_the_rest(monkeypa
             "game": {"displayName": "Minecraft"},
         }
     }
+    partial = {"campaign": {"id": "campaign-2", "name": "Stale", "game": None}}
     twitch = _inventory_twitch(
         monkeypatch,
         {
             "dropCampaignsInProgress": [],
             "gameEventDrops": [],
-            "completedRewardCampaigns": [
-                surviving,
-                {"campaign": {"id": "campaign-2", "name": "Stale", "game": None}},
-            ],
+            "completedRewardCampaigns": [surviving, partial],
         },
         ["currentUser", "inventory", "completedRewardCampaigns", 1, "campaign", "game"],
     )
 
     loaded = twitch.get_drops_inventory()
 
-    assert loaded["completedRewardCampaigns"] == [surviving]
+    assert loaded["completedRewardCampaigns"] == [surviving, partial]
     assert Twitch.drops_inventory_completions_loaded(loaded) is True
     signatures = twitch.completed_badge_campaign_signatures_or_cached(loaded)
     assert {game_slug for game_slug, _, _ in signatures} == {"minecraft"}
     assert twitch.completed_badge_campaign_signature_cache == signatures
-    # The other inventory readers still see the surviving entry.
-    assert twitch.completed_drop_campaigns == {"campaign-1"}
+    assert twitch.completed_drop_campaigns == {"campaign-1", "campaign-2"}
+
+
 def test_earned_viewer_reward_drop_completes_fallback_despite_expired_campaign_status(
     monkeypatch,
 ):
