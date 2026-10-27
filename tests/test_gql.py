@@ -3383,6 +3383,48 @@ def test_drops_directory_request_failure_raises_instead_of_empty_result(
     assert error.value.game_slug == "overwatch-2"
 
 
+@pytest.mark.parametrize("selector", ["overwatch-2", "overwatch-2|ow_esports"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        {"game": None},
+        {
+            "game": {
+                "streams": {
+                    "edges": [{"node": {"broadcaster": {"login": "ow_esports"}}}]
+                }
+            }
+        },
+    ],
+)
+def test_drops_directory_graphql_errors_preserve_category_eligibility(
+    monkeypatch, selector, data
+):
+    # Raw GQL requests return HTTP 200 error envelopes without raising RetryError.
+    gql = GQL(
+        client_session(),
+        post_request=lambda *args, **kwargs: FakeResponse(
+            {"data": data, "errors": [{"message": "service unavailable"}]}
+        ),
+    )
+    twitch = _category_lookup_twitch(gql)
+    eligibility = {("overwatch-2", "previous"): (1, 1)}
+    twitch.category_campaign_eligibility = dict(eligibility)
+    helix_get = _helix_with_category(
+        {"data": [{"user_login": "ow_esports", "game_id": "ow-id"}]}
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category(selector)
+
+    assert error.value.game_slug == "overwatch-2"
+    assert twitch.category_campaign_eligibility == eligibility
+
+
 def test_forced_category_streamer_lookup_failure_raises_instead_of_not_live(
     monkeypatch, caplog
 ):

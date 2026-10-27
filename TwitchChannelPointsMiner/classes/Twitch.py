@@ -4509,6 +4509,14 @@ class Twitch(object):
                 game_slug=game_slug,
             ) from error
 
+        # Raw requests retain GraphQL errors even when HTTP succeeded. Partial
+        # directory data cannot establish that the missing channels are offline.
+        if response.get("errors"):
+            raise CategoryLookupFailedException(
+                f"Twitch Drops directory for '{game_slug}' returned GraphQL errors",
+                game_slug=game_slug,
+            )
+
         game = (response.get("data") or {}).get("game") or {}
         edges = (game.get("streams") or {}).get("edges") or []
         return {
