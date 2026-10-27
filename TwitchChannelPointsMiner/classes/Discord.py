@@ -5,6 +5,7 @@ from textwrap import dedent
 import requests
 
 from TwitchChannelPointsMiner.classes.NotificationError import (
+    MAX_NOTIFICATION_PARTS,
     notification_prefix,
     send_parts,
 )
@@ -78,7 +79,12 @@ class Discord(object):
         else:
             opening, closing = "`", "`"
         limit = DISCORD_CONTENT_LIMIT - len(opening) - len(closing)
-        chunks = split_message_lines(message, limit, notification_prefix())
+        chunks = split_message_lines(
+            message,
+            limit,
+            notification_prefix(),
+            max_pieces=MAX_NOTIFICATION_PARTS,
+        )
         return [f"{opening}{chunk}{closing}" for chunk in chunks]
 
 

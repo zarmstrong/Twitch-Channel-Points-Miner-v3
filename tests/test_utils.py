@@ -191,3 +191,34 @@ def test_read_closes_file_handle(monkeypatch):
 
     assert utils.read("anything") == "contents"
     assert closed == [True]
+
+
+def test_split_message_lines_caps_the_number_of_pieces():
+    message = "\n".join(f"line {index:03}" for index in range(100))
+
+    pieces = utils.split_message_lines(message, 40, max_pieces=3)
+
+    assert len(pieces) == 3
+    assert all(len(piece) <= 40 for piece in pieces)
+    assert pieces[:2] == [
+        "line 000\nline 001\nline 002\nline 003",
+        "line 004\nline 005\nline 006\nline 007",
+    ]
+    # The last kept piece gives up whole lines so the notice fits the limit.
+    assert pieces[-1] == "line 008\n[22 more parts not sent]"
+    # A notice that cannot fit at all is left out rather than overflowing.
+    assert len(utils.split_message_lines(message, 20, max_pieces=3)) == 3
+    # Under the cap nothing changes.
+    assert utils.split_message_lines(message, 40) == utils.split_message_lines(
+        message, 40, max_pieces=100
+    )
+
+
+def test_split_message_lines_cap_keeps_the_prefix_on_every_piece():
+    message = "[u] " + "\n".join(f"line {index:03}" for index in range(100))
+
+    pieces = utils.split_message_lines(message, 30, "[u] ", max_pieces=2)
+
+    assert len(pieces) == 2
+    assert all(piece.startswith("[u] ") and len(piece) <= 30 for piece in pieces)
+    assert "more parts not sent]" in pieces[-1]

@@ -4,6 +4,7 @@ from textwrap import dedent
 import requests
 
 from TwitchChannelPointsMiner.classes.NotificationError import (
+    MAX_NOTIFICATION_PARTS,
     notification_prefix,
     send_parts,
 )
@@ -33,6 +34,7 @@ class Pushover(object):
                 PUSHOVER_MESSAGE_LIMIT,
                 notification_prefix(),
                 length_func=len,
+                max_pieces=MAX_NOTIFICATION_PARTS,
             )
             # Only the first part alerts at the configured priority. Later
             # parts are sent at normal priority, so a long report does not

@@ -320,3 +320,16 @@ def test_discord_retries_rate_limited_part_after_retry_after():
     sleep.assert_called_once_with(2.0)
     contents = [call.kwargs["data"]["content"] for call in request.call_args_list]
     assert contents[1] == contents[2]
+
+
+def test_discord_caps_a_huge_notification_at_ten_posts():
+    discord = Discord("https://example.com/discord", [Events.CHAT_MENTION])
+    message = "\n".join(f"reward {index:05}: progress updated" for index in range(3000))
+
+    with patched_post() as request:
+        assert discord.send(message, Events.CHAT_MENTION) == (True, None)
+
+    contents = [call.kwargs["data"]["content"] for call in request.call_args_list]
+    assert len(contents) == 10
+    assert all(len(content) <= 2000 for content in contents)
+    assert contents[-1].endswith("more parts not sent]\n```")

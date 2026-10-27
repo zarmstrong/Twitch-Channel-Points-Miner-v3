@@ -4,6 +4,7 @@ from textwrap import dedent
 import requests
 
 from TwitchChannelPointsMiner.classes.NotificationError import (
+    MAX_NOTIFICATION_PARTS,
     notification_prefix,
     send_parts,
 )
@@ -45,6 +46,7 @@ class Telegram(object):
                 TELEGRAM_TEXT_LIMIT,
                 notification_prefix(),
                 length_func=len,
+                max_pieces=MAX_NOTIFICATION_PARTS,
             )
             session = requests.Session()
             try:

@@ -205,6 +205,7 @@ def split_message_lines(
     prefix: str = "",
     *,
     length_func: Callable[[str], int] = utf16_length,
+    max_pieces: int | None = None,
 ) -> list[str]:
     """Split a message into pieces of at most ``limit`` units.
 
@@ -220,6 +221,9 @@ def split_message_lines(
 
     When the message starts with ``prefix`` (such as the username the logger
     adds), every later piece starts with it too, within the limit.
+
+    With ``max_pieces``, at most that many pieces are returned; the last one
+    ends with a line saying how many pieces were left out, trimmed to fit.
     """
     if limit < 1:
         raise ValueError("limit must be a positive integer")
@@ -229,9 +233,41 @@ def split_message_lines(
         prefix_length = length_func(prefix)
         if prefix_length <= limit // 2:
             body = message[len(prefix) :]  # noqa: E203
-            pieces = _split_lines(body, limit - prefix_length, length_func)
+            body_limit = limit - prefix_length
+            pieces = _truncate_pieces(
+                _split_lines(body, body_limit, length_func),
+                body_limit,
+                max_pieces,
+                length_func,
+            )
             return [prefix + piece for piece in pieces]
-    return _split_lines(message, limit, length_func)
+    return _truncate_pieces(
+        _split_lines(message, limit, length_func), limit, max_pieces, length_func
+    )
+
+
+def _truncate_pieces(
+    pieces: list[str],
+    limit: int,
+    max_pieces: int | None,
+    length_func: Callable[[str], int],
+) -> list[str]:
+    """Keep at most ``max_pieces`` pieces, ending the last with a notice."""
+    if max_pieces is None or len(pieces) <= max_pieces:
+        return pieces
+    if max_pieces < 1:
+        raise ValueError("max_pieces must be a positive integer")
+    omitted = len(pieces) - max_pieces
+    notice = f"[{omitted} more part{'s' if omitted != 1 else ''} not sent]"
+    kept = pieces[:max_pieces]
+    if length_func(notice) > limit:
+        return kept
+    last = kept[-1]
+    # Drop whole lines first, then characters, until the notice fits.
+    while last and length_func(last) + 1 + length_func(notice) > limit:
+        last = last.rsplit("\n", 1)[0] if "\n" in last else last[:-1]
+    kept[-1] = f"{last}\n{notice}" if last else notice
+    return kept
 
 
 def _split_lines(

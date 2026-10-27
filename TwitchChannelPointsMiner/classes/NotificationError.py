@@ -7,6 +7,10 @@ from TwitchChannelPointsMiner.classes.Settings import Settings
 
 # Longest Retry-After (seconds) honoured before a rate-limited part is given up on.
 RETRY_AFTER_CAP = 10
+# Most parts one notification is split into. Each part is its own post, so an
+# unbounded split could flood a channel and hold the notification thread
+# through rate-limit waits; the last part says what was left out.
+MAX_NOTIFICATION_PARTS = 10
 
 
 def notification_prefix():
