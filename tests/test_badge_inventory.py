@@ -1574,7 +1574,7 @@ def test_entries_without_end_time_are_reported_once_and_never_wildcarded(caplog)
     warnings = [
         record
         for record in caplog.records
-        if "lack the name, game and end time" in record.getMessage()
+        if "lack the campaign name or end time" in record.getMessage()
     ]
     assert [record.levelno for record in warnings] == [logging.WARNING]
 
@@ -1773,17 +1773,74 @@ def test_continuing_gist_stand_down_is_repeated_hourly(monkeypatch, caplog):
     ] == [logging.INFO, logging.DEBUG, logging.INFO, logging.INFO]
 
 
-def test_unsignable_warning_only_repeats_for_a_new_high(caplog):
+def test_unsignable_warning_repeats_only_for_a_new_streak_or_high(
+    monkeypatch, caplog
+):
+    import TwitchChannelPointsMiner.classes.Twitch as twitch_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: clock[0])
+    hour = twitch_module.COMPLETED_BADGE_UNSIGNABLE_WARNING_SECONDS
     twitch = bare_twitch(SimpleNamespace())
+    clean = {"completedRewardCampaigns": []}
     one = {"completedRewardCampaigns": [None]}
     two = {"completedRewardCampaigns": [None, None]}
 
-    with caplog.at_level(logging.DEBUG):
-        for inventory in (one, two, one, two, one):
-            _record(twitch, inventory)
+    def levels(*steps):
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            for advance, inventory in steps:
+                clock[0] += advance
+                _record(twitch, inventory)
+        return [
+            record.levelno
+            for record in caplog.records
+            if "lack the campaign name or end time" in record.getMessage()
+        ]
 
-    assert [
-        record.levelno
-        for record in caplog.records
-        if "lack the name, game and end time" in record.getMessage()
-    ] == [logging.WARNING, logging.WARNING]
+    # First failure warns; a higher count within the hour does not, so
+    # entries failing on alternate reads cannot warn on every read.
+    assert levels((0, one), (1, two), (1, one), (1, two)) == [logging.WARNING]
+    # After the hour the higher count warns once; the same count never again.
+    assert levels((hour, two), (hour, two), (hour, one)) == [logging.WARNING]
+    # A clean read ends the streak, so a later failure warns again.
+    assert levels((0, clean), (hour, one)) == [logging.WARNING]
+
+
+def test_completions_list_with_every_entry_errored_reads_as_errored():
+    """GraphQL nulls a failed list item; a list of nothing but such nulls
+    says no more than a null list and must not read as "nothing completed"."""
+    path = ["currentUser", "inventory", "completedRewardCampaigns"]
+    loaded = _normalized(
+        {"dropCampaignsInProgress": [], "completedRewardCampaigns": [None, None]},
+        path + [0],
+        path + [1],
+    )
+
+    assert Twitch.drops_inventory_completions_state(loaded) == "errored"
+
+
+def test_completions_list_keeps_surviving_entries_and_errorless_nulls():
+    path = ["currentUser", "inventory", "completedRewardCampaigns"]
+    partly_errored = {
+        "dropCampaignsInProgress": [],
+        "completedRewardCampaigns": [
+            None,
+            *COMPLETED_MINECRAFT_INVENTORY["completedRewardCampaigns"],
+        ],
+    }
+    errorless_nulls = {
+        "dropCampaignsInProgress": [],
+        "completedRewardCampaigns": [None],
+    }
+
+    assert (
+        Twitch.drops_inventory_completions_state(
+            _normalized(partly_errored, path + [0])
+        )
+        == "loaded"
+    )
+    assert (
+        Twitch.drops_inventory_completions_state(_normalized(errorless_nulls))
+        == "loaded"
+    )

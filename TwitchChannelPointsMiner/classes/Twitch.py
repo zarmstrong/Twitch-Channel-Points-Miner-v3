@@ -82,6 +82,8 @@ CHANNEL_POINTS_MAX_CONCURRENCY = 3
 DROP_INVENTORY_FRESHNESS_SECONDS = 180
 # How often a continuing gist stand-down is reported again at full level.
 GIST_STAND_DOWN_REMINDER_SECONDS = 3600
+# Minimum time between warnings about unrecognizable completed campaigns.
+COMPLETED_BADGE_UNSIGNABLE_WARNING_SECONDS = 3600
 # Guards the completed-campaign signature cache on Twitch objects built
 # without __init__ (some tests use __new__), so no thread has to create a
 # lock lazily and race another thread doing the same.
@@ -184,6 +186,7 @@ class Twitch(object):
         "completed_badge_campaign_signature_lock",
         "completed_badge_campaign_signatures_by_id",
         "completed_badge_campaign_unsignable_count",
+        "completed_badge_campaign_unsignable_warned_at",
         "drop_badge_rewards",
         "restart_requested",
         "gql",
@@ -310,6 +313,7 @@ class Twitch(object):
         self.completed_badge_campaign_signature_lock = Lock()
         self.completed_badge_campaign_signatures_by_id = {}
         self.completed_badge_campaign_unsignable_count = 0
+        self.completed_badge_campaign_unsignable_warned_at = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
         self.stream_segment_watchers = {}
@@ -2871,8 +2875,9 @@ class Twitch(object):
         campaign ID, and can never match self.completed_drop_campaigns).
 
         Entries with errored metadata still yield a signature when they can:
-        from an earlier full read of the same campaign ID, or with the
-        missing fields as wildcards (see completed_signature_matches).
+        from an earlier full read of the same campaign ID, or with an
+        errored game as a wildcard (see completed_signature_matches). An
+        entry missing its name or end time is not matched at all.
         """
         with _completed_badge_signature_lock(self):
             known_signatures_by_id = dict(
@@ -2995,18 +3000,31 @@ class Twitch(object):
                 self.completed_badge_campaign_signatures_by_id = signatures_by_id
             else:
                 stored_signatures_by_id.update(signatures_by_id)
-            # Highest count reported so far. Reads from different threads
-            # can see different shapes, and an old entry without an end time
-            # stays unsignable forever, so only a new high warns again.
+            # Highest count warned about in the current streak. An old entry
+            # without an end time stays unsignable forever, so the same count
+            # never warns twice; a read with none ends the streak so a later
+            # failure warns again. Warnings are at most hourly, so entries
+            # that fail on alternate reads cannot warn on every read.
             previous_unsignable = getattr(
                 self, "completed_badge_campaign_unsignable_count", 0
             )
-            if unsignable > previous_unsignable:
+            now = time.monotonic()
+            warned_at = getattr(
+                self, "completed_badge_campaign_unsignable_warned_at", None
+            )
+            warn = unsignable > previous_unsignable and (
+                warned_at is None
+                or now - warned_at >= COMPLETED_BADGE_UNSIGNABLE_WARNING_SECONDS
+            )
+            if warn:
                 self.completed_badge_campaign_unsignable_count = unsignable
-        if unsignable > previous_unsignable:
+                self.completed_badge_campaign_unsignable_warned_at = now
+            elif unsignable == 0:
+                self.completed_badge_campaign_unsignable_count = 0
+        if warn:
             logger.warning(
                 f"{unsignable} completed Drop campaign(s) in the inventory lack "
-                "the name, game and end time needed to recognize them; they "
+                "the campaign name or end time needed to recognize them; they "
                 "may be mined again until Twitch returns them in full",
                 extra={"emoji": ":warning:", "category_log": True},
             )
@@ -6697,26 +6715,34 @@ class Twitch(object):
     def __normalize_completed_reward_campaigns(inventory, error_paths):
         """Make completedRewardCampaigns say whether it can be trusted.
 
-        A delivered list is always kept: errors inside individual entries
-        leave the rest usable (a failed metadata field can still leave a
-        valid campaign ID that category discovery must treat as completed,
-        and signature matching recovers what it can; see
-        completed_badge_campaign_signatures). Without a list, the field
-        becomes None ("errored") when an error covers it (on the list or
-        inside it, on a parent path, or without a path), since the failure
-        may have nulled or dropped it. Otherwise it is removed ("missing"):
-        an account with no completions gets [], so a null or absent list
-        without an error is a response shape the consumers cannot trust as
-        "nothing completed" but also must not wait on forever.
+        A delivered list is kept when any entry survived: errors inside
+        individual entries leave the rest usable (a failed metadata field can
+        still leave a valid campaign ID that category discovery must treat as
+        completed, and signature matching recovers what it can; see
+        completed_badge_campaign_signatures). The field becomes None
+        ("errored") when an error covers it (on the list or inside it, on a
+        parent path, or without a path) and it carries no entry to read: no
+        list, since the failure may have nulled or dropped it, or a list
+        whose entries all failed to null, which says no more than a null
+        list. Otherwise a missing list is removed ("missing"): an account
+        with no completions gets [], so a null or absent list without an
+        error is a response shape the consumers cannot trust as "nothing
+        completed" but also must not wait on forever.
         """
         key = "completedRewardCampaigns"
-        if isinstance(inventory.get(key), list):
-            return
+        completions = inventory.get(key)
         completions_path = ("currentUser", "inventory", key)
-        if any(
+        errored = any(
             path[:3] == completions_path or completions_path[: len(path)] == path
             for path in error_paths
+        )
+        if isinstance(completions, list) and not (
+            errored
+            and completions
+            and not any(isinstance(record, dict) for record in completions)
         ):
+            return
+        if errored:
             inventory[key] = None
         else:
             inventory.pop(key, None)
