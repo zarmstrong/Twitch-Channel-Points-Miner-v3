@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 
@@ -798,20 +799,6 @@ def test_completed_badge_campaign_signatures_or_cached_is_read_only():
     assert twitch.completed_badge_campaign_signature_cache is None
 
 
-def test_completed_badge_campaign_signatures_or_cached_reuses_recorded_read(
-    monkeypatch,
-):
-    twitch = bare_twitch(SimpleNamespace())
-    inventory = _record(twitch, dict(COMPLETED_MINECRAFT_INVENTORY))
-    monkeypatch.setattr(
-        Twitch,
-        "completed_badge_campaign_signatures",
-        lambda self, inventory: pytest.fail("the recorded read must be reused"),
-    )
-
-    assert len(twitch.completed_badge_campaign_signatures_or_cached(inventory)) == 1
-
-
 def test_completed_badge_campaign_signatures_or_cached_merges_new_completions():
     twitch = bare_twitch(SimpleNamespace())
     _record(twitch, COMPLETED_MINECRAFT_INVENTORY)
@@ -881,7 +868,7 @@ def test_inventory_reader_keeps_gist_completion_cache_current(
 ):
     gql = _badge_gql()
     gql.get_inventory = lambda: SimpleNamespace(
-        inventory=COMPLETED_MINECRAFT_INVENTORY, errors=[]
+        inventory=copy.deepcopy(COMPLETED_MINECRAFT_INVENTORY), errors=[]
     )
     twitch = bare_twitch(gql)
     twitch.completed_drop_campaigns = set()
@@ -896,7 +883,17 @@ def test_inventory_reader_keeps_gist_completion_cache_current(
     def unavailable():
         if not unusable_inventory:
             raise RetryError("Inventory", [])
-        return SimpleNamespace(inventory=unusable_inventory, errors=[])
+        # __get_inventory normalizes the dict in place, and a null list only
+        # means "unavailable" when Twitch reports an error for it.
+        return SimpleNamespace(
+            inventory=copy.deepcopy(unusable_inventory),
+            errors=[
+                SimpleNamespace(
+                    message="service error",
+                    path=["currentUser", "inventory", "completedRewardCampaigns"],
+                )
+            ],
+        )
 
     gql.get_inventory = unavailable
     inventory = twitch.get_drops_inventory()
@@ -925,9 +922,9 @@ def test_gist_fallback_stands_down_without_any_completion_evidence(monkeypatch, 
             ["minecraft"], set(), PARTIAL_INVENTORY
         )
 
-    # The previous cycle's gist result stands, nothing was scraped, and the
+    # Nothing was scraped and no stored deadline is merged as verified; the
     # stand-down is reported at the category log level.
-    assert deadlines == previous_deadlines
+    assert deadlines == {}
     assert twitch.twitchdrops_app_deadlines == previous_deadlines
     assert twitch.twitchdrops_app_campaigns == {"minecraft": ["previous cycle"]}
     assert front_page_calls == []
@@ -1514,7 +1511,9 @@ def test_partial_signature_matches_badge_catalog_campaign():
     assert DropBadgeCatalog._matches_completed_campaign(
         record, campaign, ends_at, {(None, "corrupted creeper cape", 4070908800.0)}
     )
-    assert DropBadgeCatalog._matches_completed_campaign(
+    # Only the game may be a wildcard: a game's sibling campaigns can end
+    # together, so the game and end time alone identify nothing.
+    assert not DropBadgeCatalog._matches_completed_campaign(
         record, campaign, ends_at, {("minecraft", None, 4070908800.0)}
     )
     # A different end time is a different run of the campaign.
@@ -1623,7 +1622,7 @@ def test_gist_stand_down_is_not_repeated_by_wildcard_pass(monkeypatch, caplog):
         lambda self, inventory, requested: ({}, set()),
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         twitch.filter_categories_with_active_drops(
             ["minecraft"], inventory=PARTIAL_INVENTORY
         )
@@ -1631,14 +1630,117 @@ def test_gist_stand_down_is_not_repeated_by_wildcard_pass(monkeypatch, caplog):
             inventory=PARTIAL_INVENTORY, refresh_external_catalog=False
         )
 
-    assert calls == [["minecraft"]]
-    assert (
-        len(
-            [
-                record
-                for record in caplog.records
-                if "Skipping Twitch Drops gist check" in record.getMessage()
-            ]
+    # The wildcard pass checks again rather than reusing a stored result,
+    # but the stand-down is reported once per streak.
+    assert calls == [["minecraft"], None]
+    assert [
+        record.levelno
+        for record in caplog.records
+        if "Skipping Twitch Drops gist check" in record.getMessage()
+    ] == [logging.INFO, logging.DEBUG]
+
+
+def _normalized(inventory, *error_paths):
+    twitch = bare_twitch(
+        SimpleNamespace(
+            get_inventory=lambda: SimpleNamespace(
+                inventory=inventory,
+                errors=[
+                    SimpleNamespace(message="service error", path=path)
+                    for path in error_paths
+                ],
+            )
         )
-        == 1
     )
+    twitch.completed_drop_campaigns = set()
+    return twitch.get_drops_inventory()
+
+
+def test_null_completions_without_an_error_mean_none_completed():
+    loaded = _normalized(
+        {"dropCampaignsInProgress": [], "completedRewardCampaigns": None}
+    )
+
+    assert loaded["completedRewardCampaigns"] == []
+    assert Twitch.drops_inventory_completions_state(loaded) == "loaded"
+
+
+def test_optional_errors_keep_an_absent_completions_field_missing():
+    loaded = _normalized(
+        {"dropCampaignsInProgress": []}, ["currentUser", "inventory", "gameEventDrops"]
+    )
+
+    assert Twitch.drops_inventory_completions_state(loaded) == "missing"
+
+
+@pytest.mark.parametrize(
+    "error_path", [None, ["currentUser", "inventory", "gameEventDrops"]]
+)
+def test_errors_elsewhere_keep_a_delivered_completions_list(error_path):
+    loaded = _normalized(
+        {"dropCampaignsInProgress": [], **COMPLETED_MINECRAFT_INVENTORY}, error_path
+    )
+
+    assert loaded["completedRewardCampaigns"] == (
+        COMPLETED_MINECRAFT_INVENTORY["completedRewardCampaigns"]
+    )
+
+
+def test_pathless_error_marks_an_absent_completions_field_errored():
+    loaded = _normalized({"dropCampaignsInProgress": []}, None)
+
+    assert Twitch.drops_inventory_completions_state(loaded) == "errored"
+
+
+def test_errored_name_does_not_suppress_sibling_campaign_of_same_game():
+    """A game can run a restricted and an all-channel campaign that end
+    together; an entry with only its game and end time must not mark both
+    complete."""
+    twitch = bare_twitch(SimpleNamespace())
+    inventory = _record(
+        twitch,
+        {
+            "completedRewardCampaigns": [
+                {
+                    "campaign": {
+                        "id": "restricted",
+                        "name": None,
+                        "endAt": "2099-01-01T00:00:00Z",
+                        "game": {"displayName": "Minecraft"},
+                    }
+                }
+            ]
+        },
+    )
+
+    assert twitch.completed_badge_campaign_signatures_or_cached(inventory) == set()
+    assert twitch.completed_badge_campaign_unsignable_count == 1
+
+
+def test_continuing_gist_stand_down_is_repeated_hourly(monkeypatch, caplog):
+    import TwitchChannelPointsMiner.classes.Twitch as twitch_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: clock[0])
+    twitch = bare_twitch(_badge_gql())
+    twitch.category_log_level = logging.INFO
+    _minecraft_gist(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), {})
+        clock[0] += twitch_module.GIST_STAND_DOWN_REMINDER_SECONDS - 1
+        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), {})
+        clock[0] += 1
+        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), {})
+        # Evidence arrives: the streak ends, so the next stand-down is new.
+        twitch._Twitch__twitchdrops_app_fallback(
+            ["minecraft"], set(), _record(twitch, EMPTY_INVENTORY)
+        )
+        twitch.completed_badge_campaign_signature_cache = None
+        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), {})
+
+    assert [
+        record.levelno
+        for record in caplog.records
+        if "Skipping Twitch Drops gist check" in record.getMessage()
+    ] == [logging.INFO, logging.DEBUG, logging.INFO, logging.INFO]

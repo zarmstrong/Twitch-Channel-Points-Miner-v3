@@ -42,9 +42,9 @@ def completed_signature_matches(
     """Whether a campaign matches a completed-campaign signature.
 
     Signatures are (game_slug, campaign_name, ends_at_epoch). A None game
-    or name is a wildcard: Twitch can return a completed campaign with an
-    errored field, and the remaining fields (always including the end time)
-    still identify it well enough to keep it from being mined again.
+    is a wildcard: Twitch can return a completed campaign with an errored
+    game, and its name and end time still identify it well enough to keep
+    it from being mined again.
     """
     for (
         signature_game_slug,
@@ -53,10 +53,7 @@ def completed_signature_matches(
     ) in completed_campaign_signatures:
         if (
             (signature_game_slug is None or game_slug == signature_game_slug)
-            and (
-                signature_campaign_name is None
-                or campaign_name == signature_campaign_name
-            )
+            and campaign_name == signature_campaign_name
             and abs(ends_at_epoch - signature_ends_at) <= 1
         ):
             return True
