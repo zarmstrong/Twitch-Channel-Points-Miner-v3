@@ -1,6 +1,10 @@
 import logging
+import sys
 import threading
+import time
 from types import SimpleNamespace
+
+import pytest
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     BADGE_LOOKUP_FAILURE_LIMIT,
@@ -12,6 +16,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     StreamerSettings,
 )
 from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.Twitch import Twitch
 
 
 class FakeCatalog:
@@ -46,6 +51,7 @@ class FakeTwitch:
         self.twitch_login = SimpleNamespace(
             get_auth_token=lambda: "token",
         )
+        self.completed_badge_campaign_signature_cache = None
 
     def get_earned_badge_names(self, refresh=False):
         assert refresh is True
@@ -64,11 +70,31 @@ class FakeTwitch:
         return set(categories)
 
     def get_drops_inventory(self):
-        return {"present": True}
+        return self._record({"present": True, "completedRewardCampaigns": []})
+
+    def _record(self, inventory):
+        # Twitch.__get_inventory records every loaded inventory's completions
+        # before returning it; the badge check only reads the cache.
+        if Twitch.drops_inventory_completions_loaded(inventory):
+            self.completed_badge_campaign_signature_cache = (
+                self.completed_badge_campaign_signature_cache or set()
+            ) | self.completed_badge_campaign_signatures(inventory)
+        return inventory
 
     def completed_badge_campaign_signatures(self, inventory):
-        assert inventory == {"present": True}
+        assert inventory == {"present": True, "completedRewardCampaigns": []}
         return {"a-signature"}
+
+    # The real cache logic, so these tests exercise it rather than a copy.
+    drops_inventory_completions_loaded = staticmethod(
+        Twitch.drops_inventory_completions_loaded
+    )
+    drops_inventory_completions_state = staticmethod(
+        Twitch.drops_inventory_completions_state
+    )
+    completed_badge_campaign_signatures_or_cached = (
+        Twitch.completed_badge_campaign_signatures_or_cached
+    )
 
     def get_channel_id(self, username):
         return f"id-{username}"
@@ -107,6 +133,7 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
     miner.original_streamers = []
     miner.ws_pool = FakeWebSocketsPool()
     miner.drop_badge_catalog = FakeCatalog()
+    miner.badge_inventory_state = None
     miner.badge_drop_streamer_limit = 2
     miner.badge_drop_category_chat = ChatPresence.NEVER
     miner.badge_drop_category_sort = "VIEWERS_DESC"
@@ -173,6 +200,7 @@ def _badge_check_miner(twitch):
     miner.original_streamers = [10]
     miner.ws_pool = FakeWebSocketsPool()
     miner.drop_badge_catalog = FakeCatalog()
+    miner.badge_inventory_state = None
     miner.badge_drop_streamer_limit = 2
     miner.badge_drop_category_chat = ChatPresence.NEVER
     miner.badge_drop_category_sort = "RANDOM"
@@ -433,6 +461,7 @@ def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
     miner.original_streamers = [10]
     miner.ws_pool = FakeWebSocketsPool()
     miner.drop_badge_catalog = EmptyCatalog()
+    miner.badge_inventory_state = None
     miner.badge_drop_streamer_limit = 1
     miner.badge_drop_category_chat = ChatPresence.NEVER
     miner.badge_drop_category_sort = "VIEWERS_DESC"
@@ -452,46 +481,269 @@ def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
     assert miner.ws_pool.removed == ["stale"]
 
 
-def test_auto_mine_badge_campaigns_falls_back_when_inventory_fetch_fails():
-    class NoInventoryTwitch(FakeTwitch):
-        def get_drops_inventory(self):
-            raise RuntimeError("inventory unavailable")
+class BaselineTwitch(FakeTwitch):
+    """Earned badges change on refresh, so a restored baseline is observable."""
 
-        def completed_badge_campaign_signatures(self, inventory):
-            raise AssertionError(
-                "should not be called when inventory fetch fails"
-            )
+    def __init__(self):
+        super().__init__()
+        self.available_badge_names = {"old badge"}
 
-    class RecordingCatalog:
-        def eligible_badge_campaigns(self, owned_badges, completed_campaign_signatures=None):
-            assert owned_badges == {"owned badge"}
-            assert completed_campaign_signatures == set()
-            return []
+    def get_earned_badge_names(self, refresh=False):
+        assert refresh is True
+        self.available_badge_names = {"owned badge"}
+        return self.available_badge_names
 
-    defaults = StreamerSettings(chat=ChatPresence.NEVER)
-    defaults.default()
-    defaults.bet.default()
-    Settings.streamer_settings = defaults
 
-    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+class UntouchedCatalog:
+    def eligible_badge_campaigns(
+        self, owned_badges, completed_campaign_signatures=None
+    ):
+        raise AssertionError("the badge check must be skipped this cycle")
 
-    miner.category_lookup_failure_streaks = {}
-    miner.username = "testuser"
-    miner.twitch = NoInventoryTwitch()
-    miner.streamers = []
-    miner.original_streamers = []
-    miner.ws_pool = FakeWebSocketsPool()
-    miner.drop_badge_catalog = RecordingCatalog()
-    miner.badge_drop_streamer_limit = 2
-    miner.badge_drop_category_chat = ChatPresence.NEVER
-    miner.badge_drop_category_sort = "VIEWERS_DESC"
-    miner.badge_drop_blacklist = set()
-    miner.config_reload_lock = threading.Lock()
-    miner.sync_campaigns_thread = object()
+
+class CompletedCatalog:
+    """Every catalog campaign matches a completed-campaign signature."""
+
+    def eligible_badge_campaigns(
+        self, owned_badges, completed_campaign_signatures=None
+    ):
+        assert owned_badges == {"owned badge"}
+        assert completed_campaign_signatures == {"a-signature"}
+        return []
+
+
+UNUSABLE_INVENTORIES = {
+    # Twitch.get_drops_inventory() returns {} (never raises) when the request
+    # or its parsing fails.
+    "failed-load": {},
+    # A partial response passes drops_inventory_loaded with
+    # completedRewardCampaigns errored to null.
+    "partial-response": {
+        "dropCampaignsInProgress": [],
+        "completedRewardCampaigns": None,
+    },
+}
+
+
+class NoInventoryTwitch(BaselineTwitch):
+    def __init__(self, inventory):
+        super().__init__()
+        self.inventory = inventory
+
+    def get_drops_inventory(self):
+        return self._record(self.inventory)
+
+    def completed_badge_campaign_signatures(self, inventory):
+        raise AssertionError("should not be called when the inventory is unusable")
+
+
+def _records(caplog, fragment):
+    return [record for record in caplog.records if fragment in record.getMessage()]
+
+
+@pytest.mark.parametrize("inventory_id", list(UNUSABLE_INVENTORIES))
+def test_auto_mine_badge_campaigns_skips_without_cache_when_inventory_unusable(
+    caplog, inventory_id
+):
+    # Both used to read as "no campaign completed" and re-add the channels of
+    # finished campaigns.
+    miner = _badge_check_miner(NoInventoryTwitch(UNUSABLE_INVENTORIES[inventory_id]))
+    miner.drop_badge_catalog = UntouchedCatalog()
+    tracked = list(miner.streamers)
+
+    with caplog.at_level(logging.INFO):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == tracked
+    assert miner.original_streamers == [10]
+    assert miner.ws_pool.removed == []
+    assert miner.twitch.selectors == []
+    assert miner.twitch.available_badge_names == {"old badge"}
+    assert miner.twitch.completed_badge_campaign_signature_cache is None
+    # A skipped cycle warns like the earned-badge skip does.
+    skip_records = _records(caplog, "skipping automatic badge Drop discovery")
+    assert [record.levelno for record in skip_records] == [logging.WARNING]
+    if inventory_id == "partial-response":
+        assert "error for the completed Drop campaigns" in (
+            skip_records[0].getMessage()
+        )
+
+
+@pytest.mark.parametrize("inventory_id", list(UNUSABLE_INVENTORIES))
+def test_auto_mine_badge_campaigns_uses_cached_completions_when_inventory_unusable(
+    caplog, inventory_id
+):
+    miner = _badge_check_miner(NoInventoryTwitch(UNUSABLE_INVENTORIES[inventory_id]))
+    miner.drop_badge_catalog = CompletedCatalog()
+    miner.twitch.completed_badge_campaign_signature_cache = {"a-signature"}
+
+    with caplog.at_level(logging.INFO):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    # The cycle ran against the cached result: the completed campaign stayed
+    # excluded and its tracked channel was retired.
+    assert miner.streamers == []
+    assert miner.original_streamers == []
+    assert miner.ws_pool.removed == ["previous-random"]
+    assert miner.twitch.available_badge_names == {"owned badge"}
+    assert miner.twitch.completed_badge_campaign_signature_cache == {"a-signature"}
+    assert len(_records(caplog, "last loaded completed-campaign result")) == 1
+
+
+def test_auto_mine_badge_campaigns_logs_inventory_fallback_only_on_transitions(
+    caplog,
+):
+    twitch = NoInventoryTwitch({})
+    twitch.completed_badge_campaign_signature_cache = {"a-signature"}
+    miner = _badge_check_miner(twitch)
+    miner.drop_badge_catalog = CompletedCatalog()
+
+    with caplog.at_level(logging.DEBUG):
+        # Two failed checks in a row: the streak is reported once at the
+        # category level, then only at DEBUG.
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        fallback_levels = [
+            record.levelno
+            for record in _records(caplog, "last loaded completed-campaign result")
+        ]
+        assert fallback_levels == [logging.INFO, logging.DEBUG]
+        assert miner.badge_inventory_state == "unavailable-cached"
+
+        # A different unusable state is a transition and is reported again.
+        twitch.inventory = UNUSABLE_INVENTORIES["partial-response"]
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        assert [
+            record.levelno
+            for record in _records(caplog, "error for the completed Drop campaigns")
+        ] == [logging.INFO]
+        assert miner.badge_inventory_state == "errored-completions-cached"
+
+        # A loaded inventory without the field will not recover by itself,
+        # so it warns even with a cached result.
+        twitch.inventory = {"dropCampaignsInProgress": []}
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        assert [
+            record.levelno
+            for record in _records(caplog, "without a completedRewardCampaigns list")
+        ] == [logging.WARNING]
+        assert miner.badge_inventory_state == "missing-completions-cached"
+
+        # Recovery is reported once and clears the streak.
+        twitch.inventory = {"present": True, "completedRewardCampaigns": []}
+        twitch.completed_badge_campaign_signatures = lambda inventory: {"a-signature"}
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        assert [
+            record.levelno
+            for record in _records(caplog, "badge Drop completion checks resumed")
+        ] == [logging.INFO]
+        assert miner.badge_inventory_state is None
+
+
+def test_auto_mine_badge_campaigns_logs_skip_streak_once_at_warning(caplog):
+    twitch = NoInventoryTwitch({})
+    miner = _badge_check_miner(twitch)
+    miner.drop_badge_catalog = UntouchedCatalog()
+
+    with caplog.at_level(logging.DEBUG):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        assert [
+            record.levelno
+            for record in _records(caplog, "skipping automatic badge Drop discovery")
+        ] == [logging.WARNING, logging.DEBUG]
+        assert miner.badge_inventory_state == "unavailable-skipped"
+
+        # The inventory loads: the cycle runs again and recovery is logged once.
+        twitch.inventory = {"present": True, "completedRewardCampaigns": []}
+        twitch.completed_badge_campaign_signatures = lambda inventory: {"a-signature"}
+        miner.drop_badge_catalog = CompletedCatalog()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        assert [
+            record.levelno
+            for record in _records(caplog, "badge Drop completion checks resumed")
+        ] == [logging.INFO]
+        assert miner.badge_inventory_state is None
+        assert miner.ws_pool.removed == ["previous-random"]
+
+
+def test_auto_mine_badge_campaigns_retires_completed_campaigns_when_inventory_loads():
+    # A loaded inventory feeds the completed-campaign signatures to the catalog
+    # and refreshes the cache, and a tracked channel whose campaign is now
+    # complete is retired.
+    miner = _badge_check_miner(BaselineTwitch())
+    miner.drop_badge_catalog = CompletedCatalog()
 
     miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
 
     assert miner.streamers == []
+    assert miner.original_streamers == []
+    assert miner.ws_pool.removed == ["previous-random"]
+    assert miner.twitch.selectors == []
+    assert miner.twitch.available_badge_names == {"owned badge"}
+    assert miner.twitch.completed_badge_campaign_signature_cache == {"a-signature"}
+
+
+def test_auto_mine_badge_campaigns_restores_badge_baseline_when_check_raises():
+    # An unexpected error while reading the completions aborts the cycle
+    # through the outer handler.
+    class BrokenTwitch(BaselineTwitch):
+        def completed_badge_campaign_signatures(self, *args):
+            raise RuntimeError("unexpected inventory failure")
+
+    miner = _badge_check_miner(BrokenTwitch())
+    miner.drop_badge_catalog = UntouchedCatalog()
+    tracked = list(miner.streamers)
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == tracked
+    assert miner.original_streamers == [10]
+    assert miner.ws_pool.removed == []
+    assert miner.twitch.available_badge_names == {"old badge"}
+
+
+class RaisingInventoryTwitch(BaselineTwitch):
+    def get_drops_inventory(self):
+        raise RuntimeError("unexpected inventory failure")
+
+
+def test_auto_mine_badge_campaigns_skips_when_inventory_raises_without_cache(caplog):
+    # get_drops_inventory reports failures by returning {}; one that raises
+    # anyway is treated as an unavailable inventory, not a broken check.
+    miner = _badge_check_miner(RaisingInventoryTwitch())
+    miner.drop_badge_catalog = UntouchedCatalog()
+    tracked = list(miner.streamers)
+
+    with caplog.at_level(logging.DEBUG):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == tracked
+    assert miner.ws_pool.removed == []
+    assert miner.twitch.available_badge_names == {"old badge"}
+    assert any(
+        "unexpected inventory failure" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any(
+        "Unable to determine eligible badge Drop campaigns" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_auto_mine_badge_campaigns_uses_cache_when_inventory_raises():
+    twitch = RaisingInventoryTwitch()
+    twitch.completed_badge_campaign_signature_cache = {"a-signature"}
+    miner = _badge_check_miner(twitch)
+    miner.drop_badge_catalog = CompletedCatalog()
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    # The cycle ran against the cached completions and retired the tracked
+    # streamer of the completed campaign.
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["previous-random"]
 
 
 def test_auto_mine_badge_campaigns_adds_channels_a_failed_lookup_still_found():
@@ -520,6 +772,7 @@ def test_auto_mine_badge_campaigns_adds_channels_a_failed_lookup_still_found():
     miner.original_streamers = []
     miner.ws_pool = FakeWebSocketsPool()
     miner.drop_badge_catalog = FakeCatalog()
+    miner.badge_inventory_state = None
     miner.badge_drop_streamer_limit = 2
     miner.badge_drop_category_chat = ChatPresence.NEVER
     miner.badge_drop_category_sort = "VIEWERS_DESC"
@@ -773,3 +1026,79 @@ def test_rediscovered_category_streamer_is_checked_before_it_can_be_watched():
     assert added == 1
     assert checked_while_listed == [False]
     assert [streamer.username for streamer in miner.streamers] == ["returning"]
+
+
+def test_auto_mine_badge_campaigns_runs_without_completions_field(caplog):
+    """An inventory that loads without completedRewardCampaigns (and without
+    an error for it) means the response no longer carries the field. Badge
+    discovery keeps running instead of standing down indefinitely."""
+
+    class EmptyCompletionsCatalog:
+        def eligible_badge_campaigns(
+            self, owned_badges, completed_campaign_signatures=None
+        ):
+            assert completed_campaign_signatures == set()
+            return []
+
+    miner = _badge_check_miner(NoInventoryTwitch({"dropCampaignsInProgress": []}))
+    miner.drop_badge_catalog = EmptyCompletionsCatalog()
+
+    with caplog.at_level(logging.DEBUG):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.ws_pool.removed == ["previous-random"]
+    assert miner.badge_inventory_state == "missing-completions-unmatched"
+    assert [
+        record.levelno
+        for record in _records(caplog, "without a completedRewardCampaigns list")
+    ] == [logging.WARNING, logging.DEBUG]
+
+
+def test_auto_mine_badge_campaigns_repeats_persistent_state_hourly(
+    caplog, monkeypatch
+):
+    clock = [1000.0]
+    miner_module = sys.modules[TwitchChannelPointsMiner.__module__]
+    monkeypatch.setattr(
+        miner_module,
+        "time",
+        SimpleNamespace(
+            **{
+                **{name: getattr(time, name) for name in dir(time)},
+                "monotonic": lambda: clock[0],
+            }
+        ),
+    )
+    miner = _badge_check_miner(NoInventoryTwitch({}))
+    miner.drop_badge_catalog = UntouchedCatalog()
+
+    with caplog.at_level(logging.DEBUG):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        clock[0] += TwitchChannelPointsMiner.BADGE_INVENTORY_REMINDER_SECONDS - 1
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        clock[0] += 1
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert [
+        record.levelno
+        for record in _records(caplog, "skipping automatic badge Drop discovery")
+    ] == [logging.WARNING, logging.DEBUG, logging.WARNING, logging.DEBUG]
+
+
+def test_auto_mine_badge_campaigns_reports_raising_inventory_once(caplog):
+    miner = _badge_check_miner(RaisingInventoryTwitch())
+    miner.drop_badge_catalog = UntouchedCatalog()
+
+    with caplog.at_level(logging.DEBUG):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "unexpected inventory failure" in record.getMessage()
+    ]
+    assert len(warnings) == 1

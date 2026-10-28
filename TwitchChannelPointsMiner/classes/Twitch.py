@@ -26,6 +26,9 @@ import requests
 from colorama import Fore
 
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
+from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
+    completed_signature_matches,
+)
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
@@ -78,6 +81,23 @@ logger = logging.getLogger(__name__)
 JsonType = Dict[str, Any]
 CHANNEL_POINTS_MAX_CONCURRENCY = 3
 DROP_INVENTORY_FRESHNESS_SECONDS = 180
+# How often a continuing gist stand-down is reported again at full level.
+GIST_STAND_DOWN_REMINDER_SECONDS = 3600
+# Minimum time between warnings about unrecognizable completed campaigns.
+COMPLETED_BADGE_UNSIGNABLE_WARNING_SECONDS = 3600
+# Guards the completed-campaign signature cache on Twitch objects built
+# without __init__ (some tests use __new__), so no thread has to create a
+# lock lazily and race another thread doing the same.
+_COMPLETED_BADGE_SIGNATURE_FALLBACK_LOCK = Lock()
+
+
+def _completed_badge_signature_lock(twitch):
+    return (
+        getattr(twitch, "completed_badge_campaign_signature_lock", None)
+        or _COMPLETED_BADGE_SIGNATURE_FALLBACK_LOCK
+    )
+
+
 # How long a per-channel campaign check result outranks category discovery's
 # provisional eligibility. Discovered streams are re-checked about every two
 # minutes, so this only lapses when the channel query keeps failing.
@@ -148,6 +168,7 @@ class Twitch(object):
         "twitchdrops_app_upcoming_starts",
         "twitchdrops_app_deadlines",
         "twitchdrops_app_catalog_complete",
+        "twitchdrops_app_stand_down_logged_at",
         "twitchdrops_app_campaign_filtered_slugs",
         "twitch_campaign_names_by_game",
         "active_drop_campaigns",
@@ -180,6 +201,11 @@ class Twitch(object):
         "campaign_names",
         "reward_campaign_ids",
         "available_badge_names",
+        "completed_badge_campaign_signature_cache",
+        "completed_badge_campaign_signature_lock",
+        "completed_badge_campaign_signatures_by_id",
+        "completed_badge_campaign_unsignable_count",
+        "completed_badge_campaign_unsignable_warned_at",
         "drop_badge_rewards",
         "restart_requested",
         "gql",
@@ -248,6 +274,7 @@ class Twitch(object):
         self.twitchdrops_app_upcoming_starts = {}
         self.twitchdrops_app_deadlines = {}
         self.twitchdrops_app_catalog_complete = False
+        self.twitchdrops_app_stand_down_logged_at = None
         # Games whose gist campaigns were filtered against the campaigns
         # Twitch itself reported, so their gist deadlines can be merged
         # alongside Twitch's own for the same game.
@@ -310,6 +337,11 @@ class Twitch(object):
         # whenever it lacks personalized claim-state data.
         self.reward_campaign_ids = set()
         self.available_badge_names = None
+        self.completed_badge_campaign_signature_cache = None
+        self.completed_badge_campaign_signature_lock = Lock()
+        self.completed_badge_campaign_signatures_by_id = {}
+        self.completed_badge_campaign_unsignable_count = 0
+        self.completed_badge_campaign_unsignable_warned_at = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
         self.stream_segment_watchers = {}
@@ -1511,14 +1543,9 @@ class Twitch(object):
         for completed_record in inventory.get("completedRewardCampaigns", []) or []:
             if not isinstance(completed_record, dict):
                 continue
-            campaign = completed_record.get("campaign")
-            if not isinstance(campaign, dict):
-                campaign = completed_record
-            campaign_id = campaign.get("id")
-            if campaign_id in [None, ""] and isinstance(campaign.get("campaign"), dict):
-                campaign_id = campaign["campaign"].get("id")
-            if campaign_id not in [None, ""]:
-                completed_ids.add(str(campaign_id))
+            _, campaign_id = self.__completed_record_campaign(completed_record)
+            if campaign_id is not None:
+                completed_ids.add(campaign_id)
 
         # Twitch can briefly leave a completed campaign in the in-progress
         # collection before moving it to completedRewardCampaigns. All Drops
@@ -1998,13 +2025,15 @@ class Twitch(object):
         for completed_record in inventory.get("completedRewardCampaigns", []) or []:
             if not isinstance(completed_record, dict):
                 continue
-            campaign = completed_record.get("campaign")
-            if not isinstance(campaign, dict):
-                campaign = completed_record
+            campaign, _ = self.__completed_record_campaign(completed_record)
+            # Only a top-level ID: everything downstream reads campaign["id"],
+            # so a record identified by a nested ID cannot be used here.
             campaign_id = campaign.get("id")
-            game = campaign.get("game") or {}
-            if campaign_id in [None, ""] or not (
-                game.get("displayName") or game.get("name")
+            game = campaign.get("game")
+            if (
+                campaign_id in [None, ""]
+                or not isinstance(game, dict)
+                or not (game.get("displayName") or game.get("name"))
             ):
                 continue
             campaigns_by_id[str(campaign_id)] = campaign
@@ -2251,9 +2280,53 @@ class Twitch(object):
     def __campaign_name_key(name):
         return " ".join(str(name or "").split()).casefold()
 
-    def __twitchdrops_app_fallback(
-        self, categories, known_category_slugs, inventory=None
-    ):
+    def __twitchdrops_app_fallback(self, categories, known_category_slugs, inventory):
+        # completedRewardCampaigns is authoritative account-completion evidence
+        # (unlike __fallback_reward_was_awarded's lastAwardedAt-in-window guess,
+        # it does not depend on the reward having been (re)awarded inside this
+        # externally-sourced campaign's date window) but its campaign IDs are
+        # Twitch's own and never match the gist's locally computed IDs, so join
+        # on the same (game, campaign name, end time) signature already used
+        # for badge campaigns. Without that evidence every gist campaign this
+        # account already finished would look mineable, so stand down until
+        # the inventory loads once. The stored gist result is cleared, as
+        # after a failed gist scrape: it may come from a run without
+        # completion evidence (an inventory missing the field) and must not
+        # stay live as verified. The flag stays unset so a wildcard pass
+        # with refresh_external_catalog=False checks again. Both discovery passes reach this in
+        # the same cycle, so the stand-down is reported once per streak and
+        # repeated hourly while it lasts.
+        completed_campaign_signatures = (
+            self.completed_badge_campaign_signatures_or_cached(inventory)
+        )
+        if completed_campaign_signatures is None:
+            now = time.monotonic()
+            logged_at = getattr(self, "twitchdrops_app_stand_down_logged_at", None)
+            reminder_due = (
+                logged_at is None or now - logged_at >= GIST_STAND_DOWN_REMINDER_SECONDS
+            )
+            logger.log(
+                (
+                    getattr(self, "category_log_level", logging.INFO)
+                    if reminder_due
+                    else logging.DEBUG
+                ),
+                "Skipping Twitch Drops gist check: completedRewardCampaigns "
+                "unavailable and no earlier result cached",
+                extra={"emoji": ":pause_button:", "category_log": True},
+            )
+            if reminder_due:
+                self.twitchdrops_app_stand_down_logged_at = now
+            # Like a failed scrape, leave nothing from an earlier run live:
+            # it may come from a run without completion evidence.
+            self.twitchdrops_app_campaign_filtered_slugs = set()
+            self.twitchdrops_app_campaigns = {}
+            self.twitchdrops_app_game_names = {}
+            self.twitchdrops_app_upcoming_starts = {}
+            self.twitchdrops_app_deadlines = {}
+            self.twitchdrops_app_catalog_complete = False
+            return {}
+        self.twitchdrops_app_stand_down_logged_at = None
         catalog_complete = categories is None
         deadlines = {}
         twitch_authoritative_slugs = set(known_category_slugs)
@@ -2281,24 +2354,14 @@ class Twitch(object):
             | self.__get_viewer_reward_drop_earned_names()
         )
         captured_drop_history = self.__captured_drop_history()
-        # completedRewardCampaigns is authoritative account-completion evidence
-        # (unlike __fallback_reward_was_awarded's lastAwardedAt-in-window guess,
-        # it does not depend on the reward having been (re)awarded inside this
-        # externally-sourced campaign's date window) but its campaign IDs are
-        # Twitch's own and never match the gist's locally computed IDs, so join
-        # on the same (game, campaign name, end time) signature already used
-        # for badge campaigns.
-        completed_campaign_signatures = (
-            self.completed_badge_campaign_signatures(inventory)
-            if isinstance(inventory, dict)
-            else set()
-        )
         self.__log_drop_check_json(
             "completedRewardCampaigns signatures available for gist matching",
             sorted(
                 [
-                    game_slug,
-                    campaign_name,
+                    # Partial signatures use None as a wildcard; sorted()
+                    # cannot compare None with a string.
+                    game_slug or "*",
+                    campaign_name or "*",
                     datetime.utcfromtimestamp(ends_at_epoch).isoformat() + "Z",
                 ]
                 for game_slug, campaign_name, ends_at_epoch in completed_campaign_signatures
@@ -2878,6 +2941,39 @@ class Twitch(object):
         """
         return isinstance(inventory, dict) and inventory != {}
 
+    @staticmethod
+    def drops_inventory_completions_state(inventory) -> str:
+        """Classify an inventory's completedRewardCampaigns field.
+
+        "unavailable": the inventory itself did not load.
+        "loaded": a list, possibly empty (an account with no completions
+        gets [] rather than null).
+        "errored": present but not a list; __get_inventory nulls the field
+        when Twitch reports an error covering a list it did not deliver, or
+        a delivered list whose entries all failed to null.
+        "missing": the inventory loaded without a list and without an error
+        for it. __get_inventory removes an error-free null as well, so this
+        also covers a response that no longer carries the field (for example
+        after a schema change) rather than a transient failure.
+        """
+        if not Twitch.drops_inventory_loaded(inventory):
+            return "unavailable"
+        if "completedRewardCampaigns" not in inventory:
+            return "missing"
+        if isinstance(inventory.get("completedRewardCampaigns"), list):
+            return "loaded"
+        return "errored"
+
+    @staticmethod
+    def drops_inventory_completions_loaded(inventory) -> bool:
+        """Whether an inventory carries a usable completedRewardCampaigns list.
+
+        A partial Inventory response passes drops_inventory_loaded with the
+        field errored to null. Errors within individual entries can leave
+        usable completion IDs even without signature metadata.
+        """
+        return Twitch.drops_inventory_completions_state(inventory) == "loaded"
+
     def completed_badge_campaign_signatures(self, inventory: dict) -> set:
         """Build (game_slug, campaign_name, ends_at_epoch) signatures for
         campaigns the authenticated account has already completed.
@@ -2892,35 +2988,192 @@ class Twitch(object):
         those human-readable fields instead of by ID (the scraper's
         campaign "id" is a locally computed hash, not Twitch's real
         campaign ID, and can never match self.completed_drop_campaigns).
+
+        Entries with errored metadata still yield a signature when they can:
+        from an earlier full read of the same campaign ID, or with an
+        errored game as a wildcard (see completed_signature_matches).
+        Otherwise, an entry missing its name or end time is not matched.
+        """
+        with _completed_badge_signature_lock(self):
+            known_signatures_by_id = dict(
+                getattr(self, "completed_badge_campaign_signatures_by_id", None) or {}
+            )
+        return self.__completed_badge_campaign_evidence(
+            inventory, known_signatures_by_id
+        )[0]
+
+    @staticmethod
+    def __completed_record_campaign(completed_record):
+        campaign = completed_record.get("campaign")
+        if not isinstance(campaign, dict):
+            campaign = completed_record
+        campaign_id = campaign.get("id")
+        if campaign_id in [None, ""] and isinstance(campaign.get("campaign"), dict):
+            campaign_id = campaign["campaign"].get("id")
+        return campaign, None if campaign_id in [None, ""] else str(campaign_id)
+
+    def __completed_badge_campaign_evidence(self, inventory, known_signatures_by_id):
+        """Return (signatures, full_signatures, signatures_by_id, unsignable).
+
+        signatures is everything usable for matching this read, including
+        partial (wildcard) signatures. full_signatures holds only entries
+        with all three fields, the only ones safe to keep permanently: a
+        wildcard from a transient error would otherwise keep suppressing
+        unrelated same-named campaigns after the error clears.
+        unsignable counts entries that may belong to an active campaign but
+        carry too little metadata to match it.
         """
         signatures = set()
+        full_signatures = set()
+        signatures_by_id = {}
+        unsignable = 0
         if not isinstance(inventory, dict):
-            return signatures
+            return signatures, full_signatures, signatures_by_id, unsignable
 
+        now_epoch = datetime.now(timezone.utc).timestamp()
         for completed_record in inventory.get("completedRewardCampaigns", []) or []:
             if not isinstance(completed_record, dict):
+                unsignable += 1
                 continue
-            campaign = completed_record.get("campaign")
-            if not isinstance(campaign, dict):
-                campaign = completed_record
+            campaign, campaign_id = self.__completed_record_campaign(completed_record)
 
-            game = campaign.get("game") or {}
-            game_name = (game.get("displayName") or game.get("name") or "").strip()
+            game = campaign.get("game")
+            game_name = ""
+            if isinstance(game, dict):
+                game_name = str(game.get("displayName") or game.get("name") or "")
+            game_slug = self.__slugify(game_name.strip()) if game_name.strip() else ""
             campaign_name = str(campaign.get("name") or "").strip().casefold()
             ends_at = self.__parse_twitch_datetime(
                 campaign.get("endAt") or campaign.get("endsAt")
             )
-            if not game_name or not campaign_name or ends_at is None:
+            ends_at_epoch = (
+                None
+                if ends_at is None
+                else ends_at.replace(tzinfo=timezone.utc).timestamp()
+            )
+
+            if game_slug and campaign_name and ends_at_epoch is not None:
+                signature = (game_slug, campaign_name, ends_at_epoch)
+                signatures.add(signature)
+                full_signatures.add(signature)
+                if campaign_id is not None:
+                    signatures_by_id[campaign_id] = signature
                 continue
-
-            game_slug = self.__slugify(game_name)
-            if not game_slug:
+            if campaign_id is not None and campaign_id in known_signatures_by_id:
+                signatures.add(known_signatures_by_id[campaign_id])
                 continue
+            if ends_at_epoch is None:
+                # The end time is what tells reruns of a same-named campaign
+                # apart, so it is never a wildcard.
+                unsignable += 1
+                continue
+            if ends_at_epoch <= now_epoch:
+                # Already over: it cannot match an active campaign.
+                continue
+            if campaign_name:
+                # The game alone is too broad: a game can run several
+                # campaigns ending together, such as a restricted and an
+                # all-channel one, and only one of them may be complete.
+                signatures.add((game_slug or None, campaign_name, ends_at_epoch))
+                continue
+            unsignable += 1
 
-            ends_at_epoch = ends_at.replace(tzinfo=timezone.utc).timestamp()
-            signatures.add((game_slug, campaign_name, ends_at_epoch))
+        return signatures, full_signatures, signatures_by_id, unsignable
 
-        return signatures
+    def __record_completed_badge_campaigns(self, inventory):
+        """Add a freshly read inventory's completions to the signature cache.
+
+        __get_inventory is the only writer, so inventory sync, badge checks
+        and category discovery all record the completions they observe while
+        consumers only read. The cache only grows, like
+        completed_drop_campaigns: completing a campaign is permanent, so a
+        partial response that omits an entry must not erase it. The parsing
+        runs outside the lock; merging is a union, so concurrent writers
+        cannot lose each other's results.
+        """
+        if not self.drops_inventory_completions_loaded(inventory):
+            return
+        with _completed_badge_signature_lock(self):
+            known_signatures_by_id = dict(
+                getattr(self, "completed_badge_campaign_signatures_by_id", None) or {}
+            )
+        (
+            _,
+            full_signatures,
+            signatures_by_id,
+            unsignable,
+        ) = self.__completed_badge_campaign_evidence(inventory, known_signatures_by_id)
+        with _completed_badge_signature_lock(self):
+            cached = getattr(self, "completed_badge_campaign_signature_cache", None)
+            self.completed_badge_campaign_signature_cache = (
+                cached or set()
+            ) | full_signatures
+            stored_signatures_by_id = getattr(
+                self, "completed_badge_campaign_signatures_by_id", None
+            )
+            if stored_signatures_by_id is None:
+                self.completed_badge_campaign_signatures_by_id = signatures_by_id
+            else:
+                stored_signatures_by_id.update(signatures_by_id)
+            # Highest count warned about in the current streak. An old entry
+            # without an end time stays unsignable forever, so the same count
+            # never warns twice; a read with none ends the streak so a later
+            # failure warns again. Warnings are at most hourly, so entries
+            # that fail on alternate reads cannot warn on every read.
+            previous_unsignable = getattr(
+                self, "completed_badge_campaign_unsignable_count", 0
+            )
+            now = time.monotonic()
+            warned_at = getattr(
+                self, "completed_badge_campaign_unsignable_warned_at", None
+            )
+            warn = unsignable > previous_unsignable and (
+                warned_at is None
+                or now - warned_at >= COMPLETED_BADGE_UNSIGNABLE_WARNING_SECONDS
+            )
+            if warn:
+                self.completed_badge_campaign_unsignable_count = unsignable
+                self.completed_badge_campaign_unsignable_warned_at = now
+            elif unsignable == 0:
+                self.completed_badge_campaign_unsignable_count = 0
+        if warn:
+            logger.warning(
+                f"{unsignable} completed Drop campaign(s) in the inventory lack "
+                "the campaign name or end time needed to recognize them; they "
+                "may be mined again until Twitch returns them in full",
+                extra={"emoji": ":warning:", "category_log": True},
+            )
+        elif unsignable:
+            self.__log_drop_check(
+                f"{unsignable} completed Drop campaign(s) in the inventory "
+                "cannot be recognized",
+                level=logging.DEBUG,
+            )
+
+    def completed_badge_campaign_signatures_or_cached(self, inventory):
+        """Signatures of every completed campaign known for this inventory.
+
+        Read-only: __get_inventory already recorded the inventory's
+        completions. A loaded inventory returns the cache plus its own
+        signatures (partial ones included). An inventory without the field
+        at all ("missing") returns the cache, or an empty set before any
+        load, so a response shape that will not recover on its own cannot
+        stop badge and gist discovery indefinitely. A failed load or an
+        errored field returns the cache as it is, or None before any load
+        succeeded, so no consumer mistakes a failed load for "no campaign
+        completed".
+        """
+        state = self.drops_inventory_completions_state(inventory)
+        with _completed_badge_signature_lock(self):
+            cached = getattr(self, "completed_badge_campaign_signature_cache", None)
+            cached = None if cached is None else set(cached)
+        if state == "loaded":
+            return (cached or set()) | self.completed_badge_campaign_signatures(
+                inventory
+            )
+        if state == "missing":
+            return cached or set()
+        return cached
 
     def __campaign_matches_completed_signature(
         self, game_name, campaign_name, ends_at, completed_campaign_signatures
@@ -2939,14 +3192,11 @@ class Twitch(object):
         if not game_slug or not campaign_name:
             return False
 
-        ends_at_epoch = ends_at.replace(tzinfo=timezone.utc).timestamp()
-        return any(
-            game_slug == signature_game_slug
-            and campaign_name == signature_campaign_name
-            and abs(ends_at_epoch - signature_ends_at) <= 1
-            for signature_game_slug, signature_campaign_name, signature_ends_at in (
-                completed_campaign_signatures
-            )
+        return completed_signature_matches(
+            completed_campaign_signatures,
+            game_slug,
+            campaign_name,
+            ends_at.replace(tzinfo=timezone.utc).timestamp(),
         )
 
     def __merge_fallback_deadlines(
@@ -6904,14 +7154,65 @@ class Twitch(object):
         debug["total_unique"] = len(campaigns)
         return campaigns, debug
 
+    @staticmethod
+    def __normalize_completed_reward_campaigns(inventory, error_paths):
+        """Make completedRewardCampaigns say whether it can be trusted.
+
+        A delivered list is kept when any entry survived: errors inside
+        individual entries leave the rest usable (a failed metadata field can
+        still leave a valid campaign ID that category discovery must treat as
+        completed, and signature matching recovers what it can; see
+        completed_badge_campaign_signatures). The field becomes None
+        ("errored") when an error covers it (on the list or inside it, on a
+        parent path, or without a path) and it carries no entry to read: no
+        list, since the failure may have nulled or dropped it, or a list
+        whose entries all failed to null, which says no more than a null
+        list. Like a null list, it stands discovery down until a usable list
+        has loaded once, even if the same entries fail on every read. An
+        empty list is kept: a list that failed to resolve comes back null,
+        so [] means it resolved and the errors are elsewhere. Otherwise a
+        missing list is removed ("missing"): an account with no completions
+        gets [], so a null or absent list without an error is a response
+        shape the consumers cannot trust as "nothing completed" but also
+        must not wait on forever.
+        """
+        key = "completedRewardCampaigns"
+        completions = inventory.get(key)
+        completions_path = ("currentUser", "inventory", key)
+        errored = any(
+            path[:3] == completions_path or completions_path[: len(path)] == path
+            for path in error_paths
+        )
+        if isinstance(completions, list) and not (
+            errored
+            and completions
+            and not any(isinstance(record, dict) for record in completions)
+        ):
+            return
+        if errored:
+            inventory[key] = None
+        else:
+            inventory.pop(key, None)
+
     def __get_inventory(self):
         try:
             inventory_response = self.gql.get_inventory()
-            inventory = inventory_response.inventory
+            inventory = getattr(inventory_response, "inventory", None)
+            if not isinstance(inventory, dict):
+                # An error on currentUser or its inventory nulls the whole
+                # object. Report it like any other failed load so callers
+                # never receive something they cannot read.
+                logger.error(
+                    "Unable to load drops inventory: Twitch returned no "
+                    "inventory. Errors: "
+                    f"{getattr(inventory_response, 'errors', None)}"
+                )
+                return {}
+            error_paths = {
+                tuple(error.path or []) for error in inventory_response.errors or []
+            }
+            self.__normalize_completed_reward_campaigns(inventory, error_paths)
             if inventory_response.errors:
-                error_paths = {
-                    tuple(error.path or []) for error in inventory_response.errors
-                }
                 only_optional_errors = error_paths.issubset(
                     {("currentUser", "inventory", "gameEventDrops")}
                 )
@@ -6940,6 +7241,9 @@ class Twitch(object):
             self.completed_drop_campaigns.update(
                 self.__completed_campaign_ids_from_inventory(inventory)
             )
+            # Sync and startup inventory reads also observe completions. Keep
+            # their evidence even if the next discovery-specific fetch fails.
+            self.__record_completed_badge_campaigns(inventory)
             if self.log_drop_checks is True:
                 campaigns_in_progress = (
                     inventory.get("dropCampaignsInProgress", []) or []

@@ -362,6 +362,8 @@ class TwitchChannelPointsMiner:
         "drop_badge_catalog_thread",
         "drop_badge_catalog_stop_event",
         "auto_mine_badge_drops",
+        "badge_inventory_state",
+        "badge_inventory_state_logged_at",
         "badge_drop_streamer_limit",
         "badge_drop_category_chat",
         "badge_drop_category_sort",
@@ -519,6 +521,8 @@ class TwitchChannelPointsMiner:
         self.drop_badge_catalog_thread = None
         self.drop_badge_catalog_stop_event = threading.Event()
         self.auto_mine_badge_drops = False
+        self.badge_inventory_state = None
+        self.badge_inventory_state_logged_at = None
         self.badge_drop_streamer_limit = 1
         self.badge_drop_category_chat = None
         self.badge_drop_category_sort = "VIEWERS_DESC"
@@ -1551,8 +1555,9 @@ class TwitchChannelPointsMiner:
         if self.drop_badge_catalog is None or self.ws_pool is None:
             return
 
+        previous_owned_badges = getattr(self.twitch, "available_badge_names", None)
+        category_log_level = getattr(self.twitch, "category_log_level", logging.INFO)
         try:
-            previous_owned_badges = getattr(self.twitch, "available_badge_names", None)
             owned_badges = self.twitch.get_earned_badge_names(refresh=True)
             if owned_badges is None:
                 self.twitch.available_badge_names = previous_owned_badges
@@ -1563,24 +1568,58 @@ class TwitchChannelPointsMiner:
                 )
                 return
 
-            completed_campaign_signatures = set()
+            # AvailableBadges omits already-claimed campaign badges, so the
+            # Drops inventory is the only way to recognize completed
+            # campaigns. A failed load comes back empty instead of raising,
+            # and a partial response can leave completedRewardCampaigns as
+            # null, so neither may be read as "nothing completed": that
+            # re-added the channels of finished campaigns until the next
+            # check. Twitch falls back to the last loaded result; only before
+            # the first successful load is the cycle skipped, the same way a
+            # missing earned-badge inventory is above. get_drops_inventory
+            # reports its own failures by returning an empty dict; anything it
+            # raises unexpectedly is treated the same way, and reported once
+            # per streak by __log_badge_inventory_fallback.
+            inventory_error = None
             try:
                 inventory = self.twitch.get_drops_inventory()
-                completed_campaign_signatures = (
-                    self.twitch.completed_badge_campaign_signatures(inventory)
-                )
             except Exception as error:
-                logger.warning(
-                    "Unable to fetch the account's Drops inventory for badge "
-                    f"campaign completion checks: {error}",
+                inventory_error = error
+                logger.debug(
+                    f"Unable to load the account's Drops inventory for badge "
+                    f"Drop completion checks: {error}",
                     extra={"emoji": ":warning:", "category_log": True},
                 )
+                inventory = {}
+            completed_campaign_signatures = (
+                self.twitch.completed_badge_campaign_signatures_or_cached(inventory)
+            )
+            if Twitch.drops_inventory_completions_loaded(inventory):
+                if self.badge_inventory_state is not None:
+                    self.badge_inventory_state = None
+                    logger.log(
+                        category_log_level,
+                        "Drops inventory completions loaded again; badge Drop "
+                        "completion checks resumed",
+                        extra={"emoji": ":white_check_mark:", "category_log": True},
+                    )
+            else:
+                self.__log_badge_inventory_fallback(
+                    inventory,
+                    completed_campaign_signatures,
+                    category_log_level,
+                    inventory_error,
+                )
+                if completed_campaign_signatures is None:
+                    self.twitch.available_badge_names = previous_owned_badges
+                    return
 
             campaigns = self.drop_badge_catalog.eligible_badge_campaigns(
                 owned_badges,
                 completed_campaign_signatures=completed_campaign_signatures,
             )
         except Exception as error:
+            self.twitch.available_badge_names = previous_owned_badges
             logger.warning(
                 f"Unable to determine eligible badge Drop campaigns: {error}",
                 extra={"emoji": ":warning:", "category_log": True},
@@ -1797,6 +1836,75 @@ class TwitchChannelPointsMiner:
             f"{len(campaigns)} eligible campaigns, {badge_count} unearned badges, "
             f"{added} new live streamers",
             extra={"emoji": ":gift:", "category_log": True},
+        )
+
+    # A state that persists is repeated at its full level this often, so a
+    # skipped or degraded badge check never goes quiet for good.
+    BADGE_INVENTORY_REMINDER_SECONDS = 3600
+
+    def __log_badge_inventory_fallback(
+        self, inventory, cached_signatures, category_log_level, error=None
+    ):
+        """Report an unusable Drops inventory once per streak, not per check.
+
+        A failed request is also logged by __get_inventory itself, but an
+        inventory that loads without a completedRewardCampaigns field logs
+        nowhere else. Repeats of the same state drop to DEBUG until the state
+        changes, the caller logs recovery, or BADGE_INVENTORY_REMINDER_SECONDS
+        pass, when the full-level message repeats as a reminder. A skipped
+        cycle warns like the earned-badge skip above. A cycle that still ran
+        on the cached result after a failed load or an errored field only
+        uses the category log level. A field missing from a loaded inventory
+        always warns: that response shape will not clear on its own.
+        """
+        state = Twitch.drops_inventory_completions_state(inventory)
+        has_cache = (
+            getattr(self.twitch, "completed_badge_campaign_signature_cache", None)
+            is not None
+        )
+        if state == "missing":
+            state = "missing-completions"
+            cause = "Drops inventory loaded without a completedRewardCampaigns list"
+        elif state == "errored":
+            state = "errored-completions"
+            cause = "Twitch returned an error for the completed Drop campaigns"
+        else:
+            state = "unavailable"
+            cause = "Drops inventory unavailable"
+            if error is not None:
+                cause += f" ({error})"
+        if cached_signatures is None:
+            state += "-skipped"
+            action = "skipping automatic badge Drop discovery until it loads once"
+        elif has_cache:
+            state += "-cached"
+            action = (
+                "checking badge Drop campaigns against the last loaded "
+                "completed-campaign result"
+            )
+        else:
+            state += "-unmatched"
+            action = (
+                "checking badge Drop campaigns without completed-campaign "
+                "evidence, so finished campaigns may be mined again"
+            )
+        now = time.monotonic()
+        logged_at = getattr(self, "badge_inventory_state_logged_at", None)
+        reminder_due = (
+            logged_at is None
+            or now - logged_at >= self.BADGE_INVENTORY_REMINDER_SECONDS
+        )
+        if state == self.badge_inventory_state and not reminder_due:
+            level, emoji = logging.DEBUG, ":pause_button:"
+        elif state in ("unavailable-cached", "errored-completions-cached"):
+            level, emoji = category_log_level, ":pause_button:"
+        else:
+            level, emoji = logging.WARNING, ":warning:"
+        if level != logging.DEBUG:
+            self.badge_inventory_state_logged_at = now
+        self.badge_inventory_state = state
+        logger.log(
+            level, f"{cause}; {action}", extra={"emoji": emoji, "category_log": True}
         )
 
     def __reconcile_badge_campaign_streamers(

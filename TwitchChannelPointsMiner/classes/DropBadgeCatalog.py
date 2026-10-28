@@ -36,6 +36,30 @@ def _parse_timestamp(value):
         return None
 
 
+def completed_signature_matches(
+    completed_campaign_signatures, game_slug, campaign_name, ends_at_epoch
+):
+    """Whether a campaign matches a completed-campaign signature.
+
+    Signatures are (game_slug, campaign_name, ends_at_epoch). A None game
+    is a wildcard: Twitch can return a completed campaign with an errored
+    game, and its name and end time still identify it well enough to keep
+    it from being mined again.
+    """
+    for (
+        signature_game_slug,
+        signature_campaign_name,
+        signature_ends_at,
+    ) in completed_campaign_signatures:
+        if (
+            (signature_game_slug is None or game_slug == signature_game_slug)
+            and campaign_name == signature_campaign_name
+            and abs(ends_at_epoch - signature_ends_at) <= 1
+        ):
+            return True
+    return False
+
+
 # Twitch's own surfaces disagree on how a title's number is written -- a
 # drop's reward name may read "Solasta 2 Multiplayer" while the same badge's
 # name in the account's earned-badge inventory reads "Solasta II
@@ -551,19 +575,12 @@ class DropBadgeCatalog:
         if not game_slug or not campaign_name:
             return False
 
-        ends_at_epoch = ends_at.timestamp()
-        for (
-            signature_game_slug,
-            signature_campaign_name,
-            signature_ends_at,
-        ) in completed_campaign_signatures:
-            if (
-                game_slug == signature_game_slug
-                and campaign_name == signature_campaign_name
-                and abs(ends_at_epoch - signature_ends_at) <= 1
-            ):
-                return True
-        return False
+        return completed_signature_matches(
+            completed_campaign_signatures,
+            game_slug,
+            campaign_name,
+            ends_at.timestamp(),
+        )
 
     def eligible_badge_campaigns(
         self, owned_badge_names=None, completed_campaign_signatures=None
