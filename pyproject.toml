@@ -1,0 +1,8 @@
+[tool.black]
+# Refuse to run under any other major version, whose stable style differs.
+# Keep in step with requirements-dev.txt and .pre-commit-config.yaml.
+required-version = "26"
+# The oldest Python in setup.py's python_requires and the CI test matrix.
+target-version = ["py311"]
+# Agent worktrees are full checkouts of the repo but are not in .gitignore.
+extend-exclude = '^/\.claude/'

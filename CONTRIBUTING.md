@@ -117,11 +117,23 @@ For content changes, make sure that you:
 When you open a pull request, you must fill out the "Ready for review" template before we can review your PR. This template helps reviewers understand your changes and the purpose of your pull request.
 
 ### Python Styleguide
-All Python code is formatted with [Black](https://github.com/psf/black) using the default settings. Your code will not be accepted if it is not blackened.
-You can use the pre-commit hook.
+All Python code, including the tests and the scripts in the repository root and `tools/`, is formatted with [Black](https://github.com/psf/black). Your code will not be accepted if it is not blackened.
+
+Use the Black version pinned in `requirements-dev.txt`. Black's style changes between major versions, so `pyproject.toml` sets `required-version` and Black refuses to run under a different major version instead of reformatting files you did not touch.
+```
+pip install -r requirements-dev.txt
+black --check .
+```
+
+You can use the pre-commit hook, which runs the same Black version.
 ```
 pip install pre-commit
 pre-commit install
+```
+
+The VS Code Black Formatter extension uses its own bundled Black unless you tell it to use the one installed in your environment. Add this to your VS Code settings:
+```json
+"black-formatter.importStrategy": "fromEnvironment"
 ```
 
 ### Suggested changes
