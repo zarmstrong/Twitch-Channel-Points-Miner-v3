@@ -1,6 +1,7 @@
 import re
 import socket
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from os import path
@@ -166,6 +167,154 @@ def percentage(a, b):
 
 def create_chunks(lst, n):
     return [lst[i : (i + n)] for i in range(0, len(lst), n)]  # noqa: E203
+
+
+def _utf16_width(character: str) -> int:
+    return 2 if ord(character) > 0xFFFF else 1
+
+
+def utf16_length(text: str) -> int:
+    """Return the length of ``text`` in UTF-16 code units.
+
+    Discord counts message length this way, so characters outside the Basic
+    Multilingual Plane (most emoji) count twice.
+    """
+    return sum(_utf16_width(character) for character in text)
+
+
+def _wrap_line(
+    line: str, limit: int, length_func: Callable[[str], int]
+) -> list[tuple[str, int]]:
+    """Hard-wrap ``line`` into ``(segment, length)`` pairs within ``limit``."""
+    segments = []
+    start = 0
+    length = 0
+    for index, character in enumerate(line):
+        width = length_func(character)
+        if length and length + width > limit:
+            segments.append((line[start:index], length))
+            start, length = index, 0
+        length += width
+    segments.append((line[start:], length))
+    return segments
+
+
+def split_message_lines(
+    message: str,
+    limit: int,
+    prefix: str = "",
+    *,
+    length_func: Callable[[str], int] = utf16_length,
+    max_pieces: int | None = None,
+    notice_separator: str = "\n",
+) -> list[str]:
+    """Split a message into pieces of at most ``limit`` units.
+
+    Length defaults to UTF-16 code units. Pass ``length_func=len`` for services
+    such as Telegram and Pushover that count Unicode characters instead.
+
+    A message that already fits is returned unchanged as the only piece.
+    Otherwise pieces break on line boundaries whenever possible, and a single
+    line that is longer than ``limit`` on its own is hard-wrapped. Blank lines
+    are kept inside a piece but never start one. Whitespace-only segments from
+    hard-wrapping are also skipped when they would start a piece, so a long
+    whitespace run cannot produce a blank notification.
+
+    When the message starts with ``prefix`` (such as the username the logger
+    adds), every later piece starts with it too, within the limit.
+
+    With ``max_pieces``, at most that many pieces are returned; the last one
+    ends with a notice saying how many pieces were left out, trimmed to fit.
+    A notice longer than ``limit`` on its own is left out.
+    The notice follows ``notice_separator``: a new line by default, or a
+    space where the pieces must stay on one line (Discord's inline code).
+    """
+    if limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if max_pieces is not None and max_pieces < 1:
+        raise ValueError("max_pieces must be a positive integer")
+    if length_func(message) <= limit:
+        return [message]
+    if prefix and message.startswith(prefix):
+        prefix_length = length_func(prefix)
+        if prefix_length <= limit // 2:
+            body = message[len(prefix) :]  # noqa: E203
+            body_limit = limit - prefix_length
+            pieces = _truncate_pieces(
+                _split_lines(body, body_limit, length_func),
+                body_limit,
+                max_pieces,
+                length_func,
+                notice_separator,
+            )
+            return [prefix + piece for piece in pieces]
+    return _truncate_pieces(
+        _split_lines(message, limit, length_func),
+        limit,
+        max_pieces,
+        length_func,
+        notice_separator,
+    )
+
+
+def _truncate_pieces(
+    pieces: list[str],
+    limit: int,
+    max_pieces: int | None,
+    length_func: Callable[[str], int],
+    separator: str = "\n",
+) -> list[str]:
+    """Keep at most ``max_pieces`` pieces, ending the last with a notice."""
+    if max_pieces is None or len(pieces) <= max_pieces:
+        return pieces
+    omitted = len(pieces) - max_pieces
+    notice = f"[{omitted} more part{'s' if omitted != 1 else ''} not sent]"
+    kept = pieces[:max_pieces]
+    if length_func(notice) > limit:
+        return kept
+    # Trailing whitespace (blank lines, or spaces a cut leaves behind) would
+    # put the notice after an empty line or a visible gap.
+    last = kept[-1].rstrip()
+    notice_length = length_func(separator) + length_func(notice)
+    # Make room by dropping trailing lines whole while they are short or fit
+    # inside the overflow, so no short line is left cut off mid-way, and by
+    # cutting characters only from a long last line, which keeps all it can.
+    while last and length_func(last) + notice_length > limit:
+        overflow = length_func(last) + notice_length - limit
+        head, newline, tail = last.rpartition("\n")
+        tail_length = length_func(tail)
+        if newline and (tail_length <= overflow or tail_length <= notice_length):
+            last = head.rstrip()
+        else:
+            # Free `overflow` units, counted per character: a character can
+            # be wider than one unit (an emoji is two UTF-16 units).
+            cut, freed = len(last), 0
+            while cut > 0 and freed < overflow:
+                cut -= 1
+                freed += length_func(last[cut])
+            last = last[:cut].rstrip()
+    kept[-1] = f"{last}{separator}{notice}" if last else notice
+    return kept
+
+
+def _split_lines(
+    message: str, limit: int, length_func: Callable[[str], int]
+) -> list[str]:
+    pieces = []
+    current = []
+    current_length = 0
+    for line in message.split("\n"):
+        for segment, segment_length in _wrap_line(line, limit, length_func):
+            if current and current_length + 1 + segment_length > limit:
+                pieces.append("\n".join(current))
+                current, current_length = [], 0
+            if not current and not segment.strip():
+                continue
+            current_length += segment_length + (1 if current else 0)
+            current.append(segment)
+    if current:
+        pieces.append("\n".join(current))
+    return pieces or [""]
 
 
 def read(fname):
