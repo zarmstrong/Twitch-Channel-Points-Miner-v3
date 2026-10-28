@@ -1820,6 +1820,19 @@ def test_completions_list_with_every_entry_errored_reads_as_errored():
     assert Twitch.drops_inventory_completions_state(loaded) == "errored"
 
 
+@pytest.mark.parametrize(
+    "error_path",
+    [None, ["currentUser"], ["currentUser", "inventory", "completedRewardCampaigns"]],
+)
+def test_empty_completions_list_stays_loaded_despite_errors(error_path):
+    """A list that failed to resolve comes back null, so [] resolved."""
+    loaded = _normalized(
+        {"dropCampaignsInProgress": [], "completedRewardCampaigns": []}, error_path
+    )
+
+    assert Twitch.drops_inventory_completions_state(loaded) == "loaded"
+
+
 def test_completions_list_keeps_surviving_entries_and_errorless_nulls():
     path = ["currentUser", "inventory", "completedRewardCampaigns"]
     partly_errored = {

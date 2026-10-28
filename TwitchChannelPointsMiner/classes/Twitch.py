@@ -2835,7 +2835,8 @@ class Twitch(object):
         "loaded": a list, possibly empty (an account with no completions
         gets [] rather than null).
         "errored": present but not a list; __get_inventory nulls the field
-        when Twitch reports an error covering a list it did not deliver.
+        when Twitch reports an error covering a list it did not deliver, or
+        a delivered list whose entries all failed to null.
         "missing": the inventory loaded without a list and without an error
         for it. __get_inventory removes an error-free null as well, so this
         also covers a response that no longer carries the field (for example
@@ -2876,8 +2877,8 @@ class Twitch(object):
 
         Entries with errored metadata still yield a signature when they can:
         from an earlier full read of the same campaign ID, or with an
-        errored game as a wildcard (see completed_signature_matches). An
-        entry missing its name or end time is not matched at all.
+        errored game as a wildcard (see completed_signature_matches).
+        Otherwise, an entry missing its name or end time is not matched.
         """
         with _completed_badge_signature_lock(self):
             known_signatures_by_id = dict(
@@ -6724,10 +6725,14 @@ class Twitch(object):
         parent path, or without a path) and it carries no entry to read: no
         list, since the failure may have nulled or dropped it, or a list
         whose entries all failed to null, which says no more than a null
-        list. Otherwise a missing list is removed ("missing"): an account
-        with no completions gets [], so a null or absent list without an
-        error is a response shape the consumers cannot trust as "nothing
-        completed" but also must not wait on forever.
+        list. Like a null list, it stands discovery down until a usable list
+        has loaded once, even if the same entries fail on every read. An
+        empty list is kept: a list that failed to resolve comes back null,
+        so [] means it resolved and the errors are elsewhere. Otherwise a
+        missing list is removed ("missing"): an account with no completions
+        gets [], so a null or absent list without an error is a response
+        shape the consumers cannot trust as "nothing completed" but also
+        must not wait on forever.
         """
         key = "completedRewardCampaigns"
         completions = inventory.get(key)
