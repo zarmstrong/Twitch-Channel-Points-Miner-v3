@@ -251,3 +251,43 @@ def test_send_parts_gives_up_when_rate_limited_again_after_retry():
 
     sleep.assert_called_once_with(1.0)
     assert post_one.call_count == 2
+
+
+def test_send_parts_retries_when_retry_after_equals_cap():
+    post_one = Mock(side_effect=[rate_limited("10"), None])
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.NotificationError.time.sleep"
+    ) as sleep:
+        assert send_parts("Discord", ["one"], post_one) == (True, None)
+
+    sleep.assert_called_once_with(10.0)
+    assert post_one.call_count == 2
+
+
+def test_send_parts_does_not_retry_other_errors_with_retry_after():
+    error = http_error(503)
+    error.response.headers["Retry-After"] = "1"
+    post_one = Mock(side_effect=error)
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.NotificationError.time.sleep"
+    ) as sleep:
+        success, reason = send_parts("Discord", ["one"], post_one)
+
+    assert success is False
+    assert reason == format_request_failure("Discord", error)
+    sleep.assert_not_called()
+    post_one.assert_called_once_with("one")
+
+
+def test_send_parts_treats_negative_retry_after_as_no_wait():
+    post_one = Mock(side_effect=[rate_limited("-1"), None])
+
+    with patch(
+        "TwitchChannelPointsMiner.classes.NotificationError.time.sleep"
+    ) as sleep:
+        assert send_parts("Discord", ["one"], post_one) == (True, None)
+
+    sleep.assert_called_once_with(0.0)
+    assert post_one.call_count == 2

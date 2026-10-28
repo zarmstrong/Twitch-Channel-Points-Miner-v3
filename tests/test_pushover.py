@@ -248,3 +248,16 @@ def test_pushover_does_not_retry_quota_429_without_wait_hint():
 
     sleep.assert_not_called()
     post.assert_called_once()
+
+
+def test_pushover_caps_a_huge_notification_at_ten_posts():
+    pushover = make_pushover([Events.DROP_STATUS])
+    message = "\n".join(f"reward {index:05}: progress updated" for index in range(3000))
+
+    with patched_post() as post:
+        assert pushover.send(message, Events.DROP_STATUS) == (True, None)
+
+    texts = [call.kwargs["data"]["message"] for call in post.call_args_list]
+    assert len(texts) == 10
+    assert all(len(text) <= 1024 for text in texts)
+    assert texts[-1].endswith("more parts not sent]")
