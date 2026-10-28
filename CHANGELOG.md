@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.19.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.4...3.19.5) (2026-10-28)
+
+
+### Bug Fixes
+
+* **categories:** treat Helix connection errors, timeouts, 401/403, 429 and 5xx as failed lookups; only 400/404/410/422 count as an empty answer ([1ea62d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ea62d7b5ef9d2d27d5f2a97a6de2e015cfc4193))
+* **ci:** allow release issue labeling after fork PR merges ([#183](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/183)) ([1de67a2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1de67a2873aa98f89464e77f094cb041b0982da9))
+* **discord:** split notifications longer than Discord's 2,000-character limit ([#188](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/188)) ([79be059](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79be059d4352245429d6f728c9fc3eb2c8d34ac4)), closes [#176](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/176)
+* **drops:** accept a running same-game badge as proof that game-wide Drops apply ([#187](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/187)) ([c211c7c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/c211c7cbe6f067a4a47c87c7edcfd661582d3d14))
+* **drops:** keep badge Drop channels of a game whose lookup failed for up to 12 checks (about an hour), while games that were checked still retire stale channels ([1ea62d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ea62d7b5ef9d2d27d5f2a97a6de2e015cfc4193))
+* **drops:** keep category streamers when fetching live channels fails ([#190](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/190)) ([1ea62d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ea62d7b5ef9d2d27d5f2a97a6de2e015cfc4193)), closes [#175](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/175)
+* **drops:** keep category streamers when the drops dashboard fails and no other source reports a campaign, and carry each campaign's channel allow-list through the outage until the campaign ends ([1ea62d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ea62d7b5ef9d2d27d5f2a97a6de2e015cfc4193))
+* **drops:** keep the current Drops pick when its own live check fails, for one refresh, beside the channels confirmed live ([1ea62d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ea62d7b5ef9d2d27d5f2a97a6de2e015cfc4193))
+* **drops:** mine all-channel campaigns when the game also has a restricted one ([#185](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/185)) ([8d0d7c7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/8d0d7c7f51ac0df76fe964fc0ed2bf960e305ae1))
+* **drops:** skip allow-list entries that cannot be Twitch logins so one cannot make Helix reject a whole batch of 100 channels ([1ea62d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ea62d7b5ef9d2d27d5f2a97a6de2e015cfc4193))
+* **drops:** stop treating a failed drops inventory as no completed badge campaigns ([#189](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/189)) ([04d7d1f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/04d7d1fcece692d4d298ac8333fee7f93e2dd466)), closes [#179](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/179)
+* **drops:** stop watching a discovered channel for a Drop a followed channel already earns ([#182](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/182)) ([cb8ded8](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cb8ded89645a0fef12d7366f90c16e8470092ff3))
+* **pushover:** split notifications longer than Pushover's 1,024-character limit ([#188](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/188)) ([2a3a8c9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/2a3a8c9ac0805bea9c181f717f1ddd1d33c6050e))
+* **telegram:** split notifications longer than Telegram's 4,096-character limit ([79be059](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79be059d4352245429d6f728c9fc3eb2c8d34ac4))
+
 ## [3.19.4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.3...3.19.4) (2026-10-25)
 
 
