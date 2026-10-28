@@ -1082,6 +1082,13 @@ Placeholder values are ignored; use real credentials and never commit them.
 | Email | Addresses reached through SMTP | `Email` |
 | ntfy | ntfy topic (hosted or self-hosted) | `Ntfy` |
 
+Telegram, Discord and Pushover split a message that is too long to send in
+one piece into consecutive messages, breaking at line ends where possible. A
+notification is sent as at most ten messages; the tenth says how many more
+were left out. On Telegram and Pushover only the first message alerts as
+configured: later ones are sent silently on Telegram and at quiet priority on
+Pushover. Discord posts every message normally.
+
 Delivery failures are logged and do not stop mining. Enable
 `console_username` when several accounts share a destination. The analytics
 dashboard can send a test message for each enabled provider.
@@ -1096,7 +1103,7 @@ destination `chat_id` (for example with [@getmyid_bot](https://t.me/getmyid_bot)
 | `chat_id` | int | Required | Numeric Telegram chat ID. |
 | `token` | str | Required | Bot token issued by BotFather. |
 | `events` | list | Required | Events to send. |
-| `disable_notification` | bool | `False` | Send without sound or vibration. |
+| `disable_notification` | bool | `False` | Send without sound or vibration. Later messages of a split notification are always silent. |
 | `message_thread_id` | int or None | `None` | Optional Telegram forum topic ID for supergroup topics. |
 
 ```python
@@ -1211,7 +1218,7 @@ user key and application API token.
 |---|---|---|---|
 | `userkey` | str | Required | Pushover user or group key. |
 | `token` | str | Required | Application API token. |
-| `priority` | int | Required | [Pushover message priority](https://pushover.net/api#priority). |
+| `priority` | int | Required | [Pushover message priority](https://pushover.net/api#priority). Later messages of a split notification go at quiet priority (-1), or -2 when the configured priority is -2 or lower. |
 | `sound` | str | Required | [Pushover sound name](https://pushover.net/api#sounds). |
 | `events` | list | Required | Events to send. |
 
