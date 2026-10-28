@@ -206,6 +206,85 @@ def test_failed_badge_lookup_does_not_retire_badge_channels():
     assert miner.ws_pool.removed == []
 
 
+class RestrictedGameFailingTwitch(FakeTwitch):
+    """The restricted badge game's lookup keeps failing; the all-channel game
+    is evaluated and has nobody live."""
+
+    def get_live_streamers_for_category(self, selector, **kwargs):
+        if kwargs.get("restricted_campaigns"):
+            from TwitchChannelPointsMiner.classes.Exceptions import (
+                CategoryLookupFailedException,
+            )
+
+            raise CategoryLookupFailedException(
+                "directory errors", game_slug="restricted-game"
+            )
+        return []
+
+
+def _badge_streamer_in(username, game_slug):
+    return Streamer(
+        username,
+        from_category=True,
+        from_badge_campaign=True,
+        discovery_category_slugs={game_slug},
+    )
+
+
+def test_failed_badge_game_does_not_shield_channels_of_evaluated_games():
+    miner = _badge_check_miner(RestrictedGameFailingTwitch())
+    evaluated = _badge_streamer_in("evaluated-stale", "all-channel-game")
+    failed = _badge_streamer_in("failed-game", "restricted-game")
+    miner.streamers = [evaluated, failed]
+    miner.original_streamers = [10, 20]
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == [failed]
+    assert miner.original_streamers == [20]
+    assert miner.ws_pool.removed == ["evaluated-stale"]
+
+
+def test_badge_game_that_keeps_failing_retires_its_channels_after_the_limit(caplog):
+    miner = _badge_check_miner(RestrictedGameFailingTwitch())
+    failed = _badge_streamer_in("failed-game", "restricted-game")
+    miner.streamers.append(failed)
+    miner.original_streamers.append(20)
+
+    for _ in range(2):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+    assert [streamer.username for streamer in miner.streamers] == [
+        "previous-random",
+        "failed-game",
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["previous-random", "failed-game"]
+    assert "failed 3 badge Drop checks in a row" in caplog.text
+
+
+def test_badge_channels_record_the_game_they_were_found_under():
+    miner = _badge_check_miner(FakeTwitch())
+    rediscovered = _badge_streamer_in("allowedchannel", "old-game")
+    miner.streamers = [rediscovered]
+    miner.original_streamers = [10]
+
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+
+    slugs = {
+        streamer.username: streamer.discovery_category_slugs
+        for streamer in miner.streamers
+    }
+    assert slugs == {
+        "allowedchannel": {"restricted-game"},
+        "allchannel": {"all-channel-game"},
+        "blacklisted": {"all-channel-game"},
+    }
+
+
 def test_badge_ownership_change_retires_only_stale_badge_streamers():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
     miner.category_lookup_failure_streaks = {}

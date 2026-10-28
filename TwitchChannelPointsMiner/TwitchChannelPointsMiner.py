@@ -1602,47 +1602,64 @@ class TwitchChannelPointsMiner:
                 )
 
         discovered_usernames = []
-        discovery_failed = False
+        # The badge game(s) each channel was found under, so a later failed
+        # lookup keeps only that game's channels.
+        game_slugs_by_username = {}
+        # Badge games whose lookup failed (with the Twitch game slug it
+        # resolved to, when known): not evaluated this check.
+        failed_game_slugs = set()
+
+        def record_found(game_slug, usernames):
+            discovered_usernames.extend(usernames)
+            for username in usernames:
+                username = str(username).lower().strip()
+                if username:
+                    game_slugs_by_username.setdefault(username, set()).add(game_slug)
+
+        def record_failure(game_slug, error):
+            failed_game_slugs.add(game_slug)
+            if getattr(error, "game_slug", None):
+                failed_game_slugs.add(error.game_slug)
+            # A lookup that failed part-way still reports what it found.
+            record_found(game_slug, getattr(error, "usernames", None) or ())
+
         for game_slug in dict.fromkeys(unrestricted_games):
             try:
-                discovered_usernames.extend(
-                    self.twitch.get_live_streamers_for_category(
-                        game_slug,
-                        drops_enabled=True,
-                        limit=self.badge_drop_streamer_limit,
-                        sort_by=self.badge_drop_category_sort,
-                        respect_campaign_restrictions=False,
-                    )
+                found = self.twitch.get_live_streamers_for_category(
+                    game_slug,
+                    drops_enabled=True,
+                    limit=self.badge_drop_streamer_limit,
+                    sort_by=self.badge_drop_category_sort,
+                    respect_campaign_restrictions=False,
                 )
             except Exception as error:
-                discovery_failed = True
-                # A lookup that failed part-way still reports what it found.
-                discovered_usernames.extend(getattr(error, "usernames", None) or ())
+                record_failure(game_slug, error)
                 logger.warning(
                     f"Unable to find a live channel for badge Drop campaign "
                     f"'{game_slug}': {error}",
                     extra={"emoji": ":warning:", "category_log": True},
                 )
+            else:
+                record_found(game_slug, found)
 
         for game_slug, restricted_campaigns in restricted_campaigns_by_game.items():
             try:
-                discovered_usernames.extend(
-                    self.twitch.get_live_streamers_for_category(
-                        game_slug,
-                        drops_enabled=True,
-                        limit=30,
-                        sort_by=self.badge_drop_category_sort,
-                        restricted_campaigns=restricted_campaigns,
-                    )
+                found = self.twitch.get_live_streamers_for_category(
+                    game_slug,
+                    drops_enabled=True,
+                    limit=30,
+                    sort_by=self.badge_drop_category_sort,
+                    restricted_campaigns=restricted_campaigns,
                 )
             except Exception as error:
-                discovery_failed = True
-                discovered_usernames.extend(getattr(error, "usernames", None) or ())
+                record_failure(game_slug, error)
                 logger.warning(
                     f"Unable to find restricted live channels for badge Drop "
                     f"campaign '{game_slug}': {error}",
                     extra={"emoji": ":warning:", "category_log": True},
                 )
+            else:
+                record_found(game_slug, found)
 
         added = 0
         earned_badge_changed = (
@@ -1651,21 +1668,45 @@ class TwitchChannelPointsMiner:
             and owned_badges != previous_owned_badges
         )
         with self.config_reload_lock:
+            # Bounded like the category lookups: a game whose lookup never
+            # recovers must not keep its stale channels forever.
+            unevaluated_game_slugs = self.__expire_unevaluated_slugs(
+                "badge",
+                failed_game_slugs,
+                checks="badge Drop checks",
+                consequence="",
+            )
             # Badge channels the latest check no longer returns are retired,
             # or every check (limit 1, often a random sort) adds another one.
             # The current Drops pick stays among the results while it is live
             # in its game. A failed lookup returns nothing for its game, so
-            # only an ownership change retires channels after one.
-            if earned_badge_changed or not discovery_failed:
-                self.__reconcile_badge_campaign_streamers(
-                    discovered_usernames, earned_badge_changed=earned_badge_changed
-                )
-            existing_usernames = {streamer.username for streamer in self.streamers}
+            # that game's channels are kept, unless the earned badges changed.
+            self.__reconcile_badge_campaign_streamers(
+                discovered_usernames,
+                earned_badge_changed=earned_badge_changed,
+                unevaluated_game_slugs=(
+                    () if earned_badge_changed else unevaluated_game_slugs
+                ),
+            )
+            existing_streamers = {
+                streamer.username: streamer for streamer in self.streamers
+            }
             for username in dict.fromkeys(discovered_usernames):
                 username = str(username).lower().strip()
+                existing = existing_streamers.get(username)
+                if (
+                    existing is not None
+                    and existing.from_badge_campaign is True
+                    and username in game_slugs_by_username
+                ):
+                    # Replace, as category discovery does: the games it was
+                    # found under this check are the ones to judge it by.
+                    existing.discovery_category_slugs = set(
+                        game_slugs_by_username[username]
+                    )
                 if (
                     not username
-                    or username in existing_usernames
+                    or existing is not None
                     or username in self.badge_drop_blacklist
                 ):
                     continue
@@ -1680,6 +1721,7 @@ class TwitchChannelPointsMiner:
                         ),
                         from_category=True,
                         from_badge_campaign=True,
+                        discovery_category_slugs=game_slugs_by_username.get(username),
                     )
                     streamer.channel_id = self.twitch.get_channel_id(username)
                     streamer.settings = set_default_settings(
@@ -1699,7 +1741,7 @@ class TwitchChannelPointsMiner:
                     self.twitch.check_streamer_online(streamer)
                     self.streamers.append(streamer)
                     self.original_streamers.append(streamer.channel_points)
-                    existing_usernames.add(username)
+                    existing_streamers[username] = streamer
                     added += 1
 
                     self.ws_pool.submit(
@@ -1751,14 +1793,31 @@ class TwitchChannelPointsMiner:
         )
 
     def __reconcile_badge_campaign_streamers(
-        self, discovered_usernames, earned_badge_changed=True
+        self, discovered_usernames, earned_badge_changed=True, unevaluated_game_slugs=()
     ):
-        """Retire badge-only channels absent from the latest badge discovery."""
+        """Retire badge-only channels absent from the latest badge discovery.
+
+        Channels of `unevaluated_game_slugs` (badge games whose lookup failed
+        this check) are kept: their absence says nothing about whether they
+        are stale. So is a channel whose game is unknown while any lookup
+        failed, as every channel was before failures were told apart.
+        """
         discovered = {
             str(username).lower().strip()
             for username in discovered_usernames
             if str(username).strip()
         }
+
+        def in_unevaluated_game(streamer):
+            if not unevaluated_game_slugs:
+                return False
+            if (
+                not streamer.discovery_category_slugs
+                and not streamer.stream.game_name()
+            ):
+                return True
+            return self.__streamer_in_categories(streamer, unevaluated_game_slugs)
+
         retained = []
         retained_baselines = []
         removed = []
@@ -1771,6 +1830,7 @@ class TwitchChannelPointsMiner:
             if (
                 streamer.from_badge_campaign is not True
                 or streamer.username in discovered
+                or in_unevaluated_game(streamer)
             ):
                 retained.append(streamer)
                 retained_baselines.append(baseline)
@@ -1982,7 +2042,14 @@ class TwitchChannelPointsMiner:
             )
         return categories, unevaluated_slugs, failed
 
-    def __expire_unevaluated_slugs(self, kind, unevaluated_slugs, count=True):
+    def __expire_unevaluated_slugs(
+        self,
+        kind,
+        unevaluated_slugs,
+        count=True,
+        checks="refreshes",
+        consequence=" and wildcard discovery can run",
+    ):
         """`unevaluated_slugs` without the categories that have now stayed
         unevaluated for CATEGORY_LOOKUP_FAILURE_LIMIT refreshes in a row.
 
@@ -2012,9 +2079,9 @@ class TwitchChannelPointsMiner:
         if newly_expired:
             logger.warning(
                 f"Category lookups for {', '.join(newly_expired)} failed "
-                f"{CATEGORY_LOOKUP_FAILURE_LIMIT} refreshes in a row; treating "
-                "them as evaluated so their stale streamers can be retired and "
-                "wildcard discovery can run",
+                f"{CATEGORY_LOOKUP_FAILURE_LIMIT} {checks} in a row; treating "
+                "them as evaluated so their stale streamers can be retired"
+                f"{consequence}",
                 extra={"emoji": ":warning:", "category_log": True},
             )
         return set(unevaluated_slugs) - expired
