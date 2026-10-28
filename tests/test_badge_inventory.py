@@ -1,8 +1,6 @@
 import copy
 import json
 import logging
-
-import pytest
 from datetime import datetime
 from types import SimpleNamespace
 
