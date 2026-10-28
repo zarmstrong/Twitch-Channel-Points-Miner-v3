@@ -90,7 +90,9 @@ def test_update_check_uses_imported_package_version(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         miner._TwitchChannelPointsMiner__check_for_update(now=100)
 
-    record = next(record for record in caplog.records if "Update available" in record.msg)
+    record = next(
+        record for record in caplog.records if "Update available" in record.msg
+    )
     assert "running 3.7.3" in record.msg
 
 
@@ -121,7 +123,9 @@ def test_available_update_forces_alert_and_throttles_to_daily(monkeypatch, caplo
     with caplog.at_level(logging.INFO):
         assert miner._TwitchChannelPointsMiner__check_for_update(now=100) is True
 
-    record = next(record for record in caplog.records if "Update available" in record.msg)
+    record = next(
+        record for record in caplog.records if "Update available" in record.msg
+    )
     assert record.levelno == logging.INFO
     assert record.event is Events.UPDATE_AVAILABLE
     assert record.force_alert is True
@@ -140,7 +144,9 @@ def test_available_update_gives_docker_latest_image_instructions(monkeypatch, ca
     with caplog.at_level(logging.INFO):
         assert miner._TwitchChannelPointsMiner__check_for_update(now=100) is True
 
-    record = next(record for record in caplog.records if "Update available" in record.msg)
+    record = next(
+        record for record in caplog.records if "Update available" in record.msg
+    )
     assert "zacharmstrong/twitch-channel-points-miner:latest" in record.msg
     assert "docker compose pull && docker compose up -d" in record.msg
     assert "/releases/latest" not in record.msg

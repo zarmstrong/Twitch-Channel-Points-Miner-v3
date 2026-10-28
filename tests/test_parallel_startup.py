@@ -78,9 +78,7 @@ def test_channel_points_context_limits_parallel_requests():
             active_requests -= 1
         return SimpleNamespace(community=SimpleNamespace(channel=None))
 
-    twitch.gql = SimpleNamespace(
-        get_channel_points_context=get_channel_points_context
-    )
+    twitch.gql = SimpleNamespace(get_channel_points_context=get_channel_points_context)
     streamers = [Streamer(f"streamer{index}") for index in range(8)]
 
     with ThreadPoolExecutor(max_workers=len(streamers)) as executor:

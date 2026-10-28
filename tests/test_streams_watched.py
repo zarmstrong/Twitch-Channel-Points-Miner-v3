@@ -2377,8 +2377,7 @@ def test_category_pick_evicted_by_badge_is_logged_as_no_free_slot(monkeypatch):
 
     assert posted == ["https://spade.test/badge-streamer"]
     assert not any(
-        "Selected" in message and "category-streamer" in message
-        for message in messages
+        "Selected" in message and "category-streamer" in message for message in messages
     )
     assert any(
         "eligible but no watch slot free" in message and "category-streamer" in message
@@ -2909,9 +2908,7 @@ def test_pending_watch_streak_keeps_a_second_drop_stream_when_streaks_prioritize
     ]
 
 
-def test_poll_stream_segments_logs_and_swallows_unexpected_errors(
-    monkeypatch, caplog
-):
+def test_poll_stream_segments_logs_and_swallows_unexpected_errors(monkeypatch, caplog):
     from TwitchChannelPointsMiner.classes.StreamSegmentWatcher import (
         StreamSegmentWatcher,
     )

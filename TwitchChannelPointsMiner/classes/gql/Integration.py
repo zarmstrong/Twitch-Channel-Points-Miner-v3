@@ -119,8 +119,7 @@ class PostRequest(Protocol):
 
     def __call__(
         self, url: str, json: dict | list, headers: dict[str, str]
-    ) -> Response:
-        ...
+    ) -> Response: ...
 
 
 class GQL:

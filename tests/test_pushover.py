@@ -113,9 +113,10 @@ def test_pushover_wraps_unicode_message_by_character_count():
     prefix = "[\U0001f3c6] "
     body = "a" * 900 + "\U0001f3c6" * 600
 
-    with patch.object(
-        Settings, "logger", SimpleNamespace(username=prefix)
-    ), patched_post() as post:
+    with (
+        patch.object(Settings, "logger", SimpleNamespace(username=prefix)),
+        patched_post() as post,
+    ):
         assert pushover.send(prefix + body, Events.DAILY_REPORT) == (True, None)
 
     texts = [call.kwargs["data"]["message"] for call in post.call_args_list]
@@ -216,9 +217,10 @@ def test_pushover_repeats_username_prefix_on_later_parts():
     lines = [f"Campaign {index:03d}: progress {index % 100}%" for index in range(60)]
     message = prefix + "\n".join(lines)
 
-    with patch.object(
-        Settings, "logger", SimpleNamespace(username=prefix)
-    ), patched_post() as post:
+    with (
+        patch.object(Settings, "logger", SimpleNamespace(username=prefix)),
+        patched_post() as post,
+    ):
         assert pushover.send(message, Events.DROP_STATUS) == (True, None)
 
     texts = [call.kwargs["data"]["message"] for call in post.call_args_list]
@@ -238,9 +240,10 @@ def test_pushover_does_not_retry_quota_429_without_wait_hint():
     failing = Mock()
     failing.raise_for_status.side_effect = requests.HTTPError(response=quota)
 
-    with patched_post(side_effect=[failing]) as post, patch(
-        "TwitchChannelPointsMiner.classes.NotificationError.time.sleep"
-    ) as sleep:
+    with (
+        patched_post(side_effect=[failing]) as post,
+        patch("TwitchChannelPointsMiner.classes.NotificationError.time.sleep") as sleep,
+    ):
         assert pushover.send("claimed", Events.DROP_STATUS) == (
             False,
             "Pushover rate limited the notification (HTTP 429).",

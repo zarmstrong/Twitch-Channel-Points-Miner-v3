@@ -81,7 +81,9 @@ def test_expect_number_accepts_json_ints_and_floats():
 
 
 def test_playback_access_token_repr_uses_class_name():
-    response = PlaybackAccessTokenResponse("value", "signature", Authorization(False, None))
+    response = PlaybackAccessTokenResponse(
+        "value", "signature", Authorization(False, None)
+    )
 
     assert repr(response).startswith("PlaybackAccessTokenResponse(")
 
@@ -664,9 +666,7 @@ def twitch_with_gql(gql):
 
 def test_get_channel_id_only_classifies_empty_id_as_missing_streamer():
     twitch = twitch_with_gql(
-        SimpleNamespace(
-            get_id_from_login=lambda username: SimpleNamespace(id="")
-        )
+        SimpleNamespace(get_id_from_login=lambda username: SimpleNamespace(id=""))
     )
 
     with pytest.raises(StreamerDoesNotExistException):
@@ -1350,6 +1350,7 @@ def test_category_filter_does_not_resurrect_completed_twitch_category(monkeypatc
             "fallback discovery should not inspect awarded benefits"
         ),
     )
+
     def fallback(self, categories, known_slugs, inventory=None):
         fallback_calls.append(known_slugs)
         return {"two-point-museum": datetime(2099, 1, 1)}
@@ -1403,9 +1404,7 @@ def test_category_filter_merges_campaign_filtered_fallback_for_twitch_game(
         "albion-online",
     ]
     assert twitch.category_campaign_deadlines["rust"] == datetime(2099, 1, 1)
-    assert twitch.category_campaign_deadlines["albion-online"] == datetime(
-        2098, 1, 1
-    )
+    assert twitch.category_campaign_deadlines["albion-online"] == datetime(2098, 1, 1)
 
 
 def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatch):
@@ -1544,7 +1543,9 @@ def test_category_filter_orders_campaigns_across_inventory_and_fallback(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
-        lambda self, categories, known_slugs, inventory=None: {"fallback-game": datetime(2099, 1, 1)},
+        lambda self, categories, known_slugs, inventory=None: {
+            "fallback-game": datetime(2099, 1, 1)
+        },
     )
 
     assert (
@@ -3361,9 +3362,7 @@ def test_forced_category_streamer_must_match_active_campaign_allowlist(monkeypat
 def test_points_only_forced_streamer_ignores_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {
-        "naraka-bladepoint": [
-            {"id": "campaign-1", "channels": ["narakabladepoint"]}
-        ]
+        "naraka-bladepoint": [{"id": "campaign-1", "channels": ["narakabladepoint"]}]
     }
     twitch.twitchdrops_app_campaigns = {}
     twitch.twitchdrops_app_game_names = {}
@@ -3396,9 +3395,7 @@ def test_points_only_forced_streamer_ignores_campaign_allowlist(monkeypatch):
 def test_forced_category_streamer_normalizes_campaign_allowlist(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.active_drop_campaigns = {
-        "naraka-bladepoint": [
-            {"id": "campaign-1", "channels": [" NARAKABladepoint "]}
-        ]
+        "naraka-bladepoint": [{"id": "campaign-1", "channels": [" NARAKABladepoint "]}]
     }
     twitch.twitchdrops_app_campaigns = {}
     twitch.twitchdrops_app_game_names = {}

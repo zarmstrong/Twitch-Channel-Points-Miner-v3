@@ -33,7 +33,9 @@ def update_payload():
 
 
 def make_bet(strategy=Strategy.MOST_VOTED, **settings):
-    bet_settings = BetSettings(strategy=strategy, percentage=10, max_points=500, **settings)
+    bet_settings = BetSettings(
+        strategy=strategy, percentage=10, max_points=500, **settings
+    )
     bet = Bet(outcomes(), bet_settings)
     bet.update_outcomes(update_payload())
     return bet

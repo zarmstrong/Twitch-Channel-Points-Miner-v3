@@ -995,9 +995,7 @@ def _update_managed_web_config(config_path, payload):
             valid = (
                 STREAMER_RE.fullmatch(value) is not None
                 if kind == "streamers"
-                else _valid_managed_category(value)
-                if kind == "categories"
-                else False
+                else _valid_managed_category(value) if kind == "categories" else False
             )
         else:
             valid = bool(value) and kind in {"streamers", "categories"}

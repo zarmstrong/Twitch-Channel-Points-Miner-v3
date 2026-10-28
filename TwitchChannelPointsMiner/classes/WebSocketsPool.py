@@ -141,7 +141,7 @@ class WebSocketsPool:
             on_message=WebSocketsPool.on_message,
             on_open=WebSocketsPool.on_open,
             on_error=WebSocketsPool.on_error,
-            on_close=WebSocketsPool.on_close
+            on_close=WebSocketsPool.on_close,
             # on_close=WebSocketsPool.handle_reconnection, # Do nothing.
         )
 
@@ -313,9 +313,11 @@ class WebSocketsPool:
                             # Analytics switch
                             if Settings.enable_analytics is True:
                                 streamer.persistent_series(
-                                    event_type=message.data["point_gain"]["reason_code"]
-                                    if message.type == "points-earned"
-                                    else "Spent"
+                                    event_type=(
+                                        message.data["point_gain"]["reason_code"]
+                                        if message.type == "points-earned"
+                                        else "Spent"
+                                    )
                                 )
 
                         if message.type == "points-earned":

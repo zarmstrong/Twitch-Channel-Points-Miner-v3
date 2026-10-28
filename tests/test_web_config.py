@@ -180,9 +180,7 @@ def test_managed_web_config_reorders_streamers_without_touching_settings(tmp_pat
 
     assert [item["username"] for item in result["streamers"]] == ["two", "one"]
     one_settings = next(
-        item["settings"]
-        for item in result["streamers"]
-        if item["username"] == "one"
+        item["settings"] for item in result["streamers"] if item["username"] == "one"
     )
     assert one_settings["favorite"] is True
     loaded = _load_config(config)
@@ -1015,7 +1013,9 @@ ANALYTICS_CONFIG = None
 
 def test_set_miner_username_rejects_invalid_characters(tmp_path):
     config = tmp_path / "config.py"
-    config.write_text('MINER_CONFIG = {"username": "your-twitch-username"}\n', encoding="utf-8")
+    config.write_text(
+        'MINER_CONFIG = {"username": "your-twitch-username"}\n', encoding="utf-8"
+    )
 
     with pytest.raises(ConfigEditError, match="valid Twitch username"):
         set_miner_username(config, "not a valid username!!!")

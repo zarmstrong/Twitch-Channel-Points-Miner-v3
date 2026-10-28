@@ -408,9 +408,7 @@ def test_campaign_names_from_ids_resolves_before_sync_campaigns_catches_up(monke
         "example-game": [{"id": "gist-1", "name": "Gist Campaign", "channels": []}]
     }
     twitch.active_drop_campaigns = {
-        "example-game": [
-            {"id": "native-1", "name": "Native Campaign", "channels": []}
-        ]
+        "example-game": [{"id": "native-1", "name": "Native Campaign", "channels": []}]
     }
 
     names = twitch._Twitch__campaign_names_from_ids(
@@ -1835,7 +1833,7 @@ def test_completed_badge_campaign_signatures_matches_by_name_and_end_time(
     signatures = twitch.completed_badge_campaign_signatures(inventory)
 
     assert len(signatures) == 1
-    (game_slug, campaign_name, ends_at_epoch), = signatures
+    ((game_slug, campaign_name, ends_at_epoch),) = signatures
     assert game_slug == "infinity-nikki"
     assert campaign_name == "infinity nikki drops campaign"
     from datetime import datetime, timezone

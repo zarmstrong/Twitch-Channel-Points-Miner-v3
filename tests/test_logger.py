@@ -112,7 +112,9 @@ def test_file_logs_rotate_at_midnight_with_configured_retention(tmp_path, monkey
 
 
 def _filtered_message(msg, *args):
-    record = logging.LogRecord("urllib3.connectionpool", 10, __file__, 1, msg, args, None)
+    record = logging.LogRecord(
+        "urllib3.connectionpool", 10, __file__, 1, msg, args, None
+    )
     assert SensitiveUrlFilter().filter(record) is True
     return record.getMessage()
 
@@ -137,7 +139,9 @@ def test_sensitive_url_filter_redacts_usher_signature_and_token():
 
 def test_sensitive_url_filter_redacts_signed_playlist_and_segment_paths():
     playlist = _filtered_message('"GET /v1/playlist/CqSIGNED.m3u8 HTTP/1.1" 200 None')
-    segment = _filtered_message('"HEAD /s1/v1/segment/CtoSIGNED?dna=XYZ HTTP/1.1" 200 0')
+    segment = _filtered_message(
+        '"HEAD /s1/v1/segment/CtoSIGNED?dna=XYZ HTTP/1.1" 200 0'
+    )
 
     assert playlist == '"GET /v1/playlist/<redacted> HTTP/1.1" 200 None'
     assert segment == '"HEAD /s1/v1/segment/<redacted> HTTP/1.1" 200 0'

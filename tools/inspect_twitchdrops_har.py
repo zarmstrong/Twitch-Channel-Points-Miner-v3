@@ -24,7 +24,6 @@ from TwitchChannelPointsMiner.classes.TwitchDropsApp import (
     parse_drop,
 )
 
-
 DROP_WORDS = ("campaign", "drop", "reward", "benefit")
 IDENTITY_KEYS = {
     "id",
@@ -55,9 +54,7 @@ def walk_json(value: Any, path: tuple[str, ...] = ()) -> Iterator[dict]:
             (related_word(part) for part in reversed(path) if related_word(part)),
             None,
         )
-        key_kind = next(
-            (related_word(key) for key in value if related_word(key)), None
-        )
+        key_kind = next((related_word(key) for key in value if related_word(key)), None)
         has_identity = bool(keys & IDENTITY_KEYS)
         # A parent container such as {"campaigns": [...]} is not itself a
         # campaign. Requiring an identity also avoids printing most GraphQL

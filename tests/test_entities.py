@@ -94,7 +94,9 @@ def test_parse_datetime_rejects_unknown_format():
 
 
 def test_stream_update_normalizes_title_and_detects_drop_tag(monkeypatch):
-    monkeypatch.setattr("TwitchChannelPointsMiner.classes.entities.Stream.DROP_ID", "drops")
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.DROP_ID", "drops"
+    )
     stream = Stream()
 
     stream.update(

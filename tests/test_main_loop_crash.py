@@ -107,9 +107,12 @@ def test_websocket_check_survives_websockets_retired_mid_loop():
         reconnected.append(websocket)
         miner.ws_pool.ws.pop()
 
-    with patch(f"{MODULE}.internet_connection_available", return_value=True), patch(
-        f"{MODULE}.WebSocketsPool.handle_reconnection",
-        side_effect=handle_reconnection,
+    with (
+        patch(f"{MODULE}.internet_connection_available", return_value=True),
+        patch(
+            f"{MODULE}.WebSocketsPool.handle_reconnection",
+            side_effect=handle_reconnection,
+        ),
     ):
         miner._TwitchChannelPointsMiner__check_websockets()
 
@@ -127,9 +130,10 @@ def test_mine_stops_workers_and_exits_non_zero_when_run_crashes():
     minute_watcher.is_alive.side_effect = [True, False]
     miner.minute_watcher_thread = minute_watcher
 
-    with patch.object(
-        TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
-    ), patch(f"{MODULE}.logger") as logger:
+    with (
+        patch.object(TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")),
+        patch(f"{MODULE}.logger") as logger,
+    ):
         with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
     assert exit_info.value.code == 1
@@ -165,9 +169,10 @@ def test_mine_keeps_the_original_error_when_a_worker_was_never_started():
     miner = _miner()
     miner.drop_badge_catalog_thread = threading.Thread(target=lambda: None)
 
-    with patch.object(
-        TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
-    ), patch(f"{MODULE}.logger"):
+    with (
+        patch.object(TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")),
+        patch(f"{MODULE}.logger"),
+    ):
         with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
     assert exit_info.value.code == 1
@@ -187,9 +192,10 @@ def test_signal_during_crash_shutdown_does_not_exit_cleanly():
     streamer.leave_chat = lambda: miner.end(None, None)
     miner.streamers = [streamer]
 
-    with patch.object(
-        TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
-    ), patch(f"{MODULE}.logger"):
+    with (
+        patch.object(TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")),
+        patch(f"{MODULE}.logger"),
+    ):
         with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
     assert exit_info.value.code == 1
@@ -222,9 +228,7 @@ def test_reconnection_skips_a_websocket_retired_while_sleeping(monkeypatch):
     websocket.parent_pool = pool
     new = MagicMock()
     monkeypatch.setattr(WebSocketsPool, "_WebSocketsPool__new", new)
-    monkeypatch.setattr(
-        f"{POOL_MODULE}.time.sleep", lambda _seconds: pool.ws.pop()
-    )
+    monkeypatch.setattr(f"{POOL_MODULE}.time.sleep", lambda _seconds: pool.ws.pop())
     monkeypatch.setattr(f"{POOL_MODULE}.internet_connection_available", lambda: True)
 
     WebSocketsPool.handle_reconnection(websocket)
@@ -327,8 +331,9 @@ def test_report_survives_streamers_retired_while_it_runs():
             miner.streamers[:] = []
             miner.original_streamers[:] = []
 
-    with patch(f"{MODULE}.logger") as logger, patch(
-        f"{MODULE}._drop_progress_report_entries", return_value=[]
+    with (
+        patch(f"{MODULE}.logger") as logger,
+        patch(f"{MODULE}._drop_progress_report_entries", return_value=[]),
     ):
         logger.info.side_effect = info
         # Held by this same thread, as when end() runs as a signal handler in
@@ -346,9 +351,10 @@ def test_crash_alert_is_flushed_even_if_stopping_a_worker_fails():
     miner.ws_pool = MagicMock()
     miner.ws_pool.end.side_effect = OSError("socket already gone")
 
-    with patch.object(
-        TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")
-    ), patch(f"{MODULE}.logger"):
+    with (
+        patch.object(TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")),
+        patch(f"{MODULE}.logger"),
+    ):
         with pytest.raises(SystemExit) as exit_info:
             miner.mine([])
     assert exit_info.value.code == 1
@@ -390,9 +396,12 @@ def test_exit_after_crash_forces_exit_when_a_worker_is_stuck():
     # stuck worker would otherwise keep the crashed process up.
     thread, release = _lingering_thread()
     try:
-        with patch(f"{MODULE}.os._exit", side_effect=RuntimeError("exited")) as (
-            exit_mock
-        ), patch(f"{MODULE}.logger") as logger:
+        with (
+            patch(f"{MODULE}.os._exit", side_effect=RuntimeError("exited")) as (
+                exit_mock
+            ),
+            patch(f"{MODULE}.logger") as logger,
+        ):
             with pytest.raises(RuntimeError, match="exited"):
                 _exit_after_crash()
     finally:

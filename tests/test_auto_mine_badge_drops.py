@@ -20,7 +20,9 @@ from TwitchChannelPointsMiner.classes.Twitch import Twitch
 
 
 class FakeCatalog:
-    def eligible_badge_campaigns(self, owned_badges, completed_campaign_signatures=None):
+    def eligible_badge_campaigns(
+        self, owned_badges, completed_campaign_signatures=None
+    ):
         assert owned_badges == {"owned badge"}
         assert completed_campaign_signatures == {"a-signature"}
         return [
@@ -445,7 +447,9 @@ def test_badge_inventory_failure_preserves_baseline_for_next_refresh():
             return result
 
     class EmptyCatalog:
-        def eligible_badge_campaigns(self, owned_badges, completed_campaign_signatures=None):
+        def eligible_badge_campaigns(
+            self, owned_badges, completed_campaign_signatures=None
+        ):
             return []
 
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
@@ -983,8 +987,7 @@ def test_category_refresh_adds_replacements_before_retiring_stale_streamers():
 
     assert len(miner.twitch.streamers_seen_during_load) == 2
     assert all(
-        "stale" in usernames
-        for usernames in miner.twitch.streamers_seen_during_load
+        "stale" in usernames for usernames in miner.twitch.streamers_seen_during_load
     )
     assert [streamer.username for streamer in miner.streamers] == [
         "allchannel",
@@ -1055,9 +1058,7 @@ def test_auto_mine_badge_campaigns_runs_without_completions_field(caplog):
     ] == [logging.WARNING, logging.DEBUG]
 
 
-def test_auto_mine_badge_campaigns_repeats_persistent_state_hourly(
-    caplog, monkeypatch
-):
+def test_auto_mine_badge_campaigns_repeats_persistent_state_hourly(caplog, monkeypatch):
     clock = [1000.0]
     miner_module = sys.modules[TwitchChannelPointsMiner.__module__]
     monkeypatch.setattr(

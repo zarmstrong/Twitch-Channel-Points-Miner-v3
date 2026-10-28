@@ -168,9 +168,7 @@ def test_discovery_source_prefers_badge_then_wildcard_then_category():
     # Badge and wildcard streamers are built with from_category=True as well,
     # so the more specific flag must win over the shared one.
     assert (
-        Streamer(
-            "b", from_category=True, from_badge_campaign=True
-        ).discovery_source()
+        Streamer("b", from_category=True, from_badge_campaign=True).discovery_source()
         == StreamerSource.BADGES
     )
     assert (
@@ -254,9 +252,7 @@ def test_priority_never_turns_a_badge_streamer_into_a_category_streamer():
     badge = Streamer("b", from_category=True, from_badge_campaign=True)
 
     assert (
-        discovery_source(
-            badge, [StreamerSource.CATEGORIES, StreamerSource.BADGES]
-        )
+        discovery_source(badge, [StreamerSource.CATEGORIES, StreamerSource.BADGES])
         == StreamerSource.BADGES
     )
     assert is_category_tier(badge) is False

@@ -45,10 +45,13 @@ def _isolate_launcher_logger_state():
     logger.setLevel(original_level)
 
 
-def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_tab: (
-    dashboard_info,
-    initial_tab,
-)):
+def _fake_launch_shell_recording(
+    calls,
+    extract=lambda dashboard_info, initial_tab: (
+        dashboard_info,
+        initial_tab,
+    ),
+):
     """A `launch_shell` stand-in accepting its full current signature, so
     call-site tests don't need to know about args (config_path, prompt_marker,
     needs_username, start_mining, logs_dir) they aren't exercising."""
@@ -116,7 +119,9 @@ def test_build_commit_hash_none_when_file_missing(tmp_path, monkeypatch):
     assert windows_launcher._build_commit_hash() is None
 
 
-def test_build_commit_hash_none_when_build_could_not_determine_one(tmp_path, monkeypatch):
+def test_build_commit_hash_none_when_build_could_not_determine_one(
+    tmp_path, monkeypatch
+):
     # build_windows.bat writes the literal string "unknown" rather than
     # leaving the file absent when git wasn't available at build time.
     marker = tmp_path / "commit_hash.txt"
@@ -148,18 +153,26 @@ def test_config_root_directory_is_exe_dir_for_portable_build(tmp_path, monkeypat
     assert windows_launcher.config_root_directory(tmp_path) == tmp_path
 
 
-def test_config_root_directory_is_standard_dir_for_standard_build(tmp_path, monkeypatch):
+def test_config_root_directory_is_standard_dir_for_standard_build(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: True)
     monkeypatch.setattr(
-        windows_launcher, "_standard_application_directory", lambda: tmp_path / "AppData"
+        windows_launcher,
+        "_standard_application_directory",
+        lambda: tmp_path / "AppData",
     )
 
-    assert windows_launcher.config_root_directory(tmp_path / "exe") == tmp_path / "AppData"
+    assert (
+        windows_launcher.config_root_directory(tmp_path / "exe") == tmp_path / "AppData"
+    )
 
 
 def _write_legacy_data(exe_dir):
     (exe_dir / "config").mkdir(parents=True)
-    (exe_dir / "config" / "config.py").write_text("MINER_CONFIG = {}\n", encoding="utf-8")
+    (exe_dir / "config" / "config.py").write_text(
+        "MINER_CONFIG = {}\n", encoding="utf-8"
+    )
     (exe_dir / "cookies").mkdir()
     (exe_dir / "cookies" / "someone.json").write_text("[]", encoding="utf-8")
     (exe_dir / "analytics").mkdir()
@@ -238,7 +251,9 @@ def test_migrate_legacy_windows_data_handles_partial_legacy_data(tmp_path):
     exe_dir = tmp_path / "exe"
     exe_dir.mkdir()
     (exe_dir / "config").mkdir()
-    (exe_dir / "config" / "config.py").write_text("MINER_CONFIG = {}\n", encoding="utf-8")
+    (exe_dir / "config" / "config.py").write_text(
+        "MINER_CONFIG = {}\n", encoding="utf-8"
+    )
     # No cookies/analytics/logs folders at all - e.g. never logged in yet.
     standard_dir = tmp_path / "AppData"
 
@@ -297,19 +312,15 @@ def test_migrate_legacy_windows_data_overwrites_a_stale_bootstrap_template(tmp_p
     result = windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
 
     assert result is not None
-    assert (
-        "the_real_user"
-        in (standard_dir / "config" / "config.py").read_text(encoding="utf-8")
+    assert "the_real_user" in (standard_dir / "config" / "config.py").read_text(
+        encoding="utf-8"
     )
     assert (standard_dir / "cookies" / "someone.json").is_file()
     assert (standard_dir / "analytics" / "someone.json").is_file()
     # The user's real config was archived too, not just moved aside and lost.
-    assert (
-        "the_real_user"
-        in (exe_dir / "config-legacy" / "config" / "config.py").read_text(
-            encoding="utf-8"
-        )
-    )
+    assert "the_real_user" in (
+        exe_dir / "config-legacy" / "config" / "config.py"
+    ).read_text(encoding="utf-8")
 
 
 def test_show_migration_notice_uses_native_message_box_on_windows(monkeypatch):
@@ -353,18 +364,23 @@ def test_prepare_config_copies_template_once(tmp_path, monkeypatch):
 def test_application_directory_uses_source_directory(monkeypatch):
     monkeypatch.delattr(windows_launcher.sys, "frozen", raising=False)
 
-    assert windows_launcher.application_directory() == Path(
-        windows_launcher.__file__
-    ).resolve().parent
+    assert (
+        windows_launcher.application_directory()
+        == Path(windows_launcher.__file__).resolve().parent
+    )
 
 
-def test_main_prints_and_exports_build_commit_when_available(tmp_path, monkeypatch, capsys):
+def test_main_prints_and_exports_build_commit_when_available(
+    tmp_path, monkeypatch, capsys
+):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(windows_launcher, "_build_commit_hash", lambda: "abc1234")
     monkeypatch.setattr(
@@ -383,7 +399,9 @@ def test_main_skips_build_commit_output_when_unavailable(tmp_path, monkeypatch, 
     (config_dir / "config.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(windows_launcher, "_build_commit_hash", lambda: None)
     monkeypatch.setattr(
@@ -406,9 +424,13 @@ def test_main_forwards_command_line_arguments(tmp_path, monkeypatch):
     runner_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
     monkeypatch.setattr(
-        windows_launcher, "runner_main", lambda argv, **kwargs: runner_calls.append(argv) or 0
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
+    monkeypatch.setattr(
+        windows_launcher,
+        "runner_main",
+        lambda argv, **kwargs: runner_calls.append(argv) or 0,
     )
     monkeypatch.setattr(
         windows_launcher.sys,
@@ -447,7 +469,9 @@ def test_main_sets_a_fresh_shell_bypass_token_before_launching_the_shell(
     tokens_seen = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
 
     def fake_launch_shell(*args, **kwargs):
@@ -489,7 +513,9 @@ def test_main_creates_a_brand_new_standard_appdata_directory(tmp_path, monkeypat
         windows_launcher, "_standard_application_directory", lambda: standard_dir
     )
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(windows_launcher, "launch_shell", lambda *args, **kwargs: None)
     monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
@@ -513,7 +539,9 @@ def test_main_migrates_legacy_data_and_shows_notice_for_standard_build(
         windows_launcher, "_standard_application_directory", lambda: standard_dir
     )
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(windows_launcher, "launch_shell", lambda *args, **kwargs: None)
     monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
@@ -534,7 +562,9 @@ def test_main_never_migrates_for_a_portable_build(tmp_path, monkeypatch):
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: exe_dir)
     monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: False)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(windows_launcher, "launch_shell", lambda *args, **kwargs: None)
     monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
@@ -568,9 +598,13 @@ def test_main_starts_miner_thread_and_launches_shell_when_interactive(
     shell_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
     monkeypatch.setattr(
-        windows_launcher, "runner_main", lambda argv, **kwargs: runner_calls.append(argv) or 0
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
+    monkeypatch.setattr(
+        windows_launcher,
+        "runner_main",
+        lambda argv, **kwargs: runner_calls.append(argv) or 0,
     )
     monkeypatch.setattr(
         windows_launcher,
@@ -610,9 +644,13 @@ def test_main_defers_mining_until_username_is_submitted(tmp_path, monkeypatch):
     shell_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
     monkeypatch.setattr(
-        windows_launcher, "runner_main", lambda argv, **kwargs: runner_calls.append(argv) or 0
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
+    monkeypatch.setattr(
+        windows_launcher,
+        "runner_main",
+        lambda argv, **kwargs: runner_calls.append(argv) or 0,
     )
 
     def fake_launch_shell(
@@ -668,15 +706,23 @@ def test_main_prints_guidance_when_shell_fails_before_username_is_set(
     paused = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(
         windows_launcher,
         "launch_shell",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no WebView2 runtime")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("no WebView2 runtime")
+        ),
     )
-    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
-    monkeypatch.setattr(windows_launcher, "pause_for_first_run", lambda: paused.append(True))
+    monkeypatch.setattr(
+        windows_launcher.webbrowser, "open", lambda url: opened.append(url)
+    )
+    monkeypatch.setattr(
+        windows_launcher, "pause_for_first_run", lambda: paused.append(True)
+    )
     monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
 
     assert windows_launcher.main() == 0
@@ -687,7 +733,9 @@ def test_main_prints_guidance_when_shell_fails_before_username_is_set(
     assert "No Twitch username is configured yet." in capsys.readouterr().out
 
 
-def test_main_enables_analytics_and_opens_config_tab_on_first_run(tmp_path, monkeypatch):
+def test_main_enables_analytics_and_opens_config_tab_on_first_run(
+    tmp_path, monkeypatch
+):
     template = tmp_path / "template.py"
     template.write_text(
         "MINER_CONFIG = {\n"
@@ -702,7 +750,9 @@ def test_main_enables_analytics_and_opens_config_tab_on_first_run(tmp_path, monk
     shell_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "bundled_file", lambda _name: template)
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(
@@ -747,12 +797,16 @@ def test_main_opens_config_tab_for_preexisting_installer_created_config(
     shell_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(
         windows_launcher,
         "launch_shell",
-        _fake_launch_shell_recording(shell_calls, extract=lambda _info, initial_tab: initial_tab),
+        _fake_launch_shell_recording(
+            shell_calls, extract=lambda _info, initial_tab: initial_tab
+        ),
     )
     monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
 
@@ -796,7 +850,9 @@ def test_main_leaves_existing_config_untouched_on_upgrade_launch(tmp_path, monke
     shell_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(
         windows_launcher,
@@ -921,7 +977,9 @@ _PRISTINE_TEMPLATE_CONFIG = (
 )
 
 
-def test_ensure_windows_analytics_defaults_enables_dashboard_when_just_created(tmp_path):
+def test_ensure_windows_analytics_defaults_enables_dashboard_when_just_created(
+    tmp_path,
+):
     config_path = tmp_path / "config.py"
     config_path.write_text(_PRISTINE_TEMPLATE_CONFIG, encoding="utf-8")
 
@@ -940,7 +998,9 @@ def test_ensure_windows_analytics_defaults_enables_dashboard_when_just_created(t
     assert updated.count("ANALYTICS_CONFIG") == 1
 
 
-def test_ensure_windows_analytics_defaults_never_applied_when_not_just_created(tmp_path):
+def test_ensure_windows_analytics_defaults_never_applied_when_not_just_created(
+    tmp_path,
+):
     # The core fix: content alone can never distinguish "a template we just
     # copied" from "a user who deliberately chose enable_analytics=False and
     # left ANALYTICS_CONFIG unset" - both produce this exact same text. Only
@@ -999,7 +1059,9 @@ def test_ensure_windows_analytics_defaults_leaves_unrecognized_template_alone(tm
     assert config_path.read_text(encoding="utf-8") == original
 
 
-def test_ensure_windows_analytics_defaults_ignores_customized_analytics_config(tmp_path):
+def test_ensure_windows_analytics_defaults_ignores_customized_analytics_config(
+    tmp_path,
+):
     # Secondary content check again: even with just_created=True, this must
     # never touch a config where ANALYTICS_CONFIG has already been
     # customized, even though enable_analytics is still False verbatim.
@@ -1021,7 +1083,9 @@ def test_ensure_windows_analytics_defaults_ignores_customized_analytics_config(t
 
 
 def test_matches_template_defaults_true_only_for_untouched_defaults():
-    assert windows_launcher._matches_template_defaults(_PRISTINE_TEMPLATE_CONFIG) is True
+    assert (
+        windows_launcher._matches_template_defaults(_PRISTINE_TEMPLATE_CONFIG) is True
+    )
     assert (
         windows_launcher._matches_template_defaults(
             "MINER_CONFIG = {'enable_analytics': True}\nANALYTICS_CONFIG = None\n"
@@ -1331,7 +1395,11 @@ def test_window_api_get_dashboard_info_waits_for_port_then_returns_url(monkeypat
         "_wait_until_dashboard_ready",
         lambda url: waited.append(url) or True,
     )
-    dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
+    dashboard_info = {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "url": "http://127.0.0.1:5000/",
+    }
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
         dashboard_info,
@@ -1352,11 +1420,17 @@ def test_window_api_get_dashboard_info_waits_for_port_then_returns_url(monkeypat
     }
 
 
-def test_window_api_get_dashboard_info_reports_unavailable_when_never_ready(monkeypatch):
+def test_window_api_get_dashboard_info_reports_unavailable_when_never_ready(
+    monkeypatch,
+):
     monkeypatch.setattr(
         windows_launcher, "_wait_until_dashboard_ready", lambda url: False
     )
-    dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
+    dashboard_info = {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "url": "http://127.0.0.1:5000/",
+    }
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
         dashboard_info,
@@ -1376,8 +1450,14 @@ def test_window_api_get_dashboard_info_reports_unavailable_when_never_ready(monk
 
 def test_window_api_open_in_browser_opens_dashboard_url(monkeypatch):
     opened = []
-    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
-    dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
+    monkeypatch.setattr(
+        windows_launcher.webbrowser, "open", lambda url: opened.append(url)
+    )
+    dashboard_info = {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "url": "http://127.0.0.1:5000/",
+    }
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
         dashboard_info,
@@ -1414,7 +1494,9 @@ def test_window_api_open_in_browser_noop_when_dashboard_unavailable(monkeypatch)
 
 def test_window_api_open_twitch_activate_opens_the_activation_page(monkeypatch):
     opened = []
-    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(
+        windows_launcher.webbrowser, "open", lambda url: opened.append(url)
+    )
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
         dashboard_info=None,
@@ -1432,7 +1514,9 @@ def test_window_api_open_twitch_activate_opens_the_activation_page(monkeypatch):
 
 def test_window_api_open_external_url_opens_http_and_https_links(monkeypatch):
     opened = []
-    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(
+        windows_launcher.webbrowser, "open", lambda url: opened.append(url)
+    )
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
         dashboard_info=None,
@@ -1443,7 +1527,9 @@ def test_window_api_open_external_url_opens_http_and_https_links(monkeypatch):
         logs_dir=None,
     )
 
-    api.open_external_url("https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3")
+    api.open_external_url(
+        "https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3"
+    )
     api.open_external_url("http://example.com")
 
     assert opened == [
@@ -1454,7 +1540,9 @@ def test_window_api_open_external_url_opens_http_and_https_links(monkeypatch):
 
 def test_window_api_open_external_url_ignores_non_http_schemes(monkeypatch):
     opened = []
-    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(
+        windows_launcher.webbrowser, "open", lambda url: opened.append(url)
+    )
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
         dashboard_info=None,
@@ -1533,9 +1621,13 @@ def test_open_folder_swallows_errors(tmp_path, monkeypatch):
     windows_launcher._open_folder(tmp_path / "config")  # must not raise
 
 
-def test_window_api_open_config_folder_opens_configs_parent_directory(tmp_path, monkeypatch):
+def test_window_api_open_config_folder_opens_configs_parent_directory(
+    tmp_path, monkeypatch
+):
     calls = []
-    monkeypatch.setattr(windows_launcher, "_open_folder", lambda path: calls.append(path))
+    monkeypatch.setattr(
+        windows_launcher, "_open_folder", lambda path: calls.append(path)
+    )
     config_path = tmp_path / "config" / "config.py"
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
@@ -1554,7 +1646,9 @@ def test_window_api_open_config_folder_opens_configs_parent_directory(tmp_path, 
 
 def test_window_api_open_logs_folder_opens_the_logs_directory(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(windows_launcher, "_open_folder", lambda path: calls.append(path))
+    monkeypatch.setattr(
+        windows_launcher, "_open_folder", lambda path: calls.append(path)
+    )
     logs_dir = tmp_path / "logs"
     api = windows_launcher.WindowApi(
         windows_launcher.ConsoleBuffer(),
@@ -1687,7 +1781,9 @@ def test_self_test_fails_when_webview_missing(monkeypatch, capsys):
 def test_main_dispatches_to_self_test_before_touching_config(monkeypatch, tmp_path):
     # Must short-circuit before prepare_config/os.chdir/etc. run, so this
     # flag stays a pure, side-effect-free import check usable from CI.
-    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--self-test"])
+    monkeypatch.setattr(
+        windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--self-test"]
+    )
     monkeypatch.setattr(windows_launcher, "self_test", lambda: 42)
     monkeypatch.setattr(
         windows_launcher,
@@ -2082,7 +2178,9 @@ def test_launch_shell_enables_text_selection_and_shows_version_in_title(
     # Console tab's whole point - reading and copying logs - impossible.
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     windows_launcher.launch_shell(
         None,
@@ -2108,7 +2206,9 @@ def test_launch_shell_passes_the_bundled_icon_to_webview_start(tmp_path, monkeyp
     # explicitly, not that fallback.
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     windows_launcher.launch_shell(
         None,
@@ -2138,7 +2238,9 @@ def test_launch_shell_wires_close_confirmation_handler(tmp_path, monkeypatch):
     _patch_fake_webview(monkeypatch, fake_webview)
     # This test is about the close handler, not the analytics prompt (which
     # would otherwise also run via the fake start() above); stub it out.
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     windows_launcher.launch_shell(
         None,
@@ -2155,7 +2257,9 @@ def test_launch_shell_wires_close_confirmation_handler(tmp_path, monkeypatch):
     assert callable(fake_webview.window.events.closing.handler)
 
 
-def test_launch_shell_runs_analytics_prompt_check_via_start_callback(tmp_path, monkeypatch):
+def test_launch_shell_runs_analytics_prompt_check_via_start_callback(
+    tmp_path, monkeypatch
+):
     # create_confirmation_dialog (and other dialogs) require the GUI event
     # loop that webview.start() begins - pywebview's own docs run them via
     # a callback passed to start(), not before it's called. This confirms
@@ -2188,7 +2292,9 @@ def test_launch_shell_runs_analytics_prompt_check_via_start_callback(tmp_path, m
     assert calls == [(fake_webview.window, None, config_path, prompt_marker)]
 
 
-def test_launch_shell_skips_analytics_prompt_while_username_setup_pending(tmp_path, monkeypatch):
+def test_launch_shell_skips_analytics_prompt_while_username_setup_pending(
+    tmp_path, monkeypatch
+):
     # Asking about the dashboard before the user has even entered a
     # username would be premature - see launch_shell's _on_started.
     fake_webview = _FakeWebview()
@@ -2248,7 +2354,9 @@ def test_show_fatal_error_message_swallows_dialog_failures(monkeypatch):
             raise RuntimeError("no such API")
 
     monkeypatch.setattr(windows_launcher.os, "name", "nt")
-    monkeypatch.setattr(windows_launcher.ctypes, "windll", ExplodingWindll(), raising=False)
+    monkeypatch.setattr(
+        windows_launcher.ctypes, "windll", ExplodingWindll(), raising=False
+    )
 
     windows_launcher._show_fatal_error_message("boom")  # must not raise
 
@@ -2276,7 +2384,9 @@ def test_run_returns_main_result_without_showing_error_on_success(monkeypatch):
     monkeypatch.setattr(
         windows_launcher,
         "_show_fatal_error_message",
-        lambda _text: (_ for _ in ()).throw(AssertionError("should not show on success")),
+        lambda _text: (_ for _ in ()).throw(
+            AssertionError("should not show on success")
+        ),
     )
 
     assert windows_launcher.run() == 0
@@ -2289,7 +2399,9 @@ def test_enable_dashboard_from_shell_writes_config_and_reports_restart_needed(
     monkeypatch.setattr(
         windows_launcher,
         "secrets",
-        type("FakeSecrets", (), {"token_urlsafe": staticmethod(lambda _n: "generatedpw")}),
+        type(
+            "FakeSecrets", (), {"token_urlsafe": staticmethod(lambda _n: "generatedpw")}
+        ),
     )
 
     def fake_enable_analytics_dashboard(config_path, password):
@@ -2309,7 +2421,9 @@ def test_enable_dashboard_from_shell_writes_config_and_reports_restart_needed(
     assert calls == [(config_path, "generatedpw")]
 
 
-def test_enable_dashboard_from_shell_reports_failure_without_raising(tmp_path, monkeypatch):
+def test_enable_dashboard_from_shell_reports_failure_without_raising(
+    tmp_path, monkeypatch
+):
     import TwitchChannelPointsMiner.config_editor as config_editor
 
     def raise_error(_config_path, _password):
@@ -2317,7 +2431,9 @@ def test_enable_dashboard_from_shell_reports_failure_without_raising(tmp_path, m
 
     monkeypatch.setattr(config_editor, "enable_analytics_dashboard", raise_error)
 
-    success, message = windows_launcher._enable_dashboard_from_shell(tmp_path / "config.py")
+    success, message = windows_launcher._enable_dashboard_from_shell(
+        tmp_path / "config.py"
+    )
 
     assert success is False
     assert "ANALYTICS_CONFIG assignment not found" in message
@@ -2329,7 +2445,11 @@ def test_maybe_prompt_skips_when_analytics_already_enabled(tmp_path):
             raise AssertionError("must not prompt when analytics is already on")
 
     prompt_marker = tmp_path / ".shell_analytics_prompt_shown"
-    dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
+    dashboard_info = {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "url": "http://127.0.0.1:5000/",
+    }
 
     windows_launcher._maybe_prompt_to_enable_analytics(
         FakeWindow(), dashboard_info, tmp_path / "config.py", prompt_marker
@@ -2398,7 +2518,10 @@ def test_maybe_prompt_enables_and_marks_shown_on_yes(tmp_path, monkeypatch):
     assert enable_calls == [config_path]
     # A second, informational dialog reports the result of enabling it.
     assert len(dialogs) == 2
-    assert dialogs[1] == ("Dashboard", "Saved. Restart the app for the dashboard to start.")
+    assert dialogs[1] == (
+        "Dashboard",
+        "Saved. Restart the app for the dashboard to start.",
+    )
 
 
 def test_maybe_prompt_does_not_mark_shown_if_dialog_itself_fails(tmp_path):
@@ -2444,7 +2567,9 @@ def test_main_installer_style_disabled_config_shows_disabled_flow_end_to_end(
     shell_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
 
     def fake_launch_shell(
@@ -2460,6 +2585,7 @@ def test_main_installer_style_disabled_config_shows_disabled_flow_end_to_end(
         start_minimized=False,
     ):
         shell_calls.append((dashboard_info, initial_tab))
+
         # Exercises the real prompt-gating logic (not just that launch_shell
         # was reached), using a fake window so no real dialog is shown.
         class FakeWindow:
@@ -2524,7 +2650,9 @@ def test_hide_to_tray_handler_survives_a_notify_failure():
         def notify(self, message, title=None):
             raise RuntimeError("notifications unsupported on this backend")
 
-    handler = windows_launcher._make_hide_to_tray_handler(FakeWindow(), BrokenTrayIcon())
+    handler = windows_launcher._make_hide_to_tray_handler(
+        FakeWindow(), BrokenTrayIcon()
+    )
 
     assert handler() is False
 
@@ -2552,7 +2680,9 @@ def test_launch_shell_falls_back_to_close_confirmation_when_tray_unavailable(
     # CI/Linux) - launch_shell must still leave the window closable.
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     windows_launcher.launch_shell(
         None,
@@ -2575,7 +2705,9 @@ def test_launch_shell_falls_back_to_close_confirmation_when_tray_unavailable(
 def test_launch_shell_wires_hide_to_tray_when_tray_is_available(tmp_path, monkeypatch):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
     fake_icon = _FakeTrayIcon()
     monkeypatch.setattr(
         windows_launcher, "_build_tray_icon", lambda on_show, on_quit: fake_icon
@@ -2606,7 +2738,9 @@ def test_launch_shell_logs_minimize_and_restore_events(tmp_path, monkeypatch, ca
     # the OS-level events even fired.
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     with caplog.at_level(logging.INFO, logger="windows_launcher"):
         windows_launcher.launch_shell(
@@ -2627,10 +2761,14 @@ def test_launch_shell_logs_minimize_and_restore_events(tmp_path, monkeypatch, ca
     assert "restored" in caplog.text.lower()
 
 
-def test_launch_shell_logs_when_close_button_hides_to_tray(tmp_path, monkeypatch, caplog):
+def test_launch_shell_logs_when_close_button_hides_to_tray(
+    tmp_path, monkeypatch, caplog
+):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
     fake_icon = _FakeTrayIcon()
     monkeypatch.setattr(
         windows_launcher, "_build_tray_icon", lambda on_show, on_quit: fake_icon
@@ -2656,7 +2794,9 @@ def test_launch_shell_logs_when_close_button_hides_to_tray(tmp_path, monkeypatch
 def test_launch_shell_logs_when_tray_is_unavailable(tmp_path, monkeypatch, caplog):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     def _raise(on_show, on_quit):
         raise RuntimeError("no tray on this desktop")
@@ -2682,7 +2822,9 @@ def test_launch_shell_logs_when_tray_is_unavailable(tmp_path, monkeypatch, caplo
 def _launch_shell_with_tray(tmp_path, monkeypatch, miner_alive=True):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     captured = {}
     tray_icon = _FakeTrayIcon()
@@ -2714,7 +2856,9 @@ def _launch_shell_with_tray(tmp_path, monkeypatch, miner_alive=True):
     return fake_webview.window, captured, tray_icon, miner
 
 
-def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, monkeypatch):
+def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(
+    tmp_path, monkeypatch
+):
     window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
     hide_handler = window.events.closing.handler
     dialog_calls = []
@@ -2740,7 +2884,9 @@ def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, m
     assert tray_icon.stopped is True
 
 
-def test_launch_shell_quit_from_tray_shows_shutting_down_notification(tmp_path, monkeypatch):
+def test_launch_shell_quit_from_tray_shows_shutting_down_notification(
+    tmp_path, monkeypatch
+):
     """The tray-Quit path is where users actually experience the multi-
     minute graceful shutdown (IRC leave, websocket teardown, watcher joins)
     freezing the window - see _stop_miner_gracefully's docstring. A tray
@@ -2758,7 +2904,9 @@ def test_launch_shell_quit_from_tray_shows_shutting_down_notification(tmp_path, 
     assert "shutting down" in message.lower()
 
 
-def test_launch_shell_quit_from_tray_reentrant_close_is_cancelled(tmp_path, monkeypatch):
+def test_launch_shell_quit_from_tray_reentrant_close_is_cancelled(
+    tmp_path, monkeypatch
+):
     """A second close attempt while the tray-Quit confirmation dialog is
     still open (e.g. the window's own [X] clicked again) must be cancelled
     outright, not reach create_confirmation_dialog or destroy() a second
@@ -2787,10 +2935,14 @@ def test_launch_shell_quit_from_tray_reentrant_close_is_cancelled(tmp_path, monk
     assert tray_icon.stopped is True
 
 
-def test_launch_shell_quit_from_tray_cancelled_restores_hide_to_tray(tmp_path, monkeypatch):
+def test_launch_shell_quit_from_tray_cancelled_restores_hide_to_tray(
+    tmp_path, monkeypatch
+):
     window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
     hide_handler = window.events.closing.handler
-    window.create_confirmation_dialog = lambda title, message: False  # User clicks Cancel.
+    window.create_confirmation_dialog = (
+        lambda title, message: False
+    )  # User clicks Cancel.
 
     captured["on_quit"]()
 
@@ -2835,10 +2987,14 @@ def test_launch_shell_tray_show_is_ignored_while_quit_confirmation_is_open(
     assert tray_icon.stopped is True
 
 
-def test_launch_shell_tray_show_works_again_after_quit_is_cancelled(tmp_path, monkeypatch):
+def test_launch_shell_tray_show_works_again_after_quit_is_cancelled(
+    tmp_path, monkeypatch
+):
     window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
     window.hidden = True
-    window.create_confirmation_dialog = lambda title, message: False  # User clicks Cancel.
+    window.create_confirmation_dialog = (
+        lambda title, message: False
+    )  # User clicks Cancel.
 
     captured["on_quit"]()
     captured["on_show"]()
@@ -2846,7 +3002,9 @@ def test_launch_shell_tray_show_works_again_after_quit_is_cancelled(tmp_path, mo
     assert window.hidden is False
 
 
-def test_launch_shell_wires_guarded_show_into_single_instance_listener(tmp_path, monkeypatch):
+def test_launch_shell_wires_guarded_show_into_single_instance_listener(
+    tmp_path, monkeypatch
+):
     """Regression test for a coverage gap: launch_shell must hand
     _start_single_instance_listener the same quitting-guarded show as the
     tray's on_show, not a raw window.show - otherwise a second-launch ping
@@ -2857,7 +3015,9 @@ def test_launch_shell_wires_guarded_show_into_single_instance_listener(tmp_path,
     _start_single_instance_listener(window.show) would pass the whole suite."""
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     captured = {}
     monkeypatch.setattr(
@@ -2918,7 +3078,9 @@ def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
             self.title = title
             self.menu = menu
 
-    fake_pystray = types.SimpleNamespace(Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon)
+    fake_pystray = types.SimpleNamespace(
+        Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon
+    )
     # `Image` set directly on the fake "PIL" package so `from PIL import
     # Image` resolves via a plain hasattr() check, without the real import
     # system needing to locate an actual "PIL.Image" submodule.
@@ -3003,7 +3165,9 @@ def test_acquire_single_instance_lock_fails_open_on_error(monkeypatch):
             raise RuntimeError("no such API")
 
     monkeypatch.setattr(windows_launcher.os, "name", "nt")
-    monkeypatch.setattr(windows_launcher.ctypes, "windll", ExplodingWindll(), raising=False)
+    monkeypatch.setattr(
+        windows_launcher.ctypes, "windll", ExplodingWindll(), raising=False
+    )
 
     # Never block launch just because the check itself broke.
     assert windows_launcher._acquire_single_instance_lock() is True
@@ -3055,7 +3219,9 @@ def test_notify_running_instance_is_silent_with_nothing_listening(monkeypatch):
 def test_main_shows_message_and_pings_existing_instance_when_already_running(
     monkeypatch,
 ):
-    monkeypatch.setattr(windows_launcher, "_acquire_single_instance_lock", lambda: False)
+    monkeypatch.setattr(
+        windows_launcher, "_acquire_single_instance_lock", lambda: False
+    )
     notified = []
     shown = []
     monkeypatch.setattr(
@@ -3082,12 +3248,16 @@ def test_main_convert_only_is_exempt_from_the_single_instance_check(
     (config_dir / "config.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     monkeypatch.setattr(
         windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--convert-only"]
     )
-    monkeypatch.setattr(windows_launcher, "_acquire_single_instance_lock", lambda: False)
+    monkeypatch.setattr(
+        windows_launcher, "_acquire_single_instance_lock", lambda: False
+    )
     monkeypatch.setattr(
         windows_launcher,
         "_notify_running_instance",
@@ -3173,7 +3343,9 @@ def test_set_autostart_enabled_writes_command_and_is_then_reported_enabled(monke
 
     assert success is True
     assert (
-        store[windows_launcher._AUTOSTART_KEY_PATH][windows_launcher._AUTOSTART_VALUE_NAME]
+        store[windows_launcher._AUTOSTART_KEY_PATH][
+            windows_launcher._AUTOSTART_VALUE_NAME
+        ]
         == windows_launcher._autostart_command()
     )
     assert windows_launcher.is_autostart_enabled() is True
@@ -3217,7 +3389,13 @@ def test_window_api_get_autostart_info_reflects_current_state(monkeypatch):
     monkeypatch.setattr(windows_launcher, "is_autostart_enabled", lambda: True)
     monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), None, None, Path("config.py"), False, lambda: None, None
+        windows_launcher.ConsoleBuffer(),
+        None,
+        None,
+        Path("config.py"),
+        False,
+        lambda: None,
+        None,
     )
 
     assert api.get_autostart_info() == {"available": True, "enabled": True}
@@ -3231,7 +3409,13 @@ def test_window_api_set_autostart_delegates_to_helper(monkeypatch):
         lambda enabled: calls.append(enabled) or (True, "Saved."),
     )
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), None, None, Path("config.py"), False, lambda: None, None
+        windows_launcher.ConsoleBuffer(),
+        None,
+        None,
+        Path("config.py"),
+        False,
+        lambda: None,
+        None,
     )
 
     result = api.set_autostart(True)
@@ -3258,7 +3442,9 @@ def test_write_then_read_close_behavior_round_trips(tmp_path):
 
 
 def test_write_close_behavior_rejects_unknown_value(tmp_path):
-    success, message = windows_launcher._write_close_behavior(tmp_path / "config.py", "bogus")
+    success, message = windows_launcher._write_close_behavior(
+        tmp_path / "config.py", "bogus"
+    )
 
     assert success is False
     assert "Invalid" in message
@@ -3275,7 +3461,9 @@ def test_read_close_behavior_ignores_unrecognized_stored_value(tmp_path):
 
 def test_read_close_behavior_tolerates_corrupt_prefs_file(tmp_path):
     config_path = tmp_path / "config.py"
-    windows_launcher._shell_prefs_path(config_path).write_text("not json", encoding="utf-8")
+    windows_launcher._shell_prefs_path(config_path).write_text(
+        "not json", encoding="utf-8"
+    )
 
     assert windows_launcher._read_close_behavior(config_path) == "tray"
 
@@ -3288,14 +3476,18 @@ def test_write_close_behavior_preserves_other_keys_in_prefs_file(tmp_path):
 
     windows_launcher._write_close_behavior(config_path, "quit")
 
-    saved = json.loads(windows_launcher._shell_prefs_path(config_path).read_text(encoding="utf-8"))
+    saved = json.loads(
+        windows_launcher._shell_prefs_path(config_path).read_text(encoding="utf-8")
+    )
     assert saved == {"other_setting": 42, "close_behavior": "quit"}
 
 
 def test_make_close_dispatcher_routes_to_hide_handler_by_default():
     calls = []
     dispatcher = windows_launcher._make_close_dispatcher(
-        lambda: "tray", lambda: calls.append("hide") or False, lambda: calls.append("quit") or True
+        lambda: "tray",
+        lambda: calls.append("hide") or False,
+        lambda: calls.append("quit") or True,
     )
 
     result = dispatcher()
@@ -3307,7 +3499,9 @@ def test_make_close_dispatcher_routes_to_hide_handler_by_default():
 def test_make_close_dispatcher_routes_to_quit_handler_when_preference_is_quit():
     calls = []
     dispatcher = windows_launcher._make_close_dispatcher(
-        lambda: "quit", lambda: calls.append("hide") or False, lambda: calls.append("quit") or True
+        lambda: "quit",
+        lambda: calls.append("hide") or False,
+        lambda: calls.append("quit") or True,
     )
 
     result = dispatcher()
@@ -3320,7 +3514,13 @@ def test_window_api_get_close_behavior_info_reports_availability_and_value(tmp_p
     config_path = tmp_path / "config.py"
     windows_launcher._write_close_behavior(config_path, "quit")
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), None, None, config_path, False, lambda: None, None
+        windows_launcher.ConsoleBuffer(),
+        None,
+        None,
+        config_path,
+        False,
+        lambda: None,
+        None,
     )
     api._tray_available = True
 
@@ -3329,7 +3529,13 @@ def test_window_api_get_close_behavior_info_reports_availability_and_value(tmp_p
 
 def test_window_api_get_close_behavior_info_defaults_unavailable(tmp_path):
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), None, None, tmp_path / "config.py", False, lambda: None, None
+        windows_launcher.ConsoleBuffer(),
+        None,
+        None,
+        tmp_path / "config.py",
+        False,
+        lambda: None,
+        None,
     )
 
     info = api.get_close_behavior_info()
@@ -3340,7 +3546,13 @@ def test_window_api_get_close_behavior_info_defaults_unavailable(tmp_path):
 def test_window_api_set_close_behavior_persists_value(tmp_path):
     config_path = tmp_path / "config.py"
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), None, None, config_path, False, lambda: None, None
+        windows_launcher.ConsoleBuffer(),
+        None,
+        None,
+        config_path,
+        False,
+        lambda: None,
+        None,
     )
 
     result = api.set_close_behavior("quit")
@@ -3352,7 +3564,13 @@ def test_window_api_set_close_behavior_persists_value(tmp_path):
 def test_window_api_get_about_info_reports_version_and_commit(tmp_path, monkeypatch):
     monkeypatch.setattr(windows_launcher, "_build_commit_hash", lambda: "abc1234")
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), None, None, tmp_path / "config.py", False, lambda: None, None
+        windows_launcher.ConsoleBuffer(),
+        None,
+        None,
+        tmp_path / "config.py",
+        False,
+        lambda: None,
+        None,
     )
 
     info = api.get_about_info()
@@ -3361,10 +3579,14 @@ def test_window_api_get_about_info_reports_version_and_commit(tmp_path, monkeypa
     assert info["commit"] == "abc1234"
 
 
-def test_launch_shell_close_button_quits_immediately_when_preference_is_quit(tmp_path, monkeypatch):
+def test_launch_shell_close_button_quits_immediately_when_preference_is_quit(
+    tmp_path, monkeypatch
+):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
     monkeypatch.setattr(
         windows_launcher, "_build_tray_icon", lambda on_show, on_quit: _FakeTrayIcon()
     )
@@ -3393,7 +3615,9 @@ def test_launch_shell_close_button_quits_immediately_when_preference_is_quit(tmp
 def test_launch_shell_exposes_tray_availability_to_window_api(tmp_path, monkeypatch):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
     monkeypatch.setattr(
         windows_launcher, "_build_tray_icon", lambda on_show, on_quit: _FakeTrayIcon()
     )
@@ -3410,13 +3634,17 @@ def test_launch_shell_exposes_tray_availability_to_window_api(tmp_path, monkeypa
         None,
     )
 
-    assert fake_webview.create_window_kwargs['js_api']._tray_available is True
+    assert fake_webview.create_window_kwargs["js_api"]._tray_available is True
 
 
-def test_launch_shell_tray_unavailable_leaves_window_api_reporting_it(tmp_path, monkeypatch):
+def test_launch_shell_tray_unavailable_leaves_window_api_reporting_it(
+    tmp_path, monkeypatch
+):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
     monkeypatch.setattr(
         windows_launcher,
         "_build_tray_icon",
@@ -3435,8 +3663,8 @@ def test_launch_shell_tray_unavailable_leaves_window_api_reporting_it(tmp_path, 
         None,
     )
 
-    assert fake_webview.create_window_kwargs['js_api']._tray_available is False
-    assert fake_webview.create_window_kwargs['js_api'].get_close_behavior_info() == {
+    assert fake_webview.create_window_kwargs["js_api"]._tray_available is False
+    assert fake_webview.create_window_kwargs["js_api"].get_close_behavior_info() == {
         "available": False,
         "value": "tray",
     }
@@ -3445,16 +3673,22 @@ def test_launch_shell_tray_unavailable_leaves_window_api_reporting_it(tmp_path, 
 # --- --start-minimized -----------------------------------------------------
 
 
-def test_main_strips_start_minimized_flag_before_forwarding_to_runner(tmp_path, monkeypatch):
+def test_main_strips_start_minimized_flag_before_forwarding_to_runner(
+    tmp_path, monkeypatch
+):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text("", encoding="utf-8")
     runner_calls = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
     monkeypatch.setattr(
-        windows_launcher, "runner_main", lambda argv, **kwargs: runner_calls.append(argv) or 0
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
+    monkeypatch.setattr(
+        windows_launcher,
+        "runner_main",
+        lambda argv, **kwargs: runner_calls.append(argv) or 0,
     )
     monkeypatch.setattr(
         windows_launcher.sys,
@@ -3479,7 +3713,9 @@ def test_main_passes_start_minimized_through_to_launch_shell(tmp_path, monkeypat
     (config_dir / ".desktop_shell_onboarded").touch()
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     captured = {}
 
@@ -3488,14 +3724,18 @@ def test_main_passes_start_minimized_through_to_launch_shell(tmp_path, monkeypat
 
     monkeypatch.setattr(windows_launcher, "launch_shell", fake_launch_shell)
     monkeypatch.setattr(
-        windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--start-minimized"]
+        windows_launcher.sys,
+        "argv",
+        ["TwitchChannelPointsMiner.exe", "--start-minimized"],
     )
 
     assert windows_launcher.main() == 0
     assert captured["start_minimized"] is True
 
 
-def test_main_ignores_start_minimized_while_username_setup_is_pending(tmp_path, monkeypatch):
+def test_main_ignores_start_minimized_while_username_setup_is_pending(
+    tmp_path, monkeypatch
+):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text(
@@ -3508,7 +3748,9 @@ def test_main_ignores_start_minimized_while_username_setup_is_pending(tmp_path, 
     (config_dir / ".desktop_shell_onboarded").touch()
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
-    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "install_console_capture", lambda _buffer: None
+    )
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
     captured = {}
 
@@ -3517,7 +3759,9 @@ def test_main_ignores_start_minimized_while_username_setup_is_pending(tmp_path, 
 
     monkeypatch.setattr(windows_launcher, "launch_shell", fake_launch_shell)
     monkeypatch.setattr(
-        windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--start-minimized"]
+        windows_launcher.sys,
+        "argv",
+        ["TwitchChannelPointsMiner.exe", "--start-minimized"],
     )
 
     assert windows_launcher.main() == 0
@@ -3527,7 +3771,9 @@ def test_main_ignores_start_minimized_while_username_setup_is_pending(tmp_path, 
 def test_launch_shell_passes_hidden_kwarg_to_create_window(tmp_path, monkeypatch):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
-    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
 
     windows_launcher.launch_shell(
         None,

@@ -20,7 +20,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.constants import CLIENT_ID, GQLOperations, USER_AGENTS
 
-
 WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 WEB_USER_AGENT = USER_AGENTS["Windows"]["CHROME"]
 AVAILABLE_DROPS_OPERATION = getattr(
@@ -210,9 +209,7 @@ def fetch_integrity_token(twitch, session, client_id):
     }
 
 
-def run_operation(
-    twitch, session, name, operation, client_id, integrity_token=None
-):
+def run_operation(twitch, session, name, operation, client_id, integrity_token=None):
     payload = copy.deepcopy(operation)
     headers = {
         "Authorization": f"OAuth {twitch.twitch_login.get_auth_token()}",
@@ -278,9 +275,7 @@ def run_operation(
         }
 
 
-def resolve_channel_id(
-    twitch, session, channel_login, client_id, integrity_token=None
-):
+def resolve_channel_id(twitch, session, channel_login, client_id, integrity_token=None):
     operation = copy.deepcopy(GQLOperations.GetIDFromLogin)
     operation["variables"]["login"] = channel_login
     result = run_operation(
@@ -419,9 +414,7 @@ def build_discovery_summary(operation_results, detail_results):
             if campaign_id in [None, ""]:
                 continue
             campaign_id = str(campaign_id)
-            entry = all_campaigns.setdefault(
-                campaign_id, campaign_summary(campaign)
-            )
+            entry = all_campaigns.setdefault(campaign_id, campaign_summary(campaign))
             entry["sources"] = sorted(
                 name for name, ids in source_ids.items() if campaign_id in ids
             )
@@ -436,14 +429,11 @@ def build_discovery_summary(operation_results, detail_results):
                 benefit["earned_badge_matches"] = earned_badge_matches(
                     benefit.get("name"), campaign.get("game"), badges
                 )
-                benefit["badge_achieved"] = bool(
-                    benefit["earned_badge_matches"]
-                )
+                benefit["badge_achieved"] = bool(benefit["earned_badge_matches"])
 
     return {
         "source_campaign_counts": {
-            source: len(campaigns)
-            for source, campaigns in campaigns_by_source.items()
+            source: len(campaigns) for source, campaigns in campaigns_by_source.items()
         },
         "earned_badge_count": len(badges),
         "earned_badge_titles": sorted(
@@ -545,9 +535,7 @@ def main():
         channel_id = args.channel_id
         resolution = None
         if channel_id:
-            print(
-                f"Using channel ID {channel_id} for {args.channel}.", flush=True
-            )
+            print(f"Using channel ID {channel_id} for {args.channel}.", flush=True)
         else:
             print(f"Resolving channel {args.channel}...", flush=True)
             channel_id, resolution = resolve_channel_id(
@@ -565,10 +553,8 @@ def main():
                 if isinstance(error, dict)
             ]
             response_user = (
-                (((resolution or {}).get("response") or {}).get("data") or {}).get(
-                    "user"
-                )
-            )
+                ((resolution or {}).get("response") or {}).get("data") or {}
+            ).get("user")
             print(
                 f"Could not resolve Twitch channel {args.channel!r}; "
                 f"HTTP status: {(resolution or {}).get('http_status', 'request failed')}; "
@@ -626,8 +612,7 @@ def main():
     )
     if available_campaigns and args.channel:
         print(
-            "Expanding "
-            f"{len(available_campaigns)} channel-advertised campaign(s)..."
+            "Expanding " f"{len(available_campaigns)} channel-advertised campaign(s)..."
         )
         for campaign in available_campaigns:
             campaign_id = campaign.get("id")

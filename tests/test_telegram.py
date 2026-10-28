@@ -180,9 +180,10 @@ def test_telegram_counts_unicode_prefix_within_each_parts_character_limit():
     prefix = "[\U0001f3c6] "
     body = "\U0001f3c6" * 5000
 
-    with patch.object(
-        Settings, "logger", SimpleNamespace(username=prefix)
-    ), patched_post() as post:
+    with (
+        patch.object(Settings, "logger", SimpleNamespace(username=prefix)),
+        patched_post() as post,
+    ):
         assert telegram.send(prefix + body, Events.DROP_STATUS) == (True, None)
 
     texts = [call.kwargs["data"]["text"] for call in post.call_args_list]
@@ -225,9 +226,10 @@ def test_telegram_repeats_username_prefix_on_later_parts():
     prefix = "[miner] "
     message = prefix + "x" * 5000
 
-    with patch.object(
-        Settings, "logger", SimpleNamespace(username=prefix)
-    ), patched_post() as post:
+    with (
+        patch.object(Settings, "logger", SimpleNamespace(username=prefix)),
+        patched_post() as post,
+    ):
         assert telegram.send(message, Events.DROP_STATUS) == (True, None)
 
     texts = [call.kwargs["data"]["text"] for call in post.call_args_list]
@@ -265,9 +267,10 @@ def test_telegram_retries_after_body_retry_after_hint():
     limited = Mock()
     limited.raise_for_status.side_effect = requests.HTTPError(response=limited_response)
 
-    with patched_post(side_effect=[limited, Mock()]) as post, patch(
-        "TwitchChannelPointsMiner.classes.NotificationError.time.sleep"
-    ) as sleep:
+    with (
+        patched_post(side_effect=[limited, Mock()]) as post,
+        patch("TwitchChannelPointsMiner.classes.NotificationError.time.sleep") as sleep,
+    ):
         assert telegram.send("claimed", Events.DROP_STATUS) == (True, None)
 
     sleep.assert_called_once_with(3.0)

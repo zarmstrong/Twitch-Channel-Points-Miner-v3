@@ -82,9 +82,7 @@ def test_subscriber_only_campaign_is_not_treated_as_watch_drop():
 
     assert report["campaign_count"] == 0
     assert report["non_watch_campaign_count"] == 1
-    assert report["non_watch_campaigns"][0]["drops"][0]["name"] == (
-        "Subscriber Reward"
-    )
+    assert report["non_watch_campaigns"][0]["drops"][0]["name"] == ("Subscriber Reward")
 
 
 def test_upcoming_campaign_includes_page_start_and_watch_drop():
@@ -108,9 +106,7 @@ def test_upcoming_campaign_includes_page_start_and_watch_drop():
     <h2>Past Drops</h2>
     """
 
-    report = parse_game_page(
-        source, "https://twitchdrops.app/game/example-game"
-    )
+    report = parse_game_page(source, "https://twitchdrops.app/game/example-game")
 
     assert report["campaign_count"] == 0
     assert report["upcoming_campaigns"][0]["starts_at"] == "2026-07-16T20:00:00Z"

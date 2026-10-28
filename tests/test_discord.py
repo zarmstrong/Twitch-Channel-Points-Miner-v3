@@ -248,9 +248,10 @@ def test_discord_repeats_username_prefix_on_later_parts():
     lines = [f"Campaign {index:03d}: progress {index % 100}%" for index in range(120)]
     message = prefix + "\n".join(lines)
 
-    with patch.object(
-        Settings, "logger", SimpleNamespace(username=prefix)
-    ), patched_post() as request:
+    with (
+        patch.object(Settings, "logger", SimpleNamespace(username=prefix)),
+        patched_post() as request,
+    ):
         assert discord.send(message, Events.DROP_STATUS) == (True, None)
 
     contents = [call.kwargs["data"]["content"] for call in request.call_args_list]
@@ -309,11 +310,12 @@ def test_discord_retries_rate_limited_part_after_retry_after():
         response=SimpleNamespace(status_code=429, headers={"Retry-After": "2"})
     )
 
-    with patched_post(
-        side_effect=[Mock(), limited, Mock()],
-    ) as request, patch(
-        "TwitchChannelPointsMiner.classes.NotificationError.time.sleep"
-    ) as sleep:
+    with (
+        patched_post(
+            side_effect=[Mock(), limited, Mock()],
+        ) as request,
+        patch("TwitchChannelPointsMiner.classes.NotificationError.time.sleep") as sleep,
+    ):
         assert discord.send(message, Events.DROP_STATUS) == (True, None)
 
     assert request.call_count == 3

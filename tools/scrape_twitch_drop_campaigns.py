@@ -23,7 +23,6 @@ from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScraper
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 
-
 CACHE_VERSION = 1
 WEB_USER_AGENT = USER_AGENTS["Windows"]["CHROME"]
 GLOBAL_BADGES_URL = "https://api.twitch.tv/helix/chat/badges/global"

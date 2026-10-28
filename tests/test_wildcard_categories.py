@@ -10,7 +10,10 @@ from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.Exceptions import CategoryLookupFailedException
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.Twitch import Twitch, _drops_dashboard_state
-from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    Streamer,
+    StreamerSettings,
+)
 
 
 def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
@@ -34,7 +37,9 @@ def _bare_twitch(monkeypatch, deadlines, requested_slugs_seen=None):
             requested_slugs_seen.append(requested_category_slugs)
         return dict(deadlines), set(deadlines)
 
-    monkeypatch.setattr(Twitch, "_Twitch__get_inventory", lambda self: {"present": True})
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_inventory", lambda self: {"present": True}
+    )
     monkeypatch.setattr(
         Twitch,
         "_Twitch__active_drop_category_slugs_from_campaigns",
@@ -79,9 +84,7 @@ def test_get_wildcard_categories_unfiltered_request_is_passed_through(monkeypatc
 
 
 def test_preferred_filter_keeps_external_catalog_scoped(monkeypatch):
-    twitch = _bare_twitch(
-        monkeypatch, {"preferred-game": datetime(2099, 1, 1)}
-    )
+    twitch = _bare_twitch(monkeypatch, {"preferred-game": datetime(2099, 1, 1)})
     fallback_requests = []
 
     def fallback(self, categories, known_slugs, inventory=None):
@@ -127,9 +130,7 @@ def test_get_wildcard_categories_limit_throttles_new_additions(monkeypatch):
     }
     twitch = _bare_twitch(monkeypatch, deadlines)
 
-    result = twitch.get_wildcard_categories_with_active_drops(
-        limit=2, pin_active=False
-    )
+    result = twitch.get_wildcard_categories_with_active_drops(limit=2, pin_active=False)
 
     assert result == ["first", "second"]
 
@@ -252,9 +253,7 @@ def test_wildcard_ranks_external_missing_campaign_ahead_of_later_twitch_campaign
 
 
 def test_wildcard_does_not_override_twitch_authoritative_deadline(monkeypatch):
-    twitch = _bare_twitch(
-        monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
-    )
+    twitch = _bare_twitch(monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)})
     twitch.twitchdrops_app_catalog_complete = False
     monkeypatch.setattr(
         Twitch,
@@ -287,18 +286,14 @@ def test_wildcard_external_addition_survives_fallback_mutating_known_slugs(
     # (see the coffeedicee bug report: "0 external additions" forever, even
     # with dozens of genuinely open external campaigns logged moments
     # earlier).
-    twitch = _bare_twitch(
-        monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
-    )
+    twitch = _bare_twitch(monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)})
     twitch.twitchdrops_app_catalog_complete = False
 
     def mutating_fallback(self, categories, known_slugs, inventory=None):
         known_slugs.add("urgent-external-game")
         return {"urgent-external-game": datetime(2050, 1, 1)}
 
-    monkeypatch.setattr(
-        Twitch, "_Twitch__twitchdrops_app_fallback", mutating_fallback
-    )
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", mutating_fallback)
 
     result = twitch.get_wildcard_categories_with_active_drops()
 
@@ -306,12 +301,8 @@ def test_wildcard_external_addition_survives_fallback_mutating_known_slugs(
 
 
 def test_wildcard_reuses_preloaded_external_catalog(monkeypatch):
-    twitch = _bare_twitch(
-        monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
-    )
-    twitch.twitchdrops_app_deadlines = {
-        "urgent-external-game": datetime(2050, 1, 1)
-    }
+    twitch = _bare_twitch(monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)})
+    twitch.twitchdrops_app_deadlines = {"urgent-external-game": datetime(2050, 1, 1)}
     monkeypatch.setattr(
         Twitch,
         "_Twitch__twitchdrops_app_fallback",
@@ -455,9 +446,7 @@ def test_wildcard_discovery_only_runs_when_preferred_pass_finds_a_streamer():
     assert [streamer.username for streamer in miner.streamers] == [
         "preferred-game-streamer"
     ]
-    assert all(
-        streamer.from_wildcard_category is False for streamer in miner.streamers
-    )
+    assert all(streamer.from_wildcard_category is False for streamer in miner.streamers)
 
 
 def test_wildcard_discovery_runs_when_eligible_category_has_no_live_streamer():
@@ -566,9 +555,7 @@ def test_real_wildcard_discovery_still_retires_genuinely_closed_streamer():
     )
 
     assert len(twitch.wildcard_calls) == 1
-    assert "gamex-streamer" not in [
-        streamer.username for streamer in miner.streamers
-    ]
+    assert "gamex-streamer" not in [streamer.username for streamer in miner.streamers]
     assert miner.ws_pool.removed == ["gamex-streamer"]
     assert gamex.irc_chat.stopped is True
 
@@ -1160,8 +1147,7 @@ def test_real_discovery_filters_skip_on_failed_inventory(monkeypatch):
 
     assert twitch.filter_categories_with_active_drops(["overwatch-2"]) == []
     assert (
-        twitch.filter_categories_with_active_drops(["overwatch-2"], inventory={})
-        == []
+        twitch.filter_categories_with_active_drops(["overwatch-2"], inventory={}) == []
     )
     assert twitch.get_wildcard_categories_with_active_drops() == []
     assert twitch.get_wildcard_categories_with_active_drops(inventory={}) == []

@@ -145,11 +145,15 @@ def test_badge_matching_normalizes_roman_numerals():
     # "Solasta 2 Multiplayer" vs "Solasta II Multiplayer"), which otherwise
     # leaves a completed badge campaign perpetually "unearned".
     assert (
-        badge_match_reason("Solasta 2 Multiplayer", "Solasta II", "Solasta II Multiplayer")
+        badge_match_reason(
+            "Solasta 2 Multiplayer", "Solasta II", "Solasta II Multiplayer"
+        )
         == "exact_title"
     )
     assert (
-        badge_match_reason("Solasta II Multiplayer", "Solasta II", "Solasta 2 Multiplayer")
+        badge_match_reason(
+            "Solasta II Multiplayer", "Solasta II", "Solasta 2 Multiplayer"
+        )
         == "exact_title"
     )
 
@@ -403,11 +407,11 @@ def test_eligible_badge_campaigns_excludes_campaign_matched_by_completion_signat
     # owned_badge_names is empty, mirroring the reporter's 19-badge
     # AvailableBadges list, which never contains this already-earned badge.
     without_signature = catalog.eligible_badge_campaigns()
-    assert [record["game_slug"] for record in without_signature] == [
-        "infinity-nikki"
-    ]
+    assert [record["game_slug"] for record in without_signature] == ["infinity-nikki"]
 
-    matching_signature = {("infinity-nikki", "infinity nikki drops campaign", ends_at.timestamp())}
+    matching_signature = {
+        ("infinity-nikki", "infinity nikki drops campaign", ends_at.timestamp())
+    }
     with_signature = catalog.eligible_badge_campaigns(
         completed_campaign_signatures=matching_signature
     )
@@ -419,9 +423,7 @@ def test_eligible_badge_campaigns_excludes_campaign_matched_by_completion_signat
     still_eligible = catalog.eligible_badge_campaigns(
         completed_campaign_signatures=unrelated_signature
     )
-    assert [record["game_slug"] for record in still_eligible] == [
-        "infinity-nikki"
-    ]
+    assert [record["game_slug"] for record in still_eligible] == ["infinity-nikki"]
 
 
 def test_confirmed_badge_rewards_exposes_catalog_identities(tmp_path):

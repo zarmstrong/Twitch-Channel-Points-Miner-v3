@@ -110,25 +110,17 @@ def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
             "data": {
                 "game": {
                     "streams": {
-                        "edges": [
-                            {"node": {"broadcaster": {"login": "Eligible"}}}
-                        ]
+                        "edges": [{"node": {"broadcaster": {"login": "Eligible"}}}]
                     }
                 }
             }
         }
 
-    twitch = bare_twitch(
-        SimpleNamespace(post_gql_request_raw=post_gql_request_raw)
-    )
+    twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
 
-    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == {
-        "eligible"
-    }
+    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == {"eligible"}
     assert calls[0][0] == "DirectoryPage_Game"
-    assert calls[0][1]["variables"]["options"]["tags"] == [
-        "official-drops-id"
-    ]
+    assert calls[0][1]["variables"]["options"]["tags"] == ["official-drops-id"]
 
 
 def test_drops_directory_filter_does_not_trust_user_tag_text(monkeypatch):
@@ -337,9 +329,7 @@ def test_available_badges_retries_after_unavailable_response():
             {"data": {"currentUser": {"availableBadges": None}}},
             {
                 "data": {
-                    "currentUser": {
-                        "availableBadges": [{"title": "Two Point Pickle"}]
-                    }
+                    "currentUser": {"availableBadges": [{"title": "Two Point Pickle"}]}
                 }
             },
         ]
@@ -362,9 +352,7 @@ def test_available_badges_retries_after_request_error():
             raise RetryError("AvailableBadges", [])
         return {
             "data": {
-                "currentUser": {
-                    "availableBadges": [{"title": "Two Point Pickle"}]
-                }
+                "currentUser": {"availableBadges": [{"title": "Two Point Pickle"}]}
             }
         }
 
@@ -378,16 +366,8 @@ def test_available_badges_retries_after_request_error():
 def test_available_badges_refreshes_successful_cache():
     responses = iter(
         [
-            {
-                "data": {
-                    "currentUser": {"availableBadges": [{"title": "Old Badge"}]}
-                }
-            },
-            {
-                "data": {
-                    "currentUser": {"availableBadges": [{"title": "New Badge"}]}
-                }
-            },
+            {"data": {"currentUser": {"availableBadges": [{"title": "Old Badge"}]}}},
+            {"data": {"currentUser": {"availableBadges": [{"title": "New Badge"}]}}},
         ]
     )
     calls = []
@@ -409,9 +389,7 @@ def test_earned_badge_completes_fallback_campaign(monkeypatch):
     gql = SimpleNamespace(
         post_gql_request_raw=lambda operation, request: {
             "data": {
-                "currentUser": {
-                    "availableBadges": [{"title": "Two Point Pickle"}]
-                }
+                "currentUser": {"availableBadges": [{"title": "Two Point Pickle"}]}
             }
         }
     )
@@ -1511,8 +1489,7 @@ def test_errored_game_still_suppresses_completed_gist_campaign(monkeypatch):
     # The wildcard is for this read only; the permanent cache stays exact.
     assert twitch.completed_badge_campaign_signature_cache == set()
     assert (
-        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), inventory)
-        == {}
+        twitch._Twitch__twitchdrops_app_fallback(["minecraft"], set(), inventory) == {}
     )
     assert front_page_calls == [True]
 
@@ -1695,7 +1672,9 @@ def test_null_completions_without_an_error_read_as_missing():
     assert twitch.completed_badge_campaign_signature_cache is None
     assert twitch.completed_badge_campaign_signatures_or_cached(loaded) == set()
     # A later errored read still stands down instead of trusting the null.
-    assert twitch.completed_badge_campaign_signatures_or_cached(PARTIAL_INVENTORY) is None
+    assert (
+        twitch.completed_badge_campaign_signatures_or_cached(PARTIAL_INVENTORY) is None
+    )
 
 
 def test_optional_errors_keep_an_absent_completions_field_missing():
@@ -1786,9 +1765,7 @@ def test_continuing_gist_stand_down_is_repeated_hourly(monkeypatch, caplog):
     ] == [logging.INFO, logging.DEBUG, logging.INFO, logging.INFO]
 
 
-def test_unsignable_warning_repeats_only_for_a_new_streak_or_high(
-    monkeypatch, caplog
-):
+def test_unsignable_warning_repeats_only_for_a_new_streak_or_high(monkeypatch, caplog):
     import TwitchChannelPointsMiner.classes.Twitch as twitch_module
 
     clock = [1000.0]

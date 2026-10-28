@@ -111,9 +111,7 @@ def test_streamers_available_excludes_now_watching_file(monkeypatch, tmp_path):
         '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
     )
     (tmp_path / "now_watching.json").write_text("[]", encoding="utf-8")
-    (tmp_path / "drops_by_category.json").write_text(
-        '{"drops": []}', encoding="utf-8"
-    )
+    (tmp_path / "drops_by_category.json").write_text('{"drops": []}', encoding="utf-8")
     (tmp_path / "dashboard_prefs.json").write_text("{}", encoding="utf-8")
 
     assert streamers_available() == ["example.json"]
@@ -183,7 +181,9 @@ def test_now_watching_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
 
     monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
-    entries = [{"username": "alice", "reason": "badge", "game": "Foo", "channel_points": 1}]
+    entries = [
+        {"username": "alice", "reason": "badge", "game": "Foo", "channel_points": 1}
+    ]
     now_watching_file = tmp_path / "now_watching.json"
     now_watching_file.write_text(json_module.dumps(entries), encoding="utf-8")
     analytics_module.response_cache.clear()
@@ -279,9 +279,7 @@ def test_static_assets_are_served_without_authentication():
     # and image 401'd and silently failed to apply.
     server = AnalyticsServer(username="user", password="secret")
 
-    response = server.app.test_client().get(
-        server.app.static_url_path + "/style.css"
-    )
+    response = server.app.test_client().get(server.app.static_url_path + "/style.css")
 
     assert response.status_code == 200
 
@@ -293,9 +291,7 @@ def test_static_html_templates_still_require_authentication():
     # because Flask happens to serve them through the "static" endpoint too.
     server = AnalyticsServer(username="user", password="secret")
 
-    response = server.app.test_client().get(
-        server.app.static_url_path + "/charts.html"
-    )
+    response = server.app.test_client().get(server.app.static_url_path + "/charts.html")
 
     assert response.status_code == 401
 
@@ -385,7 +381,9 @@ def test_dashboard_prefs_endpoint_persists_a_new_value(tmp_path, monkeypatch):
     server = AnalyticsServer(password=None)
     client = server.app.test_client()
 
-    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": "false"})
+    response = client.post(
+        "/dashboard_prefs", json={"key": "dark-mode", "value": "false"}
+    )
 
     assert response.status_code == 200
     assert response.get_json() == {"dark-mode": "false"}
@@ -483,7 +481,9 @@ def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
     assert response.status_code == 200
 
 
-def test_shell_bypass_token_query_param_authenticates_and_sets_cookie(tmp_path, monkeypatch):
+def test_shell_bypass_token_query_param_authenticates_and_sets_cookie(
+    tmp_path, monkeypatch
+):
     # Simulates the Windows desktop shell's embedded dashboard iframe: it
     # can't attach a custom Authorization header, so it authenticates once
     # via a query param carrying a token only its own launcher process set.
@@ -807,7 +807,7 @@ def test_logs_tab_is_lazily_loaded_and_starts_hidden_for_new_users():
 
     assert 'id="tab-logs"' in template
     assert 'id="logs-panel" style="display: none;"' in template
-    assert "id=\"log\"" not in template
+    assert 'id="log"' not in template
     assert "var logsLoaded = false;" in script
 
     switch_tab = script.split("function switchDashboardTab", 1)[1].split(
@@ -837,9 +837,9 @@ def test_url_hash_overrides_saved_dashboard_tab():
 
 
 def test_log_polling_retries_after_transient_rollover_failure():
-    script = (
-        Path(__file__).resolve().parents[1] / "assets" / "script.js"
-    ).read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
     get_log = script.split("function getLog()", 1)[1].split(
         "\nfunction startLogPolling", 1
     )[0]

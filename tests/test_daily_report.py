@@ -86,10 +86,7 @@ def test_daily_report_omits_unchanged_streamers_and_includes_drop_context():
     message = info.call_args.args[0]
     assert "alice: +250 channel points" in message
     assert "bob:" not in message
-    assert (
-        "- Warframe — TennoCon 2026 — Cool Cat: +56m of 120m, in progress"
-        in message
-    )
+    assert "- Warframe — TennoCon 2026 — Cool Cat: +56m of 120m, in progress" in message
 
 
 def test_daily_report_suppresses_report_when_nothing_changed():

@@ -27,7 +27,6 @@ from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
 from TwitchChannelPointsMiner.logger import LoggerSettings, LoggingFormat
 
-
 RUNNER = """\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
@@ -106,14 +105,12 @@ def test_migrate_config_source_resolves_aliased_miner_config():
     exec(migrated, namespace)
 
     assert namespace["MINER_CONFIG"] is namespace["DEFAULT_CONFIG"]
-    assert namespace["DEFAULT_CONFIG"]["priority"][-1] is namespace[
-        "Priority"
-    ].FAVORITE
+    assert namespace["DEFAULT_CONFIG"]["priority"][-1] is namespace["Priority"].FAVORITE
     assert namespace["DEFAULT_SETTINGS"].points_limit is None
 
 
 def test_version_one_migration_adds_missing_options_and_follower_source_last():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 1
 from TwitchChannelPointsMiner.classes.Settings import StreamerSource
 MINER_CONFIG = {
@@ -127,7 +124,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {"followers": True}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, old_version, new_version = migrate_config_source(source)
     namespace = {}
@@ -150,7 +147,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_version_seven_migration_adds_wildcard_categories_and_source_last():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 7
 from TwitchChannelPointsMiner.classes.Settings import StreamerSource
 MINER_CONFIG = {
@@ -165,7 +162,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, old_version, new_version = migrate_config_source(source)
     namespace = {}
@@ -236,7 +233,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_version_seven_migration_appends_wildcard_last_to_custom_priority():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 7
 from TwitchChannelPointsMiner.classes.Settings import StreamerSource
 MINER_CONFIG = {
@@ -251,7 +248,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, new_version = migrate_config_source(source)
     namespace = {}
@@ -268,7 +265,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_migration_preserves_aliased_priority_enum_prefixes():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 3
 from TwitchChannelPointsMiner.classes.Settings import Priority as P
 from TwitchChannelPointsMiner.classes.Settings import StreamerSource as SS
@@ -282,7 +279,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -303,7 +300,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_version_two_migration_normalizes_logger_settings():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 2
 import logging
 from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
@@ -312,7 +309,7 @@ MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, old_version, new_version = migrate_config_source(source)
     namespace = {}
@@ -335,7 +332,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_logger_settings_with_expanded_kwargs_is_not_modified():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 2
 from TwitchChannelPointsMiner.logger import LoggerSettings
 LOGGER_OVERRIDES = {"save": False}
@@ -344,7 +341,7 @@ MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
 
@@ -352,7 +349,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_multiple_logger_settings_add_required_imports_once():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 2
 from TwitchChannelPointsMiner.logger import LoggerSettings
 FIRST_LOGGER = LoggerSettings(save=False)
@@ -361,7 +358,7 @@ MINER_CONFIG = {"username": "alice", "logger_settings": FIRST_LOGGER}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -369,17 +366,14 @@ ANALYTICS_CONFIG = None
 
     assert migrated.count("import logging") == 1
     assert (
-        migrated.count(
-            "from TwitchChannelPointsMiner.logger import ColorPalette"
-        )
-        == 1
+        migrated.count("from TwitchChannelPointsMiner.logger import ColorPalette") == 1
     )
     assert namespace["FIRST_LOGGER"].save is False
     assert namespace["SECOND_LOGGER"].colored is True
 
 
 def test_version_three_adds_missing_source_priority_and_comments_notifications():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 3
 from TwitchChannelPointsMiner.logger import LoggerSettings
 LOGGER = LoggerSettings(
@@ -389,7 +383,7 @@ MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = {"port": 6000}
-'''
+"""
 
     migrated, old_version, new_version = migrate_config_source(source)
     namespace = {}
@@ -413,7 +407,7 @@ ANALYTICS_CONFIG = {"port": 6000}
 
 
 def test_version_four_adds_daily_report_settings_and_email_template():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 4
 import logging
 from TwitchChannelPointsMiner.logger import LoggerSettings
@@ -424,7 +418,7 @@ MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, old_version, new_version = migrate_config_source(source)
     namespace = {}
@@ -481,7 +475,7 @@ def test_migrate_config_source_is_idempotent():
 
 
 def test_migrate_config_source_handles_single_line_trailing_commas():
-    source = '''\
+    source = """\
 from TwitchChannelPointsMiner.classes.Settings import Priority
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
 PRIORITIES = [Priority.ORDER,]
@@ -490,7 +484,7 @@ MINER_CONFIG = {"priority": PRIORITIES, "streamer_settings": DEFAULT_SETTINGS}
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -505,7 +499,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_migrate_config_source_adds_separator_after_nested_final_setting():
-    source = '''\
+    source = """\
 from TwitchChannelPointsMiner.classes.Settings import Priority
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
@@ -521,7 +515,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -532,7 +526,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_migrate_config_source_leaves_expanded_streamer_settings_untouched():
-    source = '''\
+    source = """\
 from TwitchChannelPointsMiner.classes.Settings import Priority
 from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
 STREAMER_OVERRIDES = {"favorite": True, "points_limit": 50000}
@@ -544,7 +538,7 @@ MINER_CONFIG = {
 STREAMERS = []
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -561,7 +555,7 @@ ANALYTICS_CONFIG = None
 
 
 def test_migration_leaves_per_streamer_overrides_sparse():
-    source = '''\
+    source = """\
 from TwitchChannelPointsMiner.classes.Settings import Priority
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
@@ -586,7 +580,7 @@ STREAMERS = [
 ]
 MINE_CONFIG = {}
 ANALYTICS_CONFIG = None
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -603,11 +597,14 @@ ANALYTICS_CONFIG = None
     assert override.points_limit is None
     assert override.bet.max_points == 1234
     assert override.bet.minimum_points is None
-    assert "StreamerSettings(\n            make_predictions=False,\n            follow_raid=True,\n            bet=BetSettings(max_points=1234),\n        )" in migrated
+    assert (
+        "StreamerSettings(\n            make_predictions=False,\n            follow_raid=True,\n            bet=BetSettings(max_points=1234),\n        )"
+        in migrated
+    )
 
 
 def test_migration_does_not_override_computed_dictionary_keys():
-    source = '''\
+    source = """\
 CONFIG_VERSION = 3
 USERNAME = "username"
 PASSWORD = "password"
@@ -617,7 +614,7 @@ MINER_CONFIG = {USERNAME: "alice", PASSWORD: "secret"}
 STREAMERS = []
 MINE_CONFIG = {BLACKLIST: ["blocked"]}
 ANALYTICS_CONFIG = {PORT: 6000}
-'''
+"""
 
     migrated, _, _ = migrate_config_source(source)
     namespace = {}
@@ -646,7 +643,7 @@ def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
 def test_migrate_current_config_wipes_twitch_password_from_file_and_backup(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
-        f'''\
+        f"""\
 CONFIG_VERSION = {CONFIG_VERSION}
 MINER_CONFIG = {{
     "username": "alice",
@@ -655,16 +652,14 @@ MINER_CONFIG = {{
 STREAMERS = []
 MINE_CONFIG = {{}}
 ANALYTICS_CONFIG = {{"password": "analytics-secret"}}
-''',
+""",
         encoding="utf-8",
     )
 
     assert migrate_config(config) is True
 
     migrated = config.read_text(encoding="utf-8")
-    backup = (tmp_path / f"config.py.v{CONFIG_VERSION}.bak").read_text(
-        encoding="utf-8"
-    )
+    backup = (tmp_path / f"config.py.v{CONFIG_VERSION}.bak").read_text(encoding="utf-8")
     assert "twitch-secret" not in migrated
     assert "twitch-secret" not in backup
     assert '"password": "analytics-secret"' in migrated
@@ -673,13 +668,13 @@ ANALYTICS_CONFIG = {{"password": "analytics-secret"}}
 
 def test_migrate_config_sanitizes_matching_interrupted_backup(tmp_path):
     config = tmp_path / "config.py"
-    source = f'''\
+    source = f"""\
 CONFIG_VERSION = {CONFIG_VERSION}
 MINER_CONFIG = {{"username": "alice", "password": "twitch-secret"}}
 STREAMERS = []
 MINE_CONFIG = {{}}
 ANALYTICS_CONFIG = None
-'''
+"""
     backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
     config.write_text(source, encoding="utf-8")
     backup.write_text(source, encoding="utf-8")
@@ -735,7 +730,9 @@ def test_migrate_config_rewrites_invalid_file_from_current_version_backup(tmp_pa
     config = tmp_path / "config.py"
     backup = tmp_path / "config.py.v0.bak"
     current, _, _ = migrate_config_source(CONFIG)
-    config.write_text("CONFIG_VERSION = 4\nMINER_CONFIG = {invalid syntax}\n", encoding="utf-8")
+    config.write_text(
+        "CONFIG_VERSION = 4\nMINER_CONFIG = {invalid syntax}\n", encoding="utf-8"
+    )
     backup.write_text(current, encoding="utf-8")
 
     assert migrate_config(config) is True
@@ -829,14 +826,12 @@ def test_convert_runner_source_preserves_configuration_expressions():
 
 
 def test_convert_runner_source_defaults_optional_sections():
-    converted = convert_runner_source(
-        """\
+    converted = convert_runner_source("""\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 
 miner = TwitchChannelPointsMiner("alice")
 miner.mine()
-"""
-    )
+""")
     namespace = {}
 
     exec(converted, namespace)
@@ -847,16 +842,14 @@ miner.mine()
 
 
 def test_convert_runner_source_preserves_supporting_imports_only():
-    converted = convert_runner_source(
-        """\
+    converted = convert_runner_source("""\
 import logging
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Settings import Priority
 
 miner = TwitchChannelPointsMiner("alice", priority=[Priority.ORDER])
 miner.mine([])
-"""
-    )
+""")
 
     assert "import logging" in converted
     assert "from TwitchChannelPointsMiner.classes.Settings import Priority" in converted
@@ -870,8 +863,7 @@ miner.mine([])
 
 
 def test_convert_runner_source_preserves_explicit_streamer_source_priority():
-    converted = convert_runner_source(
-        """\
+    converted = convert_runner_source("""\
 from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 from TwitchChannelPointsMiner.classes.Settings import StreamerSource
 
@@ -879,8 +871,7 @@ miner = TwitchChannelPointsMiner(
     "alice", streamer_source_priority=[StreamerSource.FOLLOWERS]
 )
 miner.mine([])
-"""
-    )
+""")
 
     namespace = {}
     exec(converted, namespace)

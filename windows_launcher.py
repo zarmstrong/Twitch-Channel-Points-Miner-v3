@@ -611,7 +611,9 @@ def _enable_dashboard_from_shell(config_path):
     return True, "Saved. Restart the app for the dashboard to start."
 
 
-def _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker):
+def _maybe_prompt_to_enable_analytics(
+    window, dashboard_info, config_path, prompt_marker
+):
     """One-time consent prompt for an *existing* user whose config already
     has analytics off - shown at most once ever, regardless of the answer,
     tracked by `prompt_marker` (separate from the onboarding marker, which
@@ -779,7 +781,9 @@ def _build_tray_icon(on_show, on_quit):
         pystray.MenuItem("Show", lambda icon, item: on_show(), default=True),
         pystray.MenuItem("Quit", lambda icon, item: on_quit()),
     )
-    return pystray.Icon("TwitchChannelPointsMiner", image, "Twitch Channel Points Miner", menu)
+    return pystray.Icon(
+        "TwitchChannelPointsMiner", image, "Twitch Channel Points Miner", menu
+    )
 
 
 def _make_hide_to_tray_handler(window, tray_icon):
@@ -798,7 +802,9 @@ def _make_hide_to_tray_handler(window, tray_icon):
     """
 
     def on_closing():
-        logger.info("Close button pressed: hiding the window to the tray instead of quitting.")
+        logger.info(
+            "Close button pressed: hiding the window to the tray instead of quitting."
+        )
         window.hide()
         try:
             tray_icon.notify(
@@ -835,7 +841,11 @@ def _read_close_behavior(config_path):
     or unrecognized value falls back to "tray", the long-standing default
     behavior."""
     value = _read_shell_prefs(config_path).get("close_behavior")
-    return value if value in (_CLOSE_BEHAVIOR_TRAY, _CLOSE_BEHAVIOR_QUIT) else _CLOSE_BEHAVIOR_TRAY
+    return (
+        value
+        if value in (_CLOSE_BEHAVIOR_TRAY, _CLOSE_BEHAVIOR_QUIT)
+        else _CLOSE_BEHAVIOR_TRAY
+    )
 
 
 def _write_close_behavior(config_path, value):
@@ -1111,7 +1121,9 @@ class _MinerThreadHandle:
         self.miner = miner
 
 
-def _make_close_confirmation_handler(window, miner_thread, quitting=None, tray_icon=None):
+def _make_close_confirmation_handler(
+    window, miner_thread, quitting=None, tray_icon=None
+):
     """Build a `window.events.closing` handler that blocks the close unless
     the user confirms, whenever the miner is still running.
 
@@ -1348,7 +1360,12 @@ def launch_shell(
     def _log_window_event(name):
         def _handler(*args, **kwargs):
             try:
-                logger.info("Shell window event fired: %s (args=%r, kwargs=%r)", name, args, kwargs)
+                logger.info(
+                    "Shell window event fired: %s (args=%r, kwargs=%r)",
+                    name,
+                    args,
+                    kwargs,
+                )
             except Exception:
                 logger.exception("Failed to log shell window event: %s", name)
 
@@ -1452,9 +1469,13 @@ def launch_shell(
         # bad icon, ...) - fall back to the older confirm-on-close behavior
         # rather than leave the app with no way to quit at all.
         tray_icon = None
-        logger.exception("System tray icon unavailable; falling back to confirm-on-close.")
+        logger.exception(
+            "System tray icon unavailable; falling back to confirm-on-close."
+        )
 
-    quit_handler = _make_close_confirmation_handler(window, miner_thread, quitting, tray_icon)
+    quit_handler = _make_close_confirmation_handler(
+        window, miner_thread, quitting, tray_icon
+    )
 
     api._tray_available = tray_icon is not None
 
@@ -1485,7 +1506,9 @@ def launch_shell(
             # Asking about the dashboard before the user has even entered a
             # username would be premature - it can still appear on a later,
             # normal launch once one is set.
-            _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker)
+            _maybe_prompt_to_enable_analytics(
+                window, dashboard_info, config_path, prompt_marker
+            )
 
     # Without this, pywebview falls back to extracting whatever icon
     # Windows associates with sys.executable at runtime - fragile for a
@@ -1494,7 +1517,9 @@ def launch_shell(
     # reliable way to get the app's own icon on the actual running window
     # (taskbar/Alt-Tab), separate from the exe *file's* icon in Explorer,
     # which PyInstaller's --icon flag in build_windows.bat already covers.
-    webview.start(_on_started, icon=str(bundled_file(os.path.join("assets", _TRAY_ICON_FILE))))
+    webview.start(
+        _on_started, icon=str(bundled_file(os.path.join("assets", _TRAY_ICON_FILE)))
+    )
 
 
 def self_test():
@@ -1598,7 +1623,9 @@ def main():
     if created:
         print(f"Created {config_path}")
         if interactive:
-            password = ensure_windows_analytics_defaults(config_path, just_created=created)
+            password = ensure_windows_analytics_defaults(
+                config_path, just_created=created
+            )
             if password:
                 print(
                     "Enabled the embedded dashboard for this first run. If "
