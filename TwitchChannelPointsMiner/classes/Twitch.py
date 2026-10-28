@@ -4580,9 +4580,11 @@ class Twitch(object):
         key = (game_slug, login)
         if key in (getattr(self, "unverified_drop_picks", None) or ()):
             return None
-        if not self.__has_positive_eligibility(game_slug, login):
+        # One read: another thread may replace the mapping between two.
+        eligibility = self.category_campaign_eligibility.get(key)
+        if eligibility is None or eligibility[0] <= 0:
             return None
-        return self.category_campaign_eligibility[key]
+        return eligibility
 
     @staticmethod
     def __keep_drop_pick(usernames, drop_pick, limit):
@@ -4677,7 +4679,6 @@ class Twitch(object):
             login for login in ranked_logins if TWITCH_LOGIN_PATTERN.fullmatch(login)
         ]
         live_streams = {}
-        checked = 0
         checked_logins = set(ranked_logins).difference(queried_logins)
         drop_pick = getattr(self, "last_drop_pick_streamer", None)
         # Chunks fetched after the cap was met while some campaign still had
@@ -4780,7 +4781,6 @@ class Twitch(object):
                     game_slug=game_slug,
                     usernames=partial_usernames,
                 )
-            checked += len(login_chunk)
             if "rejected_status" not in response:
                 # A rejected batch was not looked at, so a Drops pick in it
                 # still gets its own lookup below.
@@ -4843,8 +4843,8 @@ class Twitch(object):
 
         usernames = select_usernames()
         self.__log_category(
-            f"Checked {checked}/{len(ranked_logins)} campaign-restricted channels for "
-            f"'{game_name}'; selected {len(usernames)} live across "
+            f"Checked {len(checked_logins)}/{len(ranked_logins)} campaign-restricted "
+            f"channels for '{game_name}'; selected {len(usernames)} live across "
             f"{len(campaign_logins)} allow-listed campaigns",
             extra={"emoji": ":satellite_antenna:"},
         )
@@ -7456,7 +7456,13 @@ class Twitch(object):
             response = self.__helix_get(
                 "drops/campaigns", params, suppress_status_codes={404}
             )
-            if not isinstance(response, dict) or response == {}:
+            # A rejected request returns an empty stand-in page, not a page
+            # Twitch sent.
+            if (
+                not isinstance(response, dict)
+                or response == {}
+                or "rejected_status" in response
+            ):
                 break
 
             pages.append(response)

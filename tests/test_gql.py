@@ -4031,3 +4031,94 @@ def test_restricted_partial_failure_reseeds_stale_negative_eligibility(monkeypat
         ("game", "streamer_0"): (1, 1),
         ("game", "streamer_1"): (0, 1),
     }
+
+
+def test_unverified_pick_eligibility_reads_the_mapping_once():
+    # The badge thread can replace category_campaign_eligibility between two
+    # reads; a second read then raised KeyError, aborting the refresh.
+    class ReplacedAfterOneRead(dict):
+        reads = 0
+
+        def _read(self):
+            self.reads += 1
+            return self.reads == 1
+
+        def get(self, key, default=None):
+            return super().get(key, default) if self._read() else default
+
+        def __getitem__(self, key):
+            if self._read():
+                return super().__getitem__(key)
+            raise KeyError(key)
+
+        def __contains__(self, key):
+            return super().__contains__(key) if self._read() else False
+
+    twitch = twitch_with_gql(None)
+    twitch.category_campaign_eligibility = ReplacedAfterOneRead(
+        {("game", "pick"): (1, 2)}
+    )
+
+    eligibility = twitch._Twitch__unverified_pick_eligibility("game", "pick")
+
+    assert eligibility == (1, 2)
+
+
+def _checked_log(monkeypatch, twitch):
+    messages = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__log_category",
+        lambda self, message, **kwargs: messages.append(message),
+    )
+    twitch.get_live_streamers_for_category("Gray Zone Warfare")
+    return [message for message in messages if message.startswith("Checked ")]
+
+
+def test_restricted_lookup_log_counts_malformed_logins_as_checked(monkeypatch):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40},
+        campaigns=[{"id": "madfinger", "channels": ["a1", "Not A Login"]}],
+        allow_listed=["a1", "not a login"],
+    )
+
+    checked = _checked_log(monkeypatch, twitch)
+
+    assert len(checked) == 1
+    assert checked[0].startswith("Checked 2/2 ")
+
+
+def test_restricted_lookup_log_does_not_count_a_rejected_batch(monkeypatch):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40},
+        campaigns=[{"id": "madfinger", "channels": PICK_IN_SECOND_BATCH}],
+        allow_listed=PICK_IN_SECOND_BATCH,
+    )
+    fixture_helix_get = Twitch._Twitch__helix_get
+
+    def helix_get(self, endpoint, params):
+        logins = params.get("user_login")
+        if isinstance(logins, list) and "pick" in logins:
+            return {"data": [], "rejected_status": 400}
+        return fixture_helix_get(self, endpoint, params)
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", helix_get)
+
+    checked = _checked_log(monkeypatch, twitch)
+
+    assert len(checked) == 1
+    assert checked[0].startswith(f"Checked 100/{len(PICK_IN_SECOND_BATCH)} ")
+
+
+@pytest.mark.parametrize("status_code", [400, 410, 422])
+def test_open_helix_campaigns_skip_a_rejected_request(monkeypatch, status_code):
+    twitch = _helix_twitch(monkeypatch, lambda: FakeResponse({}, status_code))
+
+    campaigns, pages = twitch._Twitch__get_open_drop_campaigns_from_helix(
+        return_raw=True
+    )
+
+    assert campaigns == []
+    assert pages == []

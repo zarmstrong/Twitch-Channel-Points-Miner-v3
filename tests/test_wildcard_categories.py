@@ -2190,3 +2190,146 @@ def test_cross_pass_rediscovery_keeps_streamer_through_a_later_failed_lookup():
     assert shared.stream.game_name() is None
     assert miner.streamers == [shared]
     assert miner.ws_pool.removed == []
+
+
+def test_config_change_refreshes_do_not_count_toward_a_category_lookup_limit():
+    twitch = LookupFailureTwitch(
+        ["overwatch-2"], eligible_categories=["overwatch-2"], wildcard_categories=[]
+    )
+    miner = _bare_miner(twitch)
+    preferred = _tracked_in_game("ow_esports", "overwatch-2")
+    miner.streamers = [preferred]
+    miner.original_streamers = [10]
+
+    _refresh(miner, ["overwatch-2"])
+    for _ in range(3):
+        miner.refresh_categories({"categories": ["overwatch-2"], "category_limit": 2})
+    _refresh(miner, ["overwatch-2"])
+    assert miner.streamers == [preferred]
+    assert miner.ws_pool.removed == []
+
+    _refresh(miner, ["overwatch-2"])
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["ow_esports"]
+
+
+def test_config_change_refreshes_do_not_count_toward_a_wildcard_lookup_limit():
+    twitch = LookupFailureTwitch(
+        ["gamex"], eligible_categories=[], wildcard_categories=["gamex"]
+    )
+    miner = _bare_miner(twitch)
+    wild = _tracked_in_game("wild", "gamex", wildcard=True)
+    miner.streamers = [wild]
+    miner.original_streamers = [10]
+    config = {"categories": ["overwatch-2"], "wildcard_categories": True}
+
+    _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    for _ in range(3):
+        miner.refresh_categories(config)
+    _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == [wild]
+    assert miner.ws_pool.removed == []
+
+    _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["wild"]
+
+
+class _StartupDone(Exception):
+    """Raised once startup has built its streamers, before the session
+    starts its threads."""
+
+
+def _startup_streamers(twitch, categories, wildcard_categories=True):
+    """Run the miner's startup up to the point its streamers are built and
+    return them, with the startup discovery passes left as they ran."""
+
+    def stop_after_discovery(streamers):
+        raise _StartupDone()
+
+    twitch.login = lambda: None
+    twitch.initialize_streamers_context = stop_after_discovery
+    miner = _bare_miner(twitch)
+    miner.running = False
+    miner.session_id = "test-session"
+    miner.claim_drops_startup = False
+    miner.watch_streak_cache = None
+
+    with pytest.raises(_StartupDone):
+        miner.run(
+            categories=categories,
+            category_limit=2,
+            drop_badge_catalog=False,
+            wildcard_categories=wildcard_categories,
+        )
+    return miner.streamers
+
+
+def test_startup_runs_wildcard_discovery_when_preferred_categories_find_nobody():
+    twitch = FakeTwitch(
+        eligible_categories=["overwatch-2"],
+        wildcard_categories=["gamex"],
+        empty_categories=["overwatch-2"],
+    )
+
+    streamers = _startup_streamers(twitch, ["overwatch-2"])
+
+    assert len(twitch.wildcard_calls) == 1
+    assert [streamer.username for streamer in streamers] == ["gamex-streamer"]
+    assert streamers[0].from_wildcard_category is True
+    assert streamers[0].discovery_category_slugs == {"gamex"}
+
+
+def test_startup_category_streamers_record_the_category_they_were_found_under():
+    twitch = FakeTwitch(
+        eligible_categories=["overwatch-2"], wildcard_categories=["gamex"]
+    )
+
+    streamers = _startup_streamers(twitch, ["overwatch-2"])
+
+    assert twitch.wildcard_calls == []
+    assert [streamer.username for streamer in streamers] == ["overwatch-2-streamer"]
+    assert streamers[0].from_category is True
+    assert streamers[0].discovery_category_slugs == {"overwatch-2"}
+
+
+def test_startup_failed_preferred_lookup_keeps_wildcard_discovery_off():
+    # The preferred pass found nobody only because it could not look; the
+    # refresh stands the wildcard pass down for this, and so must startup.
+    twitch = LookupFailureTwitch(
+        ["overwatch-2"],
+        eligible_categories=["overwatch-2"],
+        wildcard_categories=["gamex"],
+    )
+
+    streamers = _startup_streamers(twitch, ["overwatch-2"])
+
+    assert twitch.wildcard_calls == []
+    assert streamers == []
+
+
+def test_startup_adds_channels_a_failed_lookup_still_found():
+    twitch = LookupFailureTwitch(
+        ["overwatch-2"],
+        partial_usernames=["partial"],
+        eligible_categories=["overwatch-2"],
+        wildcard_categories=[],
+    )
+
+    streamers = _startup_streamers(twitch, ["overwatch-2"])
+
+    assert [streamer.username for streamer in streamers] == ["partial"]
+    assert streamers[0].from_category is True
+    assert streamers[0].discovery_category_slugs == {"overwatch-2"}
+
+
+def test_startup_failed_campaign_lookup_keeps_wildcard_discovery_off():
+    twitch = CampaignLookupFailureTwitch(
+        eligible_categories=[], wildcard_categories=["gamex"]
+    )
+
+    streamers = _startup_streamers(twitch, ["overwatch-2"])
+
+    assert len(twitch.filter_calls) == 1
+    assert twitch.wildcard_calls == []
+    assert streamers == []
