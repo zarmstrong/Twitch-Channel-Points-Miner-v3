@@ -1946,13 +1946,15 @@ class Twitch(object):
         for completed_record in inventory.get("completedRewardCampaigns", []) or []:
             if not isinstance(completed_record, dict):
                 continue
-            campaign = completed_record.get("campaign")
-            if not isinstance(campaign, dict):
-                campaign = completed_record
+            campaign, _ = self.__completed_record_campaign(completed_record)
+            # Only a top-level ID: everything downstream reads campaign["id"],
+            # so a record identified by a nested ID cannot be used here.
             campaign_id = campaign.get("id")
-            game = campaign.get("game") or {}
-            if campaign_id in [None, ""] or not (
-                game.get("displayName") or game.get("name")
+            game = campaign.get("game")
+            if (
+                campaign_id in [None, ""]
+                or not isinstance(game, dict)
+                or not (game.get("displayName") or game.get("name"))
             ):
                 continue
             campaigns_by_id[str(campaign_id)] = campaign
@@ -2169,12 +2171,11 @@ class Twitch(object):
         # on the same (game, campaign name, end time) signature already used
         # for badge campaigns. Without that evidence every gist campaign this
         # account already finished would look mineable, so stand down until
-        # the inventory loads once. No deadlines are returned, as after a
-        # failed gist scrape: a stored result may come from a run without
+        # the inventory loads once. The stored gist result is cleared, as
+        # after a failed gist scrape: it may come from a run without
         # completion evidence (an inventory missing the field) and must not
-        # be merged as verified. The flag stays unset so a wildcard pass
-        # with refresh_external_catalog=False checks again instead of
-        # reusing that stored result. Both discovery passes reach this in
+        # stay live as verified. The flag stays unset so a wildcard pass
+        # with refresh_external_catalog=False checks again. Both discovery passes reach this in
         # the same cycle, so the stand-down is reported once per streak and
         # repeated hourly while it lasts.
         completed_campaign_signatures = (
@@ -2198,6 +2199,13 @@ class Twitch(object):
             )
             if reminder_due:
                 self.twitchdrops_app_stand_down_logged_at = now
+            # Like a failed scrape, leave nothing from an earlier run live:
+            # it may come from a run without completion evidence.
+            self.twitchdrops_app_campaign_filtered_slugs = set()
+            self.twitchdrops_app_campaigns = {}
+            self.twitchdrops_app_game_names = {}
+            self.twitchdrops_app_upcoming_starts = {}
+            self.twitchdrops_app_deadlines = {}
             self.twitchdrops_app_catalog_complete = False
             return {}
         self.twitchdrops_app_stand_down_logged_at = None
@@ -2823,10 +2831,11 @@ class Twitch(object):
         "loaded": a list, possibly empty (an account with no completions
         gets [] rather than null).
         "errored": present but not a list; __get_inventory nulls the field
-        when Twitch reports an error for the list itself.
-        "missing": the inventory loaded without the field and without an
-        error for it, which means the response no longer carries it (for
-        example after a schema change) rather than a transient failure.
+        when Twitch reports an error covering a list it did not deliver.
+        "missing": the inventory loaded without a list and without an error
+        for it. __get_inventory removes an error-free null as well, so this
+        also covers a response that no longer carries the field (for example
+        after a schema change) rather than a transient failure.
         """
         if not Twitch.drops_inventory_loaded(inventory):
             return "unavailable"
@@ -2986,20 +2995,25 @@ class Twitch(object):
                 self.completed_badge_campaign_signatures_by_id = signatures_by_id
             else:
                 stored_signatures_by_id.update(signatures_by_id)
+            # Highest count reported so far. Reads from different threads
+            # can see different shapes, and an old entry without an end time
+            # stays unsignable forever, so only a new high warns again.
             previous_unsignable = getattr(
                 self, "completed_badge_campaign_unsignable_count", 0
             )
-            self.completed_badge_campaign_unsignable_count = unsignable
-        if unsignable and unsignable != previous_unsignable:
+            if unsignable > previous_unsignable:
+                self.completed_badge_campaign_unsignable_count = unsignable
+        if unsignable > previous_unsignable:
             logger.warning(
                 f"{unsignable} completed Drop campaign(s) in the inventory lack "
                 "the name, game and end time needed to recognize them; they "
                 "may be mined again until Twitch returns them in full",
                 extra={"emoji": ":warning:", "category_log": True},
             )
-        elif previous_unsignable and not unsignable:
+        elif unsignable:
             self.__log_drop_check(
-                "every completed Drop campaign in the inventory is recognizable again",
+                f"{unsignable} completed Drop campaign(s) in the inventory "
+                "cannot be recognized",
                 level=logging.DEBUG,
             )
 
@@ -6683,42 +6697,29 @@ class Twitch(object):
     def __normalize_completed_reward_campaigns(inventory, error_paths):
         """Make completedRewardCampaigns say whether it can be trusted.
 
-        None afterwards means Twitch reported an error that may have nulled
-        or dropped the list. A list that arrived is kept unless an error
-        targets the list itself: errors inside individual entries leave the
-        rest usable (a failed metadata field can still leave a valid
-        campaign ID that category discovery must treat as completed, and
-        signature matching recovers what it can; see
-        completed_badge_campaign_signatures). A null or absent field is only
-        an error when an error covers it (on the list, on a parent path, or
-        without a path). Otherwise a null is Twitch reporting no
-        completions, so it becomes [], and an absent field stays absent
-        ("missing"), which consumers tolerate.
+        A delivered list is always kept: errors inside individual entries
+        leave the rest usable (a failed metadata field can still leave a
+        valid campaign ID that category discovery must treat as completed,
+        and signature matching recovers what it can; see
+        completed_badge_campaign_signatures). Without a list, the field
+        becomes None ("errored") when an error covers it (on the list or
+        inside it, on a parent path, or without a path), since the failure
+        may have nulled or dropped it. Otherwise it is removed ("missing"):
+        an account with no completions gets [], so a null or absent list
+        without an error is a response shape the consumers cannot trust as
+        "nothing completed" but also must not wait on forever.
         """
         key = "completedRewardCampaigns"
+        if isinstance(inventory.get(key), list):
+            return
         completions_path = ("currentUser", "inventory", key)
-        targeted = any(
-            path[:3] == completions_path
-            and (len(path) == 3 or not isinstance(path[3], int))
+        if any(
+            path[:3] == completions_path or completions_path[: len(path)] == path
             for path in error_paths
-        )
-        covered = targeted or any(
-            completions_path[: len(path)] == path for path in error_paths
-        )
-        entry_errored = any(
-            len(path) > 3 and path[:3] == completions_path for path in error_paths
-        )
-        completed = inventory.get(key)
-        if isinstance(completed, list):
-            if targeted:
-                inventory[key] = None
-            return
-        if key not in inventory and not covered and not entry_errored:
-            return
-        if completed is None and not covered and not entry_errored:
-            inventory[key] = []
-        else:
+        ):
             inventory[key] = None
+        else:
+            inventory.pop(key, None)
 
     def __get_inventory(self):
         try:
