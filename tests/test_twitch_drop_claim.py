@@ -2997,6 +2997,32 @@ def test_carried_allowlists_still_expire_during_a_dashboard_outage(monkeypatch):
     assert twitch.active_drop_campaign_deadlines == {"live": now + timedelta(hours=1)}
 
 
+def test_outage_carries_unreported_campaigns_of_a_game_with_reported_ones(
+    monkeypatch,
+):
+    # The inventory still reports the game's in-progress campaign, but not
+    # its allow-listed one, which only the dashboard did. Missing data is not
+    # a negative verdict for that campaign, so its allow-list is carried
+    # beside the reported campaign, which is not duplicated.
+    twitch = bare_twitch(monkeypatch)
+    in_progress = {"id": "campaign-1", "name": "Example Campaign", "channels": []}
+    restricted = {"id": "restricted-1", "name": "Co-stream", "channels": ["costream"]}
+    twitch.active_drop_campaigns = {"example-game": [in_progress, restricted]}
+    twitch.discovered_open_drop_campaigns = []
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", True, raising=False)
+    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", lambda self, **kw: [])
+    _stub_campaign_sources(monkeypatch)
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": [campaign_data()]}, {"example-game"}
+    )
+
+    campaign_ids = [
+        campaign["id"] for campaign in twitch.active_drop_campaigns["example-game"]
+    ]
+    assert campaign_ids == ["campaign-1", "restricted-1"]
+
+
 def test_active_campaign_records_its_campaign_end_for_later_carrying(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     twitch.discovered_open_drop_campaigns = []

@@ -448,6 +448,7 @@ class Twitch(object):
         eligibility_by_login: dict,
         keep_undiscovered=False,
         unverified_logins=(),
+        unresolved_logins=(),
     ):
         """Atomically replace cached eligibility for one game category.
 
@@ -465,6 +466,10 @@ class Twitch(object):
         `unverified_logins` are given logins kept although their live check
         failed (a Drops pick, carrying its previous eligibility); they are
         recorded so the next refresh does not keep them that way again.
+        `unresolved_logins` are logins whose live check failed but which were
+        not kept: their record stays until a lookup settles their live state,
+        so another lookup of the same game cannot reset it while the check
+        keeps failing.
         """
 
         def undiscovered(key):
@@ -515,7 +520,9 @@ class Twitch(object):
             self.unverified_drop_picks = {
                 key
                 for key in getattr(self, "unverified_drop_picks", None) or ()
-                if key[0] != game_slug or undiscovered(key)
+                if key[0] != game_slug
+                or undiscovered(key)
+                or key[1] in unresolved_logins
             } | {(game_slug, login) for login in unverified_logins}
             # A lookup that failed part-way did not evaluate the game, so a
             # kept streamer without an entry must not read as ruled out.
@@ -2204,10 +2211,12 @@ class Twitch(object):
 
         if self.campaign_lookup_unavailable:
             # Retained co-streams still need the last known allow-list when
-            # their own channel query omits the campaign. Only replace games
-            # a source actually evaluated; missing data is not a negative
-            # verdict. A carried campaign still drops out once it ends or the
-            # inventory reports it completed, however long the outage lasts.
+            # their own channel query omits the campaign. Only replace the
+            # campaigns a source actually reported this cycle; missing data is
+            # not a negative verdict, even in a game whose other campaigns
+            # were reported (by the inventory, say). A carried campaign still
+            # drops out once it ends or the inventory reports it completed,
+            # however long the outage lasts.
             now = datetime.utcnow()
             previous_deadlines = (
                 getattr(self, "active_drop_campaign_deadlines", None) or {}
@@ -2215,19 +2224,18 @@ class Twitch(object):
             for game_slug, campaigns in (
                 getattr(self, "active_drop_campaigns", None) or {}
             ).items():
-                if game_slug in twitch_category_slugs or game_slug in active_campaigns:
-                    continue
                 carried = [
                     campaign
                     for campaign in campaigns
-                    if campaign.get("id") not in self.completed_drop_campaigns
+                    if campaign.get("id") not in campaigns_by_id
+                    and campaign.get("id") not in self.completed_drop_campaigns
                     and (
                         previous_deadlines.get(campaign.get("id")) is None
                         or previous_deadlines[campaign.get("id")] > now
                     )
                 ]
                 if carried:
-                    active_campaigns[game_slug] = carried
+                    active_campaigns.setdefault(game_slug, []).extend(carried)
                     for campaign in carried:
                         campaign_id = campaign.get("id")
                         if campaign_id in previous_deadlines:
@@ -3858,19 +3866,26 @@ class Twitch(object):
         max_results = max(limit, 1)
         restricted_usernames = None
         restricted_eligibility = {}
-        # (login, carried eligibility) of a Drops pick kept although its live
-        # check failed. It is appended after every limit, so it takes no slot
-        # from a channel confirmed live, which this evaluated category would
-        # otherwise retire as stale.
+        # (login, carried eligibility) of a Drops pick whose live check
+        # failed; carried is None when it is not kept. A kept one is appended
+        # after every limit, so it takes no slot from a channel confirmed
+        # live, which this evaluated category would otherwise retire as stale.
         unverified_pick = None
 
         def with_unverified_pick(usernames, eligibility):
             """usernames and eligibility with the unverified pick appended,
-            plus the logins to record as unverified."""
+            plus the pick's record for __replace_category_campaign_eligibility
+            (keyword arguments)."""
             if unverified_pick is None or unverified_pick[0] in usernames:
-                return usernames, eligibility, ()
+                return usernames, eligibility, {}
             login, carried = unverified_pick
-            return usernames + [login], {**eligibility, login: carried}, (login,)
+            if carried is None:
+                return usernames, eligibility, {"unresolved_logins": (login,)}
+            return (
+                usernames + [login],
+                {**eligibility, login: carried},
+                {"unverified_logins": (login,)},
+            )
 
         # One entry per campaign: None when any channel can earn it, else its
         # allow-listed logins (see __campaign_logins_by_campaign); the sets
@@ -3919,9 +3934,9 @@ class Twitch(object):
                     selection = with_unverified_pick(
                         restricted_usernames, restricted_eligibility
                     )
-                    usernames, eligibility, unverified_logins = selection
+                    usernames, eligibility, pick_record = selection
                     self.__replace_category_campaign_eligibility(
-                        game_slug, eligibility, unverified_logins=unverified_logins
+                        game_slug, eligibility, **pick_record
                     )
                     return usernames
                 # A campaign open to every channel still needs channels
@@ -4074,7 +4089,7 @@ class Twitch(object):
             (
                 partial_usernames,
                 partial_eligibility,
-                unverified_logins,
+                pick_record,
             ) = with_unverified_pick(
                 allow_listed + partial_discovered,
                 selection_eligibility(partial_discovered),
@@ -4084,7 +4099,7 @@ class Twitch(object):
                     game_slug,
                     partial_eligibility,
                     keep_undiscovered=True,
-                    unverified_logins=unverified_logins,
+                    **pick_record,
                 )
             if partial_usernames:
                 reason += f" after {len(partial_usernames)} live channels were found"
@@ -4202,13 +4217,13 @@ class Twitch(object):
                         "although its live check failed",
                         extra={"emoji": ":warning:"},
                     )
-                    unverified_pick = (drop_pick, carried)
+                unverified_pick = (drop_pick, carried)
 
-        usernames, eligibility, unverified_logins = with_unverified_pick(
+        usernames, eligibility, pick_record = with_unverified_pick(
             allow_listed + discovered, selection_eligibility(discovered)
         )
         self.__replace_category_campaign_eligibility(
-            game_slug, eligibility, unverified_logins=unverified_logins
+            game_slug, eligibility, **pick_record
         )
 
         if drops_enabled is True and allow_listed and discovered_room <= 0:
@@ -4351,8 +4366,10 @@ class Twitch(object):
         """Live channels from the campaigns' allow-lists, most widely eligible
         first, plus each one's (eligible campaigns, total campaigns), plus
         (login, carried eligibility) for a Drops pick whose live check failed,
-        else None. That pick is not among the channels: it takes no slot, and
-        the caller appends it after every limit. Recording the eligibility is
+        else None; carried is None when the pick must not be kept (see
+        __unverified_pick_eligibility). That pick is not among the channels:
+        it takes no slot, and the caller appends a kept one after every
+        limit. Recording the eligibility is
         left to the caller, which may merge these with channels discovered
         for campaigns open to every channel.
 
@@ -4567,7 +4584,7 @@ class Twitch(object):
                         f"check failed: {error}",
                         extra={"emoji": ":warning:"},
                     )
-                    unverified_pick = (drop_pick, carried)
+                unverified_pick = (drop_pick, carried)
             if pick_stream is not None and (
                 allow_cross_category
                 or str(pick_stream.get("game_id") or "") == str(game_id)

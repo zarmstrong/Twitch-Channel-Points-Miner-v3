@@ -2661,7 +2661,26 @@ def test_category_search_keeps_unverified_pick_for_one_refresh_only(monkeypatch)
     assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "two"]
     assert len(lookups) == 2
     assert ("game", "pick") not in twitch.category_campaign_eligibility
-    assert twitch.unverified_drop_picks == set()
+    # Still unresolved, so the record stays until a lookup settles it.
+    assert twitch.unverified_drop_picks == {("game", "pick")}
+
+
+def test_unverified_pick_stays_refused_while_its_check_keeps_failing(monkeypatch):
+    # Other lookups of the same game (the badge flow, a second category
+    # resolving to it) run between refreshes, and the pick's own stream
+    # refresh can re-seed its eligibility. None of that may let a check that
+    # keeps failing keep the pick again.
+    twitch, _lookups = _drop_pick_search_twitch(
+        monkeypatch, ["one", "two"], pick_lookup_fails=True
+    )
+    twitch.category_campaign_eligibility = {("game", "pick"): (1, 1)}
+
+    assert twitch.get_live_streamers_for_category("game", limit=2)[-1] == "pick"
+    assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "two"]
+    twitch.category_campaign_eligibility[("game", "pick")] = (1, 1)
+
+    assert twitch.get_live_streamers_for_category("game", limit=2) == ["one", "two"]
+    assert twitch.unverified_drop_picks == {("game", "pick")}
 
 
 def test_category_search_unverified_pick_mark_clears_once_its_check_succeeds(
@@ -2786,7 +2805,8 @@ def test_restricted_search_drops_an_unverified_pick_from_another_game(monkeypatc
 
     assert usernames == ["big"]
     assert "pick" not in eligibility
-    assert unverified is None
+    # Reported as unresolved, but not kept.
+    assert unverified == ("pick", None)
 
 
 def test_restricted_search_skips_malformed_logins_and_rereads_a_rejected_batch(

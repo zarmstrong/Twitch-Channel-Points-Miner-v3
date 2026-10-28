@@ -405,6 +405,12 @@ class FakeTwitch:
         streamer.is_online = True
 
 
+DISCOVERY_OUTAGE_EXPIRED = (
+    "category discovery (drops inventory or campaign lookup) failed 3 refreshes "
+    "in a row"
+)
+
+
 def _bare_miner(twitch):
     defaults = StreamerSettings(chat=ChatPresence.NEVER)
     defaults.default()
@@ -870,7 +876,7 @@ class InventoryFailureTwitch(FakeTwitch):
         return []
 
 
-def _refresh(miner, categories, wildcard_categories=False):
+def _refresh(miner, categories, wildcard_categories=False, count_failures=True):
     miner._TwitchChannelPointsMiner__refresh_category_streamers(
         categories,
         [],
@@ -884,6 +890,7 @@ def _refresh(miner, categories, wildcard_categories=False):
         wildcard_category_limit=10,
         wildcard_category_streamer_limit=1,
         wildcard_category_pin_active=True,
+        count_failures=count_failures,
     )
 
 
@@ -937,7 +944,110 @@ def test_inventory_that_never_loads_retires_streamers_after_the_limit(caplog):
     assert miner.streamers == []
     assert miner.original_streamers == []
     assert miner.ws_pool.removed == ["ow_esports", "wild"]
-    assert "drops inventory failed 3 refreshes in a row" in caplog.text
+    assert DISCOVERY_OUTAGE_EXPIRED in caplog.text
+
+
+class AlternatingOutageTwitch(FakeTwitch):
+    """The drops inventory and the campaign lookup fail in turn, one per
+    refresh, so each cause alone is never three refreshes in a row."""
+
+    inventory_down = True
+
+    def get_drops_inventory(self):
+        if self.inventory_down:
+            self.inventory_fetch_count += 1
+            return {}
+        return super().get_drops_inventory()
+
+    def filter_categories_with_active_drops(self, categories, **kwargs):
+        self.filter_calls.append(kwargs)
+        self.unevaluated_category_slugs = set()
+        if self.inventory_down:
+            return []
+        raise CategoryLookupFailedException("drop campaign lookup failed")
+
+    def get_wildcard_categories_with_active_drops(self, **kwargs):
+        self.wildcard_calls.append(kwargs)
+        return []
+
+
+def test_alternating_inventory_and_campaign_outages_share_the_limit(caplog):
+    twitch = AlternatingOutageTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    wildcard = _tracked("wild", wildcard=True)
+    miner.streamers = [preferred, wildcard]
+    miner.original_streamers = [10, 20]
+
+    for inventory_down in (True, False):
+        twitch.inventory_down = inventory_down
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+    assert miner.streamers == [preferred, wildcard]
+    assert twitch.wildcard_calls == []
+
+    # The third unavailable refresh in a row, whichever cause it has.
+    twitch.inventory_down = True
+    with caplog.at_level(logging.WARNING):
+        _refresh(miner, ["overwatch-2"], wildcard_categories=True)
+
+    assert miner.streamers == []
+    assert miner.original_streamers == []
+    assert miner.ws_pool.removed == ["ow_esports", "wild"]
+    assert len(twitch.wildcard_calls) == 1
+    assert DISCOVERY_OUTAGE_EXPIRED in caplog.text
+
+
+def test_config_change_refreshes_do_not_use_up_the_outage_limit():
+    # Each config edit refreshes categories at once; during an outage, a few
+    # quick edits must not retire every tracked streamer within minutes.
+    twitch = CampaignLookupFailureTwitch(eligible_categories=[], wildcard_categories=[])
+    miner = _bare_miner(twitch)
+    preferred = _tracked("ow_esports")
+    miner.streamers = [preferred]
+    miner.original_streamers = [10]
+
+    _refresh(miner, ["overwatch-2"])
+    for _ in range(3):
+        miner.refresh_categories({"categories": ["overwatch-2"], "category_limit": 2})
+    _refresh(miner, ["overwatch-2"])
+    assert len(twitch.filter_calls) == 5
+    assert miner.streamers == [preferred]
+    assert miner.ws_pool.removed == []
+
+    _refresh(miner, ["overwatch-2"])
+    assert miner.streamers == []
+    assert miner.ws_pool.removed == ["ow_esports"]
+
+
+def test_config_change_refresh_still_resets_the_outage_limit_on_success():
+    class RecoveringTwitch(CampaignLookupFailureTwitch):
+        down = True
+
+        def filter_categories_with_active_drops(self, categories, **kwargs):
+            if self.down:
+                return super().filter_categories_with_active_drops(categories, **kwargs)
+            return FakeTwitch.filter_categories_with_active_drops(
+                self, categories, **kwargs
+            )
+
+    twitch = RecoveringTwitch(
+        eligible_categories=["overwatch-2"], wildcard_categories=[]
+    )
+    miner = _bare_miner(twitch)
+    preferred = _tracked("overwatch-2-streamer")
+    miner.streamers = [preferred]
+    miner.original_streamers = [10]
+
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"])
+    twitch.down = False
+    miner.refresh_categories({"categories": ["overwatch-2"], "category_limit": 2})
+    twitch.down = True
+    for _ in range(2):
+        _refresh(miner, ["overwatch-2"])
+
+    assert miner.streamers == [preferred]
+    assert miner.ws_pool.removed == []
 
 
 def test_inventory_recovery_resets_its_failure_limit():
@@ -1308,7 +1418,7 @@ def test_total_campaign_outage_expires_each_pass_after_three_failures(caplog):
     assert miner.original_streamers == [20]
     assert miner.ws_pool.removed == ["ow_esports"]
     assert len(twitch.wildcard_calls) == 1
-    assert "all configured categories failed 3 refreshes in a row" in caplog.text
+    assert DISCOVERY_OUTAGE_EXPIRED in caplog.text
 
     # Wildcard failures have their own count, starting when that pass resumes.
     _refresh(miner, ["overwatch-2"], wildcard_categories=True)

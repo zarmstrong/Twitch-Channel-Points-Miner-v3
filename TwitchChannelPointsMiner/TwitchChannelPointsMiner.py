@@ -1942,7 +1942,9 @@ class TwitchChannelPointsMiner:
             self.streamers[index] = streamer
             self.original_streamers[index] = baseline
 
-    def __lookup_campaign_categories(self, label, lookup, track_failures=False):
+    def __lookup_campaign_categories(
+        self, label, lookup, track_failures=False, count_failures=True
+    ):
         """Run one discovery filter (`lookup`, a no-argument call) for the
         `label` pass ("configured" or "wildcard").
 
@@ -1950,9 +1952,10 @@ class TwitchChannelPointsMiner:
         resets the slugs it reports as not evaluated on every call, so they
         are read here, right after it returns. A campaign lookup that failed
         outright is logged and reported as failed, with no categories.
-        During refreshes, track_failures applies the same consecutive-failure
-        limit as live-channel lookups, independently for each pass. Once the
-        limit is reached, an outage counts as evaluated empty until recovery.
+        track_failures applies the same consecutive-failure limit as
+        live-channel lookups to the outage (count_failures as in
+        __expire_unevaluated_slugs). Once the limit is reached, an outage
+        counts as evaluated empty until recovery.
         """
         failed = False
         unevaluated_slugs = set()
@@ -1974,22 +1977,27 @@ class TwitchChannelPointsMiner:
                 self.__expire_unevaluated_slugs(
                     f"{label}_campaigns",
                     {f"all {label} categories"} if failed else set(),
+                    count=count_failures,
                 )
             )
         return categories, unevaluated_slugs, failed
 
-    def __expire_unevaluated_slugs(self, kind, unevaluated_slugs):
+    def __expire_unevaluated_slugs(self, kind, unevaluated_slugs, count=True):
         """`unevaluated_slugs` without the categories that have now stayed
         unevaluated for CATEGORY_LOOKUP_FAILURE_LIMIT refreshes in a row.
 
         Those are treated as evaluated from then on, so their stale streamers
         are retired and wildcard discovery can run again, until their lookup
         succeeds and the count starts over. `kind` keeps the preferred and
-        wildcard passes' counts apart.
+        wildcard passes' counts apart. With count=False (a refresh triggered
+        by a config change, not the schedule) a failure does not add to the
+        count, so quick edits during an outage cannot use up its allowance; a
+        success still resets it.
         """
         streaks = self.category_lookup_failure_streaks
         previous = streaks.get(kind, {})
-        current = {slug: previous.get(slug, 0) + 1 for slug in unevaluated_slugs}
+        step = 1 if count else 0
+        current = {slug: previous.get(slug, 0) + step for slug in unevaluated_slugs}
         streaks[kind] = current
         expired = {
             slug
@@ -1997,7 +2005,9 @@ class TwitchChannelPointsMiner:
             if count >= CATEGORY_LOOKUP_FAILURE_LIMIT
         }
         newly_expired = sorted(
-            slug for slug in expired if current[slug] == CATEGORY_LOOKUP_FAILURE_LIMIT
+            slug
+            for slug in expired
+            if count and current[slug] == CATEGORY_LOOKUP_FAILURE_LIMIT
         )
         if newly_expired:
             logger.warning(
@@ -2179,7 +2189,14 @@ class TwitchChannelPointsMiner:
         wildcard_category_limit=10,
         wildcard_category_streamer_limit=1,
         wildcard_category_pin_active=True,
+        count_failures=True,
     ):
+        """Rediscover category streamers and retire stale ones.
+
+        count_failures=False for a refresh a config change triggered: its
+        lookup failures do not count toward CATEGORY_LOOKUP_FAILURE_LIMIT
+        (see __expire_unevaluated_slugs).
+        """
         logger.log(
             category_log_level,
             "Refreshing configured categories and drop campaigns",
@@ -2207,15 +2224,6 @@ class TwitchChannelPointsMiner:
             discovery_inventory is not None
             and not Twitch.drops_inventory_loaded(discovery_inventory)
         )
-        # Bounded like every other lookup failure: an inventory that never
-        # loads (an expired or revoked token breaks it along with the Helix
-        # lookups) must not keep stale streamers forever. Past the limit the
-        # empty discovery counts as evaluated, so they are retired.
-        inventory_unavailable = bool(
-            self.__expire_unevaluated_slugs(
-                "inventory", {"drops inventory"} if inventory_unavailable else set()
-            )
-        )
         # The same goes for a campaign lookup that failed outright (every
         # Twitch campaign source down in one cycle): the filter raises instead
         # of returning an empty list, and this cycle evaluates nothing.
@@ -2231,9 +2239,24 @@ class TwitchChannelPointsMiner:
                 drops_enabled=drops_enabled,
                 inventory=discovery_inventory,
             ),
-            track_failures=True,
         )
-        discovery_unavailable = inventory_unavailable or campaign_lookup_failed
+        # Bounded like every other lookup failure: an outage that never ends
+        # (an expired or revoked token breaks the inventory along with the
+        # Helix lookups) must not keep stale streamers forever. Past the limit
+        # the empty discovery counts as evaluated, so they are retired. Both
+        # causes share one count, so outages alternating between them are
+        # still cut off.
+        discovery_unavailable = bool(
+            self.__expire_unevaluated_slugs(
+                "discovery",
+                (
+                    {"category discovery (drops inventory or campaign lookup)"}
+                    if inventory_unavailable or campaign_lookup_failed
+                    else set()
+                ),
+                count=count_failures,
+            )
+        )
         # A failed live-channel lookup for one category is handled per
         # category instead: that category's streamers are excluded from the
         # reconcile below, while the others still retire genuinely stale ones.
@@ -2252,7 +2275,7 @@ class TwitchChannelPointsMiner:
         unevaluated_category_slugs |= filter_unevaluated_slugs
         if not discovery_unavailable:
             unevaluated_category_slugs = self.__expire_unevaluated_slugs(
-                "preferred", unevaluated_category_slugs
+                "preferred", unevaluated_category_slugs, count=count_failures
             )
 
         added = self.__add_discovered_category_streamers(
@@ -2335,6 +2358,7 @@ class TwitchChannelPointsMiner:
                     tracked_category_slugs=tracked_wildcard_slugs,
                 ),
                 track_failures=True,
+                count_failures=count_failures,
             )
             if wildcard_lookup_failed:
                 wildcard_discovery_ran = False
@@ -2351,7 +2375,7 @@ class TwitchChannelPointsMiner:
             unevaluated_wildcard_slugs |= wildcard_filter_unevaluated_slugs
             if wildcard_discovery_ran:
                 unevaluated_wildcard_slugs = self.__expire_unevaluated_slugs(
-                    "wildcard", unevaluated_wildcard_slugs
+                    "wildcard", unevaluated_wildcard_slugs, count=count_failures
                 )
         wildcard_standing_down = wildcard_categories and not wildcard_discovery_ran
 
@@ -2584,6 +2608,7 @@ class TwitchChannelPointsMiner:
                     self.wildcard_category_streamer_limit
                 ),
                 wildcard_category_pin_active=self.wildcard_category_pin_active,
+                count_failures=False,
             )
 
     def end(self, signum, frame):
