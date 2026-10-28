@@ -346,3 +346,14 @@ def test_discord_capped_one_line_message_keeps_its_inline_code_on_one_line():
     assert all(len(content) <= 2000 for content in contents)
     assert "\n" not in contents[-1]
     assert contents[-1].endswith("z [3 more parts not sent]`")
+
+
+def test_discord_reports_a_missing_webhook_url_as_invalid():
+    # requests rejects the URL before any connection is made.
+    for webhook_api in (None, ""):
+        discord = Discord(webhook_api, [Events.CHAT_MENTION])
+
+        assert discord.send("hello", Events.CHAT_MENTION) == (
+            False,
+            "The configured Discord URL is invalid.",
+        )

@@ -95,7 +95,11 @@ def _without_wait(webhook_url: str) -> str:
 
     requests appends ``params`` to an existing query string instead of
     replacing keys, which would leave a configured ``wait=false`` in place.
+    A value that is not a string is returned unchanged, so requests reports
+    it as an invalid URL.
     """
+    if not isinstance(webhook_url, str):
+        return webhook_url
     base, _, query = webhook_url.partition("?")
     kept = [item for item in query.split("&") if item and item.split("=")[0] != "wait"]
     return f"{base}?{'&'.join(kept)}" if kept else base
