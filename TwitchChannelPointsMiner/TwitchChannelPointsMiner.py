@@ -260,6 +260,11 @@ DAILY_REPORT_STATE_VERSION = 1
 # recovers, such as an expired token, must not keep stale streamers forever
 # or hold wildcard discovery off indefinitely.
 CATEGORY_LOOKUP_FAILURE_LIMIT = 3
+# The same bound for badge Drop games. Badge checks run every 5 minutes, so
+# this keeps a failing game's channels for about an hour rather than ten
+# minutes, which would retire a channel still earning a Drop during a brief
+# outage.
+BADGE_LOOKUP_FAILURE_LIMIT = 12
 
 
 def _load_daily_report_state(path):
@@ -1675,6 +1680,8 @@ class TwitchChannelPointsMiner:
                 failed_game_slugs,
                 checks="badge Drop checks",
                 consequence="",
+                limit=BADGE_LOOKUP_FAILURE_LIMIT,
+                label="Badge game lookups",
             )
             # Badge channels the latest check no longer returns are retired,
             # or every check (limit 1, often a random sort) adds another one.
@@ -1799,8 +1806,7 @@ class TwitchChannelPointsMiner:
 
         Channels of `unevaluated_game_slugs` (badge games whose lookup failed
         this check) are kept: their absence says nothing about whether they
-        are stale. So is a channel whose game is unknown while any lookup
-        failed, as every channel was before failures were told apart.
+        are stale.
         """
         discovered = {
             str(username).lower().strip()
@@ -1811,11 +1817,6 @@ class TwitchChannelPointsMiner:
         def in_unevaluated_game(streamer):
             if not unevaluated_game_slugs:
                 return False
-            if (
-                not streamer.discovery_category_slugs
-                and not streamer.stream.game_name()
-            ):
-                return True
             return self.__streamer_in_categories(streamer, unevaluated_game_slugs)
 
         retained = []
@@ -2049,9 +2050,11 @@ class TwitchChannelPointsMiner:
         count=True,
         checks="refreshes",
         consequence=" and wildcard discovery can run",
+        limit=CATEGORY_LOOKUP_FAILURE_LIMIT,
+        label="Category lookups",
     ):
         """`unevaluated_slugs` without the categories that have now stayed
-        unevaluated for CATEGORY_LOOKUP_FAILURE_LIMIT refreshes in a row.
+        unevaluated for `limit` refreshes in a row.
 
         Those are treated as evaluated from then on, so their stale streamers
         are retired and wildcard discovery can run again, until their lookup
@@ -2066,20 +2069,14 @@ class TwitchChannelPointsMiner:
         step = 1 if count else 0
         current = {slug: previous.get(slug, 0) + step for slug in unevaluated_slugs}
         streaks[kind] = current
-        expired = {
-            slug
-            for slug, count in current.items()
-            if count >= CATEGORY_LOOKUP_FAILURE_LIMIT
-        }
+        expired = {slug for slug, streak in current.items() if streak >= limit}
         newly_expired = sorted(
-            slug
-            for slug in expired
-            if count and current[slug] == CATEGORY_LOOKUP_FAILURE_LIMIT
+            slug for slug in expired if count and current[slug] == limit
         )
         if newly_expired:
             logger.warning(
-                f"Category lookups for {', '.join(newly_expired)} failed "
-                f"{CATEGORY_LOOKUP_FAILURE_LIMIT} {checks} in a row; treating "
+                f"{label} for {', '.join(newly_expired)} failed "
+                f"{limit} {checks} in a row; treating "
                 "them as evaluated so their stale streamers can be retired"
                 f"{consequence}",
                 extra={"emoji": ":warning:", "category_log": True},

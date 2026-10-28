@@ -3,6 +3,7 @@ import threading
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+    BADGE_LOOKUP_FAILURE_LIMIT,
     TwitchChannelPointsMiner,
 )
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
@@ -162,7 +163,12 @@ def _badge_check_miner(twitch):
     miner.username = "testuser"
     miner.twitch = twitch
     miner.streamers = [
-        Streamer("previous-random", from_category=True, from_badge_campaign=True)
+        Streamer(
+            "previous-random",
+            from_category=True,
+            from_badge_campaign=True,
+            discovery_category_slugs={"restricted-game"},
+        )
     ]
     miner.original_streamers = [10]
     miner.ws_pool = FakeWebSocketsPool()
@@ -251,7 +257,7 @@ def test_badge_game_that_keeps_failing_retires_its_channels_after_the_limit(capl
     miner.streamers.append(failed)
     miner.original_streamers.append(20)
 
-    for _ in range(2):
+    for _ in range(BADGE_LOOKUP_FAILURE_LIMIT - 1):
         miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
     assert [streamer.username for streamer in miner.streamers] == [
         "previous-random",
@@ -263,7 +269,39 @@ def test_badge_game_that_keeps_failing_retires_its_channels_after_the_limit(capl
 
     assert miner.streamers == []
     assert miner.ws_pool.removed == ["previous-random", "failed-game"]
-    assert "failed 3 badge Drop checks in a row" in caplog.text
+    assert (
+        f"Badge game lookups for restricted-game failed "
+        f"{BADGE_LOOKUP_FAILURE_LIMIT} badge Drop checks in a row"
+    ) in caplog.text
+
+
+def test_badge_game_lookup_success_restarts_the_failure_limit():
+    class RecoveringTwitch(RestrictedGameFailingTwitch):
+        recovered = False
+
+        def get_live_streamers_for_category(self, selector, **kwargs):
+            if self.recovered:
+                return []
+            return super().get_live_streamers_for_category(selector, **kwargs)
+
+    twitch = RecoveringTwitch()
+    miner = _badge_check_miner(twitch)
+    miner.streamers = [_badge_streamer_in("failed-game", "restricted-game")]
+    miner.original_streamers = [20]
+
+    for _ in range(BADGE_LOOKUP_FAILURE_LIMIT - 1):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+    twitch.recovered = True
+    miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+    assert miner.ws_pool.removed == ["failed-game"]
+
+    # A channel rediscovered after the recovery gets the full allowance again.
+    twitch.recovered = False
+    miner.streamers = [_badge_streamer_in("failed-game", "restricted-game")]
+    miner.original_streamers = [20]
+    for _ in range(BADGE_LOOKUP_FAILURE_LIMIT - 1):
+        miner._TwitchChannelPointsMiner__auto_mine_badge_campaigns()
+    assert [streamer.username for streamer in miner.streamers] == ["failed-game"]
 
 
 def test_badge_channels_record_the_game_they_were_found_under():
