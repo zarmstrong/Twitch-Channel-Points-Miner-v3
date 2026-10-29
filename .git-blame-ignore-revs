@@ -1,0 +1,6 @@
+# Formatting-only commits for `git blame` to skip. GitHub's blame view reads
+# this file automatically; locally, run once per clone:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: format the codebase with Black 26 (#193)
+b117c48243e2d7bc0939e06605f47610f0c9c11f

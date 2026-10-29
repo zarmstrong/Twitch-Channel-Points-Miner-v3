@@ -25,6 +25,27 @@ jobs:
       - name: Run release issue automation tests
         run: node .github/scripts/release-linked-issues.test.js
 
+  black:
+    name: Black
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Installs the Black version pinned in requirements-dev.txt;
+      # pyproject.toml's required-version rejects any other major version.
+      - name: Install Black
+        run: python -m pip install "$(grep '^black==' requirements-dev.txt)"
+
+      - name: Check formatting
+        run: python -m black --check --diff .
+
   pytest:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest

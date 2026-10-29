@@ -125,6 +125,8 @@ pip install -r requirements-dev.txt
 black --check .
 ```
 
+CI runs the same check on every pull request. The one-off Black reformat is listed in `.git-blame-ignore-revs`; to make `git blame` skip it locally, run `git config blame.ignoreRevsFile .git-blame-ignore-revs` once in your clone.
+
 You can use the pre-commit hook, which runs the same Black version.
 ```
 pip install pre-commit
