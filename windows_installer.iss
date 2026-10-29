@@ -138,6 +138,9 @@ var
   Streamers: String;
   StartAt: Integer;
   EndAt: Integer;
+  IndentedEndAt: Integer;
+  AnalyticsOff: String;
+  AnalyticsOn: String;
 begin
   ConfigPath := ExpandConstant('{localappdata}\TwitchChannelPointsMiner\config\config.py');
   if not LoadStringFromFile(ConfigPath, ConfigBytes) then
@@ -155,13 +158,26 @@ begin
     StartAt := Pos('STREAMERS = [', ConfigText);
     if StartAt > 0 then
     begin
-      EndAt := Pos('    ]', Copy(ConfigText, StartAt, MaxInt));
+      // The list closes with "]" at the start of a line (Black's style) or,
+      // in templates formatted before Black covered config.example.py, with
+      // "    ]". Take whichever comes first: the other marker can match a
+      // later list, such as MINE_CONFIG's "categories". Searching for the
+      // line feed before "]" handles LF and CRLF checkouts alike.
+      EndAt := Pos(#10 + ']', Copy(ConfigText, StartAt, MaxInt));
+      if EndAt > 0 then
+        EndAt := EndAt + 1;
+      IndentedEndAt := Pos('    ]', Copy(ConfigText, StartAt, MaxInt));
+      if IndentedEndAt > 0 then
+        IndentedEndAt := IndentedEndAt + Length('    ]') - 1;
+      if (IndentedEndAt > 0) and ((EndAt = 0) or (IndentedEndAt < EndAt)) then
+        EndAt := IndentedEndAt;
+      // EndAt is now the offset of the closing "]" from StartAt.
       if EndAt > 0 then
       begin
         EndAt := StartAt + EndAt - 1;
         ConfigText := Copy(ConfigText, 1, StartAt - 1) +
           'STREAMERS = [' + Streamers + ']' +
-          Copy(ConfigText, EndAt + Length('    ]'), MaxInt);
+          Copy(ConfigText, EndAt + 1, MaxInt);
       end;
     end;
   end;
@@ -186,12 +202,19 @@ begin
   // either) and the exe's first run falls through to its own "analytics
   // disabled" panel and one-time enable prompt, exactly like any other
   // disabled-analytics config.
+  //
+  // Black writes the key with double quotes; templates formatted before
+  // Black covered config.example.py used single quotes.
+  AnalyticsOff := '"enable_analytics": False,';
+  if Pos(AnalyticsOff, ConfigText) = 0 then
+    AnalyticsOff := '''enable_analytics'': False,';
+  AnalyticsOn := AnalyticsOff;
+  StringChangeEx(AnalyticsOn, 'False', 'True', True);
   if WizardIsTaskSelected('enableanalytics') and
-     (Pos('''enable_analytics'': False,', ConfigText) > 0) and
+     (Pos(AnalyticsOff, ConfigText) > 0) and
      (Pos('ANALYTICS_CONFIG = None', ConfigText) > 0) then
   begin
-    StringChangeEx(ConfigText, '''enable_analytics'': False,',
-      '''enable_analytics'': True,', True);
+    StringChangeEx(ConfigText, AnalyticsOff, AnalyticsOn, True);
     // Keep one assignment so runtime and AST-based config readers agree.
     StringChangeEx(ConfigText, 'ANALYTICS_CONFIG = None',
       '# --- Added by the installer: enables the embedded dashboard ---' + #13#10 +
