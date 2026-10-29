@@ -1762,6 +1762,7 @@ def _mixed_campaign_twitch(
     catalog=False,
     directory_has_next_page=None,
     game_name="Gray Zone Warfare",
+    directory_response=None,
 ):
     # Gray Zone Warfare, 2026-10-25: "Rogue Ops - Stage 1" was open to every
     # channel while "Rogue Ops - MADFINGER" was limited to grayzonewarfare.
@@ -1782,7 +1783,7 @@ def _mixed_campaign_twitch(
     }
     if directory_has_next_page is not None:
         streams["pageInfo"] = {"hasNextPage": directory_has_next_page}
-    directory = {"data": {"game": {"streams": streams}}}
+    directory = directory_response or {"data": {"game": {"streams": streams}}}
 
     def post_gql_request_raw(operation, request):
         calls.append(("gql", operation))
@@ -2107,6 +2108,38 @@ def test_complete_drops_directory_with_page_info_vets_the_allow_list(monkeypatch
     )
 
     assert usernames == ["big"]
+
+
+@pytest.mark.parametrize(
+    "directory_response",
+    [
+        # The locally built slug is not one Twitch knows.
+        {"data": {"game": None}},
+        # A partial outage: errors next to an empty list.
+        {
+            "errors": [{"message": "service timeout"}],
+            "data": {"game": {"streams": {"edges": []}}},
+        },
+        # Nothing to vet against.
+        {"data": {"game": {"streams": {"edges": []}}}},
+    ],
+)
+def test_unusable_drops_directory_leaves_the_allow_list_alone(
+    monkeypatch, directory_response
+):
+    # Each looks like a short, complete page, but filtering by it would drop
+    # every allow-listed channel, Drops or not.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5, "big": 300},
+        directory_response=directory_response,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=1
+    )
+
+    assert usernames == ["grayzonewarfare"]
 
 
 def test_special_events_allow_list_is_not_vetted_by_its_directory(monkeypatch):

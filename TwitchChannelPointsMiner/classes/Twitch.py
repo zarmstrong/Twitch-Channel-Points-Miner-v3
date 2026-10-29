@@ -4187,8 +4187,9 @@ class Twitch(object):
                 # campaign without a channel (#184), so when the directory
                 # lists every Drops-enabled channel, look up only those. The
                 # special-events allow-lists span other games, which that
-                # directory does not cover; a failed or full directory leaves
-                # the allow-lists as they are.
+                # directory does not cover. A failed, partial or empty
+                # directory (an empty one is also what a slug Twitch does not
+                # know returns) leaves the allow-lists as they are.
                 lookup_logins = campaign_logins
                 lookup_login_sets = campaign_login_sets
                 if (
@@ -4197,7 +4198,15 @@ class Twitch(object):
                     and game_slug != "special-events"
                 ):
                     drops_logins, complete = drops_directory() or (set(), False)
-                    if complete:
+                    if not (complete and drops_logins):
+                        self.__log_drop_check(
+                            f"Not checking allow-listed channels for "
+                            f"'{game_name}' against the Drops-enabled "
+                            "directory: it did not load, or may not list "
+                            "every Drops-enabled channel",
+                            level=logging.DEBUG,
+                        )
+                    else:
                         lookup_logins = [
                             (
                                 None
@@ -4212,16 +4221,17 @@ class Twitch(object):
                             None if logins is None else logins & drops_logins
                             for logins in campaign_login_sets
                         ]
-                        left_out = set()
+                        allow_listed_logins = set()
                         for logins in campaign_login_sets:
-                            left_out.update(logins or ())
-                        left_out -= drops_logins
-                        if left_out:
+                            allow_listed_logins.update(logins or ())
+                        vetted = allow_listed_logins & drops_logins
+                        if vetted != allow_listed_logins:
                             self.__log_category(
-                                f"Leaving out {len(left_out)} allow-listed "
+                                f"Checking only the {len(vetted)} of "
+                                f"{len(allow_listed_logins)} allow-listed "
                                 f"channels for '{game_name}' that Twitch's "
-                                "Drops-enabled directory does not list",
-                                extra={"emoji": ":no_entry:"},
+                                "Drops-enabled directory lists",
+                                extra={"emoji": ":satellite_antenna:"},
                             )
                 (
                     restricted_usernames,
@@ -4359,8 +4369,10 @@ class Twitch(object):
         total_campaigns = len(fallback_campaigns) or 1
 
         def selection_eligibility(discovered):
-            # Twitch's own allow-list vouches for the allow-listed channels
-            # regardless of the Drops-enabled directory filter.
+            # Twitch's own allow-list vouches for the allow-listed channels;
+            # discovery's directory filter does not apply to them (any vetting
+            # against a complete directory happened before they were looked
+            # up).
             eligibility = {
                 username: restricted_eligibility[username] for username in allow_listed
             }
@@ -4438,10 +4450,11 @@ class Twitch(object):
                 break
 
             if drops_enabled is True and drops_enabled_logins is None:
-                if drops_directory() is None:
+                drops_enabled_directory = drops_directory()
+                if drops_enabled_directory is None:
                     error = directory["error"]
                     raise lookup_failed(str(error)) from error
-                drops_enabled_logins = drops_directory()[0]
+                drops_enabled_logins = drops_enabled_directory[0]
                 # Allow-listed channels in the directory were seeded as seen
                 # and can never become candidates; sizing the window by them
                 # would page the whole category looking for channels that
@@ -4929,9 +4942,9 @@ class Twitch(object):
 
     def __get_drops_enabled_directory(self, game_slug: str) -> Tuple[set, bool]:
         """The game's Drops-enabled live channels, and whether that is all of
-        them: Twitch said there is no next page or, without page info, the
-        page came back shorter than requested. A full page says nothing about
-        a channel missing from it."""
+        them: an error-free page of a game Twitch found, with no next page or,
+        without page info, shorter than requested. A full page, or one Twitch
+        reported errors with, says nothing about a channel missing from it."""
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
         request["variables"] = {
             "slug": game_slug,
@@ -4985,8 +4998,13 @@ class Twitch(object):
         has_next_page = (
             page_info.get("hasNextPage") if isinstance(page_info, dict) else None
         )
-        complete = has_next_page is False or (
-            has_next_page is None and len(edges) < DROPS_DIRECTORY_LIMIT
+        complete = (
+            edges_listed
+            and not response.get("errors")
+            and (
+                has_next_page is False
+                or (has_next_page is None and len(edges) < DROPS_DIRECTORY_LIMIT)
+            )
         )
         return {login for login in logins if login}, complete
 
