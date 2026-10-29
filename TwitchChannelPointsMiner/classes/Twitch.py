@@ -627,6 +627,15 @@ class Twitch(object):
         progress_by_game = {}
         finished_ids = set()
         accepted_claims = getattr(self, "accepted_drop_claims", None) or {}
+        # How the campaign sync last stored each campaign, for an inventory
+        # record that carries no allow data of its own.
+        stored_campaigns = {
+            str(stored.get("id")): stored
+            for stored_list in (
+                getattr(self, "active_drop_campaigns", None) or {}
+            ).values()
+            for stored in stored_list
+        }
         for campaign in inventory.get("dropCampaignsInProgress", []) or []:
             if not isinstance(campaign, dict):
                 continue
@@ -638,11 +647,16 @@ class Twitch(object):
 
             campaign_id = str(campaign.get("id") or "")
             campaign_name = str(campaign.get("name") or "Unknown campaign")
-            # The allow-listed channels, or None when any channel counts. The
-            # inventory is the account's own progress, so a campaign it lists
-            # without allow data is one the account is earning: it counts for
-            # every channel, as before, rather than holding no pick at all.
+            # The allow-listed channels, or None when any channel counts. A
+            # record without allow data takes the scope the campaign sync
+            # stored; failing that, it is still the account's own progress,
+            # so it counts for every channel, as before, rather than holding
+            # no pick at all.
             scope, channel_logins = campaign_channel_scope(campaign)
+            if scope is CampaignChannelScope.UNKNOWN:
+                scope, channel_logins = campaign_channel_scope(
+                    stored_campaigns.get(campaign_id)
+                )
             allowed_channels = (
                 tuple(sorted(channel_logins))
                 if scope is CampaignChannelScope.RESTRICTED
@@ -1376,17 +1390,14 @@ class Twitch(object):
         # so the two lists do not double-count, and Twitch's may include
         # unrestricted campaigns too. Campaigns whose channels are unknown are
         # left out, as category discovery leaves them out.
-        candidate_scopes = [
-            campaign_scope
-            for campaign_scope in map(
-                campaign_channel_scope,
-                [
-                    *self.twitchdrops_app_campaigns.get(game_slug, []),
-                    *getattr(self, "active_drop_campaigns", {}).get(game_slug, []),
-                ],
-            )
-            if campaign_scope[0] is not CampaignChannelScope.UNKNOWN
-        ]
+        candidate_scopes = []
+        for campaign in [
+            *self.twitchdrops_app_campaigns.get(game_slug, []),
+            *getattr(self, "active_drop_campaigns", {}).get(game_slug, []),
+        ]:
+            scope, channel_logins = campaign_channel_scope(campaign)
+            if scope is not CampaignChannelScope.UNKNOWN:
+                candidate_scopes.append((scope, channel_logins))
         if len(candidate_scopes) > 1:
             eligible_campaigns = sum(
                 1
@@ -2226,6 +2237,12 @@ class Twitch(object):
                 scope, channel_logins = campaign_channel_scope(
                     previous_campaigns.get(campaign_id)
                 )
+                if scope is not CampaignChannelScope.UNKNOWN:
+                    self.__log_drop_check(
+                        f"Keeping the last known channels of campaign "
+                        f"'{campaign.get('name')}': its details did not load",
+                        level=logging.DEBUG,
+                    )
             active_campaigns.setdefault(game_slug, []).append(
                 {
                     "id": campaign_id,
@@ -6739,9 +6756,8 @@ class Twitch(object):
         # specific channel -- if it really applied here, the channel's own
         # query should already have reflected it.
         allowlisted_elsewhere = any(
-            streamer.username in campaign.get("channels", [])
+            streamer.username in campaign_channel_scope(campaign)[1]
             for campaign in authoritative_campaigns
-            if campaign.get("channels")
         )
         if (
             getattr(streamer, "from_wildcard_category", False) is True
@@ -7001,9 +7017,10 @@ class Twitch(object):
         if isinstance(allow, dict):
             allow.setdefault("channels", None)
         else:
-            # A channel's listing carries no allow block, and inventing one
-            # would make the campaign look open to all channels (see
-            # campaign_channel_scope); Campaign reads a missing one as open.
+            # A channel's listing carries no allow block. Inventing one would
+            # make the campaign read as open to every channel instead of as
+            # unknown (see campaign_channel_scope); the Campaign entity
+            # copes without one.
             normalized.pop("allow", None)
         return normalized
 

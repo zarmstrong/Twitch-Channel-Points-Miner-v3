@@ -3421,3 +3421,33 @@ def test_inventory_progress_counts_a_campaign_without_allow_data_for_every_chann
     )
 
     assert twitch.drop_inventory_progress["example-game"][0][-1] is None
+
+
+def test_inventory_progress_takes_the_stored_scope_without_allow_data(monkeypatch):
+    # The campaign sync already knows this campaign's allow-list, so an
+    # inventory record without one does not count for every channel.
+    twitch = bare_twitch(monkeypatch)
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "campaign-1",
+                "name": "Example Campaign",
+                "all_channels": False,
+                "channels": ["costream"],
+            }
+        ]
+    }
+    campaign = campaign_data()
+    del campaign["allow"]
+    campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 5,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+
+    twitch._Twitch__cache_drop_inventory_progress(
+        {"dropCampaignsInProgress": [campaign]}
+    )
+
+    assert twitch.drop_inventory_progress["example-game"][0][-1] == ("costream",)
