@@ -2202,6 +2202,7 @@ def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
             {
                 "id": "campaign-1",
                 "name": "Example Campaign",
+                "all_channels": False,
                 "channels": ["allowedone", "allowedtwo"],
             }
         ]
@@ -2343,7 +2344,12 @@ def test_watchable_campaign_survives_alongside_reward_campaign_for_same_game(
     assert twitch_games == {"example-game"}
     assert twitch.active_drop_campaigns == {
         "example-game": [
-            {"id": "campaign-1", "name": "Example Campaign", "channels": []}
+            {
+                "id": "campaign-1",
+                "name": "Example Campaign",
+                "all_channels": True,
+                "channels": [],
+            }
         ]
     }
 
@@ -3206,3 +3212,170 @@ def test_campaign_discovery_treats_unwritten_dashboard_state_as_loaded(monkeypat
     twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
 
     assert twitch.campaign_lookup_unavailable is False
+
+
+# Issue #181: a campaign whose channel list is unknown -- a catalog record
+# scraped without one, or a Twitch campaign whose details failed to load --
+# is the same unknown campaign to every reader, never "open to all channels".
+
+UNKNOWN_CATALOG_RECORD = {
+    "id": "unknown-catalog",
+    "name": "Unscraped",
+    "all_channels": False,
+    "channels": [],
+}
+UNKNOWN_TWITCH_CAMPAIGN = {
+    "id": "unknown-twitch",
+    "name": "Details failed",
+    "all_channels": False,
+    "channels": [],
+}
+
+
+def _campaign_without_details(source):
+    campaign = campaign_data()
+    del campaign["allow"]
+    if source == "advertised":
+        return Twitch._Twitch__normalize_advertised_campaign(
+            object.__new__(Twitch), campaign
+        )
+    return campaign
+
+
+@pytest.mark.parametrize("source", ["dashboard", "advertised"])
+def test_active_campaign_without_details_is_stored_as_unknown(monkeypatch, source):
+    # DropCampaignDetails failed, so the campaign has only a dashboard summary
+    # or a channel's listing, neither of which says who can earn it. It used to
+    # be stored with channels: [], which every reader took as open to all.
+    twitch = bare_twitch(monkeypatch)
+    campaign = _campaign_without_details(source)
+    if source == "advertised":
+        twitch.advertised_drop_campaigns = {"campaign-1": campaign}
+        dashboard = []
+    else:
+        dashboard = [campaign]
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, **kwargs: dashboard
+    )
+    _stub_campaign_sources(monkeypatch)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
+
+    assert twitch.active_drop_campaigns == {
+        "example-game": [
+            {
+                "id": "campaign-1",
+                "name": "Example Campaign",
+                "all_channels": False,
+                "channels": [],
+            }
+        ]
+    }
+    assert twitch._Twitch__campaign_channels_unknown(
+        twitch.active_drop_campaigns["example-game"][0]
+    )
+
+
+def test_inventory_allow_block_replaces_an_inferred_one(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    advertised = _campaign_without_details("advertised")
+    inventory_campaign = campaign_data()
+    inventory_campaign["allow"] = {"channels": None}
+
+    merged = twitch._Twitch__merge_campaign_inventory_progress(
+        advertised, inventory_campaign
+    )
+
+    assert "_allow_inferred" not in merged
+    assert not twitch._Twitch__campaign_channels_unknown(merged)
+
+
+def test_drops_description_leaves_out_campaigns_with_unknown_channels(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.discovered_open_drop_campaigns = []
+    twitch.twitchdrops_app_campaigns = {"example-game": [UNKNOWN_CATALOG_RECORD]}
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            UNKNOWN_TWITCH_CAMPAIGN,
+            {
+                "id": "restricted",
+                "name": "Restricted",
+                "all_channels": False,
+                "channels": ["drops-channel"],
+            },
+        ]
+    }
+
+    # Not "(3 of 3 campaigns)": only the allow-listed campaign is known.
+    assert (
+        twitch._Twitch__streamer_drops_description(category_streamer())
+        == "Example Game drops"
+    )
+
+
+def test_category_drops_condition_ignores_campaigns_with_unknown_channels(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.twitchdrops_app_campaigns = {"example-game": [UNKNOWN_CATALOG_RECORD]}
+    twitch.active_drop_campaigns = {"example-game": [UNKNOWN_TWITCH_CAMPAIGN]}
+    streamer = SimpleNamespace(
+        username="drops-channel",
+        from_category=True,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=SimpleNamespace(campaigns_ids=[], game_name=lambda: "Example Game"),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
+def test_channel_check_does_not_qualify_through_campaigns_with_unknown_channels(
+    monkeypatch,
+):
+    # The channel query failed, so campaigns open to all channels still apply
+    # (see test_failed_channel_query_keeps_unrestricted_twitch_campaigns), but
+    # a campaign whose channels are unknown must not.
+    def available_drops(channel_id):
+        raise RetryError("DropsHighlightService_AvailableDrops", [])
+
+    twitch = per_streamer_campaigns_twitch(monkeypatch, available_drops)
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {"id": "open", "name": "Open", "all_channels": True, "channels": []},
+            UNKNOWN_TWITCH_CAMPAIGN,
+        ]
+    }
+    twitch.twitchdrops_app_campaigns = {"example-game": [UNKNOWN_CATALOG_RECORD]}
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "open"
+    ]
+
+
+def test_inventory_progress_counts_a_campaign_without_allow_data_for_every_channel(
+    monkeypatch,
+):
+    # Deliberately unchanged by #181: the inventory is the account's own
+    # progress, so a campaign it lists without allow data still counts.
+    twitch = bare_twitch(monkeypatch)
+    campaign = campaign_data()
+    del campaign["allow"]
+    campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 5,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+
+    twitch._Twitch__cache_drop_inventory_progress(
+        {"dropCampaignsInProgress": [campaign]}
+    )
+
+    assert twitch.drop_inventory_progress["example-game"][0][-1] is None

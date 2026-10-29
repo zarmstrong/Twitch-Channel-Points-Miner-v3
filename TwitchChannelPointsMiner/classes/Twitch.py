@@ -29,7 +29,11 @@ from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
     completed_signature_matches,
 )
-from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
+from TwitchChannelPointsMiner.classes.entities.Campaign import (
+    Campaign,
+    CampaignChannelScope,
+    campaign_channel_scope,
+)
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
@@ -634,8 +638,15 @@ class Twitch(object):
 
             campaign_id = str(campaign.get("id") or "")
             campaign_name = str(campaign.get("name") or "Unknown campaign")
+            # The allow-listed channels, or None when any channel counts. The
+            # inventory is the account's own progress, so a campaign it lists
+            # without allow data is one the account is earning: it counts for
+            # every channel, as before, rather than holding no pick at all.
+            scope, channel_logins = campaign_channel_scope(campaign)
             allowed_channels = (
-                tuple(sorted(self.__campaign_channel_logins(campaign))) or None
+                tuple(sorted(channel_logins))
+                if scope is CampaignChannelScope.RESTRICTED
+                else None
             )
             for drop in campaign.get("timeBasedDrops", []) or []:
                 if not isinstance(drop, dict):
@@ -1363,26 +1374,34 @@ class Twitch(object):
         # Combines the external gist catalog with Twitch's own authoritative
         # campaign data. The gist side omits every campaign Twitch reported,
         # so the two lists do not double-count, and Twitch's may include
-        # unrestricted campaigns too.
-        candidate_campaigns = list(
-            self.twitchdrops_app_campaigns.get(game_slug, [])
-        ) + list(getattr(self, "active_drop_campaigns", {}).get(game_slug, []))
-        if len(candidate_campaigns) > 1:
+        # unrestricted campaigns too. Campaigns whose channels are unknown are
+        # left out, as category discovery leaves them out.
+        candidate_scopes = [
+            (scope, channel_logins)
+            for scope, channel_logins in map(
+                campaign_channel_scope,
+                list(self.twitchdrops_app_campaigns.get(game_slug, []))
+                + list(getattr(self, "active_drop_campaigns", {}).get(game_slug, [])),
+            )
+            if scope is not CampaignChannelScope.UNKNOWN
+        ]
+        if len(candidate_scopes) > 1:
             eligible_campaigns = sum(
                 1
-                for channels in (
-                    self.__campaign_channel_logins(campaign)
-                    for campaign in candidate_campaigns
-                )
-                if not channels or streamer.username in channels
+                for scope, channel_logins in candidate_scopes
+                if scope is CampaignChannelScope.OPEN
+                or streamer.username in channel_logins
             )
             return (
                 f"{game_name} drops "
-                f"({eligible_campaigns} of {len(candidate_campaigns)} campaigns)"
+                f"({eligible_campaigns} of {len(candidate_scopes)} campaigns)"
             )
-        if len(candidate_campaigns) == 1:
-            channels = self.__campaign_channel_logins(candidate_campaigns[0])
-            if channels and streamer.username not in channels:
+        if len(candidate_scopes) == 1:
+            scope, channel_logins = candidate_scopes[0]
+            if (
+                scope is CampaignChannelScope.RESTRICTED
+                and streamer.username not in channel_logins
+            ):
                 return None
             return f"{game_name} drops"
 
@@ -1593,6 +1612,7 @@ class Twitch(object):
         merged_campaign = copy.deepcopy(campaign)
         if "allow" in inventory_campaign:
             merged_campaign["allow"] = copy.deepcopy(inventory_campaign["allow"])
+            merged_campaign.pop("_allow_inferred", None)
         if not inventory_campaign.get("timeBasedDrops"):
             return merged_campaign
 
@@ -1624,51 +1644,28 @@ class Twitch(object):
         return merged_campaign
 
     @staticmethod
-    def __campaign_channel_logins(campaign: dict) -> List[str]:
-        channels = campaign.get("channels")
-        if channels is None:
-            allow = campaign.get("allow")
-            channels = allow.get("channels") if isinstance(allow, dict) else None
-
-        logins = []
-        for channel in channels or []:
-            if isinstance(channel, str):
-                login = channel
-            elif isinstance(channel, dict):
-                login = channel.get("name") or channel.get("login")
-            else:
-                continue
-            login = str(login or "").lower().strip()
-            if login and login not in logins:
-                logins.append(login)
-        return logins
-
-    @staticmethod
     def __campaign_channels_unknown(campaign: dict) -> bool:
-        """A twitchdrops.app record scraped without its channel list: not open
-        to all channels, yet naming none. Nobody can be matched against it."""
-        return campaign.get("all_channels") is False and not (
-            Twitch.__campaign_channel_logins(campaign)
-        )
+        """Whether nothing says who can earn the campaign: a catalog record
+        scraped without its channel list, or a Twitch campaign whose details
+        failed to load (see campaign_channel_scope). Nobody can be matched
+        against it."""
+        return campaign_channel_scope(campaign)[0] is CampaignChannelScope.UNKNOWN
 
     @staticmethod
     def __campaign_logins_by_campaign(campaigns) -> list:
         """One entry per campaign: None when any channel can earn it, else its
         allow-listed logins in allow-list order (the restricted lookup ranks
-        ties by first appearance). A catalog record says outright whether it is
-        open to all channels; a Twitch campaign is open when it carries no
-        allow-list. Callers filter out catalog records without a channel list
-        first (see __campaign_channels_unknown) so the entries line up with
-        their campaigns; any that slip through are skipped rather than read as
-        open to everyone."""
+        ties by first appearance), as campaign_channel_scope classifies it.
+        Callers filter out campaigns whose channels are unknown first (see
+        __campaign_channels_unknown) so the entries line up with their
+        campaigns; any that slip through are skipped rather than read as open
+        to everyone."""
         by_campaign = []
         for campaign in campaigns:
-            if Twitch.__campaign_channels_unknown(campaign):
+            scope, logins = campaign_channel_scope(campaign)
+            if scope is CampaignChannelScope.UNKNOWN:
                 continue
-            logins = Twitch.__campaign_channel_logins(campaign)
-            all_channels = campaign.get("all_channels")
-            is_open = all_channels is True if all_channels is not None else not logins
-            by_campaign.append(None if is_open else logins)
+            by_campaign.append(None if scope is CampaignChannelScope.OPEN else logins)
         return by_campaign
 
     def __awarded_benefits(self, inventory: dict) -> Tuple[set, set]:
@@ -2213,11 +2210,17 @@ class Twitch(object):
             if deadline is None:
                 continue
 
+            scope, channel_logins = campaign_channel_scope(campaign)
             active_campaigns.setdefault(game_slug, []).append(
                 {
                     "id": campaign_id,
                     "name": campaign.get("name"),
-                    "channels": self.__campaign_channel_logins(campaign),
+                    # In the catalog's terms, so every reader classifies it
+                    # alike: a campaign whose details failed to load has no
+                    # allow block and is stored as neither open nor naming a
+                    # channel, i.e. unknown, rather than as open to all.
+                    "all_channels": scope is CampaignChannelScope.OPEN,
+                    "channels": channel_logins,
                 }
             )
             # The campaign's own end, not `deadline` (its earliest incomplete
@@ -3670,14 +3673,15 @@ class Twitch(object):
         authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
             game_slug, []
         )
+        # A campaign whose channels are unknown vouches for nobody.
         for campaign in list(self.twitchdrops_app_campaigns.get(game_slug, [])) + list(
             authoritative_campaigns
         ):
-            channels = {
-                str(login).lower().strip()
-                for login in campaign.get("channels", []) or []
-            }
-            if not channels or streamer.username in channels:
+            scope, channel_logins = campaign_channel_scope(campaign)
+            if (
+                scope is CampaignChannelScope.OPEN
+                or streamer.username in channel_logins
+            ):
                 return True
 
         return False
@@ -6515,7 +6519,14 @@ class Twitch(object):
         game_slug = self.__slugify(streamer.stream.game_name() or "")
         if game_slug == "":
             return [], None, False
-        fallback_campaigns = self.twitchdrops_app_campaigns.get(game_slug, [])
+        # A catalog record scraped without its channel list names no channel
+        # to match, so leave it out, as category discovery and the badge flow
+        # do, rather than let it qualify every channel.
+        fallback_campaigns = [
+            campaign
+            for campaign in self.twitchdrops_app_campaigns.get(game_slug, [])
+            if not self.__campaign_channels_unknown(campaign)
+        ]
 
         advertised_campaigns = []
         # Whether Twitch listed a running zero-minute campaign (a badge) for
@@ -6838,7 +6849,12 @@ class Twitch(object):
             )
             if campaign_game_slug not in ("", game_slug):
                 continue
-            channels = set(self.__campaign_channel_logins(campaign))
+            scope, channels = campaign_channel_scope(campaign)
+            if scope is CampaignChannelScope.UNKNOWN and source != "dashboard":
+                # A Twitch campaign whose details failed to load says nothing
+                # about this channel. Dashboard summaries never carry an
+                # allow-list and keep their place below.
+                continue
             campaign_id = campaign.get("id")
             if not campaign_id:
                 continue
@@ -6851,7 +6867,9 @@ class Twitch(object):
                 or not require_twitch_allowlist
                 or (source == "authoritative" and running_badge_listed)
             )
-            if streamer.username in channels or (not channels and unrestricted_applies):
+            if streamer.username in channels or (
+                scope is not CampaignChannelScope.RESTRICTED and unrestricted_applies
+            ):
                 campaign_ids.add(str(campaign_id))
 
         if require_twitch_allowlist and not campaign_ids:
@@ -6967,6 +6985,10 @@ class Twitch(object):
         allow = normalized.get("allow")
         if not isinstance(allow, dict):
             allow = {}
+            # A channel's listing carries no allow block. This stand-in keeps
+            # the claim code's shape and says nothing about who can earn the
+            # campaign (see campaign_channel_scope).
+            normalized["_allow_inferred"] = True
         allow.setdefault("channels", None)
         normalized["allow"] = allow
         return normalized
