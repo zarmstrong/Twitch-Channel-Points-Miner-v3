@@ -4217,22 +4217,14 @@ class Twitch(object):
                             )
                             for logins in campaign_logins
                         ]
-                        lookup_login_sets = [
-                            None if logins is None else logins & drops_logins
-                            for logins in campaign_login_sets
-                        ]
-                        allow_listed_logins = set()
-                        for logins in campaign_login_sets:
-                            allow_listed_logins.update(logins or ())
-                        vetted = allow_listed_logins & drops_logins
-                        if vetted != allow_listed_logins:
-                            self.__log_category(
-                                f"Checking only the {len(vetted)} of "
-                                f"{len(allow_listed_logins)} allow-listed "
-                                f"channels for '{game_name}' that Twitch's "
-                                "Drops-enabled directory lists",
-                                extra={"emoji": ":satellite_antenna:"},
-                            )
+                        # The lookup builds the matching sets itself.
+                        lookup_login_sets = None
+                        self.__log_drop_check(
+                            f"Looking up only the allow-listed channels for "
+                            f"'{game_name}' that Twitch's Drops-enabled "
+                            "directory lists",
+                            level=logging.DEBUG,
+                        )
                 (
                     restricted_usernames,
                     restricted_eligibility,
