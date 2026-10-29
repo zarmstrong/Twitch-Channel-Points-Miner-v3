@@ -30,7 +30,7 @@ def campaign_channel_logins(campaign: dict) -> list:
         allow = campaign.get("allow")
         channels = allow.get("channels") if isinstance(allow, dict) else None
 
-    logins = []
+    logins = {}
     for channel in channels or []:
         if isinstance(channel, str):
             login = channel
@@ -39,9 +39,9 @@ def campaign_channel_logins(campaign: dict) -> list:
         else:
             continue
         login = str(login or "").lower().strip()
-        if login and login not in logins:
-            logins.append(login)
-    return logins
+        if login:
+            logins.setdefault(login, None)
+    return list(logins)
 
 
 def campaign_channel_scope(campaign) -> tuple:
@@ -56,8 +56,7 @@ def campaign_channel_scope(campaign) -> tuple:
     without any is open: Twitch sends {"channels": null} for a game-wide
     campaign. A record with neither, such as a dashboard summary or a
     campaign whose details failed to load, says nothing about who can earn
-    it, and neither does an allow block the miner filled in itself
-    (_allow_inferred)."""
+    it."""
     if not isinstance(campaign, dict):
         return CampaignChannelScope.UNKNOWN, []
     all_channels = campaign.get("all_channels")
@@ -70,10 +69,7 @@ def campaign_channel_scope(campaign) -> tuple:
         return CampaignChannelScope.UNKNOWN, []
     if isinstance(campaign.get("channels"), list):
         return CampaignChannelScope.OPEN, []
-    if (
-        isinstance(campaign.get("allow"), dict)
-        and campaign.get("_allow_inferred") is not True
-    ):
+    if isinstance(campaign.get("allow"), dict):
         return CampaignChannelScope.OPEN, []
     return CampaignChannelScope.UNKNOWN, []
 
@@ -97,10 +93,11 @@ class Campaign(object):
         self.game = dict["game"]
         self.name = dict["name"]
         self.status = dict["status"]
+        allow = dict.get("allow") or {}
         self.channels = (
             []
-            if dict["allow"]["channels"] is None
-            else list(map(lambda x: x["id"], dict["allow"]["channels"]))
+            if allow.get("channels") is None
+            else list(map(lambda x: x["id"], allow["channels"]))
         )
         self.in_inventory = False
 

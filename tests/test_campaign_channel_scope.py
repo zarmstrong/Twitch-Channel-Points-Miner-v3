@@ -33,8 +33,6 @@ UNKNOWN = CampaignChannelScope.UNKNOWN
         # No allow block: a dashboard summary, or details that failed to load.
         ({"id": "campaign-1", "name": "Summary"}, (UNKNOWN, [])),
         ({"allow": None}, (UNKNOWN, [])),
-        # An allow block the miner filled in for a channel's listing.
-        ({"allow": {"channels": None}, "_allow_inferred": True}, (UNKNOWN, [])),
         # Entries that carry their own channel list without all_channels.
         ({"channels": []}, (OPEN, [])),
         ({"channels": ["Solo"]}, (RESTRICTED, ["solo"])),

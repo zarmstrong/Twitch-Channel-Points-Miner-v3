@@ -96,7 +96,8 @@ def test_advertised_campaign_normalizes_null_allow(monkeypatch):
 
     normalized = twitch._Twitch__normalize_advertised_campaign(campaign)
 
-    assert normalized["allow"] == {"channels": None}
+    # No allow block is invented: one would read as open to all channels.
+    assert "allow" not in normalized
     assert Campaign(normalized).channels == []
 
 
@@ -3281,9 +3282,10 @@ def test_active_campaign_without_details_is_stored_as_unknown(monkeypatch, sourc
     )
 
 
-def test_inventory_allow_block_replaces_an_inferred_one(monkeypatch):
+def test_inventory_allow_block_makes_an_advertised_listing_known(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     advertised = _campaign_without_details("advertised")
+    assert twitch._Twitch__campaign_channels_unknown(advertised)
     inventory_campaign = campaign_data()
     inventory_campaign["allow"] = {"channels": None}
 
@@ -3291,8 +3293,48 @@ def test_inventory_allow_block_replaces_an_inferred_one(monkeypatch):
         advertised, inventory_campaign
     )
 
-    assert "_allow_inferred" not in merged
     assert not twitch._Twitch__campaign_channels_unknown(merged)
+
+
+@pytest.mark.parametrize(
+    "previous, expected",
+    [
+        (
+            {"all_channels": False, "channels": ["costream"]},
+            {"all_channels": False, "channels": ["costream"]},
+        ),
+        (
+            {"all_channels": True, "channels": []},
+            {"all_channels": True, "channels": []},
+        ),
+    ],
+)
+def test_failed_details_keep_the_last_known_channel_scope(
+    monkeypatch, previous, expected
+):
+    # One cycle's failed DropCampaignDetails lookup must not turn a known
+    # allow-list, or a game-wide campaign, into an unknown one and retire the
+    # channels being watched for it.
+    twitch = bare_twitch(monkeypatch)
+    twitch.active_drop_campaigns = {
+        "example-game": [{"id": "campaign-1", "name": "Example Campaign", **previous}]
+    }
+    campaign = _campaign_without_details("dashboard")
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, **kwargs: [campaign]
+    )
+    _stub_campaign_sources(monkeypatch)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
+
+    assert twitch.active_drop_campaigns == {
+        "example-game": [{"id": "campaign-1", "name": "Example Campaign", **expected}]
+    }
 
 
 def test_drops_description_leaves_out_campaigns_with_unknown_channels(monkeypatch):
