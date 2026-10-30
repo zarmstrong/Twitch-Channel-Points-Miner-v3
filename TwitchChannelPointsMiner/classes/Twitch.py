@@ -1611,7 +1611,14 @@ class Twitch(object):
     ) -> dict:
         """Keep fresh campaign drops with authenticated inventory state and access."""
         if not campaign.get("timeBasedDrops"):
-            return copy.deepcopy(inventory_campaign)
+            merged_campaign = copy.deepcopy(inventory_campaign)
+            # The fresh record's allow-list still applies when the inventory
+            # carries none.
+            if not isinstance(merged_campaign.get("allow"), dict) and isinstance(
+                campaign.get("allow"), dict
+            ):
+                merged_campaign["allow"] = copy.deepcopy(campaign["allow"])
+            return merged_campaign
 
         merged_campaign = copy.deepcopy(campaign)
         if isinstance(inventory_campaign.get("allow"), dict):
@@ -6892,11 +6899,15 @@ class Twitch(object):
             if campaign_game_slug not in ("", game_slug):
                 continue
             scope, channels = campaign_channel_scope(campaign)
-            if scope is CampaignChannelScope.UNKNOWN and source != "dashboard":
-                # A catalog record scraped without its channel list, or a
-                # Twitch campaign whose details failed to load, says nothing
-                # about this channel. Dashboard summaries never carry an
-                # allow-list and keep their place below.
+            if scope is CampaignChannelScope.UNKNOWN and (
+                source == "gist" or require_twitch_allowlist
+            ):
+                # A catalog record scraped without its channel list says it is
+                # not open yet names nobody. A Twitch campaign whose channels
+                # are unknown (a dashboard summary, or details that failed to
+                # load) says nothing about this channel, but stands in for an
+                # unrestricted one, as category discovery searches it, when
+                # Twitch did not answer this channel's query.
                 continue
             campaign_id = campaign.get("id")
             if not campaign_id:

@@ -3401,12 +3401,14 @@ def test_category_drops_condition_ignores_campaigns_with_unknown_channels(
     assert twitch._Twitch__category_drops_condition(streamer) is False
 
 
-def test_channel_check_does_not_qualify_through_campaigns_with_unknown_channels(
+def test_failed_channel_query_treats_unknown_campaigns_like_discovery_does(
     monkeypatch,
 ):
     # The channel query failed, so campaigns open to all channels still apply
-    # (see test_failed_channel_query_keeps_unrestricted_twitch_campaigns), but
-    # a campaign whose channels are unknown must not.
+    # (see test_failed_channel_query_keeps_unrestricted_twitch_campaigns). A
+    # Twitch campaign whose channels are unknown stands in for one, as master
+    # and category discovery treat it; a catalog record that says it is not
+    # open yet names nobody never does.
     def available_drops(channel_id):
         raise RetryError("DropsHighlightService_AvailableDrops", [])
 
@@ -3419,9 +3421,29 @@ def test_channel_check_does_not_qualify_through_campaigns_with_unknown_channels(
     }
     twitch.twitchdrops_app_campaigns = {"example-game": [UNKNOWN_CATALOG_RECORD]}
 
-    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
-        "open"
-    ]
+    assert sorted(
+        twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+    ) == ["open", "unknown-twitch"]
+
+
+def test_merge_keeps_the_fresh_allow_list_when_only_inventory_has_drops(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    details = {
+        **campaign_data(),
+        "allow": {"channels": [{"name": "costream"}]},
+        "timeBasedDrops": [],
+    }
+    inventory_campaign = campaign_data()
+    del inventory_campaign["allow"]
+
+    merged = twitch._Twitch__merge_campaign_inventory_progress(
+        details, inventory_campaign
+    )
+
+    assert merged["allow"] == {"channels": [{"name": "costream"}]}
+    assert merged["timeBasedDrops"] == inventory_campaign["timeBasedDrops"]
 
 
 def test_inventory_progress_counts_a_campaign_without_allow_data_for_every_channel(
