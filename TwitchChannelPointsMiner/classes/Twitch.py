@@ -184,6 +184,7 @@ class Twitch(object):
         "category_campaign_eligibility_lock",
         "category_channel_verdicts",
         "unverified_drop_picks",
+        "known_campaign_scopes",
         "channel_query_failures",
         "category_campaign_deadlines",
         "last_category_drop_selection",
@@ -299,6 +300,9 @@ class Twitch(object):
         # (game_slug, login) of Drops picks kept by the latest refresh although
         # their live check failed; a pick is kept that way one refresh at most.
         self.unverified_drop_picks = set()
+        # Campaign ID -> the last known campaign_channel_scope of a campaign,
+        # for a later record that does not say who can earn it.
+        self.known_campaign_scopes = {}
         # (game_slug, login) -> (consecutive failed campaign queries, time of
         # the last one) for a provisional wildcard channel.
         self.channel_query_failures = {}
@@ -627,15 +631,6 @@ class Twitch(object):
         progress_by_game = {}
         finished_ids = set()
         accepted_claims = getattr(self, "accepted_drop_claims", None) or {}
-        # How the campaign sync last stored each campaign, for an inventory
-        # record that carries no allow data of its own.
-        stored_campaigns = {
-            str(stored.get("id")): stored
-            for stored_list in (
-                getattr(self, "active_drop_campaigns", None) or {}
-            ).values()
-            for stored in stored_list
-        }
         for campaign in inventory.get("dropCampaignsInProgress", []) or []:
             if not isinstance(campaign, dict):
                 continue
@@ -648,15 +643,11 @@ class Twitch(object):
             campaign_id = str(campaign.get("id") or "")
             campaign_name = str(campaign.get("name") or "Unknown campaign")
             # The allow-listed channels, or None when any channel counts. A
-            # record without allow data takes the scope the campaign sync
-            # stored; failing that, it is still the account's own progress,
+            # record without allow data takes the campaign's last known
+            # scope; failing that, it is still the account's own progress,
             # so it counts for every channel, as before, rather than holding
             # no pick at all.
-            scope, channel_logins = campaign_channel_scope(campaign)
-            if scope is CampaignChannelScope.UNKNOWN:
-                scope, channel_logins = campaign_channel_scope(
-                    stored_campaigns.get(campaign_id)
-                )
+            scope, channel_logins = self.__known_campaign_scope(campaign_id, campaign)
             allowed_channels = (
                 tuple(sorted(channel_logins))
                 if scope is CampaignChannelScope.RESTRICTED
@@ -1623,7 +1614,7 @@ class Twitch(object):
             return copy.deepcopy(inventory_campaign)
 
         merged_campaign = copy.deepcopy(campaign)
-        if "allow" in inventory_campaign:
+        if isinstance(inventory_campaign.get("allow"), dict):
             merged_campaign["allow"] = copy.deepcopy(inventory_campaign["allow"])
         if not inventory_campaign.get("timeBasedDrops"):
             return merged_campaign
@@ -1654,6 +1645,31 @@ class Twitch(object):
                 merged_drops.append(copy.deepcopy(drop))
 
         return merged_campaign
+
+    def __known_campaign_scope(self, campaign_id, campaign) -> tuple:
+        """campaign_channel_scope of the campaign, remembered by campaign ID.
+        A record that does not say who can earn the campaign (its details
+        failed to load, say) gets the last known scope instead. The memory
+        outlives each sync pass: the configured-category and wildcard passes
+        each replace active_drop_campaigns with their own campaigns."""
+        campaign_id = str(campaign_id or "")
+        scope, channel_logins = campaign_channel_scope(campaign)
+        known = getattr(self, "known_campaign_scopes", None)
+        if known is None:
+            known = self.known_campaign_scopes = {}
+        if scope is not CampaignChannelScope.UNKNOWN:
+            if campaign_id:
+                known[campaign_id] = (scope, tuple(channel_logins))
+            return scope, channel_logins
+        if campaign_id in known:
+            known_scope, known_logins = known[campaign_id]
+            self.__log_drop_check(
+                f"Using the last known channels of campaign "
+                f"'{campaign.get('name')}': this record does not list them",
+                level=logging.DEBUG,
+            )
+            return known_scope, list(known_logins)
+        return scope, channel_logins
 
     @staticmethod
     def __campaign_channels_unknown(campaign: dict) -> bool:
@@ -2131,16 +2147,6 @@ class Twitch(object):
             ambiguous_benefit_names,
         ) = self.__ambiguous_campaign_benefits(campaigns_by_id.values())
 
-        # How each campaign was stored last cycle, so details that fail to
-        # load for a cycle do not turn a known allow-list, or a game-wide
-        # campaign, into one whose channels are unknown.
-        previous_campaigns = {
-            stored.get("id"): stored
-            for stored_campaigns in (
-                getattr(self, "active_drop_campaigns", None) or {}
-            ).values()
-            for stored in stored_campaigns
-        }
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
                 continue
@@ -2232,17 +2238,9 @@ class Twitch(object):
             if deadline is None:
                 continue
 
-            scope, channel_logins = campaign_channel_scope(campaign)
-            if scope is CampaignChannelScope.UNKNOWN:
-                scope, channel_logins = campaign_channel_scope(
-                    previous_campaigns.get(campaign_id)
-                )
-                if scope is not CampaignChannelScope.UNKNOWN:
-                    self.__log_drop_check(
-                        f"Keeping the last known channels of campaign "
-                        f"'{campaign.get('name')}': its details did not load",
-                        level=logging.DEBUG,
-                    )
+            # Details that fail to load for a cycle do not turn a known
+            # allow-list, or a game-wide campaign, into an unknown one.
+            scope, channel_logins = self.__known_campaign_scope(campaign_id, campaign)
             active_campaigns.setdefault(game_slug, []).append(
                 {
                     "id": campaign_id,

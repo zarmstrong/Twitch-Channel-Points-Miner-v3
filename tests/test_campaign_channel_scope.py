@@ -29,6 +29,8 @@ UNKNOWN = CampaignChannelScope.UNKNOWN
         ),
         # Twitch sends a null channel list for a game-wide campaign.
         ({"allow": {"channels": None}}, (OPEN, [])),
+        # An allow-list naming no login the miner can read is not game-wide.
+        ({"allow": {"channels": [{"id": "100"}, {"id": "200"}]}}, (UNKNOWN, [])),
         ({"allow": {"channels": []}}, (OPEN, [])),
         # No allow block: a dashboard summary, or details that failed to load.
         ({"id": "campaign-1", "name": "Summary"}, (UNKNOWN, [])),

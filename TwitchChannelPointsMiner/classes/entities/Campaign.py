@@ -22,16 +22,21 @@ class CampaignChannelScope(Enum):
     UNKNOWN = auto()  # Its channel list was never loaded.
 
 
-def campaign_channel_logins(campaign: dict) -> list:
-    """The campaign's allow-listed logins, lowercased and in allow-list order,
-    from its own "channels" list or Twitch's allow block."""
+def _campaign_channel_entries(campaign: dict) -> list:
+    """The raw entries of the campaign's own "channels" list, else of
+    Twitch's allow block."""
     channels = campaign.get("channels")
     if channels is None:
         allow = campaign.get("allow")
         channels = allow.get("channels") if isinstance(allow, dict) else None
+    return channels or []
 
+
+def campaign_channel_logins(campaign: dict) -> list:
+    """The campaign's allow-listed logins, lowercased and in allow-list order,
+    from its own "channels" list or Twitch's allow block."""
     logins = {}
-    for channel in channels or []:
+    for channel in _campaign_channel_entries(campaign):
         if isinstance(channel, str):
             login = channel
         elif isinstance(channel, dict):
@@ -56,7 +61,7 @@ def campaign_channel_scope(campaign) -> tuple:
     without any is open: Twitch sends {"channels": null} for a game-wide
     campaign. A record with neither, such as a dashboard summary or a
     campaign whose details failed to load, says nothing about who can earn
-    it."""
+    it, and neither does a channel list with no login the miner can read."""
     if not isinstance(campaign, dict):
         return CampaignChannelScope.UNKNOWN, []
     all_channels = campaign.get("all_channels")
@@ -65,7 +70,7 @@ def campaign_channel_scope(campaign) -> tuple:
     logins = campaign_channel_logins(campaign)
     if logins:
         return CampaignChannelScope.RESTRICTED, logins
-    if all_channels is False:
+    if all_channels is False or _campaign_channel_entries(campaign):
         return CampaignChannelScope.UNKNOWN, []
     if isinstance(campaign.get("channels"), list):
         return CampaignChannelScope.OPEN, []
