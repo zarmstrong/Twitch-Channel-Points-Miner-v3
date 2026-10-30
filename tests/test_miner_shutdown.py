@@ -24,7 +24,7 @@ def _miner(streamer_mutex):
     )
     miner.daily_report_lock = threading.RLock()
     miner.daily_report_state_dirty = False
-    miner.daily_report_in_progress = False
+    miner.daily_report_in_progress = None
     miner.daily_report_drop_progress_latest = {}
     miner.drop_badge_catalog_stop_event = MagicMock()
     miner.ws_pool = None

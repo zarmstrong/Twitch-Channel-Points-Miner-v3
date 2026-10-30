@@ -634,7 +634,8 @@ class TwitchChannelPointsMiner:
         # thread, which may already hold it mid-report.
         self.daily_report_lock = threading.RLock()
         self.daily_report_state_dirty = False
-        self.daily_report_in_progress = False
+        # The thread sending a report, if any.
+        self.daily_report_in_progress = None
         # Drop progress lives in memory, so put back what was recorded since
         # the last report before run() scrapes the inventory and captures the
         # session baseline; otherwise a restart loses it from the next report.
@@ -1518,11 +1519,11 @@ class TwitchChannelPointsMiner:
         # added or retired by the background threads land wholly before or
         # after this report rather than being lost between its two halves.
         with self.daily_report_lock:
-            self.daily_report_in_progress = True
+            self.daily_report_in_progress = threading.get_ident()
             try:
                 self.__send_daily_report(now)
             finally:
-                self.daily_report_in_progress = False
+                self.daily_report_in_progress = None
 
     def __send_daily_report(self, now):
         # One read of the balances serves both the report and the next
@@ -3042,7 +3043,9 @@ class TwitchChannelPointsMiner:
             # end() can interrupt a report on this thread as a signal handler;
             # saving then would mix its updated and pending fields, so keep
             # the state from before it (the report is sent again next session).
-            if self.daily_report_in_progress:
+            # From another thread (the Windows shell's), the lock below waits
+            # for the report to finish instead.
+            if self.daily_report_in_progress == threading.get_ident():
                 return
             # On exit, count every channel's balance so far as if it retired:
             # the next session takes back the ones it tracks again, and the
