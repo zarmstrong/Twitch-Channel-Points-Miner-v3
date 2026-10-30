@@ -4142,6 +4142,8 @@ class Twitch(object):
         # The game's Drops-enabled directory as (logins, complete), requested
         # at most once per lookup. None after a failed request, unless the
         # caller cannot go on without it: then the lookup fails (required).
+        # lookup_failed is defined further down, so only call it with
+        # required=True after that point (discovery's paging loop).
         directory = {}
 
         def drops_directory(required=False):
@@ -4190,9 +4192,10 @@ class Twitch(object):
                 # campaign without a channel (#184), so when the directory
                 # lists every Drops-enabled channel, look up only those. The
                 # special-events allow-lists span other games, which that
-                # directory does not cover. A failed, partial or empty
-                # directory (an empty one is also what a slug Twitch does not
-                # know returns) leaves the allow-lists as they are.
+                # directory does not cover. A failed or partial directory
+                # leaves the allow-lists as they are, and so, as a precaution,
+                # does an empty one: it would drop every allow-listed channel
+                # on the word of a response that lists no channel at all.
                 lookup_logins = campaign_logins
                 lookup_login_sets = campaign_login_sets
                 if (
@@ -4549,9 +4552,15 @@ class Twitch(object):
                 f"(limit: {max_results}, sort: {sort_key})"
             )
         elif drops_enabled is True:
-            eligible_count = len(drops_enabled_logins or [])
-            # Only a directory Twitch says may continue undercounts.
+            # The directory may have loaded only to vet the allow-lists, before
+            # discovery stopped on an empty page; count what it listed.
             drops_enabled_directory = directory.get("result")
+            eligible_count = len(
+                drops_enabled_directory[0]
+                if drops_enabled_directory is not None
+                else drops_enabled_logins or []
+            )
+            # Only a directory Twitch says may continue undercounts.
             eligible_label = (
                 f"at least {eligible_count}"
                 if drops_enabled_directory is not None

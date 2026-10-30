@@ -2136,6 +2136,31 @@ def test_unusable_drops_directory_leaves_the_allow_list_alone(
     assert usernames == ["grayzonewarfare"]
 
 
+def test_selection_log_counts_the_directory_loaded_for_vetting(monkeypatch):
+    # The directory loaded to vet the allow-list, then discovery stopped on an
+    # empty stream page: the summary counted 0 Drops-enabled channels.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5},
+        directory_logins=("grayzonewarfare", "elsewhere"),
+    )
+    messages = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__log_category",
+        lambda self, message, **kwargs: messages.append(message),
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["grayzonewarfare"]
+    assert any(
+        "1 allow-listed plus 0 of 2 Drops-enabled" in message for message in messages
+    )
+
+
 def test_special_events_allow_list_is_not_vetted_by_its_directory(monkeypatch):
     # Special-events allow-lists name channels streaming other games, which
     # that category's directory cannot list.
