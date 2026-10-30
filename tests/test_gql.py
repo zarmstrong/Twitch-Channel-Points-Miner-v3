@@ -1760,7 +1760,7 @@ def _mixed_campaign_twitch(
     directory_logins=None,
     fail_batch_lookup=False,
     catalog=False,
-    directory_has_next_page=None,
+    directory_has_next_page=False,
     game_name="Gray Zone Warfare",
     directory_response=None,
 ):
@@ -1769,8 +1769,9 @@ def _mixed_campaign_twitch(
     # `live` maps every live login to its viewer count; allow-listed channels
     # are only found through the per-login lookup, the rest through the
     # category's stream list. Every live channel has Drops enabled (is in the
-    # Drops-enabled directory) unless `directory_logins` says otherwise; the
-    # directory reports page info only when `directory_has_next_page` is set.
+    # Drops-enabled directory) unless `directory_logins` says otherwise. Like
+    # Twitch, the directory reports whether another page follows
+    # (`directory_has_next_page`; None leaves page info out).
     # Every Helix and GQL request is appended to `calls` when one is given.
     calls = [] if calls is None else calls
     discovered = [login for login in live if login not in allow_listed]
@@ -2021,8 +2022,9 @@ def test_allow_listed_channel_without_drops_does_not_take_a_mixed_limit(
     assert twitch.category_campaign_eligibility == {
         ("gray-zone-warfare", "big"): (1, 2)
     }
-    # Not looked up at all, and the directory is requested only once.
-    assert "grayzonewarfare" not in _helix_login_lookups(calls)
+    # Vetting left no allow-listed channel, so none is looked up, and the
+    # directory is requested only once.
+    assert _helix_login_lookups(calls) == []
     assert [call for call in calls if call[0] == "gql"] == [
         ("gql", "DirectoryPage_Game")
     ]
@@ -2071,10 +2073,11 @@ def test_drops_enabled_allow_listed_channel_keeps_the_slot(monkeypatch):
 @pytest.mark.parametrize(
     "directory_logins, has_next_page",
     [
-        # A full page, without page info.
-        (["big"] + [f"other{index:02d}" for index in range(99)], None),
-        # A short page that Twitch says continues.
-        (["big"], True),
+        # Rust, 2026-10-29: Twitch returned 98 of the 100 channels requested
+        # and said more followed, so a short page is not a complete one.
+        (["big"] + [f"other{index:02d}" for index in range(97)], True),
+        # Without page info nothing says the list is complete.
+        (["big"], None),
     ],
 )
 def test_incomplete_drops_directory_leaves_the_allow_list_alone(
@@ -2095,21 +2098,6 @@ def test_incomplete_drops_directory_leaves_the_allow_list_alone(
     assert usernames == ["grayzonewarfare"]
 
 
-def test_complete_drops_directory_with_page_info_vets_the_allow_list(monkeypatch):
-    twitch = _mixed_campaign_twitch(
-        monkeypatch,
-        live={"grayzonewarfare": 5, "big": 300},
-        directory_logins=("big",),
-        directory_has_next_page=False,
-    )
-
-    usernames = twitch.get_live_streamers_for_category(
-        "Gray Zone Warfare", drops_enabled=True, limit=1
-    )
-
-    assert usernames == ["big"]
-
-
 @pytest.mark.parametrize(
     "directory_response",
     [
@@ -2118,17 +2106,23 @@ def test_complete_drops_directory_with_page_info_vets_the_allow_list(monkeypatch
         # A partial outage: errors next to an empty list.
         {
             "errors": [{"message": "service timeout"}],
-            "data": {"game": {"streams": {"edges": []}}},
+            "data": {
+                "game": {"streams": {"edges": [], "pageInfo": {"hasNextPage": False}}}
+            },
         },
         # Nothing to vet against.
-        {"data": {"game": {"streams": {"edges": []}}}},
+        {
+            "data": {
+                "game": {"streams": {"edges": [], "pageInfo": {"hasNextPage": False}}}
+            }
+        },
     ],
 )
 def test_unusable_drops_directory_leaves_the_allow_list_alone(
     monkeypatch, directory_response
 ):
-    # Each looks like a short, complete page, but filtering by it would drop
-    # every allow-listed channel, Drops or not.
+    # Each looks like a complete page, but filtering by it would drop every
+    # allow-listed channel, Drops or not.
     twitch = _mixed_campaign_twitch(
         monkeypatch,
         live={"grayzonewarfare": 5, "big": 300},

@@ -4140,17 +4140,20 @@ class Twitch(object):
             )
 
         # The game's Drops-enabled directory as (logins, complete), requested
-        # at most once per lookup; None once the request failed, with the
-        # error kept for the step that cannot go on without it.
+        # at most once per lookup. None after a failed request, unless the
+        # caller cannot go on without it: then the lookup fails (required).
         directory = {}
 
-        def drops_directory():
+        def drops_directory(required=False):
             if "result" not in directory:
                 try:
                     directory["result"] = self.__get_drops_enabled_directory(game_slug)
                 except CategoryLookupFailedException as error:
                     directory["result"] = None
                     directory["error"] = error
+            if directory["result"] is None and required:
+                error = directory["error"]
+                raise lookup_failed(str(error)) from error
             return directory["result"]
 
         # One entry per campaign: None when any channel can earn it, else its
@@ -4225,22 +4228,26 @@ class Twitch(object):
                             "directory lists",
                             level=logging.DEBUG,
                         )
-                (
-                    restricted_usernames,
-                    restricted_eligibility,
-                    unverified_pick,
-                ) = self.__get_live_restricted_campaign_streamers(
-                    fallback_campaigns,
-                    game_id,
-                    game_name,
-                    drops_enabled=drops_enabled,
-                    target_per_campaign=(
-                        restricted_cap if restricted_cap is not None else 20
-                    ),
-                    max_total=restricted_cap,
-                    campaign_logins_by_campaign=lookup_logins,
-                    campaign_login_sets_by_campaign=lookup_login_sets,
-                )
+                if not any(lookup_logins):
+                    # Vetting left no allow-listed channel to look up.
+                    restricted_usernames, restricted_eligibility = [], {}
+                else:
+                    (
+                        restricted_usernames,
+                        restricted_eligibility,
+                        unverified_pick,
+                    ) = self.__get_live_restricted_campaign_streamers(
+                        fallback_campaigns,
+                        game_id,
+                        game_name,
+                        drops_enabled=drops_enabled,
+                        target_per_campaign=(
+                            restricted_cap if restricted_cap is not None else 20
+                        ),
+                        max_total=restricted_cap,
+                        campaign_logins_by_campaign=lookup_logins,
+                        campaign_login_sets_by_campaign=lookup_login_sets,
+                    )
                 if not open_campaigns:
                     selection = with_unverified_pick(
                         restricted_usernames, restricted_eligibility
@@ -4442,11 +4449,7 @@ class Twitch(object):
                 break
 
             if drops_enabled is True and drops_enabled_logins is None:
-                drops_enabled_directory = drops_directory()
-                if drops_enabled_directory is None:
-                    error = directory["error"]
-                    raise lookup_failed(str(error)) from error
-                drops_enabled_logins = drops_enabled_directory[0]
+                drops_enabled_logins = drops_directory(required=True)[0]
                 # Allow-listed channels in the directory were seeded as seen
                 # and can never become candidates; sizing the window by them
                 # would page the whole category looking for channels that
@@ -4494,8 +4497,9 @@ class Twitch(object):
             and drop_pick is not None
             and drop_pick not in discovered
             and discovered_room > 0
-            # An allow-listed pick was already checked (and not selected) by
-            # the restricted lookup, so do not ask Helix about it again.
+            # An allow-listed pick was either checked (and not selected) by
+            # the restricted lookup or left out of it as not Drops-enabled,
+            # so do not ask Helix about it again.
             and not any(
                 logins is not None and drop_pick in logins
                 for logins in campaign_login_sets
@@ -4546,9 +4550,12 @@ class Twitch(object):
             )
         elif drops_enabled is True:
             eligible_count = len(drops_enabled_logins or [])
+            # Only a directory Twitch says may continue undercounts.
+            drops_enabled_directory = directory.get("result")
             eligible_label = (
                 f"at least {eligible_count}"
-                if eligible_count >= DROPS_DIRECTORY_LIMIT
+                if drops_enabled_directory is not None
+                and not drops_enabled_directory[1]
                 else eligible_count
             )
             allow_listed_note = (
@@ -4934,9 +4941,9 @@ class Twitch(object):
 
     def __get_drops_enabled_directory(self, game_slug: str) -> Tuple[set, bool]:
         """The game's Drops-enabled live channels, and whether that is all of
-        them: an error-free page of a game Twitch found, with no next page or,
-        without page info, shorter than requested. A full page, or one Twitch
-        reported errors with, says nothing about a channel missing from it."""
+        them: an error-free page of a game Twitch found, for which Twitch
+        reports no next page. A page's length proves nothing: Twitch can
+        return fewer channels than requested while more remain."""
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
         request["variables"] = {
             "slug": game_slug,
@@ -4991,12 +4998,7 @@ class Twitch(object):
             page_info.get("hasNextPage") if isinstance(page_info, dict) else None
         )
         complete = (
-            edges_listed
-            and not response.get("errors")
-            and (
-                has_next_page is False
-                or (has_next_page is None and len(edges) < DROPS_DIRECTORY_LIMIT)
-            )
+            edges_listed and not response.get("errors") and has_next_page is False
         )
         return {login for login in logins if login}, complete
 
