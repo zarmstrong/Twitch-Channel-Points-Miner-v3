@@ -19,6 +19,10 @@ from pathlib import Path
 from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import DropBadgeCatalog
+from TwitchChannelPointsMiner.classes.entities.Campaign import (
+    CampaignChannelScope,
+    campaign_channel_scope,
+)
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
@@ -1632,14 +1636,12 @@ class TwitchChannelPointsMiner:
             campaign = record.get("campaign") or {}
             if not game_slug:
                 continue
-            channels = [
-                channel.lower().strip()
-                for channel in campaign.get("channels", []) or []
-                if isinstance(channel, str) and channel.strip()
-            ]
-            if campaign.get("all_channels") is True:
+            # A record whose channels are unknown (scraped without its channel
+            # list) is skipped, as category discovery skips it.
+            scope, channels = campaign_channel_scope(campaign)
+            if scope is CampaignChannelScope.OPEN:
                 unrestricted_games.append(game_slug)
-            elif channels:
+            elif scope is CampaignChannelScope.RESTRICTED:
                 restricted_campaigns_by_game.setdefault(game_slug, []).append(
                     {**campaign, "channels": channels}
                 )
