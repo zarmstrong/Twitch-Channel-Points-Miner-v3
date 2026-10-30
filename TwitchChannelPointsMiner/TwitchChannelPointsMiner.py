@@ -259,6 +259,9 @@ def _capture_drop_progress_baseline(twitch, progress_scraped=False):
 
 
 DAILY_REPORT_STATE_VERSION = 1
+# Saved drop progress older than this is not restored after a restart: it was
+# reported long ago, and restoring it would carry it across every restart.
+DAILY_REPORT_DROP_RETENTION = timedelta(days=7)
 # Consecutive category refreshes a category may stay unevaluated (its lookup
 # kept failing) before it is treated as evaluated: a lookup that never
 # recovers, such as an expired token, must not keep stale streamers forever
@@ -279,9 +282,13 @@ def _load_daily_report_state(path):
             not isinstance(payload, dict)
             or payload.get("version") != DAILY_REPORT_STATE_VERSION
             or not isinstance(payload.get("streamers"), dict)
-            or (
-                payload.get("drop_progress") is not None
-                and not isinstance(payload.get("drop_progress"), dict)
+            or any(
+                payload.get(key) is not None and not isinstance(payload.get(key), dict)
+                for key in (
+                    "drop_progress",
+                    "drop_progress_latest",
+                    "retired_streamers",
+                )
             )
         ):
             raise ValueError("unsupported or malformed state")
@@ -293,6 +300,12 @@ def _load_daily_report_state(path):
                 for username, points in payload["streamers"].items()
             },
             "drop_progress": payload.get("drop_progress"),
+            # Both are absent from state written before restarts were handled.
+            "drop_progress_latest": payload.get("drop_progress_latest"),
+            "retired_streamers": {
+                str(username): int(points)
+                for username, points in (payload.get("retired_streamers") or {}).items()
+            },
         }
     except FileNotFoundError:
         return None
@@ -303,17 +316,28 @@ def _load_daily_report_state(path):
         return None
 
 
-def _save_daily_report_state(path, report_date, streamers, drop_progress):
+def _save_daily_report_state(
+    path,
+    report_date,
+    streamers,
+    drop_progress,
+    drop_progress_latest=None,
+    retired_streamers=None,
+):
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": DAILY_REPORT_STATE_VERSION,
         "last_report_date": report_date.isoformat() if report_date else None,
         "streamers": streamers,
         "drop_progress": drop_progress,
+        "drop_progress_latest": drop_progress_latest,
+        "retired_streamers": retired_streamers or {},
     }
     temporary = None
     try:
+        # Inside the try: this now also runs on background threads (streamers
+        # added or retired mid-day), where an uncaught OSError would kill them.
+        target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
@@ -334,6 +358,22 @@ def _save_daily_report_state(path, report_date, streamers, drop_progress):
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def _recent_drop_progress(snapshot, now=None):
+    """Return the entries of a saved drop snapshot recorded within the retention."""
+    if not isinstance(snapshot, dict):
+        return {}
+    now = time.time() if now is None else now
+    cutoff_ms = (now - DAILY_REPORT_DROP_RETENTION.total_seconds()) * 1000
+    return {
+        tracking_key: payload
+        for tracking_key, payload in snapshot.items()
+        if isinstance(payload, dict)
+        and isinstance(payload.get("x"), (int, float))
+        and not isinstance(payload.get("x"), bool)
+        and payload["x"] >= cutoff_ms
+    }
 
 
 class TwitchChannelPointsMiner:
@@ -380,6 +420,11 @@ class TwitchChannelPointsMiner:
         "daily_report_date",
         "daily_report_streamers",
         "daily_report_drop_progress",
+        "daily_report_drop_progress_latest",
+        "daily_report_retired_streamers",
+        "daily_report_lock",
+        "daily_report_state_dirty",
+        "daily_report_in_progress",
         "daily_report_state_path",
         "update_check_enabled",
         "update_check_interval_seconds",
@@ -572,6 +617,32 @@ class TwitchChannelPointsMiner:
             if daily_report_state is not None
             else None
         )
+        self.daily_report_drop_progress_latest = _recent_drop_progress(
+            daily_report_state["drop_progress_latest"]
+            if daily_report_state is not None
+            else None
+        )
+        # Last known balance of channels not tracked right now: retired ones,
+        # and at exit every channel, which the next session takes back if it
+        # tracks it again. The report counts these only when not tracked.
+        self.daily_report_retired_streamers = (
+            daily_report_state["retired_streamers"]
+            if daily_report_state is not None
+            else {}
+        )
+        # Reentrant: end() saves this state as a signal handler on the main
+        # thread, which may already hold it mid-report.
+        self.daily_report_lock = threading.RLock()
+        self.daily_report_state_dirty = False
+        # The thread sending a report, if any.
+        self.daily_report_in_progress = None
+        # Drop progress lives in memory, so put back what was recorded since
+        # the last report before run() scrapes the inventory and captures the
+        # session baseline; otherwise a restart loses it from the next report.
+        if self._daily_report_enabled():
+            self.twitch.restore_drop_report_state(
+                self.daily_report_drop_progress_latest
+            )
 
         if os.environ.pop("TCPM_LEGACY_CONFIG_NOTICE", None):
             logger.warning(
@@ -1147,6 +1218,8 @@ class TwitchChannelPointsMiner:
                     for streamer in self.streamers
                 }
                 self.daily_report_drop_progress = self.twitch.drop_report_snapshot()
+                self.daily_report_drop_progress_latest = self.daily_report_drop_progress
+                self.daily_report_retired_streamers = {}
                 report_now = datetime.now()
                 report_time = datetime.strptime(
                     Settings.logger.daily_report_time, "%H:%M"
@@ -1158,10 +1231,7 @@ class TwitchChannelPointsMiner:
                 )
                 self.__save_daily_report_state()
             elif Settings.logger.daily_report is True:
-                for streamer in self.streamers:
-                    self.daily_report_streamers.setdefault(
-                        streamer.username, streamer.channel_points
-                    )
+                self._record_daily_report_streamers(self.streamers)
                 self.__save_daily_report_state()
 
             # If we have at least one streamer with settings = make_predictions True
@@ -1285,6 +1355,7 @@ class TwitchChannelPointsMiner:
                     break
                 # One failed pass (e.g. a network error in the category refresh)
                 # must not end the main loop; log it and retry on the next pass.
+                self.__save_daily_report_state_safely()
                 try:
                     self.__send_daily_report_if_due()
                     self.__check_for_update()
@@ -1350,6 +1421,9 @@ class TwitchChannelPointsMiner:
                         "Error in the main loop, retrying on the next pass",
                         exc_info=True,
                     )
+            # A requested restart leaves through here without stopping the
+            # workers, so keep what was recorded since the last pass.
+            self.__save_daily_report_state_safely(retire_all=True)
 
     # Both loops iterate snapshots: the badge Drop and category refresh threads
     # retire streamers (and their now-empty websockets) by shrinking these
@@ -1431,23 +1505,48 @@ class TwitchChannelPointsMiner:
         return update_available
 
     def __send_daily_report_if_due(self, now=None):
-        if Settings.logger.daily_report is not True or not self.streamers:
+        # Retired channels' balances are still reported with none tracked.
+        if Settings.logger.daily_report is not True or not (
+            self.streamers or self.daily_report_retired_streamers
+        ):
             return
         now = now or datetime.now()
         scheduled = datetime.strptime(Settings.logger.daily_report_time, "%H:%M").time()
         if now.time() < scheduled or self.daily_report_date == now.date():
             return
 
+        # Held throughout (logging is queued, so this stays short) so streamers
+        # added or retired by the background threads land wholly before or
+        # after this report rather than being lost between its two halves.
+        with self.daily_report_lock:
+            self.daily_report_in_progress = threading.get_ident()
+            try:
+                self.__send_daily_report(now)
+            finally:
+                self.daily_report_in_progress = None
+
+    def __send_daily_report(self, now):
+        # One read of the balances serves both the report and the next
+        # baseline, so points earned in between are not skipped.
+        current_points = {
+            streamer.username: streamer.channel_points
+            for streamer in list(self.streamers)
+        }
+        # Channels retired since the last report keep their final balance here.
+        report_points = {
+            **current_points,
+            **{
+                username: points
+                for username, points in self.daily_report_retired_streamers.items()
+                if username not in current_points
+            },
+        }
+
         activity_lines = []
-        for streamer in self.streamers:
-            baseline = self.daily_report_streamers.get(
-                streamer.username, streamer.channel_points
-            )
-            gained = streamer.channel_points - baseline
+        for username, points in report_points.items():
+            gained = points - self.daily_report_streamers.get(username, points)
             if gained != 0:
-                activity_lines.append(
-                    f"{streamer.username}: {gained:+,} channel points"
-                )
+                activity_lines.append(f"{username}: {gained:+,} channel points")
 
         drop_progress = self.twitch.drop_report_snapshot()
         drop_entries = _drop_progress_report_entries(
@@ -1477,19 +1576,83 @@ class TwitchChannelPointsMiner:
                 extra={"emoji": ":bar_chart:", "event": Events.DAILY_REPORT},
             )
         self.daily_report_date = now.date()
-        self.daily_report_streamers = {
-            streamer.username: streamer.channel_points for streamer in self.streamers
-        }
+        self.daily_report_streamers = current_points
+        self.daily_report_retired_streamers = {}
         self.daily_report_drop_progress = drop_progress
+        self.daily_report_drop_progress_latest = drop_progress
         self.__save_daily_report_state()
 
     def __save_daily_report_state(self):
-        _save_daily_report_state(
-            self.daily_report_state_path,
-            self.daily_report_date,
-            self.daily_report_streamers,
-            self.daily_report_drop_progress,
+        with self.daily_report_lock:
+            _save_daily_report_state(
+                self.daily_report_state_path,
+                self.daily_report_date,
+                dict(self.daily_report_streamers),
+                self.daily_report_drop_progress,
+                self.daily_report_drop_progress_latest,
+                dict(self.daily_report_retired_streamers),
+            )
+            self.daily_report_state_dirty = False
+
+    @staticmethod
+    def _daily_report_enabled():
+        # These run on every add, retirement and shutdown, including from
+        # callers that configure only part of the logger settings.
+        return getattr(Settings.logger, "daily_report", False) is True
+
+    def _save_daily_report_state_if_changed(self):
+        """Persist what changed since the last save, so a restart keeps it."""
+        if not self._daily_report_enabled():
+            return
+        with self.daily_report_lock:
+            # Inside the lock, so a slower caller cannot replace a newer
+            # snapshot saved meanwhile with its older one.
+            drop_progress = self.twitch.drop_report_snapshot()
+            if drop_progress != self.daily_report_drop_progress_latest:
+                self.daily_report_drop_progress_latest = drop_progress
+                self.daily_report_state_dirty = True
+            if self.daily_report_state_dirty:
+                self.__save_daily_report_state()
+
+    # Adds and retirements only mark the state dirty: they run on the refresh
+    # threads, often for many channels in a row, and the main loop saves it
+    # within a minute (and on exit).
+    def _record_daily_report_streamers(self, streamers):
+        """Give streamers a baseline from now, so the next report counts their gains."""
+        if not self._daily_report_enabled():
+            return
+        with self.daily_report_lock:
+            for streamer in streamers:
+                # Live again: its current balance supersedes the retired one,
+                # and an earlier baseline from today still applies.
+                self.daily_report_retired_streamers.pop(streamer.username, None)
+                self.daily_report_streamers.setdefault(
+                    streamer.username, streamer.channel_points
+                )
+            self.daily_report_state_dirty = True
+
+    def _record_daily_report_retirements(self, retained):
+        """Record the streamers about to be replaced by ``retained`` as retired."""
+        retained_usernames = {streamer.username for streamer in retained}
+        self._record_daily_report_retired_streamers(
+            [
+                streamer
+                for streamer in self.streamers
+                if streamer.username not in retained_usernames
+            ]
         )
+
+    def _record_daily_report_retired_streamers(self, streamers):
+        """Keep retired streamers' final balance until the next report counts it."""
+        if not self._daily_report_enabled() or not streamers:
+            return
+        with self.daily_report_lock:
+            for streamer in streamers:
+                if streamer.username in self.daily_report_streamers:
+                    self.daily_report_retired_streamers[streamer.username] = (
+                        streamer.channel_points
+                    )
+            self.daily_report_state_dirty = True
 
     def __drop_badge_catalog_loop(self, refresh_seconds):
         logger.info(
@@ -1788,6 +1951,7 @@ class TwitchChannelPointsMiner:
                     self.twitch.check_streamer_online(streamer)
                     self.streamers.append(streamer)
                     self.original_streamers.append(streamer.channel_points)
+                    self._record_daily_report_streamers([streamer])
                     existing_streamers[username] = streamer
                     added += 1
 
@@ -1970,6 +2134,7 @@ class TwitchChannelPointsMiner:
                 streamer.irc_chat.join(timeout=5)
             removed.append(streamer.username)
 
+        self._record_daily_report_retirements(retained)
         self.streamers[:] = retained
         self.original_streamers[:] = retained_baselines
         if removed:
@@ -2064,6 +2229,7 @@ class TwitchChannelPointsMiner:
                 streamer.irc_chat.join(timeout=5)
             removed.append(streamer.username)
 
+        self._record_daily_report_retirements(retained)
         self.streamers[:] = retained
         self.original_streamers[:] = retained_baselines
         if removed:
@@ -2321,6 +2487,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
                 self.original_streamers.append(streamer.channel_points)
+                self._record_daily_report_streamers([streamer])
                 existing_streamers[username] = streamer
                 added += 1
 
@@ -2661,6 +2828,7 @@ class TwitchChannelPointsMiner:
                     f"Removed {streamer.username} from the reloaded configuration",
                     extra={"emoji": ":heavy_minus_sign:"},
                 )
+            self._record_daily_report_retirements(retained)
             self.streamers[:] = retained
             self.original_streamers[:] = retained_baselines
 
@@ -2709,6 +2877,7 @@ class TwitchChannelPointsMiner:
                 self.twitch.check_streamer_online(streamer)
                 self.streamers.append(streamer)
                 self.original_streamers.append(streamer.channel_points)
+                self._record_daily_report_streamers([streamer])
                 existing.add(username)
                 self.ws_pool.submit(
                     PubsubTopic("video-playback-by-id", streamer=streamer)
@@ -2799,6 +2968,7 @@ class TwitchChannelPointsMiner:
         sys.exit(0)
 
     def __stop_workers(self):
+        self.__save_daily_report_state_safely(retire_all=True)
         # Snapshot: the badge Drop thread may still be retiring streamers.
         streamers = list(self.streamers)
         for streamer in streamers:
@@ -2861,6 +3031,31 @@ class TwitchChannelPointsMiner:
                         f"Mutex for {streamer} did not release in time, "
                         "continuing shutdown anyway"
                     )
+
+        self.__save_daily_report_state_safely(retire_all=True)
+
+    def __save_daily_report_state_safely(self, retire_all=False):
+        # Neither shutdown (including a crash before the state was loaded) nor
+        # the main loop's other checks may fail on this.
+        if not self._daily_report_enabled():
+            return
+        try:
+            # end() can interrupt a report on this thread as a signal handler;
+            # saving then would mix its updated and pending fields, so keep
+            # the state from before it (the report is sent again next session).
+            # From another thread (the Windows shell's), the lock below waits
+            # for the report to finish instead.
+            if self.daily_report_in_progress == threading.get_ident():
+                return
+            # On exit, count every channel's balance so far as if it retired:
+            # the next session takes back the ones it tracks again, and the
+            # rest (such as category channels no longer live) still reach the
+            # report.
+            if retire_all:
+                self._record_daily_report_retired_streamers(list(self.streamers))
+            self._save_daily_report_state_if_changed()
+        except Exception:
+            logger.warning("Unable to save daily-report state", exc_info=True)
 
     @staticmethod
     def _print_report_spacing(text=""):

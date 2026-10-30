@@ -1060,16 +1060,19 @@ def test_remove_streamers_unsubscribes_only_purely_explicit_streamers():
     category = Streamer("category", from_category=True, explicitly_configured=True)
     websocket_pool = SimpleNamespace(removed=[])
     websocket_pool.remove_streamer_topics = websocket_pool.removed.append
+    retired = []
     miner = SimpleNamespace(
         running=True,
         ws_pool=websocket_pool,
         config_reload_lock=threading.Lock(),
         streamers=[explicit, category],
         original_streamers=[100, 200],
+        _record_daily_report_retirements=retired.append,
     )
 
     TwitchChannelPointsMiner.remove_streamers(miner, ["explicit", "category"])
 
+    assert retired == [[category]]
     assert miner.streamers == [category]
     assert miner.original_streamers == [200]
     assert category.explicitly_configured is False
