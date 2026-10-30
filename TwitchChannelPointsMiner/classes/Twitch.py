@@ -4135,12 +4135,10 @@ class Twitch(object):
             game_slug
         ) or self.twitchdrops_app_campaigns.get(requested_slug, [])
 
-        # A campaign whose channels are unknown (a catalog record scraped
-        # without its channel list, or a Twitch campaign whose details failed
-        # to load) names no channel anyone could be matched against, so leave
-        # it out, as the badge Drop flow does, instead of letting it decide
-        # how this game is searched. Each source is filtered first, so a game
-        # whose Twitch campaigns are all unknown still uses the catalog's.
+        # A catalog record scraped without its channel list says it is not
+        # open to all channels yet names none, so nobody can be matched
+        # against it: leave it out, as the badge Drop flow does, instead of
+        # letting it decide how this game is searched.
         def known(campaigns):
             return [
                 campaign
@@ -4148,10 +4146,26 @@ class Twitch(object):
                 if not self.__campaign_channels_unknown(campaign)
             ]
 
+        # A Twitch campaign whose details have not loaded says nothing either
+        # way, so search it as open. The per-channel check then keeps only
+        # channels whose own campaign query lists it; leaving it out could
+        # turn a mixed game restricted-only and retire the channels earning it
+        # until the next category refresh.
+        def searchable(campaigns):
+            return [
+                (
+                    {**campaign, "all_channels": True}
+                    if self.__campaign_channels_unknown(campaign)
+                    else campaign
+                )
+                for campaign in campaigns
+            ]
+
         fallback_campaigns = (
             known(restricted_campaigns)
             if restricted_campaigns is not None
-            else known(active_twitch_campaigns) or known(fallback_catalog_campaigns)
+            else searchable(active_twitch_campaigns)
+            or known(fallback_catalog_campaigns)
         )
         max_results = max(limit, 1)
         restricted_usernames = None

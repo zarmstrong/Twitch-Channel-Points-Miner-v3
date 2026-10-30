@@ -4121,29 +4121,30 @@ def test_open_helix_campaigns_skip_a_rejected_request(monkeypatch, status_code):
     assert pages == []
 
 
-def test_category_search_uses_the_catalog_when_twitch_campaigns_are_unknown(
+def test_category_search_keeps_a_mixed_game_when_a_twitch_campaign_is_unknown(
     monkeypatch,
 ):
-    # Issue #181: Twitch reported the game's only campaign but its details
-    # failed to load, so its channels are unknown. Filtering after choosing
-    # Twitch's list over the catalog's left no campaign at all, and the
-    # catalog's allow-listed campaign was ignored.
+    # Issue #181 review: after a restart, the game's open campaign failed its
+    # DropCampaignDetails lookup, so its channels are unknown, next to a known
+    # allow-listed one. Left out, it made the game restricted-only and retired
+    # the channels earning the open campaign until the next refresh; searched
+    # as open, the per-channel check sorts out who really earns it.
     twitch = _mixed_campaign_twitch(
         monkeypatch,
         live={"x": 5, "big": 300},
         allow_listed=("x",),
-        campaigns=[{"id": "x-only", "all_channels": False, "channels": ["x"]}],
-        catalog=True,
+        campaigns=[
+            {"id": "x-only", "all_channels": False, "channels": ["x"]},
+            {"id": "details-failed", "all_channels": False, "channels": []},
+        ],
     )
-    twitch.active_drop_campaigns = {
-        "gray-zone-warfare": [
-            {"id": "details-failed", "all_channels": False, "channels": []}
-        ]
-    }
 
     usernames = twitch.get_live_streamers_for_category(
         "Gray Zone Warfare", drops_enabled=True, limit=5
     )
 
-    assert usernames == ["x"]
-    assert twitch.category_campaign_eligibility == {("gray-zone-warfare", "x"): (1, 1)}
+    assert usernames == ["x", "big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "x"): (2, 2),
+        ("gray-zone-warfare", "big"): (1, 2),
+    }
