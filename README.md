@@ -1284,9 +1284,11 @@ Email(
 
 `use_ssl` and `starttls` cannot both be enabled. Use `use_ssl=True,
 starttls=False` for implicit TLS, commonly on port 465. For scheduled summaries,
-subscribe to `DAILY_REPORT` and set `daily_report=True`. Report progress is saved
-per account under `logs/.state/`; an overdue report is sent after startup
-finishes refreshing streamer balances.
+subscribe to `DAILY_REPORT` and set `daily_report=True`. Report progress,
+including Drop progress and the points of channels added or retired during the
+day, is saved per account under `logs/.state/`, so a restart doesn't drop it
+from the next report. An overdue report is sent after startup finishes
+refreshing streamer balances.
 
 #### Events
 
