@@ -3537,3 +3537,40 @@ def test_category_drops_condition_counts_a_never_learned_campaign(monkeypatch):
     )
 
     assert twitch._Twitch__category_drops_condition(streamer) is True
+
+
+def test_never_learned_campaign_keeps_a_mixed_game_mixed_for_discovery(
+    monkeypatch,
+):
+    # After a restart the game-wide campaign's details fail while the
+    # allow-listed one's load. Discovery must still see one open campaign,
+    # or the game turns restricted-only and the channels earning the
+    # game-wide campaign are retired until the next category refresh.
+    twitch = bare_twitch(monkeypatch)
+    game_wide = {**campaign_data(), "id": "game-wide"}
+    del game_wide["allow"]
+    restricted = {
+        **campaign_data(),
+        "id": "restricted",
+        "allow": {"channels": [{"name": "costream"}]},
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, **kwargs: [game_wide, {**restricted, "allow": None}],
+    )
+    _stub_campaign_sources(monkeypatch)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: [
+            copy.deepcopy(restricted)
+        ],
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
+
+    stored = twitch.active_drop_campaigns["example-game"]
+    assert sorted(
+        Twitch._Twitch__campaign_logins_by_campaign(stored), key=lambda x: x or []
+    ) == [None, ["costream"]]

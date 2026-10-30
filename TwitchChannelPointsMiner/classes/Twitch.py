@@ -1379,8 +1379,9 @@ class Twitch(object):
         # Combines the external gist catalog with Twitch's own authoritative
         # campaign data. The gist side omits every campaign Twitch reported,
         # so the two lists do not double-count, and Twitch's may include
-        # unrestricted campaigns too. Campaigns whose channels are unknown are
-        # left out, as category discovery leaves them out.
+        # unrestricted campaigns too. Catalog records whose channels are
+        # unknown are left out, as category discovery leaves them out
+        # (Twitch's own campaigns are stored with a known or open scope).
         candidate_scopes = []
         for campaign in [
             *self.twitchdrops_app_campaigns.get(game_slug, []),
@@ -3717,7 +3718,8 @@ class Twitch(object):
         authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
             game_slug, []
         )
-        # A campaign whose channels are unknown vouches for nobody.
+        # A catalog record whose channels are unknown vouches for nobody
+        # (Twitch's own campaigns are stored with a known or open scope).
         for campaign in list(self.twitchdrops_app_campaigns.get(game_slug, [])) + list(
             authoritative_campaigns
         ):
@@ -4160,26 +4162,13 @@ class Twitch(object):
                 if not self.__campaign_channels_unknown(campaign)
             ]
 
-        # A Twitch campaign whose details have not loaded says nothing either
-        # way, so search it as open. The per-channel check then keeps only
-        # channels whose own campaign query lists it; leaving it out could
-        # turn a mixed game restricted-only and retire the channels earning it
-        # until the next category refresh.
-        def searchable(campaigns):
-            return [
-                (
-                    {**campaign, "all_channels": True}
-                    if self.__campaign_channels_unknown(campaign)
-                    else campaign
-                )
-                for campaign in campaigns
-            ]
-
+        # Twitch's own campaigns are never unknown here: one whose scope was
+        # never learned is stored as open (see
+        # __active_drop_category_slugs_from_campaigns).
         fallback_campaigns = (
             known(restricted_campaigns)
             if restricted_campaigns is not None
-            else searchable(active_twitch_campaigns)
-            or known(fallback_catalog_campaigns)
+            else known(active_twitch_campaigns) or known(fallback_catalog_campaigns)
         )
         max_results = max(limit, 1)
         restricted_usernames = None
