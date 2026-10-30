@@ -1653,7 +1653,7 @@ class Twitch(object):
 
         return merged_campaign
 
-    def __known_campaign_scope(self, campaign_id, campaign) -> tuple:
+    def __known_campaign_scope(self, campaign_id, campaign, log=False) -> tuple:
         """campaign_channel_scope of the campaign, remembered by campaign ID.
         A record that does not say who can earn the campaign (its details
         failed to load, say) gets the last known scope instead. The memory
@@ -1670,11 +1670,12 @@ class Twitch(object):
             return scope, channel_logins
         if campaign_id in known:
             known_scope, known_logins = known[campaign_id]
-            self.__log_drop_check(
-                f"Using the last known channels of campaign "
-                f"'{campaign.get('name')}': this record does not list them",
-                level=logging.DEBUG,
-            )
+            if log:
+                self.__log_drop_check(
+                    f"Using the last known channels of campaign "
+                    f"'{campaign.get('name')}': this record does not list them",
+                    level=logging.DEBUG,
+                )
             return known_scope, list(known_logins)
         return scope, channel_logins
 
@@ -2247,16 +2248,22 @@ class Twitch(object):
 
             # Details that fail to load for a cycle do not turn a known
             # allow-list, or a game-wide campaign, into an unknown one.
-            scope, channel_logins = self.__known_campaign_scope(campaign_id, campaign)
+            scope, channel_logins = self.__known_campaign_scope(
+                campaign_id, campaign, log=True
+            )
+            # A campaign whose scope was never learned is stored as open to
+            # all channels, as before: discovery then searches it and the
+            # per-channel check keeps only channels whose own campaign query
+            # lists it. Stored as unknown, readers left it out, which could
+            # retire the channels earning it. It is not remembered, so its
+            # real scope replaces this as soon as its details load.
             active_campaigns.setdefault(game_slug, []).append(
                 {
                     "id": campaign_id,
                     "name": campaign.get("name"),
                     # In the catalog's terms, so every reader classifies it
-                    # alike: a campaign whose details failed to load has no
-                    # allow block and is stored as neither open nor naming a
-                    # channel, i.e. unknown, rather than as open to all.
-                    "all_channels": scope is CampaignChannelScope.OPEN,
+                    # alike.
+                    "all_channels": scope is not CampaignChannelScope.RESTRICTED,
                     "channels": channel_logins,
                 }
             )
@@ -6899,15 +6906,11 @@ class Twitch(object):
             if campaign_game_slug not in ("", game_slug):
                 continue
             scope, channels = campaign_channel_scope(campaign)
-            if scope is CampaignChannelScope.UNKNOWN and (
-                source == "gist" or require_twitch_allowlist
-            ):
+            if scope is CampaignChannelScope.UNKNOWN and source == "gist":
                 # A catalog record scraped without its channel list says it is
-                # not open yet names nobody. A Twitch campaign whose channels
-                # are unknown (a dashboard summary, or details that failed to
-                # load) says nothing about this channel, but stands in for an
-                # unrestricted one, as category discovery searches it, when
-                # Twitch did not answer this channel's query.
+                # not open yet names nobody. A dashboard summary, which never
+                # carries an allow-list, stands in for an unrestricted
+                # campaign below, as before.
                 continue
             campaign_id = campaign.get("id")
             if not campaign_id:

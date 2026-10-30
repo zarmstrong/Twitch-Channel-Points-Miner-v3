@@ -3245,10 +3245,12 @@ def _campaign_without_details(source):
 
 
 @pytest.mark.parametrize("source", ["dashboard", "advertised"])
-def test_active_campaign_without_details_is_stored_as_unknown(monkeypatch, source):
-    # DropCampaignDetails failed, so the campaign has only a dashboard summary
-    # or a channel's listing, neither of which says who can earn it. It used to
-    # be stored with channels: [], which every reader took as open to all.
+def test_campaign_whose_scope_was_never_learned_is_stored_as_open(monkeypatch, source):
+    # DropCampaignDetails failed and nothing is remembered (as after a
+    # restart), so neither the dashboard summary nor a channel's listing says
+    # who can earn it. Stored as unknown, readers left it out and could retire
+    # the channels earning it; it is stored as open, as before, and not
+    # remembered, so its real scope replaces that once its details load.
     twitch = bare_twitch(monkeypatch)
     campaign = _campaign_without_details(source)
     if source == "advertised":
@@ -3273,14 +3275,17 @@ def test_active_campaign_without_details_is_stored_as_unknown(monkeypatch, sourc
             {
                 "id": "campaign-1",
                 "name": "Example Campaign",
-                "all_channels": False,
+                "all_channels": True,
                 "channels": [],
             }
         ]
     }
-    assert twitch._Twitch__campaign_channels_unknown(
-        twitch.active_drop_campaigns["example-game"][0]
-    )
+    assert "campaign-1" not in twitch.known_campaign_scopes
+
+    restricted = {**campaign_data(), "allow": {"channels": [{"name": "costream"}]}}
+    _sync_with_details(monkeypatch, twitch, restricted, True, {"example-game"})
+
+    assert twitch.active_drop_campaigns["example-game"][0]["channels"] == ["costream"]
 
 
 def test_inventory_allow_block_makes_an_advertised_listing_known(monkeypatch):
@@ -3488,3 +3493,47 @@ def test_inventory_progress_takes_the_known_scope_without_allow_data(monkeypatch
     )
 
     assert twitch.drop_inventory_progress["example-game"][0][-1] == ("costream",)
+
+
+def _never_learned_campaign_twitch(monkeypatch):
+    # A sync pass whose DropCampaignDetails failed for the game-wide
+    # campaign, with nothing remembered about it (as after a restart).
+    twitch = bare_twitch(monkeypatch)
+    campaign = {**campaign_data(), "allow": {"channels": None}}
+    _sync_with_details(monkeypatch, twitch, campaign, False, {"example-game"})
+    twitch.discovered_open_drop_campaigns = []
+    return twitch
+
+
+def test_running_badge_listing_admits_a_never_learned_game_wide_campaign(
+    monkeypatch,
+):
+    # As on master: a channel listing the game's running badge proves Drops
+    # are enabled there, so the account's game-wide campaigns apply, even one
+    # whose details did not load this cycle.
+    twitch = _never_learned_campaign_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[zero_minute_badge_campaign()], campaigns_available=True
+        )
+    )
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "campaign-1"
+    ]
+
+
+def test_category_drops_condition_counts_a_never_learned_campaign(monkeypatch):
+    # With no eligibility recorded yet, a category streamer still qualifies
+    # through the game's campaign, as discovery searched it.
+    twitch = _never_learned_campaign_twitch(monkeypatch)
+    streamer = SimpleNamespace(
+        username="drops-channel",
+        from_category=True,
+        from_badge_campaign=False,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=SimpleNamespace(campaigns_ids=[], game_name=lambda: "Example Game"),
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is True
