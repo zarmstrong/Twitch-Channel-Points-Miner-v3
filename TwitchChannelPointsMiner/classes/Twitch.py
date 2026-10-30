@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import choice, token_hex
-from threading import BoundedSemaphore, Event, Lock, Thread, local
+from threading import BoundedSemaphore, Event, Lock, RLock, Thread, local
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -252,7 +252,9 @@ class Twitch(object):
         self.twilight_build_id_pattern = re.compile(
             r'window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
         )
-        self.analytics_mutex = Lock()
+        # Reentrant: the miner's end() reads the drop report state as a signal
+        # handler on the main thread, which may already hold this mid-update.
+        self.analytics_mutex = RLock()
         self.category_campaign_eligibility_lock = Lock()
         self.channel_points_semaphore = BoundedSemaphore(CHANNEL_POINTS_MAX_CONCURRENCY)
         self.drop_progress_last_saved = {}
@@ -8152,6 +8154,15 @@ class Twitch(object):
                 tracking_key: payload.copy()
                 for tracking_key, payload in self.drop_report_state.items()
             }
+
+    def restore_drop_report_state(self, snapshot):
+        """Seed the drop state from a previous session without overriding newer entries."""
+        if not isinstance(snapshot, dict):
+            return
+        with self.analytics_mutex:
+            for tracking_key, payload in snapshot.items():
+                if isinstance(payload, dict):
+                    self.drop_report_state.setdefault(tracking_key, payload.copy())
 
     def __save_drop_progress_analytics(
         self,
