@@ -1784,7 +1784,9 @@ def _mixed_campaign_twitch(
     }
     if directory_has_next_page is not None:
         streams["pageInfo"] = {"hasNextPage": directory_has_next_page}
-    directory = directory_response or {"data": {"game": {"streams": streams}}}
+    directory = directory_response or {
+        "data": {"game": {"id": "gzw-id", "streams": streams}}
+    }
 
     def post_gql_request_raw(operation, request):
         calls.append(("gql", operation))
@@ -2103,6 +2105,18 @@ def test_incomplete_drops_directory_leaves_the_allow_list_alone(
     [
         # The locally built slug is not one Twitch knows.
         {"data": {"game": None}},
+        # The slug belongs to another game, whose list proves nothing here.
+        {
+            "data": {
+                "game": {
+                    "id": "other-game-id",
+                    "streams": {
+                        "edges": [{"node": {"broadcaster": {"login": "big"}}}],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            }
+        },
         # A partial outage: errors next to an empty list.
         {
             "errors": [{"message": "service timeout"}],
@@ -2187,7 +2201,7 @@ def test_failed_drops_directory_still_places_allow_listed_channels(monkeypatch):
         allow_listed=("a1", "a2"),
     )
 
-    def failed_directory(self, game_slug):
+    def failed_directory(self, game_slug, game_id=None):
         raise CategoryLookupFailedException("directory down", game_slug=game_slug)
 
     monkeypatch.setattr(
@@ -2386,7 +2400,7 @@ def test_failed_drops_directory_keeps_allow_listed_channels_in_a_mixed_game(
         monkeypatch, live={"grayzonewarfare": 5, "big": 300}
     )
 
-    def failed_directory(self, game_slug):
+    def failed_directory(self, game_slug, game_id=None):
         raise CategoryLookupFailedException("directory down", game_slug=game_slug)
 
     monkeypatch.setattr(

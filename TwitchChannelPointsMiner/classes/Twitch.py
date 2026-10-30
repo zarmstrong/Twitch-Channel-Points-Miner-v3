@@ -4149,7 +4149,9 @@ class Twitch(object):
         def drops_directory(required=False):
             if "result" not in directory:
                 try:
-                    directory["result"] = self.__get_drops_enabled_directory(game_slug)
+                    directory["result"] = self.__get_drops_enabled_directory(
+                        game_slug, game_id=game_id
+                    )
                 except CategoryLookupFailedException as error:
                     directory["result"] = None
                     directory["error"] = error
@@ -4948,11 +4950,15 @@ class Twitch(object):
     def __get_drops_enabled_directory_logins(self, game_slug: str) -> set[str]:
         return self.__get_drops_enabled_directory(game_slug)[0]
 
-    def __get_drops_enabled_directory(self, game_slug: str) -> Tuple[set, bool]:
+    def __get_drops_enabled_directory(
+        self, game_slug: str, game_id=None
+    ) -> Tuple[set, bool]:
         """The game's Drops-enabled live channels, and whether that is all of
         them: an error-free page of a game Twitch found, for which Twitch
         reports no next page. A page's length proves nothing: Twitch can
-        return fewer channels than requested while more remain."""
+        return fewer channels than requested while more remain. Given the
+        game's Helix ID, the page must also be that game's: a slug built from
+        its name can belong to another game."""
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
         request["variables"] = {
             "slug": game_slug,
@@ -5006,8 +5012,14 @@ class Twitch(object):
         has_next_page = (
             page_info.get("hasNextPage") if isinstance(page_info, dict) else None
         )
+        game_matches = game_id is None or (
+            isinstance(game, dict) and str(game.get("id") or "") == str(game_id)
+        )
         complete = (
-            edges_listed and not response.get("errors") and has_next_page is False
+            edges_listed
+            and game_matches
+            and not response.get("errors")
+            and has_next_page is False
         )
         return {login for login in logins if login}, complete
 
