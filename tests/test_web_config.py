@@ -1066,6 +1066,7 @@ def test_remove_streamers_unsubscribes_only_purely_explicit_streamers():
         config_reload_lock=threading.Lock(),
         streamers=[explicit, category],
         original_streamers=[100, 200],
+        _TwitchChannelPointsMiner__retire_daily_report_streamer=lambda streamer: None,
     )
 
     TwitchChannelPointsMiner.remove_streamers(miner, ["explicit", "category"])
