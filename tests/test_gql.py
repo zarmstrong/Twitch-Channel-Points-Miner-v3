@@ -1760,28 +1760,32 @@ def _mixed_campaign_twitch(
     directory_logins=None,
     fail_batch_lookup=False,
     catalog=False,
+    directory_has_next_page=False,
+    game_name="Gray Zone Warfare",
+    directory_response=None,
 ):
     # Gray Zone Warfare, 2026-10-25: "Rogue Ops - Stage 1" was open to every
     # channel while "Rogue Ops - MADFINGER" was limited to grayzonewarfare.
     # `live` maps every live login to its viewer count; allow-listed channels
     # are only found through the per-login lookup, the rest through the
-    # category's stream list and Drops-enabled directory. Every Helix and GQL
-    # request is appended to `calls` when one is given.
+    # category's stream list. Every live channel has Drops enabled (is in the
+    # Drops-enabled directory) unless `directory_logins` says otherwise. Like
+    # Twitch, the directory reports whether another page follows
+    # (`directory_has_next_page`; None leaves page info out).
+    # Every Helix and GQL request is appended to `calls` when one is given.
     calls = [] if calls is None else calls
     discovered = [login for login in live if login not in allow_listed]
-    directory = {
-        "data": {
-            "game": {
-                "streams": {
-                    "edges": [
-                        {"node": {"broadcaster": {"login": login}}}
-                        for login in (
-                            discovered if directory_logins is None else directory_logins
-                        )
-                    ]
-                }
-            }
-        }
+    game_slug = game_name.lower().replace(" ", "-")
+    streams = {
+        "edges": [
+            {"node": {"broadcaster": {"login": login}}}
+            for login in (live if directory_logins is None else directory_logins)
+        ]
+    }
+    if directory_has_next_page is not None:
+        streams["pageInfo"] = {"hasNextPage": directory_has_next_page}
+    directory = directory_response or {
+        "data": {"game": {"id": "gzw-id", "streams": streams}}
     }
 
     def post_gql_request_raw(operation, request):
@@ -1795,10 +1799,8 @@ def _mixed_campaign_twitch(
     ]
     # Twitch's own campaigns normally; `catalog` seeds twitchdrops.app records
     # instead, which discovery only consults when Twitch lists none.
-    twitch.active_drop_campaigns = {} if catalog else {"gray-zone-warfare": campaigns}
-    twitch.twitchdrops_app_campaigns = (
-        {"gray-zone-warfare": campaigns} if catalog else {}
-    )
+    twitch.active_drop_campaigns = {} if catalog else {game_slug: campaigns}
+    twitch.twitchdrops_app_campaigns = {game_slug: campaigns} if catalog else {}
     twitch.twitchdrops_app_game_names = {}
     twitch.category_campaign_eligibility = {}
 
@@ -1808,7 +1810,7 @@ def _mixed_campaign_twitch(
     def helix_get(endpoint, params):
         calls.append((endpoint, params))
         if endpoint == "search/categories":
-            return {"data": [{"id": "gzw-id", "name": "Gray Zone Warfare"}]}
+            return {"data": [{"id": "gzw-id", "name": game_name}]}
         if "user_login" in params:
             logins = params["user_login"]
             if isinstance(logins, str):
@@ -1968,8 +1970,8 @@ def test_category_search_skips_discovery_when_allow_listed_channels_fill_limit(
     monkeypatch,
 ):
     # Nothing discovery finds can be used once the allow-listed channels fill
-    # the limit, so the paginated stream search and the Drops-enabled directory
-    # request are not sent at all.
+    # the limit, so the paginated stream search is not sent at all. The
+    # Drops-enabled directory is, to vet the allow-listed channels.
     calls = []
     twitch = _mixed_campaign_twitch(
         monkeypatch,
@@ -1983,7 +1985,235 @@ def test_category_search_skips_discovery_when_allow_listed_channels_fill_limit(
     )
 
     assert usernames == ["a1", "a2"]
-    assert _discovery_requests(calls) == []
+    assert _discovery_requests(calls) == [("gql", "DirectoryPage_Game")]
+
+
+def _helix_login_lookups(calls):
+    return [
+        login
+        for endpoint, params in calls
+        if endpoint == "streams" and "user_login" in params
+        for login in (
+            [params["user_login"]]
+            if isinstance(params["user_login"], str)
+            else params["user_login"]
+        )
+    ]
+
+
+def test_allow_listed_channel_without_drops_does_not_take_a_mixed_limit(
+    monkeypatch,
+):
+    # Issue #184: grayzonewarfare is allow-listed and live in the game, but its
+    # stream is not in the Drops-enabled directory, so it earns neither
+    # campaign. Placed first, it filled the limit of 1, discovery was skipped,
+    # and the all-channel campaign got no channel.
+    calls = []
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5, "big": 300},
+        directory_logins=("big",),
+        calls=calls,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=1
+    )
+
+    assert usernames == ["big"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "big"): (1, 2)
+    }
+    # Vetting left no allow-listed channel, so none is looked up, and the
+    # directory is requested only once.
+    assert _helix_login_lookups(calls) == []
+    assert [call for call in calls if call[0] == "gql"] == [
+        ("gql", "DirectoryPage_Game")
+    ]
+
+
+def test_allow_listed_channel_without_drops_is_left_out_with_room_to_spare(
+    monkeypatch,
+):
+    # Kept with its allow-list eligibility it would read as Drops-eligible,
+    # and the per-channel check keeps an allow-listed channel's eligibility,
+    # so it could hold the Drops slot while earning nothing.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5, "big": 300},
+        directory_logins=("big",),
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=3
+    )
+
+    assert usernames == ["big"]
+
+
+def test_drops_enabled_allow_listed_channel_keeps_the_slot(monkeypatch):
+    # The restricted lookup caps at the limit, so filtering after it let a
+    # busier allow-listed channel without Drops take the only slot from one
+    # with them, which then lost to discovery's bigger channel.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"nodrops": 50, "withdrops": 10, "big": 300},
+        allow_listed=("nodrops", "withdrops"),
+        directory_logins=("withdrops", "big"),
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=1
+    )
+
+    assert usernames == ["withdrops"]
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", "withdrops"): (2, 2)
+    }
+
+
+@pytest.mark.parametrize(
+    "directory_logins, has_next_page",
+    [
+        # Rust, 2026-10-29: Twitch returned 98 of the 100 channels requested
+        # and said more followed, so a short page is not a complete one.
+        (["big"] + [f"other{index:02d}" for index in range(97)], True),
+        # Without page info nothing says the list is complete.
+        (["big"], None),
+    ],
+)
+def test_incomplete_drops_directory_leaves_the_allow_list_alone(
+    monkeypatch, directory_logins, has_next_page
+):
+    # A directory that may have left the channel out proves nothing about it.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5, "big": 300},
+        directory_logins=directory_logins,
+        directory_has_next_page=has_next_page,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=1
+    )
+
+    assert usernames == ["grayzonewarfare"]
+
+
+@pytest.mark.parametrize(
+    "directory_response",
+    [
+        # The locally built slug is not one Twitch knows.
+        {"data": {"game": None}},
+        # The slug belongs to another game, whose list proves nothing here.
+        {
+            "data": {
+                "game": {
+                    "id": "other-game-id",
+                    "streams": {
+                        "edges": [{"node": {"broadcaster": {"login": "big"}}}],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            }
+        },
+        # A partial outage: errors next to an empty list.
+        {
+            "errors": [{"message": "service timeout"}],
+            "data": {
+                "game": {"streams": {"edges": [], "pageInfo": {"hasNextPage": False}}}
+            },
+        },
+        # Nothing to vet against.
+        {
+            "data": {
+                "game": {"streams": {"edges": [], "pageInfo": {"hasNextPage": False}}}
+            }
+        },
+    ],
+)
+def test_unusable_drops_directory_leaves_the_allow_list_alone(
+    monkeypatch, directory_response
+):
+    # Each looks like a complete page, but filtering by it would drop every
+    # allow-listed channel, Drops or not.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5, "big": 300},
+        directory_response=directory_response,
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=1
+    )
+
+    assert usernames == ["grayzonewarfare"]
+
+
+def test_selection_log_counts_the_directory_loaded_for_vetting(monkeypatch):
+    # The directory loaded to vet the allow-list, then discovery stopped on an
+    # empty stream page: the summary counted 0 Drops-enabled channels.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5},
+        directory_logins=("grayzonewarfare", "elsewhere"),
+    )
+    messages = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__log_category",
+        lambda self, message, **kwargs: messages.append(message),
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["grayzonewarfare"]
+    assert any(
+        "1 allow-listed plus 0 of 2 Drops-enabled" in message for message in messages
+    )
+
+
+def test_special_events_allow_list_is_not_vetted_by_its_directory(monkeypatch):
+    # Special-events allow-lists name channels streaming other games, which
+    # that category's directory cannot list.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"grayzonewarfare": 5, "big": 300},
+        directory_logins=("big",),
+        game_name="Special Events",
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Special Events", drops_enabled=True, limit=1
+    )
+
+    assert usernames == ["grayzonewarfare"]
+
+
+def test_failed_drops_directory_still_places_allow_listed_channels(monkeypatch):
+    # Allow-listed channels filling the limit needed no directory before, so a
+    # failed directory request must not turn that refresh into a failed one.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"a1": 40, "a2": 30, "big": 300},
+        allow_listed=("a1", "a2"),
+    )
+
+    def failed_directory(self, game_slug, game_id=None):
+        raise CategoryLookupFailedException("directory down", game_slug=game_slug)
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_enabled_directory", failed_directory
+    )
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == ["a1", "a2"]
+    assert "gray-zone-warfare" in twitch.evaluated_category_campaigns
 
 
 def test_category_search_never_evicts_an_allow_listed_channel_for_a_pick(
@@ -2170,11 +2400,11 @@ def test_failed_drops_directory_keeps_allow_listed_channels_in_a_mixed_game(
         monkeypatch, live={"grayzonewarfare": 5, "big": 300}
     )
 
-    def failed_directory(self, game_slug):
+    def failed_directory(self, game_slug, game_id=None):
         raise CategoryLookupFailedException("directory down", game_slug=game_slug)
 
     monkeypatch.setattr(
-        Twitch, "_Twitch__get_drops_enabled_directory_logins", failed_directory
+        Twitch, "_Twitch__get_drops_enabled_directory", failed_directory
     )
 
     with pytest.raises(CategoryLookupFailedException) as error:
@@ -2287,6 +2517,9 @@ def test_unverified_allow_listed_pick_takes_no_discovery_slot_in_a_mixed_game(
             {"id": "madfinger", "channels": PICK_IN_SECOND_BATCH},
         ],
         allow_listed=PICK_IN_SECOND_BATCH,
+        # A directory that may continue leaves the allow-list, and so the
+        # batch the pick falls in, as it is.
+        directory_has_next_page=True,
     )
     twitch.last_drop_pick_streamer = "pick"
     twitch.category_campaign_eligibility = {("gray-zone-warfare", "pick"): (2, 2)}
@@ -2490,6 +2723,9 @@ def test_category_search_looks_up_an_offline_allow_listed_pick_only_once(
         live={"a1": 40, "big": 300},
         allow_listed=("a1", "gz"),
         calls=calls,
+        # A directory that may continue cannot vet the allow-list, so the
+        # restricted lookup still checks gz; a complete one would leave it out.
+        directory_has_next_page=True,
     )
     twitch.last_drop_pick_streamer = "gz"
     twitch.category_campaign_eligibility = {("gray-zone-warfare", "gz"): (2, 2)}

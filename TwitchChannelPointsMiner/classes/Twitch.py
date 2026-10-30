@@ -112,6 +112,8 @@ HELIX_PERMANENT_STATUS_CODES = {400, 404, 410, 422}
 # or other punctuation, non-ASCII, too long), as catalog records sometimes
 # carry. Twitch logins are only letters, digits and underscores.
 TWITCH_LOGIN_PATTERN = re.compile(r"[a-z0-9_]{1,25}")
+# Most channels requested from Twitch's Drops-enabled directory for a game.
+DROPS_DIRECTORY_LIMIT = 100
 # Outcome of the calling thread's latest drops dashboard request. Thread-local
 # so the campaign sync thread's dashboard calls cannot be mistaken for the
 # category discovery pass's own.
@@ -4137,6 +4139,27 @@ class Twitch(object):
                 {"unverified_logins": (login,)},
             )
 
+        # The game's Drops-enabled directory as (logins, complete), requested
+        # at most once per lookup. None after a failed request, unless the
+        # caller cannot go on without it: then the lookup fails (required).
+        # lookup_failed is defined further down, so only call it with
+        # required=True after that point (discovery's paging loop).
+        directory = {}
+
+        def drops_directory(required=False):
+            if "result" not in directory:
+                try:
+                    directory["result"] = self.__get_drops_enabled_directory(
+                        game_slug, game_id=game_id
+                    )
+                except CategoryLookupFailedException as error:
+                    directory["result"] = None
+                    directory["error"] = error
+            if directory["result"] is None and required:
+                error = directory["error"]
+                raise lookup_failed(str(error)) from error
+            return directory["result"]
+
         # One entry per campaign: None when any channel can earn it, else its
         # allow-listed logins (see __campaign_logins_by_campaign); the sets
         # answer membership, the lists keep allow-list order.
@@ -4164,22 +4187,72 @@ class Twitch(object):
                     restricted_cap = max_results
                 else:
                     restricted_cap = None
-                (
-                    restricted_usernames,
-                    restricted_eligibility,
-                    unverified_pick,
-                ) = self.__get_live_restricted_campaign_streamers(
-                    fallback_campaigns,
-                    game_id,
-                    game_name,
-                    drops_enabled=drops_enabled,
-                    target_per_campaign=(
-                        restricted_cap if restricted_cap is not None else 20
-                    ),
-                    max_total=restricted_cap,
-                    campaign_logins_by_campaign=campaign_logins,
-                    campaign_login_sets_by_campaign=campaign_login_sets,
-                )
+                # An allow-list says who may earn a campaign, not whose stream
+                # has Drops enabled, and a channel without them earns neither
+                # campaign. In a mixed game the allow-listed channels come
+                # first and can fill the limit, leaving the all-channel
+                # campaign without a channel (#184), so when the directory
+                # lists every Drops-enabled channel, look up only those. The
+                # special-events allow-lists span other games, which that
+                # directory does not cover. A failed or partial directory
+                # leaves the allow-lists as they are, and so, as a precaution,
+                # does an empty one: it would drop every allow-listed channel
+                # on the word of a response that lists no channel at all.
+                lookup_logins = campaign_logins
+                lookup_login_sets = campaign_login_sets
+                if (
+                    open_campaigns
+                    and drops_enabled is True
+                    and game_slug != "special-events"
+                ):
+                    drops_logins, complete = drops_directory() or (set(), False)
+                    if not (complete and drops_logins):
+                        self.__log_drop_check(
+                            f"Not checking allow-listed channels for "
+                            f"'{game_name}' against the Drops-enabled "
+                            "directory: it did not load, or may not list "
+                            "every Drops-enabled channel",
+                            level=logging.DEBUG,
+                        )
+                    else:
+                        lookup_logins = [
+                            (
+                                None
+                                if logins is None
+                                else [
+                                    login for login in logins if login in drops_logins
+                                ]
+                            )
+                            for logins in campaign_logins
+                        ]
+                        # The lookup builds the matching sets itself.
+                        lookup_login_sets = None
+                        self.__log_drop_check(
+                            f"Looking up only the allow-listed channels for "
+                            f"'{game_name}' that Twitch's Drops-enabled "
+                            "directory lists",
+                            level=logging.DEBUG,
+                        )
+                if not any(lookup_logins):
+                    # Vetting left no allow-listed channel to look up.
+                    restricted_usernames, restricted_eligibility = [], {}
+                else:
+                    (
+                        restricted_usernames,
+                        restricted_eligibility,
+                        unverified_pick,
+                    ) = self.__get_live_restricted_campaign_streamers(
+                        fallback_campaigns,
+                        game_id,
+                        game_name,
+                        drops_enabled=drops_enabled,
+                        target_per_campaign=(
+                            restricted_cap if restricted_cap is not None else 20
+                        ),
+                        max_total=restricted_cap,
+                        campaign_logins_by_campaign=lookup_logins,
+                        campaign_login_sets_by_campaign=lookup_login_sets,
+                    )
                 if not open_campaigns:
                     selection = with_unverified_pick(
                         restricted_usernames, restricted_eligibility
@@ -4300,8 +4373,10 @@ class Twitch(object):
         total_campaigns = len(fallback_campaigns) or 1
 
         def selection_eligibility(discovered):
-            # Twitch's own allow-list vouches for the allow-listed channels
-            # regardless of the Drops-enabled directory filter.
+            # Twitch's own allow-list vouches for the allow-listed channels;
+            # discovery's directory filter does not apply to them (any vetting
+            # against a complete directory happened before they were looked
+            # up).
             eligibility = {
                 username: restricted_eligibility[username] for username in allow_listed
             }
@@ -4379,12 +4454,7 @@ class Twitch(object):
                 break
 
             if drops_enabled is True and drops_enabled_logins is None:
-                try:
-                    drops_enabled_logins = self.__get_drops_enabled_directory_logins(
-                        game_slug
-                    )
-                except CategoryLookupFailedException as error:
-                    raise lookup_failed(str(error)) from error
+                drops_enabled_logins = drops_directory(required=True)[0]
                 # Allow-listed channels in the directory were seeded as seen
                 # and can never become candidates; sizing the window by them
                 # would page the whole category looking for channels that
@@ -4432,8 +4502,9 @@ class Twitch(object):
             and drop_pick is not None
             and drop_pick not in discovered
             and discovered_room > 0
-            # An allow-listed pick was already checked (and not selected) by
-            # the restricted lookup, so do not ask Helix about it again.
+            # An allow-listed pick was either checked (and not selected) by
+            # the restricted lookup or left out of it as not Drops-enabled,
+            # so do not ask Helix about it again.
             and not any(
                 logins is not None and drop_pick in logins
                 for logins in campaign_login_sets
@@ -4483,10 +4554,19 @@ class Twitch(object):
                 f"(limit: {max_results}, sort: {sort_key})"
             )
         elif drops_enabled is True:
-            eligible_count = len(drops_enabled_logins or [])
+            # The directory may have loaded only to vet the allow-lists, before
+            # discovery stopped on an empty page; count what it listed.
+            drops_enabled_directory = directory.get("result")
+            eligible_count = len(
+                drops_enabled_directory[0]
+                if drops_enabled_directory is not None
+                else drops_enabled_logins or []
+            )
+            # Only a directory Twitch says may continue undercounts.
             eligible_label = (
                 f"at least {eligible_count}"
-                if eligible_count >= 100
+                if drops_enabled_directory is not None
+                and not drops_enabled_directory[1]
                 else eligible_count
             )
             allow_listed_note = (
@@ -4868,11 +4948,22 @@ class Twitch(object):
         return eligible, len(campaign_logins_by_campaign)
 
     def __get_drops_enabled_directory_logins(self, game_slug: str) -> set[str]:
+        return self.__get_drops_enabled_directory(game_slug)[0]
+
+    def __get_drops_enabled_directory(
+        self, game_slug: str, game_id=None
+    ) -> Tuple[set, bool]:
+        """The game's Drops-enabled live channels, and whether that is all of
+        them: an error-free page of a game Twitch found, for which Twitch
+        reports no next page. A page's length proves nothing: Twitch can
+        return fewer channels than requested while more remain. Given the
+        game's Helix ID, the page must also be that game's: a slug built from
+        its name can belong to another game."""
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
         request["variables"] = {
             "slug": game_slug,
             "sortTypeIsRecency": False,
-            "limit": 100,
+            "limit": DROPS_DIRECTORY_LIMIT,
             "includeIsDJ": False,
             "options": {
                 "sort": "RELEVANCE",
@@ -4917,7 +5008,20 @@ class Twitch(object):
                 f"Twitch Drops directory for '{game_slug}' returned GraphQL errors",
                 game_slug=game_slug,
             )
-        return {login for login in logins if login}
+        page_info = streams.get("pageInfo") if isinstance(streams, dict) else None
+        has_next_page = (
+            page_info.get("hasNextPage") if isinstance(page_info, dict) else None
+        )
+        game_matches = game_id is None or (
+            isinstance(game, dict) and str(game.get("id") or "") == str(game_id)
+        )
+        complete = (
+            edges_listed
+            and game_matches
+            and not response.get("errors")
+            and has_next_page is False
+        )
+        return {login for login in logins if login}, complete
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:
