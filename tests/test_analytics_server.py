@@ -307,6 +307,45 @@ def test_config_endpoints_require_analytics_authentication():
     assert "analytics username and password" in read_response.get_json()["error"]
 
 
+def test_analytics_beyond_localhost_requires_password_by_default():
+    with pytest.raises(ValueError, match="requires a password"):
+        AnalyticsServer(host="0.0.0.0", password=None)
+
+
+def test_trust_proxy_auth_allows_non_loopback_bind_without_password():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    assert server.password is None
+    assert server.trust_proxy_auth is True
+
+
+def test_trust_proxy_auth_allows_config_endpoint_without_password(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    monkeypatch.setitem(
+        __import__(
+            "TwitchChannelPointsMiner.classes.AnalyticsServer", fromlist=["web_config"]
+        ).web_config.__globals__,
+        "read_managed_web_config",
+        lambda _path: {"streamers": []},
+    )
+    server = AnalyticsServer(password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get("/config")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"streamers": []}
+
+
+def test_trust_proxy_auth_does_not_bypass_a_configured_password():
+    server = AnalyticsServer(username="user", password="secret", trust_proxy_auth=True)
+
+    response = server.app.test_client().get("/")
+
+    assert response.status_code == 401
+
+
 def test_static_assets_are_served_without_authentication():
     # CSS/JS/images powering the UI, not account data - a browser resends
     # cached Basic Auth credentials automatically for these, but the

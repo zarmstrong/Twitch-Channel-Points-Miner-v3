@@ -809,6 +809,7 @@ class AnalyticsServer(Thread):
         password: str = None,
         log_poll_interval: int = 5,
         logs_file: str = None,
+        trust_proxy_auth: bool = False,
     ):
         super(AnalyticsServer, self).__init__()
 
@@ -828,10 +829,15 @@ class AnalyticsServer(Thread):
         self.username = username
         self.password = password
         self.logs_file = logs_file
+        self.trust_proxy_auth = trust_proxy_auth
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
-        if host not in LOOPBACK_HOSTS and not password:
-            raise ValueError("Analytics exposed beyond localhost requires a password")
+        if host not in LOOPBACK_HOSTS and not password and not trust_proxy_auth:
+            raise ValueError(
+                "Analytics exposed beyond localhost requires a password "
+                "(or trust_proxy_auth=True when an authenticating reverse "
+                "proxy is the only way to reach it)"
+            )
 
         def generate_log():
             if self.logs_file is None:
@@ -947,7 +953,7 @@ class AnalyticsServer(Thread):
                 # still go through the checks below like any other page.
                 return None
             if self.password is None:
-                if request.path.startswith("/config"):
+                if not self.trust_proxy_auth and request.path.startswith("/config"):
                     return Response(
                         json.dumps(
                             {

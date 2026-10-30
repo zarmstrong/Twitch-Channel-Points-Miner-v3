@@ -365,5 +365,6 @@ ANALYTICS_CONFIG = None
 #     'refresh': 5,                             # Chart refresh interval in minutes
 #     'days_ago': 7,                            # Initial chart history range
 #     'password': None,                         # Required when binding to a non-loopback host
+#     'trust_proxy_auth': False,                # Set True only when an authenticating reverse proxy (Authelia, Traefik, oauth2-proxy, ...) is the only way to reach this port: disables Basic auth and enables the Config tab without a password
 #     'log_poll_interval': 5,                   # Log viewer polling interval in seconds (1-180)
 # }
