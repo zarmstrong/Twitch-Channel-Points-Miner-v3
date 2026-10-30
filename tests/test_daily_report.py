@@ -31,7 +31,7 @@ def _restore_logger_settings():
 
 def _twitch(drop_report_state=None):
     twitch = object.__new__(Twitch)
-    twitch.analytics_mutex = threading.Lock()
+    twitch.analytics_mutex = threading.RLock()
     twitch.drop_report_state = drop_report_state or {}
     return twitch
 
@@ -68,7 +68,7 @@ def _miner():
     miner.daily_report_retired_streamers = {}
     miner.daily_report_lock = threading.RLock()
     miner.daily_report_state_dirty = False
-    miner.daily_report_in_progress = False
+    miner.daily_report_in_progress = None
     miner.daily_report_date = date(2026, 7, 20)
     miner.daily_report_state_path = "/unused/daily-report.json"
     miner.twitch = SimpleNamespace(drop_report_snapshot=MagicMock(return_value={}))
@@ -441,7 +441,39 @@ def test_a_save_that_interrupts_a_report_keeps_the_state_from_before_it():
     # Only the report's own save, with no retired balances from the handler.
     save.assert_called_once()
     assert save.call_args.args[5] == {}
-    assert miner.daily_report_in_progress is False
+    assert miner.daily_report_in_progress is None
+
+
+def test_a_save_from_another_thread_waits_for_the_report_then_saves():
+    # The Windows shell calls end() from its GUI thread, so the report it
+    # coincides with is not interrupted and the exit save must still happen.
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    miner = _miner()
+    logger_path = "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.info"
+    shutdown = threading.Thread(
+        target=miner._TwitchChannelPointsMiner__save_daily_report_state_safely,
+        kwargs={"retire_all": True},
+    )
+    waited = []
+
+    def start_shutdown(*_args, **_kwargs):
+        shutdown.start()
+        shutdown.join(timeout=0.2)
+        waited.append(shutdown.is_alive())
+
+    with patch(logger_path, side_effect=start_shutdown), patch(SAVE_PATH) as save:
+        miner._TwitchChannelPointsMiner__send_daily_report_if_due(
+            datetime(2026, 7, 21, 9, 1)
+        )
+        shutdown.join(timeout=5)
+
+    assert waited == [True]
+    assert not shutdown.is_alive()
+    # The report's save, then the shutdown's with every balance as retired.
+    assert [call.args[5] for call in save.call_args_list] == [
+        {},
+        {"alice": 1250, "bob": 500},
+    ]
 
 
 def test_restart_state_survives_reload(tmp_path):
