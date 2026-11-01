@@ -37,18 +37,24 @@ jobs:
           # Include a rename's old path so moving code into a .md still runs CI.
           files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
             --jq '.[] | .filename, (.previous_filename // empty)')
-          code=false
-          while IFS= read -r file; do
-            case "${file}" in
-              "" | *.md | LICENSE | .git-blame-ignore-revs | .vscode/* | \
-                .github/ISSUE_TEMPLATE/* | .github/FUNDING.yml | .github/stale.yml | .github/dependabot.yml) ;;
-              *)
-                echo "Code change: ${file}"
-                code=true
-                break
-                ;;
-            esac
-          done <<< "${files}"
+          if [ -z "${files}" ]; then
+            # Don't treat an unexpected empty list as docs-only.
+            echo "No changed files reported; running everything."
+            code=true
+          else
+            code=false
+            while IFS= read -r file; do
+              case "${file}" in
+                *.md | LICENSE | .git-blame-ignore-revs | .vscode/* | \
+                  .github/ISSUE_TEMPLATE/* | .github/FUNDING.yml | .github/stale.yml | .github/dependabot.yml) ;;
+                *)
+                  echo "Code change: ${file}"
+                  code=true
+                  break
+                  ;;
+              esac
+            done <<< "${files}"
+          fi
           echo "code=${code}" >> "$GITHUB_OUTPUT"
 
   release_issue_automation:
