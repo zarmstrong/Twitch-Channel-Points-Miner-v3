@@ -1648,6 +1648,9 @@ class TwitchChannelPointsMiner:
 
     def _record_daily_report_retirements(self, retained):
         """Record the streamers about to be replaced by ``retained`` as retired."""
+        # Callers run this just before the swap, once the retiring streamers'
+        # topics are removed and chats stopped, so their balances are final:
+        # a report in between counts them as tracked, which loses nothing.
         retained_usernames = {streamer.username for streamer in retained}
         self._record_daily_report_retired_streamers(
             [
