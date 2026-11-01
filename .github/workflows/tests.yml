@@ -10,8 +10,57 @@ permissions:
   contents: read
 
 jobs:
+  # Pull requests that only touch documentation skip the jobs below. The
+  # required checks still report: a skipped job counts as passing. Matrix
+  # jobs skip their steps instead, since a skipped matrix job reports under
+  # its unexpanded name and never satisfies "Python 3.x".
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Check for changes outside documentation
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Pushes to master and manual runs always test everything.
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Include a rename's old path so moving code into a .md still runs CI.
+          files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          if [ -z "${files}" ]; then
+            # Don't treat an unexpected empty list as docs-only.
+            echo "No changed files reported; running everything."
+            code=true
+          else
+            code=false
+            while IFS= read -r file; do
+              case "${file}" in
+                *.md | LICENSE | .git-blame-ignore-revs | .vscode/* | \
+                  .github/ISSUE_TEMPLATE/* | .github/FUNDING.yml | .github/stale.yml | .github/dependabot.yml) ;;
+                *)
+                  echo "Code change: ${file}"
+                  code=true
+                  break
+                  ;;
+              esac
+            done <<< "${files}"
+          fi
+          echo "code=${code}" >> "$GITHUB_OUTPUT"
+
   release_issue_automation:
     name: Release issue automation
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -29,6 +78,8 @@ jobs:
 
   black:
     name: Black
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -50,6 +101,8 @@ jobs:
 
   pytest:
     name: Python ${{ matrix.python-version }}
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -57,23 +110,33 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
+      - name: Skip for documentation-only changes
+        if: needs.changes.outputs.code == 'false'
+        run: echo "Only documentation changed; skipping tests."
+
       - name: Checkout source
+        if: needs.changes.outputs.code != 'false'
         uses: actions/checkout@v6
 
       - name: Set up Python
+        if: needs.changes.outputs.code != 'false'
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install test dependencies
+        if: needs.changes.outputs.code != 'false'
         run: python -m pip install -r requirements-dev.txt
 
       - name: Run tests
+        if: needs.changes.outputs.code != 'false'
         run: python -m pytest
 
   build_windows_exe:
     name: Build Windows executable (${{ matrix.flavor }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 15
     strategy:
@@ -164,10 +227,22 @@ jobs:
 
   windows_installer:
     name: Windows installer
-    needs: build_windows_exe
+    needs: [changes, build_windows_exe]
+    # Without an explicit if, a failed build skips this job, and a skipped
+    # required check counts as passing. Run it and fail here instead.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
 
     steps:
+      - name: Require both Windows executables
+        if: needs.build_windows_exe.result != 'success'
+        env:
+          BUILD_RESULT: ${{ needs.build_windows_exe.result }}
+        shell: pwsh
+        run: |
+          Write-Output "::error::Build Windows executable finished as $env:BUILD_RESULT"
+          exit 1
+
       - name: Checkout source
         uses: actions/checkout@v6
 
