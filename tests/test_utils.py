@@ -138,12 +138,12 @@ def test_split_message_lines_can_count_unicode_characters():
     ]
 
 
-def test_get_streamer_index_compares_channel_ids_as_strings():
+def test_get_streamer_compares_channel_ids_as_strings():
     streamers = [SimpleNamespace(channel_id="10"), SimpleNamespace(channel_id=20)]
 
-    assert utils.get_streamer_index(streamers, 10) == 0
-    assert utils.get_streamer_index(streamers, "20") == 1
-    assert utils.get_streamer_index(streamers, "missing") == -1
+    assert utils.get_streamer(streamers, 10) is streamers[0]
+    assert utils.get_streamer(streamers, "20") is streamers[1]
+    assert utils.get_streamer(streamers, "missing") is None
 
 
 def test_set_default_settings_copies_defaults_without_sharing_them():
