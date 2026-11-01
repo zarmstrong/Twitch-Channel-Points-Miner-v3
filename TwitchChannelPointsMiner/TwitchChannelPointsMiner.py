@@ -323,6 +323,7 @@ def _save_daily_report_state(
     drop_progress,
     drop_progress_latest=None,
     retired_streamers=None,
+    warn=True,
 ):
     target = Path(path)
     payload = {
@@ -353,7 +354,8 @@ def _save_daily_report_state(
         os.replace(temporary, target)
         return True
     except (OSError, TypeError, ValueError) as error:
-        logger.warning(f"Unable to save daily-report state to {target}: {error}")
+        if warn:
+            logger.warning(f"Unable to save daily-report state to {target}: {error}")
         if temporary is not None:
             try:
                 os.unlink(temporary)
@@ -426,6 +428,7 @@ class TwitchChannelPointsMiner:
         "daily_report_retired_streamers",
         "daily_report_lock",
         "daily_report_state_dirty",
+        "daily_report_save_failing",
         "daily_report_in_progress",
         "daily_report_state_path",
         "update_check_enabled",
@@ -636,6 +639,7 @@ class TwitchChannelPointsMiner:
         # thread, which may already hold it mid-report.
         self.daily_report_lock = threading.RLock()
         self.daily_report_state_dirty = False
+        self.daily_report_save_failing = False
         # The thread sending a report, if any.
         self.daily_report_in_progress = None
         # Drop progress lives in memory, so put back what was recorded since
@@ -1587,15 +1591,17 @@ class TwitchChannelPointsMiner:
     def __save_daily_report_state(self):
         with self.daily_report_lock:
             # A failed write stays pending, so the main loop's next pass (or
-            # the exit save) retries it.
-            self.daily_report_state_dirty = not _save_daily_report_state(
+            # the exit save) retries it; only the first failure in a row warns.
+            saved = _save_daily_report_state(
                 self.daily_report_state_path,
                 self.daily_report_date,
                 dict(self.daily_report_streamers),
                 self.daily_report_drop_progress,
                 self.daily_report_drop_progress_latest,
                 dict(self.daily_report_retired_streamers),
+                warn=not self.daily_report_save_failing,
             )
+            self.daily_report_state_dirty = self.daily_report_save_failing = not saved
 
     @staticmethod
     def _daily_report_enabled():

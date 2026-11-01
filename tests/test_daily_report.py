@@ -68,6 +68,7 @@ def _miner():
     miner.daily_report_retired_streamers = {}
     miner.daily_report_lock = threading.RLock()
     miner.daily_report_state_dirty = False
+    miner.daily_report_save_failing = False
     miner.daily_report_in_progress = None
     miner.daily_report_date = date(2026, 7, 20)
     miner.daily_report_state_path = "/unused/daily-report.json"
@@ -532,6 +533,33 @@ def test_a_failed_save_is_retried_by_the_next_pass():
     assert save.call_count == 2
     assert save.call_args.args[4] == {"drop": drop}
     assert miner.daily_report_state_dirty is False
+
+
+def test_a_lasting_save_failure_warns_once_until_a_save_succeeds(tmp_path):
+    Settings.logger = SimpleNamespace(daily_report=True)
+    miner = _miner()
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    miner.daily_report_state_path = str(blocker / "state.json")
+    warning_path = "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.warning"
+
+    with patch(warning_path) as warning:
+        miner.daily_report_state_dirty = True
+        for _ in range(3):
+            miner._save_daily_report_state_if_changed()
+        assert warning.call_count == 1
+
+        blocker.unlink()
+        miner._save_daily_report_state_if_changed()
+        assert miner.daily_report_state_dirty is False
+
+        (blocker / "state.json").unlink()
+        (blocker / "state.json").mkdir()  # The rename now fails again.
+        miner.daily_report_state_dirty = True
+        miner._save_daily_report_state_if_changed()
+
+    assert warning.call_count == 2
+    assert miner.daily_report_state_dirty is True
 
 
 @pytest.mark.parametrize(
