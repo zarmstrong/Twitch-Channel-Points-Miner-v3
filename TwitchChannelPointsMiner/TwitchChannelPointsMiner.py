@@ -429,6 +429,7 @@ class TwitchChannelPointsMiner:
         "daily_report_lock",
         "daily_report_state_dirty",
         "daily_report_save_failing",
+        "daily_report_balances_loaded",
         "daily_report_in_progress",
         "daily_report_state_path",
         "update_check_enabled",
@@ -640,6 +641,9 @@ class TwitchChannelPointsMiner:
         self.daily_report_lock = threading.RLock()
         self.daily_report_state_dirty = False
         self.daily_report_save_failing = False
+        # Streamers hold 0 points until run() loads them; an exit before then
+        # must not record those as their final balances.
+        self.daily_report_balances_loaded = False
         # The thread sending a report, if any.
         self.daily_report_in_progress = None
         # Drop progress lives in memory, so put back what was recorded since
@@ -1239,6 +1243,7 @@ class TwitchChannelPointsMiner:
             elif Settings.logger.daily_report is True:
                 self._record_daily_report_streamers(self.streamers)
                 self.__save_daily_report_state()
+            self.daily_report_balances_loaded = True
 
             # If we have at least one streamer with settings = make_predictions True
             make_predictions = at_least_one_value_in_settings_is(
@@ -1521,9 +1526,10 @@ class TwitchChannelPointsMiner:
         if now.time() < scheduled or self.daily_report_date == now.date():
             return
 
-        # Held throughout (logging is queued, so this stays short) so streamers
-        # added or retired by the background threads land wholly before or
-        # after this report rather than being lost between its two halves.
+        # Held throughout (logging is queued, so this stays short) so the
+        # baselines and retired balances the background threads record for
+        # streamers they add or retire land wholly before or after this
+        # report rather than being lost between its two halves.
         with self.daily_report_lock:
             self.daily_report_in_progress = threading.get_ident()
             try:
@@ -3060,7 +3066,7 @@ class TwitchChannelPointsMiner:
             # the next session takes back the ones it tracks again, and the
             # rest (such as category channels no longer live) still reach the
             # report.
-            if retire_all:
+            if retire_all and self.daily_report_balances_loaded:
                 self._record_daily_report_retired_streamers(list(self.streamers))
             self._save_daily_report_state_if_changed()
         except Exception:

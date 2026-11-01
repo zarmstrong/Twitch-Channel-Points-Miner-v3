@@ -69,6 +69,7 @@ def _miner():
     miner.daily_report_lock = threading.RLock()
     miner.daily_report_state_dirty = False
     miner.daily_report_save_failing = False
+    miner.daily_report_balances_loaded = True
     miner.daily_report_in_progress = None
     miner.daily_report_date = date(2026, 7, 20)
     miner.daily_report_state_path = "/unused/daily-report.json"

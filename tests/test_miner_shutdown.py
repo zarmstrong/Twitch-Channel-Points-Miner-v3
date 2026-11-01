@@ -25,6 +25,7 @@ def _miner(streamer_mutex):
     miner.daily_report_lock = threading.RLock()
     miner.daily_report_state_dirty = False
     miner.daily_report_save_failing = False
+    miner.daily_report_balances_loaded = True
     miner.daily_report_in_progress = None
     miner.daily_report_drop_progress_latest = {}
     miner.drop_badge_catalog_stop_event = MagicMock()
@@ -124,6 +125,26 @@ def test_end_saves_daily_report_progress_recorded_since_the_last_pass(monkeypatc
     assert save.call_args.args[5] == {"alice": 25}
     warning.assert_not_called()
     report.assert_called_once()
+
+
+def test_end_before_balances_load_keeps_the_saved_ones(monkeypatch):
+    # Streamers start at 0 points until run() loads them; recording that as
+    # alice's final balance would report her whole balance as lost.
+    miner = _miner(MagicMock(locked=MagicMock(return_value=False)))
+    miner.daily_report_balances_loaded = False
+    miner.streamers[0].channel_points = 0
+    miner.daily_report_state_path = "/unused/daily-report.json"
+    miner.daily_report_date = None
+    miner.daily_report_streamers = {"alice": 10}
+    miner.daily_report_drop_progress = None
+    miner.daily_report_retired_streamers = {"bob": 7}
+    miner.twitch.drop_report_snapshot.return_value = {"drop": {"x": 1}}
+
+    _, _, save = _end_with_daily_report(monkeypatch, miner)
+
+    save.assert_called_once()
+    assert save.call_args.args[4] == {"drop": {"x": 1}}
+    assert save.call_args.args[5] == {"bob": 7}
 
 
 def test_end_still_finishes_when_drop_progress_cannot_be_saved(monkeypatch):
