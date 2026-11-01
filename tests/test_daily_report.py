@@ -126,6 +126,18 @@ def test_daily_report_suppresses_report_when_nothing_changed():
     save.assert_called_once()
 
 
+def test_daily_report_runs_when_only_retired_channels_had_activity():
+    miner = _miner()
+    miner.streamers = []
+    miner.daily_report_retired_balances = {"alice": 1250}
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+
+    message = _report(miner, datetime(2026, 7, 21, 9, 1))
+
+    assert "alice: +250 channel points" in message
+    assert miner.daily_report_date == date(2026, 7, 21)
+
+
 def test_daily_report_waits_until_scheduled_time():
     miner = _miner()
     Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
@@ -374,14 +386,19 @@ def test_retired_channel_balances_survive_reload(tmp_path):
     "entry",
     ['"x"', '{"current_minutes_watched": "abc"}', '{"status": 3}'],
 )
-def test_malformed_drop_progress_entry_starts_fresh(tmp_path, key, entry):
+def test_malformed_drop_progress_entry_is_skipped(tmp_path, key, entry):
+    # One bad Drop entry mustn't cost every channel's baseline.
     path = tmp_path / "daily-report.json"
     path.write_text(
-        '{"version": 1, "streamers": {}, "%s": {"drop": %s}}' % (key, entry),
+        '{"version": 1, "streamers": {"alice": 1000}, '
+        '"%s": {"bad": %s, "good": {"current_minutes_watched": 5}}}' % (key, entry),
         encoding="utf-8",
     )
 
-    assert _load_daily_report_state(path) is None
+    state = _load_daily_report_state(path)
+
+    assert state["streamers"] == {"alice": 1000}
+    assert state[key] == {"good": {"current_minutes_watched": 5}}
 
 
 def test_drop_progress_with_float_minutes_still_loads(tmp_path):

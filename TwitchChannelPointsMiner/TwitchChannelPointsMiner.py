@@ -286,6 +286,23 @@ CATEGORY_LOOKUP_FAILURE_LIMIT = 3
 BADGE_LOOKUP_FAILURE_LIMIT = 12
 
 
+def _valid_drop_progress(entries, path):
+    """Drop entries a report can't compare, keeping the rest of the state."""
+    valid = {
+        tracking_key: entry
+        for tracking_key, entry in entries.items()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("current_minutes_watched") or 0, (int, float))
+        and isinstance(entry.get("status") or "", str)
+    }
+    if len(valid) != len(entries):
+        logger.warning(
+            f"Ignoring {len(entries) - len(valid)} malformed Drop entries "
+            f"in daily-report state {path}"
+        )
+    return valid
+
+
 def _load_daily_report_state(path):
     try:
         with open(path, "r", encoding="utf-8") as state_file:
@@ -302,17 +319,9 @@ def _load_daily_report_state(path):
                     "retired_balances",
                 )
             )
-            or any(
-                not isinstance(entry, dict)
-                or not isinstance(
-                    entry.get("current_minutes_watched") or 0, (int, float)
-                )
-                or not isinstance(entry.get("status") or "", str)
-                for key in ("drop_progress", "latest_drop_progress")
-                for entry in (payload.get(key) or {}).values()
-            )
         ):
             raise ValueError("unsupported or malformed state")
+        drop_progress = payload.get("drop_progress")
         last_report = payload.get("last_report_date")
         return {
             "date": date.fromisoformat(last_report) if last_report else None,
@@ -320,8 +329,14 @@ def _load_daily_report_state(path):
                 str(username): int(points)
                 for username, points in payload["streamers"].items()
             },
-            "drop_progress": payload.get("drop_progress"),
-            "latest_drop_progress": payload.get("latest_drop_progress") or {},
+            "drop_progress": (
+                None
+                if drop_progress is None
+                else _valid_drop_progress(drop_progress, path)
+            ),
+            "latest_drop_progress": _valid_drop_progress(
+                payload.get("latest_drop_progress") or {}, path
+            ),
             "retired_balances": {
                 str(username): int(points)
                 for username, points in (payload.get("retired_balances") or {}).items()
@@ -1527,7 +1542,9 @@ class TwitchChannelPointsMiner:
             self.__save_daily_report_state()
 
     def __send_daily_report_if_due(self, now=None):
-        if Settings.logger.daily_report is not True or not self.streamers:
+        if Settings.logger.daily_report is not True or not (
+            self.streamers or self.daily_report_retired_balances
+        ):
             return
         now = now or datetime.now()
         scheduled = datetime.strptime(Settings.logger.daily_report_time, "%H:%M").time()
