@@ -395,7 +395,62 @@ def test_daily_report_progress_is_saved_only_when_it_changed():
         miner._TwitchChannelPointsMiner__save_daily_report_progress()
 
     assert save.call_count == 2
-    assert save.call_args.args[4] == {"drop": {"current_minutes_watched": 5}}
+    assert save.call_args.kwargs["latest_drop_progress"] == {
+        "drop": {"current_minutes_watched": 5}
+    }
+
+
+def test_saved_drop_progress_holds_only_what_changed_since_the_report(tmp_path):
+    miner = _miner()
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    miner.daily_report_state_path = tmp_path / "daily-report.json"
+    reported = {"current_minutes_watched": 60, "status": "captured"}
+    miner.daily_report_drop_progress = {"old": reported}
+    miner.twitch.drop_report_snapshot.return_value = {
+        "old": reported,
+        "new": {"current_minutes_watched": 5},
+    }
+
+    miner._TwitchChannelPointsMiner__save_daily_report_progress()
+
+    state = _load_daily_report_state(miner.daily_report_state_path)
+    assert state["latest_drop_progress"] == {"new": {"current_minutes_watched": 5}}
+    assert state["drop_progress"] == {"old": reported}
+
+
+def test_final_save_keeps_channels_the_next_session_does_not_load(tmp_path):
+    # A category channel tracked before a restart may not be found again
+    # before the report; its points from before the restart still count.
+    miner = _miner()
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    miner.daily_report_state_path = tmp_path / "daily-report.json"
+    miner._TwitchChannelPointsMiner__save_daily_report_progress(final=True)
+    state = _load_daily_report_state(miner.daily_report_state_path)
+
+    restarted = _miner()
+    restarted.daily_report_streamers = state["streamers"]
+    restarted.daily_report_retired_balances = state["retired_balances"]
+    restarted.streamers = [SimpleNamespace(username="alice", channel_points=1300)]
+    message = _report(restarted, datetime(2026, 7, 21, 9, 1))
+
+    # alice reports from its live balance, bob from the one saved at shutdown.
+    assert "alice: +300 channel points" in message
+    assert "bob: -50 channel points" in message
+
+
+def test_a_failing_save_does_not_raise():
+    miner = _miner()
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    miner.twitch.drop_report_snapshot.side_effect = RuntimeError("boom")
+
+    with patch(
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.warning"
+    ) as warning:
+        miner._TwitchChannelPointsMiner__save_daily_report_progress()
+
+    warning.assert_called_once()
+    # The lock is released, so the next save can run.
+    assert miner.daily_report_lock.acquire(timeout=0)
 
 
 def test_failed_daily_report_save_is_retried_quietly(tmp_path):
