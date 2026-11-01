@@ -511,9 +511,27 @@ def test_unwritable_state_directory_only_warns(tmp_path):
     warning_path = "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.warning"
 
     with patch(warning_path) as warning:
-        _save_daily_report_state(blocker / "state.json", None, {}, None)
+        saved = _save_daily_report_state(blocker / "state.json", None, {}, None)
 
+    assert saved is False
     warning.assert_called_once()
+
+
+def test_a_failed_save_is_retried_by_the_next_pass():
+    Settings.logger = SimpleNamespace(daily_report=True)
+    miner = _miner()
+    drop = _drop(11)
+    miner.twitch = _twitch({"drop": drop})
+
+    with patch(SAVE_PATH, side_effect=[False, True, True]) as save:
+        miner._save_daily_report_state_if_changed()
+        # The drop snapshot is unchanged now, but the failed write is pending.
+        miner._save_daily_report_state_if_changed()
+        miner._save_daily_report_state_if_changed()
+
+    assert save.call_count == 2
+    assert save.call_args.args[4] == {"drop": drop}
+    assert miner.daily_report_state_dirty is False
 
 
 @pytest.mark.parametrize(

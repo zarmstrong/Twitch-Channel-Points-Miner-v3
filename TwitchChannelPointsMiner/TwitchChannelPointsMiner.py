@@ -351,6 +351,7 @@ def _save_daily_report_state(
             state_file.flush()
             os.fsync(state_file.fileno())
         os.replace(temporary, target)
+        return True
     except (OSError, TypeError, ValueError) as error:
         logger.warning(f"Unable to save daily-report state to {target}: {error}")
         if temporary is not None:
@@ -358,6 +359,7 @@ def _save_daily_report_state(
                 os.unlink(temporary)
             except OSError:
                 pass
+        return False
 
 
 def _recent_drop_progress(snapshot, now=None):
@@ -1584,7 +1586,9 @@ class TwitchChannelPointsMiner:
 
     def __save_daily_report_state(self):
         with self.daily_report_lock:
-            _save_daily_report_state(
+            # A failed write stays pending, so the main loop's next pass (or
+            # the exit save) retries it.
+            self.daily_report_state_dirty = not _save_daily_report_state(
                 self.daily_report_state_path,
                 self.daily_report_date,
                 dict(self.daily_report_streamers),
@@ -1592,7 +1596,6 @@ class TwitchChannelPointsMiner:
                 self.daily_report_drop_progress_latest,
                 dict(self.daily_report_retired_streamers),
             )
-            self.daily_report_state_dirty = False
 
     @staticmethod
     def _daily_report_enabled():
