@@ -221,10 +221,22 @@ jobs:
 
   windows_installer:
     name: Windows installer
-    needs: build_windows_exe
+    needs: [changes, build_windows_exe]
+    # Without an explicit if, a failed build skips this job, and a skipped
+    # required check counts as passing. Run it and fail here instead.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
 
     steps:
+      - name: Require both Windows executables
+        if: needs.build_windows_exe.result != 'success'
+        env:
+          BUILD_RESULT: ${{ needs.build_windows_exe.result }}
+        shell: pwsh
+        run: |
+          Write-Output "::error::Build Windows executable finished as $env:BUILD_RESULT"
+          exit 1
+
       - name: Checkout source
         uses: actions/checkout@v6
 
