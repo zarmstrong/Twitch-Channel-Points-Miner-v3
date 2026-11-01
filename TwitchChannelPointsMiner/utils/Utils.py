@@ -22,13 +22,14 @@ def _millify(input, precision=2):
     return millify(input, precision)
 
 
-def get_streamer_index(streamers: list, channel_id) -> int:
-    try:
-        return next(
-            i for i, x in enumerate(streamers) if str(x.channel_id) == str(channel_id)
-        )
-    except StopIteration:
-        return -1
+def get_streamer(streamers: list, channel_id):
+    # Return the Streamer itself rather than its position: other threads retire
+    # streamers by shrinking this list in place, so a position can point at a
+    # different streamer by the time it's used. Search a copy for the same reason.
+    return next(
+        (x for x in list(streamers) if str(x.channel_id) == str(channel_id)),
+        None,
+    )
 
 
 def float_round(number, ndigits=2):

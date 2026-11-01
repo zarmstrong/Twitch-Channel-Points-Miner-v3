@@ -16,10 +16,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import is_drop_discovere
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
-from TwitchChannelPointsMiner.utils import (
-    get_streamer_index,
-    internet_connection_available,
-)
+from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_available
 
 # from pathlib import Path
 
@@ -293,11 +290,12 @@ class WebSocketsPool:
             ws.last_message_timestamp = message.timestamp
             ws.last_message_type_channel = message.identifier
 
-            streamer_index = get_streamer_index(ws.streamers, message.channel_id)
-            if streamer_index != -1:
+            # Resolve the streamer once: the list can shrink or reorder while
+            # this message is handled, so never index into it again below.
+            streamer = get_streamer(ws.streamers, message.channel_id)
+            if streamer is not None:
                 try:
                     if message.topic == "community-points-user-v1":
-                        streamer = ws.streamers[streamer_index]
                         track_points_for_streamer = (
                             not is_drop_discovered(streamer)
                             or streamer.explicitly_configured is True
@@ -339,22 +337,20 @@ class WebSocketsPool:
                                 )
                         elif message.type == "claim-available":
                             ws.twitch.claim_bonus(
-                                ws.streamers[streamer_index],
+                                streamer,
                                 message.data["claim"]["id"],
                             )
 
                     elif message.topic == "video-playback-by-id":
                         # There is stream-up message type, but it's sent earlier than the API updates
                         if message.type == "stream-up":
-                            ws.streamers[streamer_index].stream_up = time.time()
+                            streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            if ws.streamers[streamer_index].is_online is True:
-                                ws.streamers[streamer_index].set_offline()
+                            if streamer.is_online is True:
+                                streamer.set_offline()
                         elif message.type == "viewcount":
-                            if ws.streamers[streamer_index].stream_up_elapsed():
-                                ws.twitch.check_streamer_online(
-                                    ws.streamers[streamer_index]
-                                )
+                            if streamer.stream_up_elapsed():
+                                ws.twitch.check_streamer_online(streamer)
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":
@@ -362,13 +358,11 @@ class WebSocketsPool:
                                 message.message["raid"]["id"],
                                 message.message["raid"]["target_login"],
                             )
-                            ws.twitch.update_raid(ws.streamers[streamer_index], raid)
+                            ws.twitch.update_raid(streamer, raid)
 
                     elif message.topic == "community-moments-channel-v1":
                         if message.type == "active":
-                            ws.twitch.claim_moment(
-                                ws.streamers[streamer_index], message.data["moment_id"]
-                            )
+                            ws.twitch.claim_moment(streamer, message.data["moment_id"])
 
                     elif message.topic == "predictions-channel-v1":
 
@@ -387,11 +381,13 @@ class WebSocketsPool:
                                     event_dict["prediction_window_seconds"]
                                 )
                                 # Reduce prediction window by 3/6s - Collect more accurate data for decision
-                                prediction_window_seconds = ws.streamers[
-                                    streamer_index
-                                ].get_prediction_window(prediction_window_seconds)
+                                prediction_window_seconds = (
+                                    streamer.get_prediction_window(
+                                        prediction_window_seconds
+                                    )
+                                )
                                 event = EventPrediction(
-                                    ws.streamers[streamer_index],
+                                    streamer,
                                     event_id,
                                     event_dict["title"],
                                     parser.parse(event_dict["created_at"]),
@@ -400,10 +396,9 @@ class WebSocketsPool:
                                     event_dict["outcomes"],
                                 )
                                 if (
-                                    ws.streamers[streamer_index].is_online
+                                    streamer.is_online
                                     and event.closing_bet_after(current_tmsp) > 0
                                 ):
-                                    streamer = ws.streamers[streamer_index]
                                     bet_settings = streamer.settings.bet
                                     if (
                                         bet_settings.minimum_points is None
@@ -481,19 +476,17 @@ class WebSocketsPool:
                                     },
                                 )
 
-                                ws.streamers[streamer_index].update_history(
-                                    "PREDICTION", points["gained"]
-                                )
+                                streamer.update_history("PREDICTION", points["gained"])
 
                                 # Remove duplicate history records from previous message sent in community-points-user-v1
                                 if event_prediction.result["type"] == "REFUND":
-                                    ws.streamers[streamer_index].update_history(
+                                    streamer.update_history(
                                         "REFUND",
                                         -points["placed"],
                                         counter=-1,
                                     )
                                 elif event_prediction.result["type"] == "WIN":
-                                    ws.streamers[streamer_index].update_history(
+                                    streamer.update_history(
                                         "PREDICTION",
                                         -points["won"],
                                         counter=-1,
@@ -502,9 +495,7 @@ class WebSocketsPool:
                                 if event_prediction.result["type"]:
                                     # Analytics switch
                                     if Settings.enable_analytics is True:
-                                        ws.streamers[
-                                            streamer_index
-                                        ].persistent_annotations(
+                                        streamer.persistent_annotations(
                                             event_prediction.result["type"],
                                             f"{ws.events_predictions[event_id].title}",
                                         )
@@ -512,20 +503,20 @@ class WebSocketsPool:
                                 event_prediction.bet_confirmed = True
                                 # Analytics switch
                                 if Settings.enable_analytics is True:
-                                    ws.streamers[streamer_index].persistent_annotations(
+                                    streamer.persistent_annotations(
                                         "PREDICTION_MADE",
                                         f"Decision: {event_prediction.bet.decision['choice']} - {event_prediction.title}",
                                     )
                     elif message.topic == "community-points-channel-v1":
                         if message.type == "community-goal-created":
                             # TODO Untested, hard to find this happening live
-                            ws.streamers[streamer_index].add_community_goal(
+                            streamer.add_community_goal(
                                 CommunityGoal.from_pubsub(
                                     message.data["community_goal"]
                                 )
                             )
                         elif message.type == "community-goal-updated":
-                            ws.streamers[streamer_index].update_community_goal(
+                            streamer.update_community_goal(
                                 CommunityGoal.from_pubsub(
                                     message.data["community_goal"]
                                 )
@@ -534,7 +525,7 @@ class WebSocketsPool:
                             # TODO Untested, not sure what the message format for this is,
                             #      https://github.com/sammwyy/twitch-ps/blob/master/main.js#L417
                             #      suggests that it should be just the entire, now deleted, goal model
-                            ws.streamers[streamer_index].delete_community_goal(
+                            streamer.delete_community_goal(
                                 message.data["community_goal"]["id"]
                             )
 
@@ -542,9 +533,7 @@ class WebSocketsPool:
                             "community-goal-updated",
                             "community-goal-created",
                         ]:
-                            ws.twitch.contribute_to_community_goals(
-                                ws.streamers[streamer_index]
-                            )
+                            ws.twitch.contribute_to_community_goals(streamer)
 
                 except Exception:
                     logger.error(
