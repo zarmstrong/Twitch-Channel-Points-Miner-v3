@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.19.6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.5...3.19.6) (2026-11-01)
+
+
+### Bug Fixes
+
+* **drops:** keep allow-listed channels without Drops enabled from filling a mixed game's limit ([#196](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/196)) ([ebcb132](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ebcb132d18254f5254e7a546fd34f15117476189))
+* **drops:** treat a campaign with an unknown channel list the same way everywhere ([#197](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/197)) ([9dc50b5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/9dc50b50c627f79b88bce6e4757e3d7778d51f35))
+* **report:** keep daily report progress across miner restarts ([#201](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/201)) ([811c1cf](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/811c1cfe4c230583827f2f87cfbf36b29ac9b33e))
+* **ws:** keep PubSub messages on their own streamer when the streamer list changes ([#203](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/203)) ([c96957d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/c96957dc89b6f8e3d521a6dba85e29688cfb6709)), closes [#170](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/170)
+
+
+### Documentation
+
+* **readme:** note that daily-report progress survives restarts ([#205](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/205)) ([7f4b5f2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7f4b5f28578805ec5b29b542ebce6a256935f4a1))
+
 ## [3.19.5](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.4...3.19.5) (2026-10-28)
 
 
