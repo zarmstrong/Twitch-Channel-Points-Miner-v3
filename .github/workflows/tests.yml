@@ -23,7 +23,9 @@ jobs:
           node-version: 20
 
       - name: Run release issue automation tests
-        run: node .github/scripts/release-linked-issues.test.js
+        run: |
+          node .github/scripts/release-linked-issues.test.js
+          node .github/scripts/release-pull-links.test.js
 
   black:
     name: Black

@@ -50,6 +50,31 @@ jobs:
         with:
           target-branch: master
 
+      - name: Checkout link automation
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Release Please links PRs as /issues/N, which GitHub's in-page
+      # navigation fails to open. The release is built from the release PR
+      # body, so relinking it also fixes the notes of the next release. This
+      # must finish before publish_docker rewrites the same release body.
+      - name: Link PR references in release notes
+        # Cosmetic; never block the release, Docker, or Windows jobs.
+        continue-on-error: true
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ steps.release_retry_2.outputs.tag_name || steps.release_retry_1.outputs.tag_name || steps.release.outputs.tag_name }}
+        with:
+          script: |
+            const automation = require('./.github/scripts/release-pull-links.js');
+            await automation.linkReleasePullRequests({
+              github,
+              context,
+              core,
+              tag: process.env.RELEASE_TAG,
+            });
+
   close_released_issues:
     name: Close released issues
     needs: release_please
