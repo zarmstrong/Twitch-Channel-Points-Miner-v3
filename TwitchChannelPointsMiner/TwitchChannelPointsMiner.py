@@ -304,6 +304,10 @@ def _load_daily_report_state(path):
             )
             or any(
                 not isinstance(entry, dict)
+                or not isinstance(
+                    entry.get("current_minutes_watched") or 0, (int, float)
+                )
+                or not isinstance(entry.get("status") or "", str)
                 for key in ("drop_progress", "latest_drop_progress")
                 for entry in (payload.get(key) or {}).values()
             )
@@ -434,6 +438,7 @@ class TwitchChannelPointsMiner:
         "daily_report_lock",
         "daily_report_saved_state",
         "daily_report_save_failed",
+        "daily_report_started",
         "update_check_enabled",
         "update_check_interval_seconds",
         "next_update_check_at",
@@ -635,6 +640,9 @@ class TwitchChannelPointsMiner:
         self.daily_report_lock = threading.Lock()
         self.daily_report_saved_state = None
         self.daily_report_save_failed = False
+        # Set once run() has recorded the startup balances; saving before that
+        # could record channels whose balances aren't loaded yet.
+        self.daily_report_started = False
         if Settings.logger.daily_report is True and daily_report_state is not None:
             # Put back the drop progress made since the last report before the
             # startup inventory check runs, so a drop that finished before a
@@ -1512,6 +1520,10 @@ class TwitchChannelPointsMiner:
                     self.daily_report_streamers.setdefault(
                         streamer.username, streamer.channel_points
                     )
+            # A channel loaded again reports from its live balance.
+            for streamer in self.streamers:
+                self.daily_report_retired_balances.pop(streamer.username, None)
+            self.daily_report_started = True
             self.__save_daily_report_state()
 
     def __send_daily_report_if_due(self, now=None):
@@ -1581,13 +1593,18 @@ class TwitchChannelPointsMiner:
         self.__save_daily_report_state(drop_progress)
 
     def __daily_report_state(self, latest_drop_progress):
-        return (
-            self.daily_report_date,
-            dict(self.daily_report_streamers),
-            self.daily_report_drop_progress,
-            latest_drop_progress,
-            dict(self.daily_report_retired_balances),
-        )
+        """The fields saved to the daily-report state file, as copies."""
+        drop_progress = self.daily_report_drop_progress
+        return {
+            "report_date": self.daily_report_date,
+            "streamers": dict(self.daily_report_streamers),
+            "drop_progress": None if drop_progress is None else dict(drop_progress),
+            # A restart restores only what changed since the last report.
+            "latest_drop_progress": _unreported_drop_progress(
+                drop_progress, latest_drop_progress
+            ),
+            "retired_balances": dict(self.daily_report_retired_balances),
+        }
 
     def __save_daily_report_state(self, latest_drop_progress=None):
         if latest_drop_progress is None:
@@ -1597,14 +1614,7 @@ class TwitchChannelPointsMiner:
         # the retries log quietly instead of warning every pass.
         if _save_daily_report_state(
             self.daily_report_state_path,
-            report_date=self.daily_report_date,
-            streamers=self.daily_report_streamers,
-            drop_progress=self.daily_report_drop_progress,
-            # A restart restores only what changed since the last report.
-            latest_drop_progress=_unreported_drop_progress(
-                self.daily_report_drop_progress, latest_drop_progress
-            ),
-            retired_balances=self.daily_report_retired_balances,
+            **state,
             quiet=self.daily_report_save_failed,
         ):
             self.daily_report_saved_state = state
@@ -1620,7 +1630,10 @@ class TwitchChannelPointsMiner:
         channel the next session doesn't load again. A channel that is loaded
         again reports from its live balance instead.
         """
-        if getattr(Settings.logger, "daily_report", False) is not True:
+        if (
+            getattr(Settings.logger, "daily_report", False) is not True
+            or not self.daily_report_started
+        ):
             return
         # Bounded at shutdown: end() can interrupt the main thread while it
         # holds this lock, and waiting on it there would hang.
@@ -1641,7 +1654,10 @@ class TwitchChannelPointsMiner:
             ):
                 self.__save_daily_report_state(latest_drop_progress)
         except Exception:
-            logger.warning("Unable to save daily-report state", exc_info=True)
+            (logger.debug if self.daily_report_save_failed else logger.warning)(
+                "Unable to save daily-report state", exc_info=True
+            )
+            self.daily_report_save_failed = True
         finally:
             self.daily_report_lock.release()
 

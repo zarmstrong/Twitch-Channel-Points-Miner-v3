@@ -29,6 +29,7 @@ def _miner():
     miner.daily_report_lock = threading.Lock()
     miner.daily_report_saved_state = None
     miner.daily_report_save_failed = False
+    miner.daily_report_started = True
     miner.twitch = SimpleNamespace(drop_report_snapshot=MagicMock(return_value={}))
     return miner
 
@@ -369,14 +370,29 @@ def test_retired_channel_balances_survive_reload(tmp_path):
 
 
 @pytest.mark.parametrize("key", ["drop_progress", "latest_drop_progress"])
-def test_malformed_drop_progress_entry_starts_fresh(tmp_path, key):
+@pytest.mark.parametrize(
+    "entry",
+    ['"x"', '{"current_minutes_watched": "abc"}', '{"status": 3}'],
+)
+def test_malformed_drop_progress_entry_starts_fresh(tmp_path, key, entry):
     path = tmp_path / "daily-report.json"
     path.write_text(
-        '{"version": 1, "streamers": {}, "%s": {"drop": "x"}}' % key,
+        '{"version": 1, "streamers": {}, "%s": {"drop": %s}}' % (key, entry),
         encoding="utf-8",
     )
 
     assert _load_daily_report_state(path) is None
+
+
+def test_drop_progress_with_float_minutes_still_loads(tmp_path):
+    path = tmp_path / "daily-report.json"
+    path.write_text(
+        '{"version": 1, "streamers": {}, "drop_progress": '
+        '{"drop": {"current_minutes_watched": 60.0, "status": null}}}',
+        encoding="utf-8",
+    )
+
+    assert _load_daily_report_state(path) is not None
 
 
 def test_daily_report_progress_is_saved_only_when_it_changed():
@@ -438,19 +454,73 @@ def test_final_save_keeps_channels_the_next_session_does_not_load(tmp_path):
     assert "bob: -50 channel points" in message
 
 
-def test_a_failing_save_does_not_raise():
+def test_a_failing_save_does_not_raise_and_warns_once():
     miner = _miner()
     Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
     miner.twitch.drop_report_snapshot.side_effect = RuntimeError("boom")
+    module = "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger"
 
-    with patch(
-        "TwitchChannelPointsMiner.TwitchChannelPointsMiner.logger.warning"
-    ) as warning:
+    with patch(f"{module}.warning") as warning, patch(f"{module}.debug") as debug:
+        miner._TwitchChannelPointsMiner__save_daily_report_progress()
         miner._TwitchChannelPointsMiner__save_daily_report_progress()
 
     warning.assert_called_once()
+    debug.assert_called_once()
     # The lock is released, so the next save can run.
     assert miner.daily_report_lock.acquire(timeout=0)
+
+
+def test_no_save_before_startup_records_the_balances():
+    # Stopping during startup: channels are listed but their balances aren't
+    # loaded, so a final save would record them as retired at 0 points.
+    miner = _miner()
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    miner.daily_report_started = False
+    for streamer in miner.streamers:
+        streamer.channel_points = 0
+
+    with patch(
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner._save_daily_report_state"
+    ) as save:
+        miner._TwitchChannelPointsMiner__save_daily_report_progress(final=True)
+
+    save.assert_not_called()
+    assert miner.daily_report_retired_balances == {}
+
+
+def test_startup_drops_retired_balances_of_channels_loaded_again():
+    miner = _miner()
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    miner.daily_report_started = False
+    miner.daily_report_retired_balances = {"alice": 1100, "carol": 70}
+
+    with patch(
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner._save_daily_report_state"
+    ):
+        miner._TwitchChannelPointsMiner__start_daily_report()
+
+    assert miner.daily_report_retired_balances == {"carol": 70}
+    assert miner.daily_report_started is True
+
+
+def test_re_recording_a_reported_drop_does_not_rewrite_the_state():
+    # Each recording stamps a new time; a drop unchanged since the report
+    # isn't written, so a new stamp alone isn't a change worth saving.
+    miner = _miner()
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+    reported = {"current_minutes_watched": 60, "status": "captured", "x": 1}
+    miner.daily_report_drop_progress = {"drop": reported}
+    miner.twitch.drop_report_snapshot.return_value = {"drop": reported}
+    save_path = (
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner._save_daily_report_state"
+    )
+
+    with patch(save_path) as save:
+        miner._TwitchChannelPointsMiner__save_daily_report_progress()
+        miner.twitch.drop_report_snapshot.return_value = {"drop": {**reported, "x": 2}}
+        miner._TwitchChannelPointsMiner__save_daily_report_progress()
+
+    save.assert_called_once()
 
 
 def test_failed_daily_report_save_is_retried_quietly(tmp_path):
