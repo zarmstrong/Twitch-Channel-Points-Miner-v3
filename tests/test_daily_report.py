@@ -194,6 +194,29 @@ def test_daily_report_lists_rewards_waiting_on_account_link():
     assert "link at" not in message.split("Other Campaign")[1]
 
 
+def test_daily_report_header_when_every_campaign_is_linked():
+    miner = _miner()
+    miner.streamers[0].channel_points = 1000
+    miner.streamers[1].channel_points = 550
+    miner.twitch.unlinked_drop_report.return_value = [
+        {
+            "campaign_id": "campaign-3",
+            "campaign": "Zone Drops",
+            "category": "Zone Game",
+            "url": "https://zone.example/link",
+            "linked": True,
+            "drops": ["Keycard ×2"],
+            "count": 2,
+        }
+    ]
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+
+    message = _send_report(miner)
+
+    assert "2 reward(s) waiting for Twitch to confirm the game account link:" in message
+    assert "can't be claimed" not in message
+
+
 def test_daily_report_suppresses_report_when_nothing_changed():
     miner = _miner()
     miner.streamers[0].channel_points = 1000

@@ -8442,9 +8442,11 @@ class Twitch(object):
                 for instance_id, entry in alive.items()
             }
             for instance_id, entry in list(self.unlinked_drop_claims.items()):
-                delivered = (
-                    instance_id in delivered_instance_ids
-                    or (entry["campaign_id"], entry.get("drop_id"))
+                # A repeatable drop lists its earlier, claimed instance next
+                # to the pending one; the pending one is not delivered.
+                delivered = instance_id in delivered_instance_ids or (
+                    instance_id not in pending_instance_ids
+                    and (entry["campaign_id"], entry.get("drop_id"))
                     in delivered_campaign_drops
                 )
                 if not delivered and (

@@ -1434,8 +1434,9 @@ def test_sync_pass_keeps_unlinked_claims_through_short_inventories(monkeypatch):
         monkeypatch, statuses=(("ELIGIBLE_FOR_ALL", False),)
     )
     twitch.claim_drop(drop, campaign_link=unlinked_campaign_link())
-    # Two empty inventories, then a claimed listing of the same drop id under
-    # another campaign: none of these is this instance's delivery.
+    # Two empty inventories, a claimed listing of the same drop id under
+    # another campaign, then a repeatable drop's earlier claimed instance
+    # next to the pending one: none of these is this instance's delivery.
     inventories = iter(
         [
             [],
@@ -1451,6 +1452,24 @@ def test_sync_pass_keeps_unlinked_claims_through_short_inventories(monkeypatch):
                     ],
                 }
             ],
+            [
+                {
+                    "id": "campaign-1",
+                    "timeBasedDrops": [
+                        {
+                            "id": "drop-1",
+                            "self": {"isClaimed": True, "dropInstanceID": "earlier"},
+                        },
+                        {
+                            "id": "drop-1",
+                            "self": {
+                                "isClaimed": False,
+                                "dropInstanceID": "instance-1",
+                            },
+                        },
+                    ],
+                }
+            ],
         ]
     )
     monkeypatch.setattr(
@@ -1459,7 +1478,7 @@ def test_sync_pass_keeps_unlinked_claims_through_short_inventories(monkeypatch):
         lambda self: {"dropCampaignsInProgress": next(inventories)},
     )
 
-    for _ in range(3):
+    for _ in range(4):
         twitch._Twitch__sync_campaigns([])
 
     assert [group["campaign_id"] for group in twitch.unlinked_drop_report()] == [

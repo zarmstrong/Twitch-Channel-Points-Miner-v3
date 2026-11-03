@@ -1589,10 +1589,16 @@ class TwitchChannelPointsMiner:
             unlinked_count = sum(
                 campaign.get("count", 0) or 0 for campaign in unlinked_campaigns
             )
-            activity_lines.append(
-                f"{unlinked_count} reward(s) can't be claimed until a game account "
-                "is linked:"
-            )
+            if all(campaign.get("linked") for campaign in unlinked_campaigns):
+                activity_lines.append(
+                    f"{unlinked_count} reward(s) waiting for Twitch to confirm the "
+                    "game account link:"
+                )
+            else:
+                activity_lines.append(
+                    f"{unlinked_count} reward(s) can't be claimed until a game "
+                    "account is linked:"
+                )
             for campaign in unlinked_campaigns:
                 line = (
                     f"- {campaign.get('category') or 'Unknown game'} — "
