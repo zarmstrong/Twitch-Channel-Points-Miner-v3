@@ -1581,6 +1581,28 @@ class TwitchChannelPointsMiner:
                     f"{str(entry.get('status') or 'in_progress').replace('_', ' ')}"
                 )
 
+        # Listed every day while it lasts: it is the one item in the report
+        # the user has to act on, and these Drops stay claimable for a while
+        # after the account is linked.
+        unlinked_campaigns = self.twitch.unlinked_drop_report()
+        if unlinked_campaigns:
+            unlinked_count = sum(
+                campaign.get("count", 0) or 0 for campaign in unlinked_campaigns
+            )
+            activity_lines.append(
+                f"{unlinked_count} reward(s) can't be claimed until a game account "
+                "is linked:"
+            )
+            for campaign in unlinked_campaigns:
+                line = (
+                    f"- {campaign.get('category') or 'Unknown game'} — "
+                    f"{campaign.get('campaign') or 'Unknown campaign'}: "
+                    f"{', '.join(campaign.get('drops') or []) or 'Unknown reward'}"
+                )
+                if campaign.get("url"):
+                    line += f" — link at {campaign['url']}"
+                activity_lines.append(line)
+
         if activity_lines:
             lines = [f"Daily report for {now.date().isoformat()}", *activity_lines]
             logger.info(
