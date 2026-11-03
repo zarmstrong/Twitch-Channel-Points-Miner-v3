@@ -140,6 +140,10 @@ ACCEPTED_CLAIM_RETRY_SECONDS = 60 * 60
 # campaign's game account is not linked. The inventory reporting the account
 # as linked retries it at once; this is only the fallback.
 UNLINKED_CLAIM_RETRY_SECONDS = 6 * 60 * 60
+# How long an unlinked claim's drop may be missing from the inventory before
+# the claim is forgotten: long enough to ride out short or empty responses,
+# short enough that an ended campaign leaves the daily report the same day.
+UNLINKED_CLAIM_MISSING_GRACE_SECONDS = 15 * 60
 
 
 class Twitch(object):
@@ -7903,9 +7907,7 @@ class Twitch(object):
             if isinstance(inventory, dict)
             else None
         )
-        # An empty list is more likely a short response than every campaign
-        # ending at once; the entries age out if it is real.
-        if isinstance(campaigns_in_progress, list) and campaigns_in_progress:
+        if isinstance(campaigns_in_progress, list):
             self.__reconcile_unlinked_claims(campaigns_in_progress)
         if campaigns_in_progress not in [None, {}]:
             campaigns_by_id = {campaign.id: campaign for campaign in campaigns}
@@ -8398,9 +8400,10 @@ class Twitch(object):
         # Entries are refreshed only when a claim pass visits the drop. A drop
         # the inventory stopped listing as unclaimed (delivered after the
         # account got linked, claimed on Twitch, or its campaign ended) must
-        # not sit in the daily report until it ages out. A drop missing from
-        # one sync is kept: forgetting it on a transient short inventory
-        # would re-send the claim and re-warn on the next full one.
+        # not sit in the daily report until it ages out. A drop missing for
+        # less than the grace period is kept: forgetting it on a transient
+        # short or empty inventory would re-send the claim and re-warn on
+        # the next full one.
         if not (getattr(self, "unlinked_drop_claims", None) or {}):
             return
         now = time.monotonic()
@@ -8429,9 +8432,12 @@ class Twitch(object):
             alive = self.__unlinked_drop_claims_alive(now)
             self.unlinked_drop_claims = {
                 instance_id: (
-                    {**entry, "seen": now, "missed": 0}
+                    {**entry, "seen": now, "missing_since": None}
                     if instance_id in pending_instance_ids
-                    else {**entry, "missed": entry.get("missed", 0) + 1}
+                    else {
+                        **entry,
+                        "missing_since": entry.get("missing_since") or now,
+                    }
                 )
                 for instance_id, entry in alive.items()
             }
@@ -8441,7 +8447,11 @@ class Twitch(object):
                     or (entry["campaign_id"], entry.get("drop_id"))
                     in delivered_campaign_drops
                 )
-                if not delivered and entry["missed"] < 2:
+                if not delivered and (
+                    entry["missing_since"] is None
+                    or (now - entry["missing_since"])
+                    < UNLINKED_CLAIM_MISSING_GRACE_SECONDS
+                ):
                     continue
                 if not delivered:
                     self.__log_drop_check(
@@ -8469,6 +8479,9 @@ class Twitch(object):
                     "campaign": entry["campaign"],
                     "category": entry["category"],
                     "url": entry["url"],
+                    # The inventory now reports the account linked; the claim
+                    # endpoint has not caught up, so the drop is still waiting.
+                    "linked": False,
                     "names": {},
                     "count": 0,
                 },
@@ -8477,6 +8490,8 @@ class Twitch(object):
             group["count"] += 1
             if group["url"] is None:
                 group["url"] = entry["url"]
+            if entry.get("connected") is True:
+                group["linked"] = True
         report = []
         for group in by_campaign.values():
             names = group.pop("names")

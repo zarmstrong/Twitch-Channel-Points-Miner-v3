@@ -1305,6 +1305,7 @@ def test_unlinked_drop_report_groups_drops_by_campaign(monkeypatch):
             "campaign": "Zone Drops",
             "category": "Gray Zone Warfare",
             "url": None,
+            "linked": False,
             "count": 1,
             "drops": ["Keycard"],
         },
@@ -1313,6 +1314,7 @@ def test_unlinked_drop_report_groups_drops_by_campaign(monkeypatch):
             "campaign": "Hunt 1896",
             "category": "Hunt: Showdown 1896",
             "url": "https://hunt.example/link",
+            "linked": False,
             "count": 3,
             "drops": ["Random Legendary Skin", "Supply Crate ×2"],
         },
@@ -1337,7 +1339,11 @@ def test_unlinked_drop_report_without_campaign_id_keeps_drops_apart(monkeypatch)
 def test_sync_pass_forgets_unlinked_claims_the_inventory_stopped_listing(
     monkeypatch, caplog
 ):
-    twitch, drop, _requests, _saved, _now = claim_recording_twitch(
+    from TwitchChannelPointsMiner.classes.Twitch import (
+        UNLINKED_CLAIM_MISSING_GRACE_SECONDS,
+    )
+
+    twitch, drop, _requests, _saved, now = claim_recording_twitch(
         monkeypatch, statuses=(("ELIGIBLE_FOR_ALL", False),)
     )
     twitch.log_drop_checks = True
@@ -1382,8 +1388,8 @@ def test_sync_pass_forgets_unlinked_claims_the_inventory_stopped_listing(
     with caplog.at_level(logging.DEBUG):
         twitch._Twitch__sync_campaigns([])
 
-    # Delivered rewards go at once; a missing drop survives one short
-    # inventory and goes on the second.
+    # Delivered rewards go at once; a missing drop survives short
+    # inventories for the grace period and goes on the first sync after.
     assert [group["campaign_id"] for group in twitch.unlinked_drop_report()] == [
         "campaign-9",
         "campaign-5",
@@ -1393,6 +1399,11 @@ def test_sync_pass_forgets_unlinked_claims_the_inventory_stopped_listing(
     assert 'Drops from "Hunt" have been claimed' in events[-1].getMessage()
     assert "left the inventory" not in caplog.text
 
+    now[0] += UNLINKED_CLAIM_MISSING_GRACE_SECONDS - 60
+    twitch._Twitch__sync_campaigns([])
+    assert len(twitch.unlinked_drop_report()) == 2
+
+    now[0] += 60
     with caplog.at_level(logging.DEBUG):
         twitch._Twitch__sync_campaigns([])
 

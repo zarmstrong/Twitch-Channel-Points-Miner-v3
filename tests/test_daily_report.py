@@ -166,12 +166,26 @@ def test_daily_report_lists_rewards_waiting_on_account_link():
             "drops": ["Badge"],
             "count": 1,
         },
+        {
+            "campaign_id": "campaign-3",
+            "campaign": "Zone Drops",
+            "category": "Zone Game",
+            "url": "https://zone.example/link",
+            "linked": True,
+            "drops": ["Keycard"],
+            "count": 1,
+        },
     ]
     Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
 
     message = _send_report(miner)
 
-    assert "5 reward(s) can't be claimed until a game account is linked:" in message
+    assert "6 reward(s) can't be claimed until a game account is linked:" in message
+    assert (
+        "- Zone Game — Zone Drops: Keycard — account now linked; claim pending"
+        in message
+    )
+    assert "zone.example" not in message
     assert (
         "- Hunt: Showdown 1896 — Hunt 1896 (Week 1, Pt. 1): Random Legendary Skin, "
         "Supply Crate ×3 — link at https://www.huntshowdown.com/twitchdrops"

@@ -1319,7 +1319,7 @@ of these values in each provider's `events` list.
 | `JOIN_RAID` | The miner follows a raid to another channel. |
 | `DROP_CLAIM` | A completed Drop reward is claimed. |
 | `DROP_STATUS` | Drop discovery, eligibility, or progress status is reported. This can be verbose. |
-| `DROP_LINK_REQUIRED` | A finished Drop can't be claimed because the campaign's game account isn't linked to Twitch. Sent once per campaign with the link URL, and once more after the account is linked and its Drops have been claimed. |
+| `DROP_LINK_REQUIRED` | A finished Drop can't be claimed because the campaign's game account isn't linked to Twitch. Sent once per campaign per run (so again after a restart) with the link URL, and once more when its Drops have been claimed. |
 | `CHAT_MENTION` | The configured username is mentioned in joined chat. Chat presence must be enabled. |
 | `CONFIGURATION` | Startup, reload, authentication, or other configuration information requires attention. Critical authentication alerts may be forced through configured providers. |
 

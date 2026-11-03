@@ -1599,7 +1599,9 @@ class TwitchChannelPointsMiner:
                     f"{campaign.get('campaign') or 'Unknown campaign'}: "
                     f"{', '.join(campaign.get('drops') or []) or 'Unknown reward'}"
                 )
-                if campaign.get("url"):
+                if campaign.get("linked"):
+                    line += " — account now linked; claim pending"
+                elif campaign.get("url"):
                     line += f" — link at {campaign['url']}"
                 activity_lines.append(line)
 
