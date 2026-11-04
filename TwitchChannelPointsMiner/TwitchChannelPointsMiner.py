@@ -859,6 +859,7 @@ class TwitchChannelPointsMiner:
             self.twitch.category_drops_override_streamers = (
                 category_drops_override_streamers is True
             )
+            self.twitch.resolve_category_game_slugs(categories)
             self.twitch.configured_category_slugs = self.twitch.get_category_slugs(
                 categories
             )
@@ -2960,6 +2961,7 @@ class TwitchChannelPointsMiner:
             self.twitch.category_drops_override_streamers = (
                 mine_config.get("category_drops_override_streamers", False) is True
             )
+            self.twitch.resolve_category_game_slugs(mine_config.get("categories", []))
             self.twitch.configured_category_slugs = self.twitch.get_category_slugs(
                 mine_config.get("categories", [])
             )

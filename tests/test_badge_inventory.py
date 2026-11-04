@@ -1847,3 +1847,53 @@ def test_completions_list_keeps_surviving_entries_and_errorless_nulls():
         Twitch.drops_inventory_completions_state(_normalized(errorless_nulls))
         == "loaded"
     )
+
+
+def test_gist_campaigns_of_a_category_given_by_twitch_slug_use_the_game_name(
+    monkeypatch,
+):
+    # Streams report 'Hunt: Showdown 1896', so per-stream lookups read the gist
+    # campaigns under 'hunt-showdown-1896', not the configured 'hunt-showdown'
+    # (#210).
+    def post_gql_request_raw(operation, request):
+        if operation == "CategoryGame":
+            return {
+                "data": {"game": {"id": "500188", "displayName": "Hunt: Showdown 1896"}}
+            }
+        return {"data": {"currentUser": {"availableBadges": []}}}
+
+    twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "hunt-showdown",
+                "game": "Hunt: Showdown 1896",
+                "url": "https://twitchdrops.app/game/hunt-showdown",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Hunt: Showdown 1896",
+            "campaigns": [
+                {
+                    "name": "Hunt 1896 (Week 2, Pt. 2)",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "channels": [],
+                    "drops": [{"name": "Hide and Seek"}],
+                }
+            ],
+        },
+    )
+
+    twitch.resolve_category_game_slugs(["hunt-showdown|psychoghost"])
+    deadlines = twitch._Twitch__twitchdrops_app_fallback(
+        ["hunt-showdown|psychoghost"], set(), EMPTY_INVENTORY
+    )
+
+    assert set(deadlines) == {"hunt-showdown-1896"}
+    assert set(twitch.twitchdrops_app_campaigns) == {"hunt-showdown-1896"}
