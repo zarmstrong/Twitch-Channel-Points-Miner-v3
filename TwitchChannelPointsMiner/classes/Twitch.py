@@ -179,6 +179,7 @@ class Twitch(object):
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
         "twitchdrops_app_game_names",
+        "game_directory_slugs",
         "twitchdrops_app_upcoming_starts",
         "twitchdrops_app_deadlines",
         "twitchdrops_app_catalog_complete",
@@ -290,6 +291,7 @@ class Twitch(object):
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
+        self.game_directory_slugs = {}
         self.twitchdrops_app_upcoming_starts = {}
         self.twitchdrops_app_deadlines = {}
         self.twitchdrops_app_catalog_complete = False
@@ -4389,14 +4391,48 @@ class Twitch(object):
                 return []
 
             if drops_enabled is True:
-                drops_logins = self.__get_drops_enabled_directory_logins(game_slug)
-                if forced_streamer_username not in drops_logins:
+                listing = drops_directory()
+                if listing is None:
+                    raise directory["error"]
+                drops_logins, complete = listing
+                if forced_streamer_username not in drops_logins and complete:
                     self.__log_category(
                         f"Forced category streamer '{forced_streamer_username}' is in "
                         f"'{game_name}' but not listed in Twitch's Drops-enabled directory",
                         extra={"emoji": ":no_entry:"},
                     )
                     return []
+                if forced_streamer_username not in drops_logins:
+                    # The directory returns one page, so in a busy category a
+                    # Drops-enabled channel can be missing from it. Ask Twitch
+                    # which campaigns that channel itself offers instead. Like
+                    # a directory listing, a campaign for the game only shows
+                    # Drops are enabled there; whether one can still be earned
+                    # is settled by the channel's campaign sync once tracked.
+                    channel_id = str(forced_stream.get("user_id") or "")
+                    channel_campaigns, _, answered = (
+                        self.__get_campaigns_from_channel_id(channel_id)
+                        if channel_id
+                        else ([], False, False)
+                    )
+                    if not answered:
+                        raise CategoryLookupFailedException(
+                            f"Twitch Drops campaign lookup for forced category "
+                            f"streamer '{forced_streamer_username}' in "
+                            f"'{game_name}' failed",
+                            game_slug=game_slug,
+                        )
+                    if not any(
+                        self.__campaign_is_for_game(campaign, game_id, game_slug)
+                        for campaign in channel_campaigns
+                    ):
+                        self.__log_category(
+                            f"Forced category streamer '{forced_streamer_username}' "
+                            f"is in '{game_name}' but Twitch lists no "
+                            f"'{game_name}' Drops campaign on that channel",
+                            extra={"emoji": ":no_entry:"},
+                        )
+                        return []
 
             self.__log_category(
                 f"Using forced category streamer '{forced_streamer_username}' for '{game_name}'",
@@ -5024,21 +5060,55 @@ class Twitch(object):
         )
         return eligible, len(campaign_logins_by_campaign)
 
-    def __get_drops_enabled_directory_logins(self, game_slug: str) -> set[str]:
-        return self.__get_drops_enabled_directory(game_slug)[0]
+    def __campaign_is_for_game(self, campaign, game_id, game_slug: str) -> bool:
+        """Whether a channel-advertised campaign belongs to the given game,
+        by its ID when Twitch sent one, else by its name."""
+        game = campaign.get("game") if isinstance(campaign, dict) else None
+        if not isinstance(game, dict):
+            return False
+        if game.get("id") is not None:
+            return str(game.get("id")) == str(game_id)
+        return (
+            self.__slugify(game.get("displayName") or game.get("name") or "")
+            == game_slug
+        )
 
-    def __get_drops_enabled_directory(
-        self, game_slug: str, game_id=None
-    ) -> Tuple[set, bool]:
-        """The game's Drops-enabled live channels, and whether that is all of
-        them: an error-free page of a game Twitch found, for which Twitch
-        reports no next page. A page's length proves nothing: Twitch can
-        return fewer channels than requested while more remain. Given the
-        game's Helix ID, the page must also be that game's: a slug built from
-        its name can belong to another game."""
+    def __get_game_directory_slug(self, game_id) -> Optional[str]:
+        """Twitch's directory slug for a game, by its Helix ID, or None when
+        Twitch did not answer. A renamed game keeps its original slug
+        ('Hunt: Showdown 1896' is 'hunt-showdown'), so it cannot be derived
+        from the current name. Only an answer is cached: a failed lookup is
+        tried again on the next refresh."""
+        game_id = str(game_id)
+        slugs = getattr(self, "game_directory_slugs", None)
+        if slugs is None:
+            slugs = self.game_directory_slugs = {}
+        if game_id in slugs:
+            return slugs[game_id]
+        request = copy.deepcopy(GQLOperations.GameSlug)
+        request["variables"] = {"id": game_id}
+        try:
+            response = self.gql.post_gql_request_raw("GameSlug", request)
+        except RetryError as error:
+            logger.debug(f"Error loading the directory slug of game {game_id}: {error}")
+            return None
+        game = (
+            (response.get("data") or {}).get("game")
+            if isinstance(response, dict)
+            else None
+        )
+        if not isinstance(game, dict) or str(game.get("id") or "") != game_id:
+            return None
+        slug = str(game.get("slug") or "").strip()
+        if not slug:
+            return None
+        slugs[game_id] = slug
+        return slug
+
+    def __request_drops_directory(self, request_slug: str, game_slug: str) -> dict:
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
         request["variables"] = {
-            "slug": game_slug,
+            "slug": request_slug,
             "sortTypeIsRecency": False,
             "limit": DROPS_DIRECTORY_LIMIT,
             "includeIsDJ": False,
@@ -5060,8 +5130,54 @@ class Twitch(object):
                 f"Twitch Drops directory for '{game_slug}' failed to load",
                 game_slug=game_slug,
             ) from error
+        return response
 
+    def __get_drops_enabled_directory(
+        self, game_slug: str, game_id=None
+    ) -> Tuple[set, bool]:
+        """The game's Drops-enabled live channels, and whether that is all of
+        them: an error-free page of a game Twitch found, for which Twitch
+        reports no next page. A page's length proves nothing: Twitch can
+        return fewer channels than requested while more remain. Given the
+        game's Helix ID, the page must also be that game's: a slug built from
+        its name can belong to another game, or to none. Twitch is then asked
+        for the game's own slug, and the directory is loaded again under it.
+        game_slug stays the key failures are reported under."""
+        request_slug = game_slug
+        if game_id is not None:
+            request_slug = (getattr(self, "game_directory_slugs", None) or {}).get(
+                str(game_id), game_slug
+            )
+        response = self.__request_drops_directory(request_slug, game_slug)
         game = (response.get("data") or {}).get("game")
+        # Look the slug up again only on proof the page is not this game's (no
+        # game, or another ID). This is deliberately weaker than game_matches
+        # below, which needs proof it is: a page without an ID triggers
+        # neither the lookup nor a "complete" verdict.
+        if (
+            game_id is not None
+            and not response.get("errors")
+            and (
+                game is None
+                or (
+                    isinstance(game, dict)
+                    and game.get("id") is not None
+                    and str(game.get("id")) != str(game_id)
+                )
+            )
+        ):
+            # A remembered slug that stopped matching is looked up again.
+            (getattr(self, "game_directory_slugs", None) or {}).pop(str(game_id), None)
+            resolved_slug = self.__get_game_directory_slug(game_id)
+            if resolved_slug and resolved_slug != request_slug:
+                self.__log_drop_check(
+                    f"Twitch lists '{game_slug}' under the directory slug "
+                    f"'{resolved_slug}'",
+                    level=logging.DEBUG,
+                )
+                response = self.__request_drops_directory(resolved_slug, game_slug)
+                game = (response.get("data") or {}).get("game")
+
         streams = game.get("streams") if isinstance(game, dict) else None
         edges = streams.get("edges") if isinstance(streams, dict) else None
         edges_listed = isinstance(edges, list)
