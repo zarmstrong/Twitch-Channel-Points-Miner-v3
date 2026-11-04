@@ -118,7 +118,7 @@ def test_drops_directory_filter_uses_twitch_tag_id(monkeypatch):
 
     twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
 
-    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == {"eligible"}
+    assert twitch._Twitch__get_drops_enabled_directory("game")[0] == {"eligible"}
     assert calls[0][0] == "DirectoryPage_Game"
     assert calls[0][1]["variables"]["options"]["tags"] == ["official-drops-id"]
 
@@ -135,7 +135,7 @@ def test_drops_directory_filter_does_not_trust_user_tag_text(monkeypatch):
         )
     )
 
-    assert twitch._Twitch__get_drops_enabled_directory_logins("game") == set()
+    assert twitch._Twitch__get_drops_enabled_directory("game")[0] == set()
 
 
 def test_drops_directory_request_failure_raises_instead_of_empty_set():
@@ -147,7 +147,7 @@ def test_drops_directory_request_failure_raises_instead_of_empty_set():
     twitch = bare_twitch(SimpleNamespace(post_gql_request_raw=post_gql_request_raw))
 
     with pytest.raises(CategoryLookupFailedException) as error:
-        twitch._Twitch__get_drops_enabled_directory_logins("game")
+        twitch._Twitch__get_drops_enabled_directory("game")
 
     assert error.value.game_slug == "game"
 

@@ -136,6 +136,10 @@ class GQLOperations:
             "}"
         ),
     }
+    GameSlug = {
+        "operationName": "GameSlug",
+        "query": "query GameSlug($id: ID!) { game(id: $id) { id slug } }",
+    }
     Inventory = {
         "operationName": "Inventory",
         "variables": {"fetchRewardCampaigns": True},

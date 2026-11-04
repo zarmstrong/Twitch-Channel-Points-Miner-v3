@@ -3917,6 +3917,239 @@ def test_forced_category_streamer_genuinely_offline_logs_not_live(monkeypatch, c
     assert "Forced category streamer 'forced_streamer' is not live" in caplog.text
 
 
+HUNT_GAME_ID = "500188"
+
+
+def _hunt_directory(logins, has_next_page=False):
+    return {
+        "data": {
+            "game": {
+                "id": HUNT_GAME_ID,
+                "streams": {
+                    "edges": [
+                        {"node": {"broadcaster": {"login": login}}} for login in logins
+                    ],
+                    "pageInfo": {"hasNextPage": has_next_page},
+                },
+            }
+        }
+    }
+
+
+def _hunt_twitch(
+    monkeypatch, directories, slug_lookup=None, channel_campaigns=None, calls=None
+):
+    """A renamed game: Twitch lists 'Hunt: Showdown 1896' under the slug
+    'hunt-showdown', not the 'hunt-showdown-1896' its name slugifies to (#210).
+    directories maps a requested slug to its DirectoryPage_Game response."""
+    calls = [] if calls is None else calls
+
+    def post_gql_request_raw(operation, request):
+        if operation == "GameSlug":
+            calls.append((operation, request["variables"]["id"]))
+            if isinstance(slug_lookup, Exception):
+                raise slug_lookup
+            return slug_lookup or {
+                "data": {"game": {"id": HUNT_GAME_ID, "slug": "hunt-showdown"}}
+            }
+        slug = request["variables"]["slug"]
+        calls.append((operation, slug))
+        return directories.get(slug, {"data": {"game": None}})
+
+    def get_available_drops(channel_id):
+        calls.append(("DropsHighlightService_AvailableDrops", channel_id))
+        if channel_campaigns is None:
+            raise AssertionError("the channel's campaigns were not expected")
+        if isinstance(channel_campaigns, Exception):
+            raise channel_campaigns
+        return SimpleNamespace(campaigns=channel_campaigns, campaigns_available=True)
+
+    twitch = _category_lookup_twitch(
+        SimpleNamespace(
+            post_gql_request_raw=post_gql_request_raw,
+            get_available_drops=get_available_drops,
+        )
+    )
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": HUNT_GAME_ID, "name": "Hunt: Showdown 1896"}]}
+        return {
+            "data": [
+                {
+                    "user_login": "psychoghost",
+                    "user_id": "39067173",
+                    "game_id": HUNT_GAME_ID,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    return twitch, calls
+
+
+def test_drops_directory_retries_under_the_slug_twitch_lists_a_renamed_game_by(
+    monkeypatch,
+):
+    twitch, calls = _hunt_twitch(
+        monkeypatch, {"hunt-showdown": _hunt_directory(["psychoghost"])}
+    )
+
+    assert twitch.get_live_streamers_for_category("hunt-showdown|psychoghost") == [
+        "psychoghost"
+    ]
+    assert calls == [
+        ("DirectoryPage_Game", "hunt-showdown-1896"),
+        ("GameSlug", HUNT_GAME_ID),
+        ("DirectoryPage_Game", "hunt-showdown"),
+    ]
+    # Each tracked category streamer keeps the game's slug-derived key.
+    assert twitch.category_campaign_eligibility == {
+        ("hunt-showdown-1896", "psychoghost"): (1, 1)
+    }
+
+    # The resolved slug is remembered, so later refreshes go straight to it.
+    calls.clear()
+    assert twitch.get_live_streamers_for_category("hunt-showdown|psychoghost") == [
+        "psychoghost"
+    ]
+    assert calls == [("DirectoryPage_Game", "hunt-showdown")]
+
+
+def test_drops_directory_slug_lookup_failure_is_not_cached(monkeypatch):
+    twitch, calls = _hunt_twitch(
+        monkeypatch,
+        {"hunt-showdown": _hunt_directory(["psychoghost"])},
+        slug_lookup=RetryError("GameSlug", []),
+    )
+
+    for _ in range(2):
+        assert twitch._Twitch__get_drops_enabled_directory(
+            "hunt-showdown-1896", game_id=HUNT_GAME_ID
+        ) == (set(), False)
+
+    assert calls.count(("GameSlug", HUNT_GAME_ID)) == 2
+    assert twitch.game_directory_slugs == {}
+
+
+def test_drops_directory_looks_up_a_remembered_slug_that_stopped_matching(
+    monkeypatch,
+):
+    twitch, calls = _hunt_twitch(
+        monkeypatch, {"hunt-showdown": _hunt_directory(["psychoghost"])}
+    )
+    twitch.game_directory_slugs = {HUNT_GAME_ID: "retired-slug"}
+
+    assert twitch._Twitch__get_drops_enabled_directory(
+        "hunt-showdown-1896", game_id=HUNT_GAME_ID
+    ) == ({"psychoghost"}, True)
+    assert calls == [
+        ("DirectoryPage_Game", "retired-slug"),
+        ("GameSlug", HUNT_GAME_ID),
+        ("DirectoryPage_Game", "hunt-showdown"),
+    ]
+    assert twitch.game_directory_slugs == {HUNT_GAME_ID: "hunt-showdown"}
+
+
+def test_drops_directory_does_not_look_up_a_slug_that_already_matches(monkeypatch):
+    twitch, calls = _hunt_twitch(
+        monkeypatch, {"hunt-showdown-1896": _hunt_directory(["psychoghost"])}
+    )
+
+    assert twitch._Twitch__get_drops_enabled_directory(
+        "hunt-showdown-1896", game_id=HUNT_GAME_ID
+    ) == ({"psychoghost"}, True)
+    assert calls == [("DirectoryPage_Game", "hunt-showdown-1896")]
+
+
+def test_drops_directory_ignores_a_slug_answer_for_another_game(monkeypatch):
+    twitch, calls = _hunt_twitch(
+        monkeypatch,
+        {"hunt-showdown": _hunt_directory(["psychoghost"])},
+        slug_lookup={"data": {"game": {"id": "other-id", "slug": "hunt-showdown"}}},
+    )
+
+    assert twitch._Twitch__get_drops_enabled_directory(
+        "hunt-showdown-1896", game_id=HUNT_GAME_ID
+    ) == (set(), False)
+    assert ("DirectoryPage_Game", "hunt-showdown") not in calls
+
+
+def test_forced_streamer_missing_from_partial_directory_uses_channel_campaigns(
+    monkeypatch, caplog
+):
+    # The directory returns one page; in a busy category a Drops-enabled
+    # channel can be missing from it (#210).
+    twitch, calls = _hunt_twitch(
+        monkeypatch,
+        {"hunt-showdown": _hunt_directory(["someone_else"], has_next_page=True)},
+        channel_campaigns=[
+            {
+                "id": "halloween",
+                "game": {"id": HUNT_GAME_ID, "name": "Hunt: Showdown 1896"},
+            }
+        ],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert twitch.get_live_streamers_for_category("hunt-showdown|psychoghost") == [
+            "psychoghost"
+        ]
+
+    assert ("DropsHighlightService_AvailableDrops", "39067173") in calls
+    assert "Using forced category streamer 'psychoghost'" in caplog.text
+
+
+def test_forced_streamer_missing_from_partial_directory_needs_a_campaign_for_the_game(
+    monkeypatch, caplog
+):
+    twitch, _ = _hunt_twitch(
+        monkeypatch,
+        {"hunt-showdown": _hunt_directory(["someone_else"], has_next_page=True)},
+        channel_campaigns=[{"id": "other", "game": {"id": "other-game-id"}}],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert twitch.get_live_streamers_for_category("hunt-showdown|psychoghost") == []
+
+    assert (
+        "Twitch lists no 'Hunt: Showdown 1896' Drops campaign on that channel"
+        in caplog.text
+    )
+
+
+def test_forced_streamer_channel_campaign_lookup_failure_raises(monkeypatch):
+    twitch, _ = _hunt_twitch(
+        monkeypatch,
+        {"hunt-showdown": _hunt_directory(["someone_else"], has_next_page=True)},
+        channel_campaigns=RetryError("DropsHighlightService_AvailableDrops", []),
+    )
+    eligibility = {("hunt-showdown-1896", "previous"): (1, 1)}
+    twitch.category_campaign_eligibility = dict(eligibility)
+
+    with pytest.raises(CategoryLookupFailedException) as error:
+        twitch.get_live_streamers_for_category("hunt-showdown|psychoghost")
+
+    assert error.value.game_slug == "hunt-showdown-1896"
+    assert twitch.category_campaign_eligibility == eligibility
+
+
+def test_forced_streamer_missing_from_complete_directory_is_rejected(
+    monkeypatch, caplog
+):
+    # channel_campaigns is None: asking the channel would fail the test.
+    twitch, _ = _hunt_twitch(
+        monkeypatch, {"hunt-showdown": _hunt_directory(["someone_else"])}
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert twitch.get_live_streamers_for_category("hunt-showdown|psychoghost") == []
+
+    assert "not listed in Twitch's Drops-enabled directory" in caplog.text
+
+
 def test_restricted_campaign_channel_lookup_failure_raises(monkeypatch):
     twitch = _category_lookup_twitch()
     twitch.active_drop_campaigns = {
