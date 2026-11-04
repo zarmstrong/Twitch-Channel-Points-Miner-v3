@@ -2986,8 +2986,9 @@ class Twitch(object):
         """Ask Twitch which game each configured category's slug belongs to,
         so the category is keyed by that game's name like its campaigns and
         streams. A slug Twitch has no game for (a game name, or an alias the
-        Twitch Drops gist resolves) keeps its own. Answers are remembered;
-        a failed lookup is tried again on the next call."""
+        Twitch Drops gist resolves) keeps its own. Answers are remembered. A
+        failed request ends the lookup, and every category it left unresolved
+        is tried again on the next call."""
         resolved = getattr(self, "category_game_slugs", None)
         if resolved is None:
             resolved = self.category_game_slugs = {}
@@ -3000,8 +3001,11 @@ class Twitch(object):
             try:
                 response = self.gql.post_gql_request_raw("CategoryGame", request)
             except RetryError as error:
+                # Each failed request has already waited through its retries;
+                # while Twitch is failing, the rest would only wait the same.
+                # Unresolved categories keep their own slug until a reload.
                 logger.debug(f"Error looking up the game of category '{slug}': {error}")
-                continue
+                break
             if not isinstance(response, dict) or response.get("errors"):
                 continue
             data = response.get("data")

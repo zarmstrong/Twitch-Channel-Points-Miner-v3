@@ -4289,6 +4289,31 @@ def test_category_game_lookup_without_an_answer_is_tried_again(
     assert calls == [("CategoryGame", "hunt-showdown")] * 2
 
 
+def test_failed_category_game_request_ends_the_lookup_until_the_next_call(
+    monkeypatch,
+):
+    # A failed request has already waited through its retries; looking up the
+    # other categories while Twitch is failing would only wait the same.
+    twitch, calls = _hunt_category_twitch(
+        monkeypatch, category_game=RetryError("CategoryGame", [])
+    )
+
+    twitch.resolve_category_game_slugs(["hunt-showdown", "overwatch"])
+
+    assert calls == [("CategoryGame", "hunt-showdown")]
+
+    twitch.gql.post_gql_request_raw = lambda operation, request: (
+        calls.append((operation, request["variables"]["slug"]))
+        or {"data": {"game": None}}
+    )
+    twitch.resolve_category_game_slugs(["hunt-showdown", "overwatch"])
+
+    assert calls[1:] == [
+        ("CategoryGame", "hunt-showdown"),
+        ("CategoryGame", "overwatch"),
+    ]
+
+
 def test_category_given_by_twitch_slug_matches_its_games_twitch_campaign(
     monkeypatch,
 ):
