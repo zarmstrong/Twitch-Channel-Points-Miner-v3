@@ -73,7 +73,10 @@ def _miner():
     miner.daily_report_in_progress = None
     miner.daily_report_date = date(2026, 7, 20)
     miner.daily_report_state_path = "/unused/daily-report.json"
-    miner.twitch = SimpleNamespace(drop_report_snapshot=MagicMock(return_value={}))
+    miner.twitch = SimpleNamespace(
+        drop_report_snapshot=MagicMock(return_value={}),
+        unlinked_drop_report=MagicMock(return_value=[]),
+    )
     return miner
 
 
@@ -137,6 +140,81 @@ def test_daily_report_omits_unchanged_streamers_and_includes_drop_context():
     assert "alice: +250 channel points" in message
     assert "bob:" not in message
     assert "- Warframe — TennoCon 2026 — Cool Cat: +56m of 120m, in progress" in message
+    assert "game account" not in message
+
+
+def test_daily_report_lists_rewards_waiting_on_account_link():
+    # Nothing else changed: the unlinked Drops alone send the report, every
+    # day, because linking the account is the one thing the user has to do.
+    miner = _miner()
+    miner.streamers[0].channel_points = 1000
+    miner.streamers[1].channel_points = 550
+    miner.twitch.unlinked_drop_report.return_value = [
+        {
+            "campaign_id": "campaign-1",
+            "campaign": "Hunt 1896 (Week 1, Pt. 1)",
+            "category": "Hunt: Showdown 1896",
+            "url": "https://www.huntshowdown.com/twitchdrops",
+            "drops": ["Random Legendary Skin", "Supply Crate ×3"],
+            "count": 4,
+        },
+        {
+            "campaign_id": "campaign-2",
+            "campaign": "Other Campaign",
+            "category": "Other Game",
+            "url": None,
+            "drops": ["Badge"],
+            "count": 1,
+        },
+        {
+            "campaign_id": "campaign-3",
+            "campaign": "Zone Drops",
+            "category": "Zone Game",
+            "url": "https://zone.example/link",
+            "linked": True,
+            "drops": ["Keycard"],
+            "count": 1,
+        },
+    ]
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+
+    message = _send_report(miner)
+
+    assert "6 reward(s) can't be claimed until a game account is linked:" in message
+    assert (
+        "- Zone Game — Zone Drops: Keycard — account now linked; claim pending"
+        in message
+    )
+    assert "zone.example" not in message
+    assert (
+        "- Hunt: Showdown 1896 — Hunt 1896 (Week 1, Pt. 1): Random Legendary Skin, "
+        "Supply Crate ×3 — link at https://www.huntshowdown.com/twitchdrops"
+    ) in message
+    assert "- Other Game — Other Campaign: Badge\n" in message + "\n"
+    assert "link at" not in message.split("Other Campaign")[1]
+
+
+def test_daily_report_header_when_every_campaign_is_linked():
+    miner = _miner()
+    miner.streamers[0].channel_points = 1000
+    miner.streamers[1].channel_points = 550
+    miner.twitch.unlinked_drop_report.return_value = [
+        {
+            "campaign_id": "campaign-3",
+            "campaign": "Zone Drops",
+            "category": "Zone Game",
+            "url": "https://zone.example/link",
+            "linked": True,
+            "drops": ["Keycard ×2"],
+            "count": 2,
+        }
+    ]
+    Settings.logger = SimpleNamespace(daily_report=True, daily_report_time="09:00")
+
+    message = _send_report(miner)
+
+    assert "2 reward(s) waiting for Twitch to confirm the game account link:" in message
+    assert "can't be claimed" not in message
 
 
 def test_daily_report_suppresses_report_when_nothing_changed():

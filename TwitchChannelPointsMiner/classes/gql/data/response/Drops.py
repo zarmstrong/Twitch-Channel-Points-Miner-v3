@@ -175,10 +175,18 @@ class DropCampaignDetailsResponse:
 
 
 class DropsPageClaimDropsResponse:
-    def __init__(self, status: str | None, errors: list | None):
+    def __init__(
+        self,
+        status: str | None,
+        errors: list | None,
+        is_user_account_connected: bool | None = None,
+    ):
         # The type of `errors` is unknown because I couldn't find an instance of it happening
         self.status = status
         self.errors = errors
+        # False when the campaign's game account is not linked to Twitch: the
+        # claim is accepted but the reward is not delivered. None when absent.
+        self.is_user_account_connected = is_user_account_connected
 
     def __repr__(self):
         return f"DropsPageClaimDropsResponse({self.__dict__})"

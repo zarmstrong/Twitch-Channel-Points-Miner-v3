@@ -115,6 +115,31 @@ def test_drop_campaign_details_parser_reads_drop_campaign_field():
     assert response.campaign.id == "campaign-1"
 
 
+def test_claim_drop_rewards_parser_reads_account_link_flag():
+    response = Parser().parse_drop_page_claim_drop_rewards(
+        {
+            "data": {
+                "claimDropRewards": {
+                    "status": "ELIGIBLE_FOR_ALL",
+                    "isUserAccountConnected": False,
+                }
+            }
+        }
+    )
+
+    assert response.status == "ELIGIBLE_FOR_ALL"
+    assert response.is_user_account_connected is False
+
+
+def test_claim_drop_rewards_parser_without_account_link_flag():
+    response = Parser().parse_drop_page_claim_drop_rewards(
+        {"data": {"claimDropRewards": {"status": "ELIGIBLE_FOR_ALL"}}}
+    )
+
+    assert response.status == "ELIGIBLE_FOR_ALL"
+    assert response.is_user_account_connected is None
+
+
 def test_available_drops_parser_preserves_channel_campaign_data():
     campaign = {
         "id": "campaign-1",

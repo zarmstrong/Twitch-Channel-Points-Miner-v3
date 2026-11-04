@@ -1287,8 +1287,10 @@ starttls=False` for implicit TLS, commonly on port 465. For scheduled summaries,
 subscribe to `DAILY_REPORT` and set `daily_report=True`. Report progress is saved
 per account under `logs/.state/`, including Drop progress and the points of
 channels added or removed during the day, so restarting the miner doesn't drop
-them from the next report. An overdue report is sent after startup finishes
-refreshing streamer balances.
+them from the next report. The report also lists finished Drops that Twitch
+won't deliver until the campaign's game account is linked, with the link URL,
+every day until the account is linked. An overdue report is sent after startup
+finishes refreshing streamer balances.
 
 #### Events
 
@@ -1317,6 +1319,7 @@ of these values in each provider's `events` list.
 | `JOIN_RAID` | The miner follows a raid to another channel. |
 | `DROP_CLAIM` | A completed Drop reward is claimed. |
 | `DROP_STATUS` | Drop discovery, eligibility, or progress status is reported. This can be verbose. |
+| `DROP_LINK_REQUIRED` | A finished Drop can't be claimed because the campaign's game account isn't linked to Twitch. Sent once per campaign per run (so again after a restart) with the link URL, and once more when its Drops have been claimed. |
 | `CHAT_MENTION` | The configured username is mentioned in joined chat. Chat presence must be enabled. |
 | `CONFIGURATION` | Startup, reload, authentication, or other configuration information requires attention. Critical authentication alerts may be forced through configured providers. |
 

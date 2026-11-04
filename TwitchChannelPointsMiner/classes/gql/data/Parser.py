@@ -904,6 +904,7 @@ class Parser:
         """
         _, _, data = self.parse_base_response(response, True)
         status = None
+        is_user_account_connected = None
         with JsonParentContext("data"):
             claim_drop_rewards = parse_expected_value(
                 data, "claimDropRewards", optional_parser(expect_dict)
@@ -914,9 +915,16 @@ class Parser:
                     status = parse_expected_value(
                         claim_drop_rewards, "status", expect_str
                     )
+                    is_user_account_connected = parse_value(
+                        claim_drop_rewards,
+                        "isUserAccountConnected",
+                        optional_parser(expect_bool),
+                    )
 
             data_errors = parse_value(data, "errors", optional_parser(expect_list))
-            return Drops.DropsPageClaimDropsResponse(status, data_errors)
+            return Drops.DropsPageClaimDropsResponse(
+                status, data_errors, is_user_account_connected
+            )
 
     def parse_user_points_contribution(
         self, response: Any

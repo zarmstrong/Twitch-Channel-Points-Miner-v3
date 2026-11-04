@@ -136,6 +136,14 @@ PROMPT_CLAIM_DEBOUNCE_SECONDS = 300
 # Twitch can accept a claim while the inventory keeps listing the drop as
 # unclaimed. Wait this long before claiming the same drop instance again.
 ACCEPTED_CLAIM_RETRY_SECONDS = 60 * 60
+# A claim Twitch accepted without delivering the reward, because the
+# campaign's game account is not linked. The inventory reporting the account
+# as linked retries it at once; this is only the fallback.
+UNLINKED_CLAIM_RETRY_SECONDS = 6 * 60 * 60
+# How long an unlinked claim's drop may be missing from the inventory before
+# the claim is forgotten: long enough to ride out short or empty responses,
+# short enough that an ended campaign leaves the daily report the same day.
+UNLINKED_CLAIM_MISSING_GRACE_SECONDS = 15 * 60
 
 
 class Twitch(object):
@@ -203,6 +211,8 @@ class Twitch(object):
         "prompt_claim_pass_lock",
         "prompt_claim_last",
         "accepted_drop_claims",
+        "unlinked_drop_claims",
+        "claim_requests_sent",
         "claim_drop_lock",
         "campaign_game_slugs",
         "campaign_names",
@@ -336,6 +346,14 @@ class Twitch(object):
         # drop_instance_id -> monotonic time Twitch accepted its claim, or of
         # the last retry since then.
         self.accepted_drop_claims = {}
+        # drop_instance_id -> the claim Twitch accepted but will not deliver
+        # until the campaign's game account is linked (see
+        # __record_unlinked_claim). Written only under the claim lock and
+        # always replaced wholesale, so unlinked_drop_report() reads it
+        # without the lock.
+        self.unlinked_drop_claims = {}
+        # Claim requests actually sent, so claim passes only pace requests.
+        self.claim_requests_sent = 0
         # Serializes claims: the sync and prompt-claim passes can reach the
         # same drop at once.
         self.claim_drop_lock = Lock()
@@ -7889,6 +7907,8 @@ class Twitch(object):
             if isinstance(inventory, dict)
             else None
         )
+        if isinstance(campaigns_in_progress, list):
+            self.__reconcile_unlinked_claims(campaigns_in_progress)
         if campaigns_in_progress not in [None, {}]:
             campaigns_by_id = {campaign.id: campaign for campaign in campaigns}
             for campaign in campaigns:
@@ -7906,12 +7926,16 @@ class Twitch(object):
                 # otherwise be silently skipped by both this and the fallback
                 # below. Snapshot which ids it actually covers before it runs.
                 campaign_tracked_drop_ids = set()
+                # Whether the campaign's game account is linked, and where to
+                # link it: the Campaign entity does not carry this.
+                campaign_link = self.__campaign_link_from_inventory(progress)
 
                 if campaign_ref is not None:
                     campaign_ref.in_inventory = True
                     campaign_tracked_drop_ids = {drop.id for drop in campaign_ref.drops}
                     campaign_ref.sync_drops(
-                        progress.get("timeBasedDrops", []), self.claim_drop
+                        progress.get("timeBasedDrops", []),
+                        functools.partial(self.claim_drop, campaign_link=campaign_link),
                     )
                     # Remove all the claimed drops
                     campaign_ref.clear_drops()
@@ -7951,6 +7975,7 @@ class Twitch(object):
                                     streamer_username=None,
                                     campaign_name_override=campaign_name_override,
                                     category_name_override=category_name_override,
+                                    campaign_link=campaign_link,
                                 )
                             except (KeyError, TypeError, ValueError):
                                 pass
@@ -8312,9 +8337,10 @@ class Twitch(object):
             }
 
     def __mark_drop_accepted(self, drop):
-        # Twitch accepted the claim, so the drop has nothing left to watch
-        # even while the inventory keeps listing it unclaimed. Called under
-        # the claim lock; inventory syncs never write this.
+        # Twitch accepted the claim (even one it will not deliver until the
+        # game account is linked), so the drop has nothing left to watch
+        # while the inventory keeps listing it unclaimed. Called under the
+        # claim lock; inventory syncs never write this.
         if drop.id:
             self.accepted_drop_ids = frozenset(
                 getattr(self, "accepted_drop_ids", None) or ()
@@ -8330,6 +8356,240 @@ class Twitch(object):
             getattr(self, "drop_inventory_finished_ids", None) or ()
         ) | frozenset(getattr(self, "accepted_drop_ids", None) or ())
 
+    @staticmethod
+    def __campaign_link_from_inventory(campaign):
+        # The game-account link state of an inventory dropCampaignsInProgress
+        # entry, for claim_drop's campaign_link. "connected" is None when
+        # Twitch sent no self edge. The campaign's name and game are not
+        # carried: the call sites already pass them as overrides.
+        if not isinstance(campaign, dict):
+            return None
+        self_edge = campaign.get("self")
+        connected = (
+            self_edge.get("isAccountConnected") if isinstance(self_edge, dict) else None
+        )
+        return {
+            "campaign_id": campaign.get("id"),
+            "connected": connected if isinstance(connected, bool) else None,
+            "url": campaign.get("accountLinkURL") or None,
+        }
+
+    @staticmethod
+    def __link_campaign_id(campaign, campaign_link):
+        if isinstance(campaign_link, dict) and campaign_link.get("campaign_id"):
+            return str(campaign_link["campaign_id"])
+        campaign_id = getattr(campaign, "id", None)
+        return str(campaign_id) if campaign_id else None
+
+    def __unlinked_drop_claims_alive(self, now):
+        # Age is the backstop for entries the sync pass never reconciles
+        # (the inventory stopped loading, say). "seen" is the last sync that
+        # listed the drop unclaimed; the retry stamp alone would age out an
+        # entry whose claim is skipped for 12h.
+        entries = getattr(self, "unlinked_drop_claims", None) or {}
+        if not entries:
+            return {}
+        return {
+            instance_id: entry
+            for instance_id, entry in entries.items()
+            if (now - max(entry["stamp"], entry.get("seen", entry["stamp"])))
+            < 2 * UNLINKED_CLAIM_RETRY_SECONDS
+        }
+
+    def __reconcile_unlinked_claims(self, campaigns_in_progress):
+        # Entries are refreshed only when a claim pass visits the drop. A drop
+        # the inventory stopped listing as unclaimed (delivered after the
+        # account got linked, claimed on Twitch, or its campaign ended) must
+        # not sit in the daily report until it ages out. A drop missing for
+        # less than the grace period is kept: forgetting it on a transient
+        # short or empty inventory would re-send the claim and re-warn on
+        # the next full one.
+        if not (getattr(self, "unlinked_drop_claims", None) or {}):
+            return
+        now = time.monotonic()
+        pending_instance_ids = set()
+        delivered_instance_ids = set()
+        # (campaign id, drop id): a claimed listing of the same drop id under
+        # another campaign is not this instance's delivery.
+        delivered_campaign_drops = set()
+        for campaign in campaigns_in_progress:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = str(campaign["id"]) if campaign.get("id") else None
+            for drop in campaign.get("timeBasedDrops", []) or []:
+                drop_self = drop.get("self") if isinstance(drop, dict) else None
+                if not isinstance(drop_self, dict):
+                    continue
+                instance_id = drop_self.get("dropInstanceID")
+                if drop_self.get("isClaimed") is True:
+                    if instance_id:
+                        delivered_instance_ids.add(instance_id)
+                    if campaign_id and drop.get("id"):
+                        delivered_campaign_drops.add((campaign_id, str(drop["id"])))
+                elif instance_id:
+                    pending_instance_ids.add(instance_id)
+        with self.__claim_lock():
+            alive = self.__unlinked_drop_claims_alive(now)
+            self.unlinked_drop_claims = {
+                instance_id: (
+                    {**entry, "seen": now, "missing_since": None}
+                    if instance_id in pending_instance_ids
+                    else {
+                        **entry,
+                        "missing_since": entry.get("missing_since") or now,
+                    }
+                )
+                for instance_id, entry in alive.items()
+            }
+            for instance_id, entry in list(self.unlinked_drop_claims.items()):
+                # A repeatable drop lists its earlier, claimed instance next
+                # to the pending one; the pending one is not delivered.
+                delivered = instance_id in delivered_instance_ids or (
+                    instance_id not in pending_instance_ids
+                    and (entry["campaign_id"], entry.get("drop_id"))
+                    in delivered_campaign_drops
+                )
+                if not delivered and (
+                    entry["missing_since"] is None
+                    or (now - entry["missing_since"])
+                    < UNLINKED_CLAIM_MISSING_GRACE_SECONDS
+                ):
+                    continue
+                if not delivered:
+                    self.__log_drop_check(
+                        f"drop {entry.get('drop_id')} of campaign "
+                        f"{entry['campaign_id']} left the inventory; forgetting "
+                        "its unlinked claim",
+                        level=logging.DEBUG,
+                    )
+                self.__forget_unlinked_claim(instance_id, entry, delivered)
+
+    def unlinked_drop_report(self):
+        """Return the finished Drops Twitch accepted but will not deliver
+        until the campaign's game account is linked, grouped by campaign and
+        sorted by game and campaign name."""
+        by_campaign = {}
+        for instance_id, entry in self.__unlinked_drop_claims_alive(
+            time.monotonic()
+        ).items():
+            # Without a campaign id, each drop is its own group rather than
+            # all of them merging under one name and URL.
+            group = by_campaign.setdefault(
+                entry["campaign_id"] or instance_id,
+                {
+                    "campaign_id": entry["campaign_id"],
+                    "campaign": entry["campaign"],
+                    "category": entry["category"],
+                    "url": entry["url"],
+                    # The inventory now reports the account linked; the claim
+                    # endpoint has not caught up, so the drop is still waiting.
+                    "linked": False,
+                    "names": {},
+                    "count": 0,
+                },
+            )
+            group["names"][entry["drop"]] = group["names"].get(entry["drop"], 0) + 1
+            group["count"] += 1
+            if group["url"] is None:
+                group["url"] = entry["url"]
+            if entry.get("connected") is True:
+                group["linked"] = True
+        report = []
+        for group in by_campaign.values():
+            names = group.pop("names")
+            group["drops"] = [
+                name if times == 1 else f"{name} ×{times}"
+                for name, times in sorted(names.items())
+            ]
+            report.append(group)
+        return sorted(
+            report,
+            key=lambda group: (
+                str(group["category"] or ""),
+                str(group["campaign"] or ""),
+            ),
+        )
+
+    def __record_unlinked_claim(
+        self,
+        drop,
+        now,
+        campaign=None,
+        campaign_link=None,
+        campaign_name_override=None,
+        category_name_override=None,
+    ):
+        # Twitch accepted the claim but will not deliver the reward until the
+        # campaign's game account is linked, and the inventory keeps listing
+        # the drop unclaimed. Not a claim: no Claim log, no DROP_CLAIM, no
+        # analytics, and the caller keeps is_claimed False. Warn once per
+        # campaign (again after a restart, as a reminder) and back off until
+        # the inventory reports the account linked.
+        instance_id = drop.drop_instance_id
+        self.accepted_drop_claims.pop(instance_id, None)
+        campaign_id = self.__link_campaign_id(campaign, campaign_link)
+        campaign_name = campaign_name_override or getattr(campaign, "name", None)
+        category_name = category_name_override
+        if category_name is None and campaign is not None:
+            game = campaign.game or {}
+            category_name = game.get("displayName") or game.get("name")
+        url = campaign_link.get("url") if isinstance(campaign_link, dict) else None
+        alive = self.unlinked_drop_claims
+        already_warned = instance_id in alive or (
+            campaign_id is not None
+            and any(entry["campaign_id"] == campaign_id for entry in alive.values())
+        )
+        self.unlinked_drop_claims = {
+            **alive,
+            instance_id: {
+                "stamp": now,
+                "campaign_id": campaign_id,
+                "drop_id": str(drop.id) if getattr(drop, "id", None) else None,
+                "campaign": campaign_name,
+                "category": category_name,
+                "url": url,
+                "drop": str(getattr(drop, "name", None) or "Unknown drop"),
+                "connected": (
+                    campaign_link.get("connected")
+                    if isinstance(campaign_link, dict)
+                    else None
+                ),
+            },
+        }
+        self.__mark_drop_accepted(drop)
+        if not already_warned:
+            logger.warning(
+                f'Can\'t claim Drops from "{campaign_name or "Unknown campaign"}" '
+                f"({category_name or 'Unknown game'}): link your game account"
+                + (f" at {url}" if url else "")
+                + ". Earned Drops stay claimable for a while after linking.",
+                extra={"emoji": ":warning:", "event": Events.DROP_LINK_REQUIRED},
+            )
+        return False
+
+    def __forget_unlinked_claim(self, instance_id, entry, delivered):
+        # Called under the claim lock. The reward is delivered, so the
+        # account got linked; or the inventory stopped listing the drop.
+        self.unlinked_drop_claims = {
+            other_id: other
+            for other_id, other in self.unlinked_drop_claims.items()
+            if other_id != instance_id
+        }
+        if not delivered:
+            return
+        campaign_id = entry["campaign_id"]
+        if campaign_id is not None and any(
+            other["campaign_id"] == campaign_id
+            for other in self.unlinked_drop_claims.values()
+        ):
+            return
+        # Says what was observed: the inventory does not tell who claimed it.
+        logger.info(
+            f'Drops from "{entry["campaign"] or "Unknown campaign"}" have been '
+            "claimed; no longer waiting on a game account link",
+            extra={"emoji": ":link:", "event": Events.DROP_LINK_REQUIRED},
+        )
+
     def claim_drop(
         self,
         drop,
@@ -8337,6 +8597,7 @@ class Twitch(object):
         streamer_username=None,
         campaign_name_override=None,
         category_name_override=None,
+        campaign_link=None,
     ):
         # Held across the request so a concurrent pass sees the accepted claim
         # instead of claiming and notifying a second time.
@@ -8347,6 +8608,7 @@ class Twitch(object):
                 streamer_username=streamer_username,
                 campaign_name_override=campaign_name_override,
                 category_name_override=category_name_override,
+                campaign_link=campaign_link,
             )
 
     def __claim_drop(
@@ -8356,11 +8618,69 @@ class Twitch(object):
         streamer_username=None,
         campaign_name_override=None,
         category_name_override=None,
+        campaign_link=None,
     ):
         if getattr(self, "accepted_drop_claims", None) is None:
             self.accepted_drop_claims = {}
         now = time.monotonic()
-        accepted_at = self.accepted_drop_claims.get(drop.drop_instance_id)
+        self.unlinked_drop_claims = self.__unlinked_drop_claims_alive(now)
+        instance_id = drop.drop_instance_id
+        inventory_connected = (
+            campaign_link.get("connected") if isinstance(campaign_link, dict) else None
+        )
+        unlinked = self.unlinked_drop_claims.get(instance_id)
+        if unlinked is not None:
+            if inventory_connected is True and unlinked.get("connected") is not True:
+                # The inventory just started reporting the account as linked:
+                # retry now. Only on that edge, because the sync pass runs
+                # every minute and a stale flag must not send a claim a
+                # minute. Record the flag before sending, so a retry that
+                # still fails waits a full interval.
+                self.__log_drop_check(
+                    f"inventory reports the game account for campaign "
+                    f"{unlinked['campaign_id']} linked; retrying claim of drop "
+                    f"{drop.id}",
+                    level=logging.DEBUG,
+                )
+                self.unlinked_drop_claims = {
+                    **self.unlinked_drop_claims,
+                    instance_id: {**unlinked, "stamp": now, "connected": True},
+                }
+            elif (now - unlinked["stamp"]) < (
+                # The inventory says linked but the last claim said not: the
+                # claim endpoint can lag the link, so retry like an accepted
+                # claim rather than waiting the full unlinked interval.
+                ACCEPTED_CLAIM_RETRY_SECONDS
+                if inventory_connected is True
+                else UNLINKED_CLAIM_RETRY_SECONDS
+            ):
+                # Repeats on every claim pass while the account stays unlinked.
+                self.__log_drop_check(
+                    f"skipping claim of drop {drop.id}; the game account for "
+                    f"campaign {unlinked['campaign_id']} is not linked",
+                    level=logging.DEBUG,
+                )
+                link_url = (
+                    campaign_link.get("url")
+                    if isinstance(campaign_link, dict)
+                    else None
+                )
+                if link_url and unlinked.get("url") != link_url:
+                    # Recorded from a pass without the inventory's link URL:
+                    # the daily report should still carry it.
+                    self.unlinked_drop_claims = {
+                        **self.unlinked_drop_claims,
+                        instance_id: {**unlinked, "url": link_url},
+                    }
+                self.__mark_drop_accepted(drop)
+                return False
+            else:
+                # Stamp the retry before sending it, as for accepted claims.
+                self.unlinked_drop_claims = {
+                    **self.unlinked_drop_claims,
+                    instance_id: {**unlinked, "stamp": now},
+                }
+        accepted_at = self.accepted_drop_claims.get(instance_id)
         if accepted_at is not None:
             if (now - accepted_at) < ACCEPTED_CLAIM_RETRY_SECONDS:
                 # Repeats on every claim pass while the inventory lags.
@@ -8380,6 +8700,7 @@ class Twitch(object):
                 extra={"emoji": ":package:"},
             )
 
+        self.claim_requests_sent = getattr(self, "claim_requests_sent", 0) + 1
         try:
             response = self.gql.claim_drop_rewards(drop.drop_instance_id)
         except RetryError as error:
@@ -8389,6 +8710,22 @@ class Twitch(object):
             if response.errors:
                 logger.error(f"Unable to claim {drop}: {response.errors}")
                 return False
+            # Checked before the accepted statuses: an unlinked response is
+            # accepted by Twitch but delivers nothing, and must not re-stamp
+            # the accepted claim or count as one. An already-claimed drop is
+            # delivered whatever the flag says.
+            if (
+                response.status == "ELIGIBLE_FOR_ALL"
+                and getattr(response, "is_user_account_connected", None) is False
+            ):
+                return self.__record_unlinked_claim(
+                    drop,
+                    now,
+                    campaign=campaign,
+                    campaign_link=campaign_link,
+                    campaign_name_override=campaign_name_override,
+                    category_name_override=category_name_override,
+                )
             if response.status in [
                 "ELIGIBLE_FOR_ALL",
                 "DROP_INSTANCE_ALREADY_CLAIMED",
@@ -8416,6 +8753,8 @@ class Twitch(object):
                         f"Claim {drop}",
                         extra={"emoji": ":package:", "event": Events.DROP_CLAIM},
                     )
+                if unlinked is not None:
+                    self.__forget_unlinked_claim(instance_id, unlinked, True)
                 if campaign is not None:
                     remaining_drops = [
                         campaign_drop
@@ -8464,12 +8803,19 @@ class Twitch(object):
                         drop.update(drop_dict["self"])
                         campaign_drops.append(drop)
                         if drop.is_claimable is True:
+                            sent_before = getattr(self, "claim_requests_sent", 0)
                             drop.is_claimed = self.claim_drop(
                                 drop,
                                 campaign_name_override=campaign_name_override,
                                 category_name_override=category_name_override,
+                                campaign_link=self.__campaign_link_from_inventory(
+                                    campaign
+                                ),
                             )
-                            time.sleep(random.uniform(5, 10))
+                            # Pace requests only; a claim skipped by its
+                            # backoff sent nothing.
+                            if getattr(self, "claim_requests_sent", 0) != sent_before:
+                                time.sleep(random.uniform(5, 10))
                     if campaign_drops and all(
                         drop.is_claimed is True for drop in campaign_drops
                     ):

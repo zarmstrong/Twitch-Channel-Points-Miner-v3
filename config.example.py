@@ -139,6 +139,7 @@ MINER_CONFIG = {
             events=[
                 Events.CHAT_MENTION,
                 Events.DROP_CLAIM,
+                Events.DROP_LINK_REQUIRED,
             ],  # Only these events will be sent
         ),
         gotify=Gotify(
@@ -157,7 +158,11 @@ MINER_CONFIG = {
             token=None,  # Optional access token for protected topics
             priority=3,  # Optional ntfy priority from 1 (min) to 5 (max)
             tags=["twitch"],  # Optional ntfy tags or emoji short names
-            events=[Events.STREAMER_ONLINE, Events.DROP_CLAIM],
+            events=[
+                Events.STREAMER_ONLINE,
+                Events.DROP_CLAIM,
+                Events.DROP_LINK_REQUIRED,
+            ],
         ),
     ),
     "streamer_settings": StreamerSettings(
