@@ -1328,6 +1328,7 @@ of these values in each provider's `events` list.
 | `DROP_LINK_REQUIRED` | A finished Drop can't be claimed because the campaign's game account isn't linked to Twitch. Sent once per campaign per run (so again after a restart) with the link URL, and once more when its Drops have been claimed. |
 | `CHAT_MENTION` | The configured username is mentioned in joined chat. Chat presence must be enabled. |
 | `CONFIGURATION` | Startup, reload, authentication, or other configuration information requires attention. Critical authentication alerts may be forced through configured providers. |
+| `WATCH_STATUS` | Never sent. It only names the *Watching for points* status line for `ColorPalette`; adding it to a notifier's `events` has no effect. |
 
 ### StreamerSettings
 
