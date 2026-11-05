@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from datetime import datetime
+from typing import Optional
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.utils import percentage
@@ -14,6 +15,36 @@ def parse_datetime(datetime_str):
     raise ValueError(f"time data '{datetime_str}' does not match format")
 
 
+def drop_required_subs(drop) -> Optional[int]:
+    """The subscriptions a raw Twitch drop needs (requiredSubs), or None when
+    Twitch did not say: not every operation or response version sends it."""
+    if not isinstance(drop, Mapping):
+        return None
+    required_subs = drop.get("requiredSubs")
+    # bool is an int subclass, but never a count.
+    if isinstance(required_subs, bool) or not isinstance(required_subs, int):
+        return None
+    return max(required_subs, 0)
+
+
+def drop_sub_requirement_unmet(drop) -> bool:
+    """Whether a raw Twitch drop still needs a subscription the account has
+    not made, so watching alone cannot earn it.
+
+    An unknown requirement is not unmet: callers then fall back on the
+    requiredMinutesWatched checks they always made."""
+    required_subs = drop_required_subs(drop)
+    if not required_subs:
+        return False
+    drop_self = drop.get("self")
+    current_subs = (
+        drop_self.get("currentSubs") if isinstance(drop_self, Mapping) else None
+    )
+    if isinstance(current_subs, bool) or not isinstance(current_subs, int):
+        current_subs = 0
+    return current_subs < required_subs
+
+
 class Drop(object):
     __slots__ = [
         "id",
@@ -22,6 +53,8 @@ class Drop(object):
         "benefit_edges",
         "item_art_url",
         "minutes_required",
+        "subs_required",
+        "current_subs",
         "has_preconditions_met",
         "current_minutes_watched",
         "drop_instance_id",
@@ -47,6 +80,9 @@ class Drop(object):
         self.benefit = ", ".join(benefit_names)
         self.item_art_url = self.__extract_item_art_url(self.benefit_edges)
         self.minutes_required = dict["requiredMinutesWatched"] or 0
+        # None when Twitch did not say whether the drop needs a subscription.
+        self.subs_required = drop_required_subs(dict)
+        self.current_subs = 0
 
         self.has_preconditions_met = None  # [True, False], None we don't know
         self.current_minutes_watched = 0
@@ -82,6 +118,9 @@ class Drop(object):
         progress,
     ):
         self.has_preconditions_met = progress["hasPreconditionsMet"]
+        current_subs = progress.get("currentSubs")
+        if isinstance(current_subs, int) and not isinstance(current_subs, bool):
+            self.current_subs = current_subs
 
         updated_percentage = percentage(
             progress["currentMinutesWatched"], self.minutes_required
@@ -114,12 +153,22 @@ class Drop(object):
         )
         self.percentage_progress = updated_percentage
 
+    def needs_subscription(self) -> bool:
+        """Whether the drop still needs a subscription the account has not
+        made; False when Twitch did not say it needs one."""
+        return bool(self.subs_required) and self.current_subs < self.subs_required
+
     def __repr__(self):
-        return f"Drop(id={self.id}, name={self.name}, benefit={self.benefit}, minutes_required={self.minutes_required}, has_preconditions_met={self.has_preconditions_met}, current_minutes_watched={self.current_minutes_watched}, percentage_progress={self.percentage_progress}%, drop_instance_id={self.drop_instance_id}, is_claimed={self.is_claimed})"
+        return f"Drop(id={self.id}, name={self.name}, benefit={self.benefit}, minutes_required={self.minutes_required}, subs_required={self.subs_required}, has_preconditions_met={self.has_preconditions_met}, current_minutes_watched={self.current_minutes_watched}, percentage_progress={self.percentage_progress}%, drop_instance_id={self.drop_instance_id}, is_claimed={self.is_claimed})"
 
     def __str__(self):
+        requirement = (
+            f" - requires {self.subs_required} sub(s)"
+            if self.needs_subscription()
+            else ""
+        )
         return (
-            f"{self.name} ({self.benefit}) {self.current_minutes_watched}/{self.minutes_required} ({self.percentage_progress}%)"
+            f"{self.name} ({self.benefit}) {self.current_minutes_watched}/{self.minutes_required} ({self.percentage_progress}%){requirement}"
             if Settings.logger.less
             else self.__repr__()
         )

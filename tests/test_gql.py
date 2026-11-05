@@ -159,6 +159,54 @@ def test_available_drops_parser_preserves_channel_campaign_data():
     assert response.campaigns_available is True
 
 
+def test_available_drops_parser_preserves_earn_requirement_fields():
+    # The shape of Twitch's 782dad0f... DropsHighlightService_AvailableDrops
+    # response for Hunt: Showdown 1896's "HS 1896 Halloween 2026" campaign.
+    campaign = {
+        "id": "campaign-1",
+        "name": "HS 1896 Halloween 2026",
+        "game": {"id": "500188", "name": "Hunt: Showdown 1896"},
+        "summary": {
+            "includesMWRequirement": True,
+            "includesSubRequirement": True,
+            "isSitewide": False,
+            "isRewardCampaign": False,
+            "isPermanentlyDismissible": False,
+        },
+        "localizedContent": {
+            "title": "HS 1896 Halloween 2026",
+            "actionItems": [
+                "Purchasing or gifting subscriptions to {Channel} while "
+                "they're live in <x:bold>{Category}</x:bold>"
+            ],
+        },
+        "timeBasedDrops": [
+            {
+                "id": "drop-red",
+                "name": "Hunt Red",
+                "requiredSubs": 1,
+                "requiredMinutesWatched": 0,
+            },
+            {
+                "id": "drop-white",
+                "name": "Hunt White",
+                "requiredSubs": 0,
+                "requiredMinutesWatched": 15,
+            },
+        ],
+    }
+    response = Parser().parse_drops_highlight_service_available_drops(
+        {
+            "data": {"channel": {"viewerDropCampaigns": [campaign]}},
+            "extensions": {"operationName": "DropsHighlightService_AvailableDrops"},
+        }
+    )
+
+    assert response.ids == ["campaign-1"]
+    assert response.campaigns == [campaign]
+    assert response.campaigns[0] is not campaign
+
+
 def test_available_drops_parser_distinguishes_null_campaign_data():
     response = Parser().parse_drops_highlight_service_available_drops(
         {
