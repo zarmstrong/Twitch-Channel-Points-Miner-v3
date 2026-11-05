@@ -32,7 +32,7 @@ AVAILABLE_DROPS_OPERATION = getattr(
             "persistedQuery": {
                 "version": 1,
                 "sha256Hash": (
-                    "9a62a09bce5b53e26e64a671e530bc599cb6aab1e5ba3cbd5d85966d3940716f"
+                    "782dad0f032942260171d2d80a654f88bdd0c5a9dddc392e9bc92218a0f42d20"
                 ),
             }
         },
