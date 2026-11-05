@@ -549,3 +549,27 @@ def test_file_log_leaves_the_default_color_out(colored):
     assert formatter.format(_watch_status_record()) == (
         "Watching for points: one (streamer); watching for drops: none"
     )
+
+
+def test_palette_reset_uncolors_watch_status_with_colored_true():
+    settings = LoggerSettings(
+        colored=True, emoji=False, color_palette=ColorPalette(WATCH_STATUS="RESET")
+    )
+    settings.username = ""
+    formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_watch_status_record()) == (
+        f"{Fore.RESET}Watching for points: one (streamer); watching for drops: "
+        f"none{Fore.RESET}"
+    )
+
+
+@pytest.mark.parametrize("colored", [True, False])
+def test_json_log_leaves_the_default_color_out(colored):
+    entry = json.loads(_json_formatter(colored=colored).format(_watch_status_record()))
+
+    assert entry["message"] == (
+        "Watching for points: one (streamer); watching for drops: none"
+    )
+    assert entry["event"] == "WATCH_STATUS"
+    assert "default_color" not in entry

@@ -30,7 +30,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
 )
-from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS
+from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
 from TwitchChannelPointsMiner.utils.Utils import set_default_settings
 
 
@@ -3145,4 +3145,5 @@ def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
         # Not hard-coded in the message, so ColorPalette's WATCH_STATUS color
         # can replace it when colored=True.
         assert "\x1b[" not in message
-        assert extra["default_color"] == Fore.GREEN
+        assert extra["default_color"] == WATCH_STATUS_COLOR
+        assert WATCH_STATUS_COLOR == Fore.GREEN

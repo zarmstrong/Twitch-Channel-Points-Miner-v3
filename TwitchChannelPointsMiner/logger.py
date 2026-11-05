@@ -28,6 +28,10 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Webhook import Webhook
 from TwitchChannelPointsMiner.utils import remove_emoji
 
+# The "Watching for points" line's color: ColorPalette's WATCH_STATUS default,
+# and the color it keeps on the console with colored=False.
+WATCH_STATUS_COLOR = Fore.GREEN
+
 
 # Fore: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.
 class ColorPalette(object):
@@ -39,7 +43,7 @@ class ColorPalette(object):
             setattr(self, str(k), Fore.RESET)
         setattr(self, "BET_WIN", Fore.GREEN)
         setattr(self, "BET_LOSE", Fore.RED)
-        setattr(self, "WATCH_STATUS", Fore.GREEN)
+        setattr(self, "WATCH_STATUS", WATCH_STATUS_COLOR)
 
         for k in kwargs:
             if k.upper() in dir(self) and getattr(self, k.upper()) is not None:

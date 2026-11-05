@@ -67,7 +67,7 @@ from TwitchChannelPointsMiner.constants import (
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
-from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS
+from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -4116,7 +4116,7 @@ class Twitch(object):
             extra={
                 "emoji": ":eye:",
                 "event": Events.WATCH_STATUS,
-                "default_color": Fore.GREEN,
+                "default_color": WATCH_STATUS_COLOR,
                 **SKIP_NOTIFICATIONS,
             },
         )
