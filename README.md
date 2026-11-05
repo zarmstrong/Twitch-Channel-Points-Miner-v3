@@ -492,6 +492,7 @@ settings.
 | `category_refresh_interval_hours` | `6` | Hours between campaign/channel refreshes. Positive values have a 30-minute minimum; `0` disables refresh. |
 | `drop_progress_stall_minutes` | `10` | Rotate to another eligible category channel when authenticated Drop progress remains unchanged for this many minutes. The minimum is `5`; `0` disables stall detection. |
 | `drop_pick_stickiness_minutes` | `15` | Keep watching the currently picked drop channel unless another eligible campaign's deadline is at least this many minutes closer, the channel goes offline, its campaign finishes/ends, or the in-progress drop can no longer complete before its campaign deadline. While the in-progress drop can still finish in time, the pick is held even past the margin. `0` disables stickiness (always switch to the soonest-expiring campaign). |
+| `watch_status_interval_minutes` | `15` | The *Watching for points* status line is logged only when the watched streams, their watch reasons, or their Drop campaigns change. An unchanged line is repeated after this many minutes as a sign of life; `0` logs it only on change. Repeats in between are logged at `DEBUG`, so a file log at `file_level=logging.DEBUG` keeps the full timeline. |
 | `category_drops_override_streamers` | `False` | Twitch counts Drops progress on only one channel at a time, so the miner watches a single Drops stream (category, wildcard, badge, or a configured/followed streamer with an active Drop), chosen by `streamer_source_priority`, and fills the other slot with a points-only stream. When `True`, a configured or followed streamer's Drops for a game that is not in `categories` rank below every discovered Drops stream, even if `STREAMERS`/`FOLLOWERS` rank higher. |
 | `drop_badge_catalog` | `True` | On startup, classify rewards from the shared Drops gist against the shared Twitch badge catalog and persist the result in the config directory. |
 | `drop_badge_refresh_interval_hours` | `1` | Hours between checks for new campaigns. Positive values have a one-hour minimum; `0` keeps the startup check but disables periodic checks. |
@@ -1016,7 +1017,9 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 
 #### Color Palette
 `ColorPalette` customizes console colors by event name. Unspecified events use
-`Fore.RESET`, while prediction wins and losses default to green and red. Values
+`Fore.RESET`, while prediction wins and losses default to green and red, and
+`DROP_STATUS` (including the *Watching for points* status line) defaults to
+green. Values
 may be Colorama constants or case-insensitive color names: `BLACK`, `RED`,
 `GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`, `WHITE`, or `RESET`.
 ```python

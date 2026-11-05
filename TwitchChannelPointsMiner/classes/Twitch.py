@@ -162,6 +162,8 @@ class Twitch(object):
         "channel_points_semaphore",
         "drop_progress_last_saved",
         "drop_status_last_saved",
+        "last_watch_status",
+        "last_watch_status_logged_at",
         "drop_report_state",
         "drop_inventory_progress",
         "drop_inventory_progress_updated_at",
@@ -271,6 +273,10 @@ class Twitch(object):
         self.channel_points_semaphore = BoundedSemaphore(CHANNEL_POINTS_MAX_CONCURRENCY)
         self.drop_progress_last_saved = {}
         self.drop_status_last_saved = {}
+        # The last "Watching for points" line logged at INFO and when, so an
+        # unchanged line is repeated only after watch_status_interval_minutes.
+        self.last_watch_status = None
+        self.last_watch_status_logged_at = 0
         self.drop_report_state = {}
         self.drop_inventory_progress = {}
         self.drop_inventory_progress_updated_at = 0
@@ -4025,7 +4031,12 @@ class Twitch(object):
         )
 
     def __log_watched_streamers(
-        self, streamers, streamers_watching, streamer_source, is_drop_stream
+        self,
+        streamers,
+        streamers_watching,
+        streamer_source,
+        is_drop_stream,
+        interval_minutes=15,
     ):
         def watch_reason(index):
             source = streamer_source(index)
@@ -4080,17 +4091,36 @@ class Twitch(object):
                 else f"{streamer.username} ({reason}; {game_label} drops)"
             )
 
-        logger.info(
-            f"{Fore.GREEN}Watching for points: "
+        # No hard-coded color: ColorPalette's DROP_STATUS color styles it.
+        status = (
+            "Watching for points: "
             f"{', '.join(points_streams) if points_streams else 'none'}; "
             "watching for drops: "
-            f"{', '.join(drops_streams) if drops_streams else 'none'}{Fore.RESET}",
+            f"{', '.join(drops_streams) if drops_streams else 'none'}"
+        )
+        # Log at INFO only when the line changes, or as a reminder once
+        # interval_minutes pass (0 disables the reminder). Repeats in between
+        # go to DEBUG so a debug log keeps the full timeline.
+        now = time.monotonic()
+        interval = max(float(interval_minutes), 0) * 60
+        changed = status != getattr(self, "last_watch_status", None)
+        due = (
+            interval > 0
+            and now - getattr(self, "last_watch_status_logged_at", 0) >= interval
+        )
+        log_at_info = changed or due
+        log = logger.info if log_at_info else logger.debug
+        log(
+            status,
             extra={
                 "emoji": ":eye:",
                 "event": Events.DROP_STATUS,
                 **SKIP_NOTIFICATIONS,
             },
         )
+        if log_at_info:
+            self.last_watch_status = status
+            self.last_watch_status_logged_at = now
 
     def __helix_get(
         self,
@@ -5559,6 +5589,7 @@ class Twitch(object):
         source_priority=None,
         drop_progress_stall_minutes=10,
         drop_pick_stickiness_minutes=0,
+        watch_status_interval_minutes=15,
     ):
         while self.running:
             iteration_started_at = time.time()
@@ -6456,6 +6487,7 @@ class Twitch(object):
                     streamers_watching,
                     streamer_source,
                     is_drop_stream=_is_drop_stream,
+                    interval_minutes=watch_status_interval_minutes,
                 )
 
                 # Segment requests are what earn Drop progress now, so start

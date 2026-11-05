@@ -14,6 +14,8 @@ from TwitchChannelPointsMiner import logger as logger_module
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.logger import (
     JSON_LOG_FIELDS,
+    ColorPalette,
+    GlobalFormatter,
     JsonFormatter,
     LoggerSettings,
     LoggingQueueHandler,
@@ -467,3 +469,48 @@ def test_queue_keeps_traceback_parts_only_for_json(
 
     assert isinstance(queue_handler, QueueHandler)
     assert isinstance(queue_handler, LoggingQueueHandler) is keeps_parts
+
+
+def test_color_palette_colors_drop_status_green_by_default():
+    assert ColorPalette().get(Events.DROP_STATUS) == Fore.GREEN
+    assert ColorPalette(DROP_STATUS="cyan").get(Events.DROP_STATUS) == Fore.CYAN
+    assert ColorPalette(drop_status=Fore.RESET).get(Events.DROP_STATUS) == Fore.RESET
+
+
+def _drop_status_record():
+    record = logging.LogRecord(
+        "miner",
+        logging.INFO,
+        __file__,
+        1,
+        "Watching for points: one (streamer); watching for drops: none",
+        None,
+        None,
+    )
+    record.event = Events.DROP_STATUS
+    return record
+
+
+@pytest.mark.parametrize(
+    "palette, color",
+    [(ColorPalette(), Fore.GREEN), (ColorPalette(DROP_STATUS="MAGENTA"), Fore.MAGENTA)],
+)
+def test_console_colors_drop_status_with_the_palette(palette, color):
+    settings = LoggerSettings(colored=True, emoji=False, color_palette=palette)
+    settings.username = ""
+    formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_drop_status_record()) == (
+        f"{color}Watching for points: one (streamer); watching for drops: none"
+        f"{Fore.RESET}"
+    )
+
+
+def test_uncolored_console_adds_no_color_to_drop_status():
+    settings = LoggerSettings(colored=False, emoji=False)
+    settings.username = ""
+    formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_drop_status_record()) == (
+        "Watching for points: one (streamer); watching for drops: none"
+    )

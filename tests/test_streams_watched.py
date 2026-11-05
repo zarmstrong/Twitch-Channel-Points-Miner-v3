@@ -15,14 +15,21 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _normalize_drop_progress_stall_minutes,
     _normalize_streamer_source_priority,
     _normalize_streams_watched,
+    _normalize_watch_status_interval_minutes,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
-from TwitchChannelPointsMiner.classes.Settings import Priority, Settings, StreamerSource
+from TwitchChannelPointsMiner.classes.Settings import (
+    Events,
+    Priority,
+    Settings,
+    StreamerSource,
+)
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
 )
+from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS
 from TwitchChannelPointsMiner.utils.Utils import set_default_settings
 
 
@@ -181,6 +188,8 @@ def _run_one_watch_iteration(
     twitch.last_wildcard_category_drop_selection = None
     twitch.last_drop_pick_streamer = last_drop_pick_streamer
     twitch.twitchdrops_app_campaigns = {}
+    twitch.last_watch_status = None
+    twitch.last_watch_status_logged_at = 0
     twitch.drop_inventory_progress = drop_inventory_progress or {}
     twitch.drop_inventory_progress_updated_at = (
         now if drop_inventory_progress and now is not None else 0
@@ -2941,3 +2950,196 @@ def test_idle_stream_segment_watchers_are_forgotten():
 
     assert twitch.stream_segment_watchers == {"active": active}
     assert closed == ["idle"]
+
+
+def test_watch_status_interval_defaults_to_fifteen_minutes():
+    mine_parameter = inspect.signature(TwitchChannelPointsMiner.mine).parameters[
+        "watch_status_interval_minutes"
+    ]
+    watcher_parameter = inspect.signature(Twitch.send_minute_watched_events).parameters[
+        "watch_status_interval_minutes"
+    ]
+
+    assert mine_parameter.default == 15
+    assert watcher_parameter.default == 15
+
+
+@pytest.mark.parametrize("value", [-1, True, "15", None, float("nan"), float("inf")])
+def test_watch_status_interval_invalid_values_use_default(caplog, value):
+    assert _normalize_watch_status_interval_minutes(value) == 15
+    assert "watch_status_interval_minutes must be a non-negative number" in (
+        caplog.text
+    )
+
+
+@pytest.mark.parametrize("value", [0, 2.5, 15, 60])
+def test_watch_status_interval_valid_values_are_preserved(caplog, value):
+    assert _normalize_watch_status_interval_minutes(value) == float(value)
+    assert caplog.text == ""
+
+
+def _watch_status_logger(monkeypatch):
+    """Capture the status line's (level, message, extra) and pin the clock."""
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    records = []
+    for level in ("info", "debug"):
+        monkeypatch.setattr(
+            twitch_module.logger,
+            level,
+            lambda message, level=level, **kwargs: records.append(
+                (level, message, kwargs.get("extra", {}))
+            ),
+        )
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: clock["now"])
+    twitch = Twitch.__new__(Twitch)
+    twitch.last_watch_status = None
+    twitch.last_watch_status_logged_at = 0
+    twitch.twitchdrops_app_campaigns = {}
+    return twitch, records, clock
+
+
+def _log_watch_status(
+    twitch,
+    streamers,
+    sources=None,
+    drop_indexes=(),
+    interval_minutes=15,
+):
+    sources = sources or {}
+    twitch._Twitch__log_watched_streamers(
+        streamers,
+        list(range(len(streamers))),
+        lambda index: sources.get(index, StreamerSource.STREAMERS),
+        is_drop_stream=lambda index: index in drop_indexes,
+        interval_minutes=interval_minutes,
+    )
+
+
+def _campaign_streamer(username, campaign_name):
+    streamer = _watch_streamer(username, from_category=True, drops_eligible=True)
+    streamer.stream.game = {"displayName": "Example Game"}
+    streamer.stream.campaigns = [
+        SimpleNamespace(name=campaign_name, game={"displayName": "Example Game"})
+    ]
+    return streamer
+
+
+def test_unchanged_watch_status_is_logged_once_then_at_debug(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    streamers = [_watch_streamer("one"), _watch_streamer("two")]
+
+    _log_watch_status(twitch, streamers)
+    clock["now"] += 20
+    _log_watch_status(twitch, streamers)
+
+    assert [level for level, _, _ in records] == ["info", "debug"]
+    assert records[0][1] == records[1][1]
+    assert records[0][1] == (
+        "Watching for points: one (streamer), two (streamer); "
+        "watching for drops: none"
+    )
+
+
+def test_watch_status_logs_change_in_points_list(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+
+    _log_watch_status(twitch, [_watch_streamer("one"), _watch_streamer("two")])
+    clock["now"] += 20
+    _log_watch_status(twitch, [_watch_streamer("one"), _watch_streamer("three")])
+
+    assert [level for level, _, _ in records] == ["info", "info"]
+    assert "three (streamer)" in records[1][1]
+
+
+def test_watch_status_logs_change_in_drops_list(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    streamers = [_campaign_streamer("one", "Alpha")]
+    sources = {0: StreamerSource.CATEGORIES}
+
+    _log_watch_status(twitch, streamers, sources)
+    clock["now"] += 20
+    _log_watch_status(twitch, streamers, sources, drop_indexes={0})
+
+    assert [level for level, _, _ in records] == ["info", "info"]
+    assert records[0][1].endswith("watching for drops: none")
+    assert "Example Game drop campaign 'Alpha'" in records[1][1]
+
+
+def test_watch_status_logs_change_in_watch_reason(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    streamers = [_watch_streamer("one")]
+
+    _log_watch_status(twitch, streamers, {0: StreamerSource.STREAMERS})
+    clock["now"] += 20
+    _log_watch_status(twitch, streamers, {0: StreamerSource.FOLLOWERS})
+
+    assert [level for level, _, _ in records] == ["info", "info"]
+    assert "one (followed channel)" in records[1][1]
+
+
+def test_watch_status_logs_change_in_campaign(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    sources = {0: StreamerSource.CATEGORIES}
+
+    _log_watch_status(
+        twitch, [_campaign_streamer("one", "Alpha")], sources, drop_indexes={0}
+    )
+    clock["now"] += 20
+    _log_watch_status(
+        twitch, [_campaign_streamer("one", "Beta")], sources, drop_indexes={0}
+    )
+
+    assert [level for level, _, _ in records] == ["info", "info"]
+    assert "'Beta'" in records[1][1]
+
+
+def test_watch_status_repeats_unchanged_line_after_interval(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    streamers = [_watch_streamer("one")]
+
+    _log_watch_status(twitch, streamers)
+    clock["now"] += 14 * 60
+    _log_watch_status(twitch, streamers)
+    clock["now"] += 60
+    _log_watch_status(twitch, streamers)
+    # The reminder restarts the interval.
+    clock["now"] += 14 * 60
+    _log_watch_status(twitch, streamers)
+    clock["now"] += 60
+    _log_watch_status(twitch, streamers)
+
+    assert [level for level, _, _ in records] == [
+        "info",
+        "debug",
+        "info",
+        "debug",
+        "info",
+    ]
+
+
+def test_watch_status_zero_interval_logs_only_on_change(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    streamers = [_watch_streamer("one")]
+
+    _log_watch_status(twitch, streamers, interval_minutes=0)
+    clock["now"] += 24 * 60 * 60
+    _log_watch_status(twitch, streamers, interval_minutes=0)
+
+    assert [level for level, _, _ in records] == ["info", "debug"]
+
+
+def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
+    twitch, records, clock = _watch_status_logger(monkeypatch)
+    streamers = [_watch_streamer("one")]
+
+    _log_watch_status(twitch, streamers)
+    clock["now"] += 20
+    _log_watch_status(twitch, streamers)
+
+    for _, message, extra in records:
+        assert extra["event"] is Events.DROP_STATUS
+        for key in SKIP_NOTIFICATIONS:
+            assert extra[key] is True
+        # No hard-coded color, so ColorPalette's DROP_STATUS color applies.
+        assert "\x1b[" not in message

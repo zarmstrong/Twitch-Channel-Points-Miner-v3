@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 11
+CONFIG_VERSION = 12
 
 import logging
 from colorama import Fore
@@ -328,6 +328,7 @@ MINE_CONFIG = {
     "category_refresh_interval_hours": 3,
     "drop_progress_stall_minutes": 10,
     "drop_pick_stickiness_minutes": 15,
+    "watch_status_interval_minutes": 15,  # Repeat an unchanged "Watching for points" line after this many minutes; 0 logs it only when it changes
     "category_drops_override_streamers": False,  # Twitch counts Drops progress on only one channel at a time, so only one Drops stream is watched, chosen by streamer_source_priority. When True, a configured/followed streamer's Drops for a game NOT in 'categories' rank below category, wildcard, and badge Drops streams even if STREAMERS/FOLLOWERS rank higher.
     "drop_badge_catalog": True,
     "drop_badge_refresh_interval_hours": 1,

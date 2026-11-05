@@ -232,6 +232,41 @@ ANALYTICS_CONFIG = None
     assert settings.file_format is LoggingFormat.TEXT
 
 
+def test_version_eleven_migration_adds_watch_status_interval_minutes():
+    source = """\
+CONFIG_VERSION = 11
+MINER_CONFIG = {"username": "alice"}
+STREAMERS = []
+MINE_CONFIG = {"drop_pick_stickiness_minutes": 15}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 11
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINE_CONFIG"]["drop_pick_stickiness_minutes"] == 15
+    assert namespace["MINE_CONFIG"]["watch_status_interval_minutes"] == 15
+
+
+def test_version_eleven_migration_keeps_existing_watch_status_interval():
+    source = """\
+CONFIG_VERSION = 11
+MINER_CONFIG = {"username": "alice"}
+STREAMERS = []
+MINE_CONFIG = {"watch_status_interval_minutes": 0}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["MINE_CONFIG"]["watch_status_interval_minutes"] == 0
+
+
 def test_version_seven_migration_appends_wildcard_last_to_custom_priority():
     source = """\
 CONFIG_VERSION = 7

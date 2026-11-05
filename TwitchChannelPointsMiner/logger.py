@@ -32,12 +32,14 @@ from TwitchChannelPointsMiner.utils import remove_emoji
 # Fore: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.
 class ColorPalette(object):
     def __init__(self, **kwargs):
-        # Init with default values RESET for all and GREEN and RED only for WIN and LOSE bet
+        # Init with default values RESET for all, GREEN and RED for WIN and LOSE
+        # bet, and GREEN for DROP_STATUS (the "Watching for points" line).
         # Then set args from kwargs
         for k in Events:
             setattr(self, str(k), Fore.RESET)
         setattr(self, "BET_WIN", Fore.GREEN)
         setattr(self, "BET_LOSE", Fore.RED)
+        setattr(self, "DROP_STATUS", Fore.GREEN)
 
         for k in kwargs:
             if k.upper() in dir(self) and getattr(self, k.upper()) is not None:
