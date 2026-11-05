@@ -471,13 +471,18 @@ def test_queue_keeps_traceback_parts_only_for_json(
     assert isinstance(queue_handler, LoggingQueueHandler) is keeps_parts
 
 
-def test_color_palette_colors_drop_status_green_by_default():
-    assert ColorPalette().get(Events.DROP_STATUS) == Fore.GREEN
-    assert ColorPalette(DROP_STATUS="cyan").get(Events.DROP_STATUS) == Fore.CYAN
-    assert ColorPalette(drop_status=Fore.RESET).get(Events.DROP_STATUS) == Fore.RESET
+def test_color_palette_colors_watch_status_green_by_default():
+    assert ColorPalette().get(Events.WATCH_STATUS) == Fore.GREEN
+    assert ColorPalette(WATCH_STATUS="cyan").get(Events.WATCH_STATUS) == Fore.CYAN
+    assert ColorPalette(watch_status=Fore.RESET).get(Events.WATCH_STATUS) == Fore.RESET
 
 
-def _drop_status_record():
+def test_color_palette_leaves_drop_status_uncolored_by_default():
+    # The drop-progress lines log as DROP_STATUS without a color of their own.
+    assert ColorPalette().get(Events.DROP_STATUS) == Fore.RESET
+
+
+def _watch_status_record(default_color=Fore.GREEN):
     record = logging.LogRecord(
         "miner",
         logging.INFO,
@@ -487,30 +492,84 @@ def _drop_status_record():
         None,
         None,
     )
-    record.event = Events.DROP_STATUS
+    record.event = Events.WATCH_STATUS
+    if default_color is not None:
+        record.default_color = default_color
     return record
 
 
 @pytest.mark.parametrize(
     "palette, color",
-    [(ColorPalette(), Fore.GREEN), (ColorPalette(DROP_STATUS="MAGENTA"), Fore.MAGENTA)],
+    [
+        (ColorPalette(), Fore.GREEN),
+        (ColorPalette(WATCH_STATUS="MAGENTA"), Fore.MAGENTA),
+    ],
 )
-def test_console_colors_drop_status_with_the_palette(palette, color):
+def test_console_colors_watch_status_with_the_palette(palette, color):
     settings = LoggerSettings(colored=True, emoji=False, color_palette=palette)
     settings.username = ""
     formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
 
-    assert formatter.format(_drop_status_record()) == (
+    assert formatter.format(_watch_status_record()) == (
         f"{color}Watching for points: one (streamer); watching for drops: none"
         f"{Fore.RESET}"
     )
 
 
-def test_uncolored_console_adds_no_color_to_drop_status():
+def test_uncolored_console_uses_the_record_default_color():
+    # The watch status line was always green before the palette could style
+    # it, so colored=False keeps that look.
+    settings = LoggerSettings(
+        colored=False, emoji=False, color_palette=ColorPalette(WATCH_STATUS="RED")
+    )
+    settings.username = ""
+    formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_watch_status_record()) == (
+        f"{Fore.GREEN}Watching for points: one (streamer); watching for drops: "
+        f"none{Fore.RESET}"
+    )
+
+
+def test_uncolored_console_adds_no_color_without_a_default_color():
     settings = LoggerSettings(colored=False, emoji=False)
     settings.username = ""
     formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
 
-    assert formatter.format(_drop_status_record()) == (
+    assert formatter.format(_watch_status_record(default_color=None)) == (
         "Watching for points: one (streamer); watching for drops: none"
     )
+
+
+@pytest.mark.parametrize("colored", [True, False])
+def test_file_log_leaves_the_default_color_out(colored):
+    settings = LoggerSettings(colored=colored, emoji=False)
+    formatter = logger_module.FileFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_watch_status_record()) == (
+        "Watching for points: one (streamer); watching for drops: none"
+    )
+
+
+def test_palette_reset_uncolors_watch_status_with_colored_true():
+    settings = LoggerSettings(
+        colored=True, emoji=False, color_palette=ColorPalette(WATCH_STATUS="RESET")
+    )
+    settings.username = ""
+    formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_watch_status_record()) == (
+        f"{Fore.RESET}Watching for points: one (streamer); watching for drops: "
+        f"none{Fore.RESET}"
+    )
+
+
+@pytest.mark.parametrize("colored", [True, False])
+def test_json_log_leaves_the_default_color_out(colored):
+    entry = json.loads(_json_formatter(colored=colored).format(_watch_status_record()))
+
+    assert entry["message"] == (
+        "Watching for points: one (streamer); watching for drops: none"
+    )
+    assert entry["event"] == "WATCH_STATUS"
+    assert "default_color" not in entry

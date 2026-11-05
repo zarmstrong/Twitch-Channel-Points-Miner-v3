@@ -67,7 +67,7 @@ from TwitchChannelPointsMiner.constants import (
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
-from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS
+from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -4091,7 +4091,8 @@ class Twitch(object):
                 else f"{streamer.username} ({reason}; {game_label} drops)"
             )
 
-        # No hard-coded color: ColorPalette's DROP_STATUS color styles it.
+        # Green on the console even with colored=False, as before; with
+        # colored=True, ColorPalette's WATCH_STATUS color styles it instead.
         status = (
             "Watching for points: "
             f"{', '.join(points_streams) if points_streams else 'none'}; "
@@ -4114,7 +4115,8 @@ class Twitch(object):
             status,
             extra={
                 "emoji": ":eye:",
-                "event": Events.DROP_STATUS,
+                "event": Events.WATCH_STATUS,
+                "default_color": WATCH_STATUS_COLOR,
                 **SKIP_NOTIFICATIONS,
             },
         )

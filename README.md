@@ -1017,9 +1017,12 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 
 #### Color Palette
 `ColorPalette` customizes console colors by event name. Unspecified events use
-`Fore.RESET`, while prediction wins and losses default to green and red, and
-`DROP_STATUS` (including the *Watching for points* status line) defaults to
-green. Values
+`Fore.RESET`, while prediction wins and losses default to green and red. The
+*Watching for points* status line has its own `WATCH_STATUS` key, which
+defaults to green; it is a console and file log event only and is never sent
+to notifiers. The palette applies only with `colored=True`; with
+`colored=False` the *Watching for points* line is still green on the console,
+as in earlier releases. Values
 may be Colorama constants or case-insensitive color names: `BLACK`, `RED`,
 `GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`, `WHITE`, or `RESET`.
 ```python
@@ -1325,6 +1328,7 @@ of these values in each provider's `events` list.
 | `DROP_LINK_REQUIRED` | A finished Drop can't be claimed because the campaign's game account isn't linked to Twitch. Sent once per campaign per run (so again after a restart) with the link URL, and once more when its Drops have been claimed. |
 | `CHAT_MENTION` | The configured username is mentioned in joined chat. Chat presence must be enabled. |
 | `CONFIGURATION` | Startup, reload, authentication, or other configuration information requires attention. Critical authentication alerts may be forced through configured providers. |
+| `WATCH_STATUS` | Never sent. It only names the *Watching for points* status line for `ColorPalette`; adding it to a notifier's `events` has no effect. |
 
 ### StreamerSettings
 

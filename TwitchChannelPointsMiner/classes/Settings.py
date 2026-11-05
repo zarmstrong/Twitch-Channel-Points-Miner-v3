@@ -86,6 +86,9 @@ class Events(Enum):
     DROP_LINK_REQUIRED = auto()
     CHAT_MENTION = auto()
     CONFIGURATION = auto()
+    # The "Watching for points" status line; console and file logs only,
+    # never sent to notifiers.
+    WATCH_STATUS = auto()
 
     def __str__(self):
         return self.name

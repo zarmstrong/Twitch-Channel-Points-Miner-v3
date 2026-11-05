@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
+from colorama import Fore
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
@@ -29,7 +30,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
 )
-from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS
+from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
 from TwitchChannelPointsMiner.utils.Utils import set_default_settings
 
 
@@ -3138,8 +3139,11 @@ def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
     _log_watch_status(twitch, streamers)
 
     for _, message, extra in records:
-        assert extra["event"] is Events.DROP_STATUS
+        assert extra["event"] is Events.WATCH_STATUS
         for key in SKIP_NOTIFICATIONS:
             assert extra[key] is True
-        # No hard-coded color, so ColorPalette's DROP_STATUS color applies.
+        # Not hard-coded in the message, so ColorPalette's WATCH_STATUS color
+        # can replace it when colored=True.
         assert "\x1b[" not in message
+        assert extra["default_color"] == WATCH_STATUS_COLOR
+        assert WATCH_STATUS_COLOR == Fore.GREEN

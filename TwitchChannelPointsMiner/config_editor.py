@@ -368,7 +368,10 @@ def _base_web_config(config_path):
         },
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
-        "notification_event_options": [event.name for event in Events],
+        # WATCH_STATUS is never sent to notifiers, so it isn't offered.
+        "notification_event_options": [
+            event.name for event in Events if event is not Events.WATCH_STATUS
+        ],
     }
 
 

@@ -28,18 +28,22 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Webhook import Webhook
 from TwitchChannelPointsMiner.utils import remove_emoji
 
+# The "Watching for points" line's color: ColorPalette's WATCH_STATUS default,
+# and the color it keeps on the console with colored=False.
+WATCH_STATUS_COLOR = Fore.GREEN
+
 
 # Fore: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.
 class ColorPalette(object):
     def __init__(self, **kwargs):
         # Init with default values RESET for all, GREEN and RED for WIN and LOSE
-        # bet, and GREEN for DROP_STATUS (the "Watching for points" line).
+        # bet, and GREEN for WATCH_STATUS (the "Watching for points" line).
         # Then set args from kwargs
         for k in Events:
             setattr(self, str(k), Fore.RESET)
         setattr(self, "BET_WIN", Fore.GREEN)
         setattr(self, "BET_LOSE", Fore.RED)
-        setattr(self, "DROP_STATUS", Fore.GREEN)
+        setattr(self, "WATCH_STATUS", WATCH_STATUS_COLOR)
 
         for k in kwargs:
             if k.upper() in dir(self) and getattr(self, k.upper()) is not None:
@@ -402,6 +406,11 @@ class GlobalFormatter(_TimezoneFormatter):
 
         if hasattr(record, "event") and self.settings.colored is True:
             record.msg = f"{self.settings.color_palette.get(record.event)}{record.msg}{Fore.RESET}"
+        elif getattr(record, "default_color", None):
+            # A line that is colored even with colored=False, like a message
+            # with a hard-coded color. With colored=True and an event, the
+            # palette color for that event applies instead.
+            record.msg = f"{record.default_color}{record.msg}{Fore.RESET}"
 
         return super().format(record)
 
