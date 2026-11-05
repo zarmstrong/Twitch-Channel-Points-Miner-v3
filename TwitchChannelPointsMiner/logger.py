@@ -408,7 +408,8 @@ class GlobalFormatter(_TimezoneFormatter):
             record.msg = f"{self.settings.color_palette.get(record.event)}{record.msg}{Fore.RESET}"
         elif getattr(record, "default_color", None):
             # A line that is colored even with colored=False, like a message
-            # with a hard-coded color, but that ColorPalette can restyle.
+            # with a hard-coded color. With colored=True and an event, the
+            # palette color for that event applies instead.
             record.msg = f"{record.default_color}{record.msg}{Fore.RESET}"
 
         return super().format(record)
