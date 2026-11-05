@@ -1,3 +1,4 @@
+from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 
@@ -32,6 +33,19 @@ def test_campaign_extracts_channels_and_builds_drops():
     assert campaign.channels == ["100", "200"]
     assert [drop.id for drop in campaign.drops] == ["drop-1", "drop-2"]
     assert campaign.dt_match is True
+
+
+def test_campaign_str_uses_game_name_without_display_name(monkeypatch):
+    # Twitch's channel listing (DropsHighlightService_AvailableDrops) names a
+    # campaign's game with id and name only.
+    monkeypatch.setattr(Settings.logger, "less", True)
+    data = campaign_data()
+    data["game"] = {"id": "500188", "name": "Hunt: Showdown 1896"}
+
+    assert str(Campaign(data)) == (
+        "Example Campaign, Game: Hunt: Showdown 1896 - Drops: 2 pcs. "
+        "- In inventory: False"
+    )
 
 
 def test_campaign_treats_unrestricted_channels_as_empty_list():

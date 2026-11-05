@@ -116,8 +116,11 @@ class Campaign(object):
         return f"Campaign(id={self.id}, name={self.name}, game={self.game}, in_inventory={self.in_inventory})"
 
     def __str__(self):
+        # A campaign listed on a channel names its game without displayName.
+        game = self.game or {}
+        game_name = game.get("displayName") or game.get("name") or "Unknown"
         return (
-            f"{self.name}, Game: {self.game['displayName']} - Drops: {len(self.drops)} pcs. - In inventory: {self.in_inventory}"
+            f"{self.name}, Game: {game_name} - Drops: {len(self.drops)} pcs. - In inventory: {self.in_inventory}"
             if Settings.logger.less
             else self.__repr__()
         )
