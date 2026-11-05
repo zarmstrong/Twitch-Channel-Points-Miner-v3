@@ -78,6 +78,7 @@ MINER_CONFIG = {
             STREAMER_online="GREEN",  # Don't worry about lower/upper case. The script will parse all the values.
             streamer_offline="red",  # Read more in README.md
             BET_WIN=Fore.MAGENTA,  # Color allowed are: [BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET].
+            WATCH_STATUS="GREEN",  # The "Watching for points" line. The palette applies only with colored=True; with colored=False the line is green.
         ),
         telegram=Telegram(  # You can omit or set to None if you don't want to receive updates on Telegram
             chat_id=123456789,  # Chat ID to send messages @getmyid_bot
