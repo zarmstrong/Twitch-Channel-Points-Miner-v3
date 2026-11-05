@@ -180,6 +180,7 @@ class Twitch(object):
         "twitchdrops_app_campaigns",
         "twitchdrops_app_game_names",
         "game_directory_slugs",
+        "category_game_slugs",
         "twitchdrops_app_upcoming_starts",
         "twitchdrops_app_deadlines",
         "twitchdrops_app_catalog_complete",
@@ -292,6 +293,7 @@ class Twitch(object):
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.game_directory_slugs = {}
+        self.category_game_slugs = {}
         self.twitchdrops_app_upcoming_starts = {}
         self.twitchdrops_app_deadlines = {}
         self.twitchdrops_app_catalog_complete = False
@@ -2480,8 +2482,7 @@ class Twitch(object):
         configured_matches = []
         for category in requested_categories:
             category_name, _ = self.__split_category_streamer_selector(category)
-            normalized = self.__normalize_category(category_name)
-            requested_slug = self.__slugify(normalized.replace("-", " "))
+            requested_slug = self.__category_slug(category)
             indexed_game = indexed_by_slug.get(requested_slug)
             if indexed_game is None:
                 continue
@@ -2505,8 +2506,7 @@ class Twitch(object):
             )
         for category in requested_categories:
             category_name, _ = self.__split_category_streamer_selector(category)
-            normalized = self.__normalize_category(category_name)
-            requested_slug = self.__slugify(normalized.replace("-", " "))
+            requested_slug = self.__category_slug(category)
             indexed_game = indexed_by_slug.get(requested_slug)
             if not requested_slug or indexed_game is None:
                 continue
@@ -2969,10 +2969,65 @@ class Twitch(object):
         )
         return earned_names
 
-    def __category_slug(self, category):
+    def __configured_category_slug(self, category):
         category_name, _ = self.__split_category_streamer_selector(category)
         normalized_category = self.__normalize_category(category_name)
         return self.__slugify(normalized_category.replace("-", " "))
+
+    def __category_slug(self, category):
+        """The slug of the game a configured category names, as campaigns and
+        streams are keyed: by the game's name. A category given by Twitch's
+        directory slug can differ from it ('hunt-showdown' is 'Hunt: Showdown
+        1896'), which resolve_category_game_slugs looks up beforehand."""
+        slug = self.__configured_category_slug(category)
+        return (getattr(self, "category_game_slugs", None) or {}).get(slug, slug)
+
+    def resolve_category_game_slugs(self, categories) -> None:
+        """Ask Twitch which game each configured category's slug belongs to,
+        so the category is keyed by that game's name like its campaigns and
+        streams. A slug Twitch has no game for (a game name, or an alias the
+        Twitch Drops gist resolves) keeps its own. Answers are remembered. A
+        failed request ends the lookup, and every category it left unresolved
+        is tried again on the next call."""
+        resolved = getattr(self, "category_game_slugs", None)
+        if resolved is None:
+            resolved = self.category_game_slugs = {}
+        for category in categories or []:
+            slug = self.__configured_category_slug(category)
+            if not slug or slug in resolved:
+                continue
+            request = copy.deepcopy(GQLOperations.CategoryGame)
+            request["variables"] = {"slug": slug}
+            try:
+                response = self.gql.post_gql_request_raw("CategoryGame", request)
+            except RetryError as error:
+                # Each failed request has already waited through its retries;
+                # while Twitch is failing, the rest would only wait the same.
+                # Unresolved categories keep their own slug until a reload.
+                logger.debug(f"Error looking up the game of category '{slug}': {error}")
+                break
+            if not isinstance(response, dict) or response.get("errors"):
+                continue
+            data = response.get("data")
+            if not isinstance(data, dict) or "game" not in data:
+                continue
+            game = data["game"]
+            if game is None:
+                resolved[slug] = slug
+                continue
+            game_name = (
+                str(game.get("displayName") or game.get("name") or "").strip()
+                if isinstance(game, dict)
+                else ""
+            )
+            if not game_name:
+                continue
+            resolved[slug] = self.__slugify(game_name)
+            if resolved[slug] != slug:
+                self.__log_category(
+                    f"Category '{slug}' is Twitch's '{game_name}'",
+                    extra={"emoji": ":mag:"},
+                )
 
     def get_game_name_slug(self, game_name: str) -> str:
         """Slugify a stream's raw game display name, matching the slugging
@@ -4121,7 +4176,7 @@ class Twitch(object):
             return []
 
         normalized_category = self.__normalize_category(category_name)
-        requested_slug = self.__slugify(normalized_category.replace("-", " "))
+        requested_slug = self.__category_slug(category)
         query = self.twitchdrops_app_game_names.get(
             requested_slug, normalized_category.replace("-", " ")
         )

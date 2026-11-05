@@ -4224,3 +4224,131 @@ def test_never_learned_campaign_keeps_a_mixed_game_mixed_for_discovery(
     assert sorted(
         Twitch._Twitch__campaign_logins_by_campaign(stored), key=lambda x: x or []
     ) == [None, ["costream"]]
+
+
+def _hunt_category_twitch(monkeypatch, category_game=None, calls=None):
+    """Twitch files 'Hunt: Showdown 1896' under the directory slug
+    'hunt-showdown', while campaigns and streams are keyed by its name (#210).
+    category_game is the CategoryGame answer, or an exception to raise."""
+    calls = [] if calls is None else calls
+    twitch = bare_twitch(monkeypatch)
+
+    def post_gql_request_raw(operation, request):
+        calls.append((operation, request["variables"]["slug"]))
+        if isinstance(category_game, Exception):
+            raise category_game
+        if category_game is not None:
+            return category_game
+        if request["variables"]["slug"] == "hunt-showdown":
+            game = {"id": "500188", "displayName": "Hunt: Showdown 1896"}
+        else:
+            game = None
+        return {"data": {"game": game}}
+
+    twitch.gql = SimpleNamespace(post_gql_request_raw=post_gql_request_raw)
+    return twitch, calls
+
+
+def test_category_given_by_twitch_slug_is_keyed_by_its_game_name(monkeypatch):
+    twitch, calls = _hunt_category_twitch(monkeypatch)
+    categories = [
+        "hunt-showdown|psychoghost",
+        "https://www.twitch.tv/directory/category/hunt-showdown?filter=drops",
+        "Hunt: Showdown 1896",
+    ]
+
+    twitch.resolve_category_game_slugs(categories)
+    twitch.resolve_category_game_slugs(categories)
+
+    assert twitch.get_category_slugs(categories) == {"hunt-showdown-1896"}
+    # One lookup per slug: Twitch's game for 'hunt-showdown', and none for the
+    # name's own slug, which is kept as it is.
+    assert calls == [
+        ("CategoryGame", "hunt-showdown"),
+        ("CategoryGame", "hunt-showdown-1896"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "category_game",
+    [
+        RetryError("CategoryGame", []),
+        {"data": None, "errors": [{"message": "service unavailable"}]},
+        {"data": {"game": {"id": "500188"}}},
+    ],
+)
+def test_category_game_lookup_without_an_answer_is_tried_again(
+    monkeypatch, category_game
+):
+    twitch, calls = _hunt_category_twitch(monkeypatch, category_game=category_game)
+
+    twitch.resolve_category_game_slugs(["hunt-showdown"])
+    twitch.resolve_category_game_slugs(["hunt-showdown"])
+
+    assert twitch.get_category_slugs(["hunt-showdown"]) == {"hunt-showdown"}
+    assert calls == [("CategoryGame", "hunt-showdown")] * 2
+
+
+def test_failed_category_game_request_ends_the_lookup_until_the_next_call(
+    monkeypatch,
+):
+    # A failed request has already waited through its retries; looking up the
+    # other categories while Twitch is failing would only wait the same.
+    twitch, calls = _hunt_category_twitch(
+        monkeypatch, category_game=RetryError("CategoryGame", [])
+    )
+
+    twitch.resolve_category_game_slugs(["hunt-showdown", "overwatch"])
+
+    assert calls == [("CategoryGame", "hunt-showdown")]
+
+    twitch.gql.post_gql_request_raw = lambda operation, request: (
+        calls.append((operation, request["variables"]["slug"]))
+        or {"data": {"game": None}}
+    )
+    twitch.resolve_category_game_slugs(["hunt-showdown", "overwatch"])
+
+    assert calls[1:] == [
+        ("CategoryGame", "hunt-showdown"),
+        ("CategoryGame", "overwatch"),
+    ]
+
+
+def test_category_given_by_twitch_slug_matches_its_games_twitch_campaign(
+    monkeypatch,
+):
+    twitch, _ = _hunt_category_twitch(monkeypatch)
+    campaign = campaign_data()
+    campaign["game"] = {"displayName": "Hunt: Showdown 1896"}
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, status="OPEN": [campaign]
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs, inventory: {},
+    )
+    inventory = {"dropCampaignsInProgress": [], "completedRewardCampaigns": []}
+
+    twitch.resolve_category_game_slugs(["hunt-showdown|psychoghost"])
+
+    # Twitch's own campaign for the game counts for the category, instead of
+    # being skipped as "category_not_configured" in favor of the gist.
+    assert twitch.filter_categories_with_active_drops(
+        ["hunt-showdown|psychoghost"], inventory=inventory
+    ) == ["hunt-showdown|psychoghost"]
+    assert set(twitch.active_drop_campaigns) == {"hunt-showdown-1896"}

@@ -140,6 +140,14 @@ class GQLOperations:
         "operationName": "GameSlug",
         "query": "query GameSlug($id: ID!) { game(id: $id) { id slug } }",
     }
+    CategoryGame = {
+        "operationName": "CategoryGame",
+        "query": (
+            "query CategoryGame($slug: String!) {"
+            "game(slug: $slug) { id name displayName }"
+            "}"
+        ),
+    }
     Inventory = {
         "operationName": "Inventory",
         "variables": {"fetchRewardCampaigns": True},

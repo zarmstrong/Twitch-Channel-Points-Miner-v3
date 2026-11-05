@@ -370,6 +370,9 @@ class FakeTwitch:
         self.filter_calls.append(kwargs)
         return self.eligible_categories
 
+    def resolve_category_game_slugs(self, categories):
+        pass
+
     def get_category_slugs(self, categories):
         return {category for category in categories}
 
