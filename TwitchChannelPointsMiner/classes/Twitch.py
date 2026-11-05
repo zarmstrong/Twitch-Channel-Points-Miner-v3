@@ -4092,7 +4092,7 @@ class Twitch(object):
             )
 
         # Green on the console even with colored=False, as before; with
-        # colored=True, ColorPalette's DROP_STATUS color styles it instead.
+        # colored=True, ColorPalette's WATCH_STATUS color styles it instead.
         status = (
             "Watching for points: "
             f"{', '.join(points_streams) if points_streams else 'none'}; "
@@ -4115,7 +4115,7 @@ class Twitch(object):
             status,
             extra={
                 "emoji": ":eye:",
-                "event": Events.DROP_STATUS,
+                "event": Events.WATCH_STATUS,
                 "default_color": Fore.GREEN,
                 **SKIP_NOTIFICATIONS,
             },

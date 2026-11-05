@@ -87,6 +87,8 @@ def test_managed_web_config_masks_credentials_and_reads_effective_settings(tmp_p
     assert result["notifications"]["discord"]["test_available"] is True
     assert "DROP_CLAIM" in result["notification_event_options"]
     assert "DAILY_REPORT" in result["notification_event_options"]
+    # Never sent to notifiers, so not offered as a notification event.
+    assert "WATCH_STATUS" not in result["notification_event_options"]
     assert "secret.example" not in json.dumps(result)
     assert result["updates"] == {
         "enabled": True,

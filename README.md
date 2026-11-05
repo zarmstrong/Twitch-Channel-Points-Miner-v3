@@ -1017,11 +1017,12 @@ and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 
 #### Color Palette
 `ColorPalette` customizes console colors by event name. Unspecified events use
-`Fore.RESET`, while prediction wins and losses default to green and red, and
-`DROP_STATUS` (including the *Watching for points* status line) defaults to
-green. The palette applies only with `colored=True`; with `colored=False` the
-*Watching for points* line is still green on the console, as in earlier
-releases. Values
+`Fore.RESET`, while prediction wins and losses default to green and red. The
+*Watching for points* status line has its own `WATCH_STATUS` key, which
+defaults to green; it is a console and file log event only and is never sent
+to notifiers. The palette applies only with `colored=True`; with
+`colored=False` the *Watching for points* line is still green on the console,
+as in earlier releases. Values
 may be Colorama constants or case-insensitive color names: `BLACK`, `RED`,
 `GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`, `WHITE`, or `RESET`.
 ```python

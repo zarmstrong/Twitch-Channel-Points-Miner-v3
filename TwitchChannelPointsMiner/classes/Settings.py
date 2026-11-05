@@ -83,6 +83,9 @@ class Events(Enum):
     JOIN_RAID = auto()
     DROP_CLAIM = auto()
     DROP_STATUS = auto()
+    # The "Watching for points" status line; console and file logs only,
+    # never sent to notifiers.
+    WATCH_STATUS = auto()
     DROP_LINK_REQUIRED = auto()
     CHAT_MENTION = auto()
     CONFIGURATION = auto()

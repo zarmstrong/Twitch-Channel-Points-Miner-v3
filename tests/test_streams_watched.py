@@ -3139,10 +3139,10 @@ def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
     _log_watch_status(twitch, streamers)
 
     for _, message, extra in records:
-        assert extra["event"] is Events.DROP_STATUS
+        assert extra["event"] is Events.WATCH_STATUS
         for key in SKIP_NOTIFICATIONS:
             assert extra[key] is True
-        # Not hard-coded in the message, so ColorPalette's DROP_STATUS color
+        # Not hard-coded in the message, so ColorPalette's WATCH_STATUS color
         # can replace it when colored=True.
         assert "\x1b[" not in message
         assert extra["default_color"] == Fore.GREEN
