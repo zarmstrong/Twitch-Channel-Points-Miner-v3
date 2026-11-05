@@ -188,6 +188,7 @@ class Twitch(object):
         "twitchdrops_app_catalog_complete",
         "twitchdrops_app_stand_down_logged_at",
         "twitchdrops_app_campaign_filtered_slugs",
+        "twitchdrops_app_open_reported_names",
         "twitch_campaign_names_by_game",
         "active_drop_campaigns",
         "active_drop_campaign_deadlines",
@@ -308,6 +309,12 @@ class Twitch(object):
         # Twitch itself reported, so their gist deadlines can be merged
         # alongside Twitch's own for the same game.
         self.twitchdrops_app_campaign_filtered_slugs = set()
+        # Per game, the normalized names of campaigns the gist skipped
+        # because Twitch reported them, and that the gist lists for all
+        # channels. Twitch's channel query can leave such a campaign out on
+        # every channel it runs on (seen for Hunt: Showdown 1896's weekly
+        # campaigns), so this is the evidence that it applies to a channel.
+        self.twitchdrops_app_open_reported_names = {}
         # Normalized names of every campaign Twitch reported per game in the
         # latest evaluation, including completed ones remembered this session.
         self.twitch_campaign_names_by_game = {}
@@ -2400,6 +2407,7 @@ class Twitch(object):
             # Like a failed scrape, leave nothing from an earlier run live:
             # it may come from a run without completion evidence.
             self.twitchdrops_app_campaign_filtered_slugs = set()
+            self.twitchdrops_app_open_reported_names = {}
             self.twitchdrops_app_campaigns = {}
             self.twitchdrops_app_game_names = {}
             self.twitchdrops_app_upcoming_starts = {}
@@ -2414,6 +2422,7 @@ class Twitch(object):
             getattr(self, "twitch_campaign_names_by_game", None) or {}
         )
         self.twitchdrops_app_campaign_filtered_slugs = set()
+        self.twitchdrops_app_open_reported_names = {}
         self.twitchdrops_app_campaigns = {}
         self.twitchdrops_app_game_names = {}
         self.twitchdrops_app_upcoming_starts = {}
@@ -2618,6 +2627,12 @@ class Twitch(object):
                 ):
                     # Twitch already evaluated this exact campaign; its verdict
                     # (active or completed) wins over the external catalog.
+                    # The catalog's channel scope still counts: Twitch's
+                    # channel query can omit a campaign that runs everywhere.
+                    if campaign_channel_scope(campaign)[0] is CampaignChannelScope.OPEN:
+                        self.twitchdrops_app_open_reported_names.setdefault(
+                            requested_slug, set()
+                        ).add(self.__campaign_name_key(campaign.get("name")))
                     campaign_evaluations.append(
                         {
                             "campaign": campaign.get("name"),
@@ -7096,13 +7111,29 @@ class Twitch(object):
         )
         # Only a genuine, non-empty allow-list containing this channel counts
         # as evidence to distrust the channel's own (empty) query result. An
-        # unrestricted authoritative campaign says nothing about this
-        # specific channel -- if it really applied here, the channel's own
-        # query should already have reflected it.
+        # unrestricted authoritative campaign alone says nothing about this
+        # specific channel: some (per-streamer Rust drops) expose no
+        # allow-list yet only progress where the channel query lists them.
         allowlisted_elsewhere = any(
             streamer.username in campaign_channel_scope(campaign)[1]
             for campaign in authoritative_campaigns
         )
+        # The gist listing one for all channels does vouch for it. Twitch's
+        # channel query (for this client) can omit such a campaign on every
+        # channel it runs on while watching there still earns it: Hunt:
+        # Showdown 1896's weekly campaigns progress on any Drops-enabled
+        # Hunt channel without ever being listed.
+        open_reported_names = (
+            getattr(self, "twitchdrops_app_open_reported_names", None) or {}
+        ).get(game_slug, set())
+        gist_open_ids = {
+            str(campaign.get("id"))
+            for campaign in authoritative_campaigns
+            if campaign.get("id")
+            and str(campaign.get("id")) not in rejected_listed_ids
+            and campaign_channel_scope(campaign)[0] is CampaignChannelScope.OPEN
+            and self.__campaign_name_key(campaign.get("name")) in open_reported_names
+        }
         if (
             getattr(streamer, "from_wildcard_category", False) is True
             and fallback_campaigns
@@ -7145,6 +7176,7 @@ class Twitch(object):
                 fallback_campaigns == []
                 and not allowlisted_elsewhere
                 and not running_badge_listed
+                and not gist_open_ids
             ):
                 if is_drop_discovered(streamer):
                     self.__record_channel_verdict(game_slug, streamer.username, (0, 0))
@@ -7175,6 +7207,14 @@ class Twitch(object):
                     "game-wide Twitch campaigns",
                     level=logging.DEBUG,
                 )
+            elif gist_open_ids and not allowlisted_elsewhere:
+                self.__log_drop_check(
+                    f"Twitch channel '{streamer.username}' did not list "
+                    f"{len(gist_open_ids)} campaign(s) for "
+                    f"{streamer.stream.game_name()} that the Twitch Drops gist "
+                    "lists for all channels; checking those campaigns instead",
+                    level=logging.DEBUG,
+                )
             else:
                 # No gist fallback exists here at all (it's intentionally
                 # skipped once Twitch's inventory is authoritative for this
@@ -7193,14 +7233,16 @@ class Twitch(object):
         # then says nothing about this channel: some campaigns (e.g.
         # per-streamer Rust item drops) expose no allow-list yet only
         # progress on the channels whose own query advertises them. Only an
-        # explicit allow-list entry still qualifies. The one exception is a
-        # listed running badge (see running_badge_listed): it proves Drops
-        # are enabled for the game here, so the account-wide evaluation's
-        # campaigns with an empty allow-list apply. Those come from full
-        # campaign data, with reward campaigns and expired deadlines already
-        # left out; dashboard summaries carry no allow-list at all and keep
-        # needing an explicit entry. The external gist index is kept as
-        # before, since Twitch can omit its campaigns from the channel query.
+        # explicit allow-list entry still qualifies. There are two exceptions.
+        # A listed running badge (see running_badge_listed) proves Drops are
+        # enabled for the game here, so the account-wide evaluation's
+        # campaigns with an empty allow-list apply. And a campaign the gist
+        # lists for all channels (see gist_open_ids) applies on its own.
+        # Those come from full campaign data, with reward campaigns and
+        # expired deadlines already left out; dashboard summaries carry no
+        # allow-list at all and keep needing an explicit entry. The external
+        # gist index is kept as before, since Twitch can omit its campaigns
+        # from the channel query.
         require_twitch_allowlist = channel_query_answered and is_category_tier(streamer)
         campaign_ids = set()
         possible_campaigns = [(campaign, "gist") for campaign in fallback_campaigns]
@@ -7241,6 +7283,7 @@ class Twitch(object):
                 source == "gist"
                 or not require_twitch_allowlist
                 or (source == "authoritative" and running_badge_listed)
+                or (source == "authoritative" and str(campaign_id) in gist_open_ids)
             )
             if streamer.username in channels or (
                 scope is not CampaignChannelScope.RESTRICTED and unrestricted_applies

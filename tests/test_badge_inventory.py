@@ -1445,6 +1445,82 @@ def test_twitchdrops_app_keeps_campaigns_twitch_did_not_report(monkeypatch):
         campaign["name"] for campaign in twitch.twitchdrops_app_campaigns["rust"]
     ] == ["Rust Isles Tac Gloves"]
     assert twitch.twitchdrops_app_campaign_filtered_slugs == {"rust"}
+    # A channel-restricted campaign Twitch reported vouches for no channel.
+    assert twitch.twitchdrops_app_open_reported_names == {}
+
+
+def test_twitchdrops_app_records_all_channel_campaigns_twitch_reported(monkeypatch):
+    """Twitch's channel query can omit a campaign that runs on every channel
+    (Hunt: Showdown 1896's weekly campaigns), so the gist skipping it because
+    Twitch reported it still keeps that the gist lists it for all channels."""
+    twitch = bare_twitch(
+        SimpleNamespace(
+            post_gql_request_raw=lambda operation, request: {
+                "data": {"currentUser": {"availableBadges": []}}
+            }
+        )
+    )
+    twitch.twitch_campaign_names_by_game = {
+        "hunt-showdown-1896": {
+            "hunt 1896 (week 2, pt. 2)",
+            "hunt 1896 restricted",
+        }
+    }
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape_front_page",
+        lambda self: [
+            {
+                "slug": "hunt-showdown-1896",
+                "game": "Hunt: Showdown 1896",
+                "url": "https://twitchdrops.app/game/hunt-showdown",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "ends_at": "2099-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        TwitchDropsAppScraper,
+        "scrape",
+        lambda self, category: {
+            "game": "Hunt: Showdown 1896",
+            "campaigns": [
+                {
+                    "name": "Hunt 1896 (Week 2, Pt. 2)",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "all_channels": True,
+                    "channels": [],
+                    "drops": [{"name": "Supply Crate"}, {"name": "Hide and Seek"}],
+                },
+                {
+                    "name": "Hunt 1896 Restricted",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "all_channels": False,
+                    "channels": ["some-streamer"],
+                    "drops": [{"name": "Restricted Reward"}],
+                },
+                {
+                    "name": "Hunt 1896 Not Reported",
+                    "ends_at": "2099-01-01T00:00:00Z",
+                    "all_channels": True,
+                    "channels": [],
+                    "drops": [{"name": "Unreported Reward"}],
+                },
+            ],
+        },
+    )
+
+    twitch._Twitch__twitchdrops_app_fallback(
+        ["hunt-showdown-1896"], {"hunt-showdown-1896"}, EMPTY_INVENTORY
+    )
+
+    assert twitch.twitchdrops_app_open_reported_names == {
+        "hunt-showdown-1896": {"hunt 1896 (week 2, pt. 2)"}
+    }
+    assert [
+        campaign["name"]
+        for campaign in twitch.twitchdrops_app_campaigns["hunt-showdown-1896"]
+    ] == ["Hunt 1896 Not Reported"]
 
 
 ERRORED_GAME_PATH = [
