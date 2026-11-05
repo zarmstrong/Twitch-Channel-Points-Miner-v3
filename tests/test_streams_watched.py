@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
+from colorama import Fore
 
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     TwitchChannelPointsMiner,
@@ -3141,5 +3142,7 @@ def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
         assert extra["event"] is Events.DROP_STATUS
         for key in SKIP_NOTIFICATIONS:
             assert extra[key] is True
-        # No hard-coded color, so ColorPalette's DROP_STATUS color applies.
+        # Not hard-coded in the message, so ColorPalette's DROP_STATUS color
+        # can replace it when colored=True.
         assert "\x1b[" not in message
+        assert extra["default_color"] == Fore.GREEN

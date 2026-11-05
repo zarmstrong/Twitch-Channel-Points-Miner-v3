@@ -4091,7 +4091,8 @@ class Twitch(object):
                 else f"{streamer.username} ({reason}; {game_label} drops)"
             )
 
-        # No hard-coded color: ColorPalette's DROP_STATUS color styles it.
+        # Green on the console even with colored=False, as before; with
+        # colored=True, ColorPalette's DROP_STATUS color styles it instead.
         status = (
             "Watching for points: "
             f"{', '.join(points_streams) if points_streams else 'none'}; "
@@ -4115,6 +4116,7 @@ class Twitch(object):
             extra={
                 "emoji": ":eye:",
                 "event": Events.DROP_STATUS,
+                "default_color": Fore.GREEN,
                 **SKIP_NOTIFICATIONS,
             },
         )

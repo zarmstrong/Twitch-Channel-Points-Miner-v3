@@ -477,7 +477,7 @@ def test_color_palette_colors_drop_status_green_by_default():
     assert ColorPalette(drop_status=Fore.RESET).get(Events.DROP_STATUS) == Fore.RESET
 
 
-def _drop_status_record():
+def _drop_status_record(default_color=Fore.GREEN):
     record = logging.LogRecord(
         "miner",
         logging.INFO,
@@ -488,6 +488,8 @@ def _drop_status_record():
         None,
     )
     record.event = Events.DROP_STATUS
+    if default_color is not None:
+        record.default_color = default_color
     return record
 
 
@@ -506,10 +508,35 @@ def test_console_colors_drop_status_with_the_palette(palette, color):
     )
 
 
-def test_uncolored_console_adds_no_color_to_drop_status():
+def test_uncolored_console_uses_the_record_default_color():
+    # The watch status line was always green before the palette could style
+    # it, so colored=False keeps that look.
+    settings = LoggerSettings(
+        colored=False, emoji=False, color_palette=ColorPalette(DROP_STATUS="RED")
+    )
+    settings.username = ""
+    formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_drop_status_record()) == (
+        f"{Fore.GREEN}Watching for points: one (streamer); watching for drops: "
+        f"none{Fore.RESET}"
+    )
+
+
+def test_uncolored_console_adds_no_color_without_a_default_color():
     settings = LoggerSettings(colored=False, emoji=False)
     settings.username = ""
     formatter = GlobalFormatter(fmt="%(message)s", settings=settings)
+
+    assert formatter.format(_drop_status_record(default_color=None)) == (
+        "Watching for points: one (streamer); watching for drops: none"
+    )
+
+
+@pytest.mark.parametrize("colored", [True, False])
+def test_file_log_leaves_the_default_color_out(colored):
+    settings = LoggerSettings(colored=colored, emoji=False)
+    formatter = logger_module.FileFormatter(fmt="%(message)s", settings=settings)
 
     assert formatter.format(_drop_status_record()) == (
         "Watching for points: one (streamer); watching for drops: none"
