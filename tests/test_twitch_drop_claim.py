@@ -420,6 +420,72 @@ def test_campaign_names_from_ids_resolves_before_sync_campaigns_catches_up(monke
     assert set(names) == {"Advertised Campaign", "Gist Campaign", "Native Campaign"}
 
 
+def gist_open_campaign_twitch(monkeypatch):
+    # Mirrors Hunt: Showdown 1896 (#210): every Drops-enabled channel lists
+    # only a finished campaign, while the running weekly campaign, which
+    # Twitch reports and the gist lists for all channels, is never listed
+    # yet progresses on any of them.
+    twitch = bare_twitch(monkeypatch)
+    finished = campaign_data()
+    finished["id"] = "finished-campaign"
+    finished["timeBasedDrops"][0]["endAt"] = "2020-01-02T00:00:00Z"
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[finished], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {
+                "id": "weekly-campaign",
+                "name": "Weekly Campaign",
+                "all_channels": True,
+                "channels": [],
+            }
+        ]
+    }
+    twitch.twitchdrops_app_open_reported_names = {"example-game": {"weekly campaign"}}
+    return twitch
+
+
+def test_channel_query_omitting_gist_open_campaign_keeps_channel(monkeypatch):
+    twitch = gist_open_campaign_twitch(monkeypatch)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "weekly-campaign"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+def test_gist_open_campaign_keeps_twitch_completion_verdict(monkeypatch):
+    twitch = gist_open_campaign_twitch(monkeypatch)
+    twitch.completed_drop_campaigns = {"weekly-campaign"}
+
+    twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
+def test_unlisted_twitch_campaign_without_gist_scope_still_blocked(monkeypatch):
+    # Without the gist listing it for all channels, an unlisted campaign with
+    # no allow-list may be a per-streamer one (Rust) and must not qualify.
+    twitch = gist_open_campaign_twitch(monkeypatch)
+    twitch.twitchdrops_app_open_reported_names = {}
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
 def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypatch):
     # The same authoritative campaign exists, but this channel isn't on its
     # allow-list, so the empty channel query result must still stand.
