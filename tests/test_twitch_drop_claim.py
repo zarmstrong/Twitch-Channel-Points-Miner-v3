@@ -3861,7 +3861,8 @@ HUNT_ACTION_ITEMS = [
 ]
 
 
-def drop_check_lines(monkeypatch):
+def drop_check_lines(monkeypatch, twitch):
+    twitch.log_drop_checks = True
     logged = []
     monkeypatch.setattr(
         Twitch,
@@ -3878,7 +3879,7 @@ def test_listing_logs_its_sub_gated_drops_with_twitch_earn_text(monkeypatch):
         "actionItems": HUNT_ACTION_ITEMS,
     }
     twitch = listing_twitch(monkeypatch, [listed])
-    logged = drop_check_lines(monkeypatch)
+    logged = drop_check_lines(monkeypatch, twitch)
 
     assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
         "hunt-halloween"
@@ -3900,7 +3901,7 @@ def test_sub_gated_drop_line_without_usable_earn_text(monkeypatch, localized_con
     listed = hunt_halloween_campaign()
     listed["localizedContent"] = localized_content
     twitch = listing_twitch(monkeypatch, [listed])
-    logged = drop_check_lines(monkeypatch)
+    logged = drop_check_lines(monkeypatch, twitch)
 
     twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
 
@@ -3917,11 +3918,29 @@ def test_no_sub_gated_drop_line_when_the_requirement_is_met_or_unknown(
     # Twitch didn't say for the first drop; the second needs no sub.
     del listed["timeBasedDrops"][0]["requiredSubs"]
     twitch = listing_twitch(monkeypatch, [listed])
-    logged = drop_check_lines(monkeypatch)
+    logged = drop_check_lines(monkeypatch, twitch)
 
     twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
 
     assert not [message for message in logged if "subscription" in message]
+
+
+def test_earn_text_is_not_built_when_drop_checks_are_not_logged(monkeypatch):
+    listed = hunt_halloween_campaign()
+    listed["localizedContent"] = {"actionItems": HUNT_ACTION_ITEMS}
+    twitch = listing_twitch(monkeypatch, [listed])
+    built = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__campaign_earn_text",
+        staticmethod(lambda *args: built.append(args) or "text"),
+    )
+
+    # Logging off changes nothing about which campaigns are kept.
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "hunt-halloween"
+    ]
+    assert built == []
 
 
 def test_no_watch_time_skip_line_quotes_twitch_earn_text(monkeypatch):
@@ -3929,7 +3948,7 @@ def test_no_watch_time_skip_line_quotes_twitch_earn_text(monkeypatch):
     listed["summary"] = {"includesMWRequirement": False}
     listed["localizedContent"] = {"actionItems": HUNT_ACTION_ITEMS[1:]}
     twitch = listing_twitch(monkeypatch, [listed])
-    logged = drop_check_lines(monkeypatch)
+    logged = drop_check_lines(monkeypatch, twitch)
 
     assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
     assert (

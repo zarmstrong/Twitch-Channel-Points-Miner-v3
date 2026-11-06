@@ -6977,8 +6977,14 @@ class Twitch(object):
             ):
                 running_badge_listed = True
             campaign_label = campaign.get("name") or campaign_id
-            earn_text = self.__campaign_earn_text(
-                campaign, streamer.username, streamer.stream.game_name()
+            # Twitch's earn text only goes into drop-check debug lines, so it
+            # is built only when those are logged.
+            earn_text = (
+                self.__campaign_earn_text(
+                    campaign, streamer.username, streamer.stream.game_name()
+                )
+                if getattr(self, "log_drop_checks", False) is True
+                else ""
             )
             if campaign_includes_watch_requirement(campaign) is False:
                 # Twitch says none of its drops needs watch time, so watching
@@ -6994,11 +7000,15 @@ class Twitch(object):
                 rejected_listed_ids.add(campaign_id)
                 continue
             campaign_with_progress = self.__with_inventory_drop_progress(campaign)
-            sub_gated_drops = [
-                str(drop.get("name") or drop.get("id") or "Unknown drop")
-                for drop in campaign_with_progress.get("timeBasedDrops") or []
-                if isinstance(drop, dict) and drop_sub_requirement_unmet(drop)
-            ]
+            sub_gated_drops = (
+                [
+                    str(drop.get("name") or drop.get("id") or "Unknown drop")
+                    for drop in campaign_with_progress.get("timeBasedDrops") or []
+                    if isinstance(drop, dict) and drop_sub_requirement_unmet(drop)
+                ]
+                if getattr(self, "log_drop_checks", False) is True
+                else []
+            )
             if sub_gated_drops:
                 twitch_says = f" (Twitch: {earn_text})" if earn_text else ""
                 self.__log_drop_check(
