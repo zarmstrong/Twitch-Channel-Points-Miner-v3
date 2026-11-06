@@ -323,3 +323,102 @@ def test_on_message_ignores_a_channel_that_is_no_longer_mined():
     )
 
     websocket.twitch.claim_bonus.assert_not_called()
+
+
+def _user_drop_event(message_type, data):
+    return _pubsub("user-drop-events", "99", {"type": message_type, "data": data})
+
+
+def test_on_message_claims_a_drop_reported_for_a_tracked_channel():
+    streamers = [FakeStreamer("target", "2")]
+    websocket = _websocket(streamers)
+    data = {
+        "drop_instance_id": "instance-1",
+        "drop_id": "drop-1",
+        "channel_id": "2",
+        "timestamp": "2026-11-06T12:00:00Z",
+    }
+
+    WebSocketsPool.on_message(websocket, _user_drop_event("drop-claim", data))
+
+    websocket.twitch.claim_drops_from_event.assert_called_once_with(data)
+    assert streamers[0].calls == []
+
+
+def test_on_message_still_claims_a_drop_for_an_untracked_channel():
+    # user-drop-events are per user: the channel may not be one we mine.
+    streamers = [FakeStreamer("first", "1")]
+    websocket = _websocket(streamers)
+    data = {
+        "drop_instance_id": "instance-1",
+        "drop_id": "drop-1",
+        "channel_id": "555",
+        "timestamp": "2026-11-06T12:00:00Z",
+    }
+
+    WebSocketsPool.on_message(websocket, _user_drop_event("drop-claim", data))
+
+    websocket.twitch.claim_drops_from_event.assert_called_once_with(data)
+
+
+def test_on_message_hands_a_duplicate_drop_claim_over_once():
+    streamers = [FakeStreamer("target", "2")]
+    websocket = _websocket(streamers)
+    message = _user_drop_event(
+        "drop-claim",
+        {
+            "drop_instance_id": "instance-1",
+            "channel_id": "2",
+            "timestamp": "2026-11-06T12:00:00Z",
+        },
+    )
+
+    WebSocketsPool.on_message(websocket, message)
+    WebSocketsPool.on_message(websocket, message)
+
+    websocket.twitch.claim_drops_from_event.assert_called_once()
+
+
+def test_on_message_does_not_claim_on_drop_progress():
+    streamers = [FakeStreamer("target", "2")]
+    websocket = _websocket(streamers)
+
+    WebSocketsPool.on_message(
+        websocket,
+        _user_drop_event(
+            "drop-progress",
+            {
+                "drop_id": "drop-1",
+                "channel_id": "2",
+                "timestamp": "2026-11-06T12:00:00Z",
+            },
+        ),
+    )
+
+    websocket.twitch.claim_drops_from_event.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param({"type": "drop-claim"}, id="no-data"),
+        pytest.param({"type": "drop-claim", "data": None}, id="null-data"),
+    ],
+)
+def test_on_message_passes_a_payloadless_drop_claim_to_twitch_without_raising(
+    message,
+):
+    streamers = [FakeStreamer("target", "2")]
+    websocket = _websocket(streamers)
+    message = {"server_time": 1700000000.0, **message}
+    raw = json.dumps(
+        {
+            "type": "MESSAGE",
+            "data": {"topic": "user-drop-events.99", "message": json.dumps(message)},
+        }
+    )
+
+    WebSocketsPool.on_message(websocket, raw)
+
+    websocket.twitch.claim_drops_from_event.assert_called_once_with(None)
+    assert streamers[0].calls == []
