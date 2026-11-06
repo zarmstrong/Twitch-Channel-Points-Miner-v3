@@ -138,6 +138,41 @@ def test_split_message_lines_can_count_unicode_characters():
     ]
 
 
+@pytest.mark.parametrize(
+    "text, placeholders, expected",
+    [
+        # Twitch's localizedContent.actionItems for Hunt: Showdown 1896's
+        # "HS 1896 Halloween 2026" campaign.
+        (
+            "Purchasing or gifting subscriptions to {Channel} while they're "
+            "live in <x:bold>{Category}</x:bold>",
+            {"Channel": "example", "Category": "Hunt: Showdown 1896"},
+            "Purchasing or gifting subscriptions to example while they're "
+            "live in Hunt: Showdown 1896",
+        ),
+        # Unknown or None placeholders are removed, never left as "{...}".
+        ("Ends on {EndDate}.", {}, "Ends on ."),
+        ("Watch {Channel}", {"Channel": None}, "Watch"),
+        # Nested and attributed tags go; text that only looks like markup stays.
+        ("<x:bold><x:italic>Bold</x:italic></x:bold> <3", None, "Bold <3"),
+        ('<x:link href="https://example.test">Details</x:link>', None, "Details"),
+        ("  spread \n over\tlines  ", None, "spread over lines"),
+        ("", None, ""),
+        (None, None, ""),
+        (["not", "text"], None, ""),
+    ],
+)
+def test_twitch_plain_text(text, placeholders, expected):
+    assert utils.twitch_plain_text(text, placeholders) == expected
+
+
+def test_twitch_plain_text_cuts_long_text():
+    text = utils.twitch_plain_text("word " * 100, max_length=20)
+
+    assert len(text) == 20
+    assert text.endswith("…")
+
+
 def test_get_streamer_compares_channel_ids_as_strings():
     streamers = [SimpleNamespace(channel_id="10"), SimpleNamespace(channel_id=20)]
 
