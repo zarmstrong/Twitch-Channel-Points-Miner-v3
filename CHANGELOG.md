@@ -1,5 +1,34 @@
 # Changelog
 
+## [3.20.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.6...3.20.0) (2026-11-06)
+
+
+### Features
+
+* **drops:** recognize subscription-gated drops from requiredSubs ([#221](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/221)) ([271b211](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/271b21178c6343f0cef0a015cae69dd9025467ca))
+* **drops:** show sitewide and subscription requirements in drop-check debug logs ([#221](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/221)) ([271b211](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/271b21178c6343f0cef0a015cae69dd9025467ca))
+* **drops:** show Twitch's requirement text in drop-check logs ([#227](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/227)) ([e4b68de](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e4b68de69239dfc483a055b3561441a334380afa)), closes [#217](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/217)
+* **drops:** skip channel campaigns Twitch marks as having no watch-time requirement ([#221](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/221)) ([271b211](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/271b21178c6343f0cef0a015cae69dd9025467ca))
+* **logging:** let ColorPalette colour the watch status line ([b6823f6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b6823f62acfa42e8f5bbdd0904a71b8dc92421e2))
+* **logging:** log the watch status line only when it changes ([#215](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/215)) ([b6823f6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b6823f62acfa42e8f5bbdd0904a71b8dc92421e2)), closes [#214](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/214)
+* **notifications:** add DROP_LINK_REQUIRED event and daily-report section for Drops waiting on a linked game account ([e8f8f77](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e8f8f776e3ed67f1cf0c87d2edce28484d9565ca))
+
+
+### Bug Fixes
+
+* **categories:** don't reject a pinned category streamer missing from a partial Drops directory ([1717ca4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1717ca4d91363104a3df4c36e6c4a2f4f0d33180))
+* **categories:** key a category given by Twitch's slug by its game name ([#213](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/213)) ([52cf3ab](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/52cf3aba8f3ca97ecd6ad8903fa50b54bc7c678b))
+* **drops:** keep the gist's all-channel campaigns on channels that list another one ([#222](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/222)) ([5cd567b](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5cd567ba42a018d51ac97e9c732ae3812f5e26e2))
+* **drops:** log a campaign whose game has no displayName ([#219](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/219)) ([1e7cada](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1e7cada6f15108bd17b0693ba37ffc7aaabd02c2)), closes [#210](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/210)
+* **drops:** query the Drops directory with Twitch's category slug ([#212](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/212)) ([1717ca4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1717ca4d91363104a3df4c36e6c4a2f4f0d33180)), closes [#210](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/210)
+* **drops:** stop re-claiming drops whose game account isn't linked ([#208](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/208)) ([e8f8f77](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e8f8f776e3ed67f1cf0c87d2edce28484d9565ca)), closes [#207](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/207)
+* **drops:** stop treating a subscription-only channel campaign as a zero-minute badge ([#221](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/221)) ([271b211](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/271b21178c6343f0cef0a015cae69dd9025467ca))
+* **drops:** trust the gist's all-channels scope for campaigns Twitch reports ([#220](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/220)) ([5424266](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5424266a4c2d4fd5eadf561e7af3c9e0ad6345bd)), closes [#210](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/210)
+* **drops:** warn when Twitch withholds campaign details from the TV login ([#230](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/230)) ([11830df](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/11830df9d95539e73bb9c16b6d49854deadbdbbd))
+* **gql:** use Twitch's current DropsHighlightService_AvailableDrops hash ([#218](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/218)) ([f150986](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f15098682c9f17e24f9606d27098fdde105981bd))
+* **logging:** give the watch status line its own WATCH_STATUS palette colour ([#216](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/216)) ([1bfc8d4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1bfc8d4df03919548d8dbdb7dcf5e11e49484dee))
+* **logging:** keep the watch status line green with colored=False ([#216](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/216)) ([1bfc8d4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1bfc8d4df03919548d8dbdb7dcf5e11e49484dee))
+
 ## [3.19.6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.5...3.19.6) (2026-11-01)
 
 
