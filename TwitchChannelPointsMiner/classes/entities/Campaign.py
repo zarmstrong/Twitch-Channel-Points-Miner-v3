@@ -98,6 +98,118 @@ def campaign_includes_watch_requirement(campaign) -> Optional[bool]:
     return None
 
 
+def _int_or_zero(value) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 0
+
+
+def campaign_from_channel_progress(campaign) -> Optional[dict]:
+    """Convert one item of Twitch's DropChannelCampaignsProgress
+    data.channelDropCampaignsProgress list into the DropCampaignDetails /
+    listing shape the rest of the miner reads.
+
+    The TV-client login gets this data while DropCampaignDetails returns null
+    (#223), so the channel's drops listing is built from it. Track/lane and
+    repeatable reward groups, and groups whose requirementType is neither
+    WATCH nor SUB, are skipped: the miner does not model them.
+    A group's "self" is not copied: its status is unreliable (unstarted
+    campaigns report IN_PROGRESS with currentMinutesWatched null), and
+    inventory supplies progress elsewhere. Returns None when the campaign is
+    malformed or no reward group is kept."""
+    if not isinstance(campaign, dict):
+        return None
+    campaign_id = campaign.get("id")
+    start_at = campaign.get("startAt")
+    end_at = campaign.get("endAt")
+    if not campaign_id or not start_at or not end_at:
+        return None
+    try:
+        parse_datetime(start_at)
+        parse_datetime(end_at)
+    except (TypeError, ValueError):
+        return None
+    campaign_name = campaign.get("name")
+
+    drops = []
+    allow_channels = {}
+    has_channel_list = False
+    groups = campaign.get("rewardGroups")
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        if group.get("track") is not None or group.get("lane") is not None:
+            continue
+        criteria = group.get("progressCriteria")
+        if not isinstance(criteria, dict):
+            criteria = {}
+        if criteria.get("isRepeatable") is True:
+            continue
+        # Only watch-time and subscription groups map onto time-based drops.
+        # Any other requirement would read as a zero-minute badge.
+        if criteria.get("requirementType") not in ["WATCH", "SUB"]:
+            continue
+        requirements = criteria.get("requirements")
+        if not isinstance(requirements, dict):
+            requirements = {}
+        rewards = group.get("rewards")
+        drops.append(
+            {
+                "id": group.get("id"),
+                "name": group.get("name") or campaign_name or campaign_id,
+                "startAt": start_at,
+                "endAt": end_at,
+                "requiredMinutesWatched": _int_or_zero(
+                    requirements.get("minutesWatched")
+                ),
+                "requiredSubs": _int_or_zero(requirements.get("subs")),
+                "benefitEdges": [
+                    {
+                        "benefit": {
+                            "id": reward.get("id"),
+                            "name": reward.get("name") or "",
+                            "distributionType": reward.get("distributionType"),
+                        }
+                    }
+                    for reward in (rewards if isinstance(rewards, list) else [])
+                    if isinstance(reward, dict)
+                ],
+            }
+        )
+        channels = criteria.get("channels")
+        if isinstance(channels, list):
+            has_channel_list = True
+            for channel in channels:
+                if isinstance(channel, dict) and channel.get("id"):
+                    allow_channels.setdefault(str(channel["id"]), None)
+    if not drops:
+        return None
+
+    allow = (
+        [{"id": channel_id} for channel_id in allow_channels]
+        if has_channel_list
+        else None
+    )
+    game = campaign.get("game")
+    return {
+        "id": campaign_id,
+        "name": campaign_name or campaign_id,
+        "status": "ACTIVE",
+        "game": game if isinstance(game, dict) else {},
+        "startAt": start_at,
+        "endAt": end_at,
+        "allow": {"channels": allow},
+        "summary": {
+            "includesMWRequirement": any(
+                drop["requiredMinutesWatched"] > 0 for drop in drops
+            ),
+            "includesSubRequirement": any(drop["requiredSubs"] > 0 for drop in drops),
+            "isSitewide": allow is None,
+        },
+        "timeBasedDrops": drops,
+    }
+
+
 class Campaign(object):
     __slots__ = [
         "id",

@@ -2,6 +2,9 @@ import copy
 import datetime
 from typing import Any, Callable, ContextManager, TypeVar
 
+from TwitchChannelPointsMiner.classes.entities.Campaign import (
+    campaign_from_channel_progress,
+)
 from TwitchChannelPointsMiner.classes.gql.data.response import (
     ChannelPointsContext,
     Drops,
@@ -831,6 +834,32 @@ class Parser:
                     campaigns,
                     campaigns_available=viewer_drop_campaigns is not None,
                 )
+
+    def parse_drop_channel_campaigns_progress(self, response: Any):
+        """
+        Parses responses to DropChannelCampaignsProgress requests.
+        Each campaign is converted to the listing shape by
+        campaign_from_channel_progress; malformed ones are dropped.
+        :param response: The response to parse.
+        :return: The parsed response.
+        :raises: GQLError: If the response contains errors or there is an issue parsing the response.
+        """
+        _, _, data = self.parse_base_response(response, True)
+        with JsonParentContext("data"):
+            progress_campaigns = parse_expected_value(
+                data, "channelDropCampaignsProgress", optional_parser(expect_list)
+            )
+            campaigns = []
+            if progress_campaigns is not None:
+                for campaign in progress_campaigns:
+                    converted = campaign_from_channel_progress(campaign)
+                    if converted is not None:
+                        campaigns.append(converted)
+            return DropsHighlightServiceAvailableDropsResponse(
+                [campaign["id"] for campaign in campaigns],
+                campaigns,
+                campaigns_available=progress_campaigns is not None,
+            )
 
     def parse_inventory_response(self, response: Any):
         """

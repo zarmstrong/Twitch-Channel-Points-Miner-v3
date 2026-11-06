@@ -199,6 +199,16 @@ class GQLOperations:
             }
         },
     }
+    DropChannelCampaignsProgress = {
+        "operationName": "DropChannelCampaignsProgress",
+        "variables": {"channelID": None},
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "3d9ce923899cbab5d7a8481da4e9918b1982a987bac68ac4347b5cf925a1d523",
+            }
+        },
+    }
     DropCampaignDetails = {
         "operationName": "DropCampaignDetails",
         "extensions": {

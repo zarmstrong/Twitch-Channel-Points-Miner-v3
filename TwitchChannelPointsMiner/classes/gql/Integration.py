@@ -501,6 +501,24 @@ class GQL:
             self.parser.parse_drops_highlight_service_available_drops,
         )
 
+    def get_channel_drop_campaigns_progress(
+        self, channel_id: str
+    ) -> DropsHighlightServiceAvailableDropsResponse:
+        """
+        Gets the drop campaigns of a channel from DropChannelCampaignsProgress,
+        the first source of a channel's campaigns; get_available_drops is the fallback.
+        :param channel_id: The id of the channel to check.
+        :return: The response.
+        :raises RetryError: If one or more errors occurred while attempting the request.
+        """
+        json_data = copy.deepcopy(GQLOperations.DropChannelCampaignsProgress)
+        json_data["variables"] = {"channelID": channel_id}
+        return self.post_gql_request_single(
+            GQLOperations.DropChannelCampaignsProgress["operationName"],
+            json_data,
+            self.parser.parse_drop_channel_campaigns_progress,
+        )
+
     def get_inventory(self) -> InventoryResponse:
         """
         Gets the user's Inventory.
