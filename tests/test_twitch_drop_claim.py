@@ -120,7 +120,7 @@ def test_channel_campaign_uses_broadcaster_id_and_in_window_award(monkeypatch):
     }
     detail_contexts = []
 
-    def campaign_details(self, campaigns, campaign_channel_id_by_id=None):
+    def campaign_details(self, campaigns, campaign_channel_id_by_id=None, **kwargs):
         detail_contexts.append(campaign_channel_id_by_id)
         return []
 
@@ -155,7 +155,7 @@ def test_reused_reward_from_earlier_campaign_remains_incomplete(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: [],
     )
 
     twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
@@ -189,7 +189,7 @@ def test_overlapping_campaigns_with_same_reward_remain_incomplete(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: [],
     )
 
     twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
@@ -244,7 +244,7 @@ def test_wildcard_external_campaign_requires_matching_twitch_campaign(monkeypatc
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: [],
     )
     streamer = category_streamer()
     streamer.from_wildcard_category = True
@@ -2741,7 +2741,9 @@ def _account_wide_evaluation(monkeypatch, accepted_drop_ids):
         Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
     )
     monkeypatch.setattr(
-        Twitch, "_Twitch__get_campaigns_details", lambda self, campaigns: campaigns
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
@@ -2801,7 +2803,7 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns: campaigns,
+        lambda self, campaigns, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch,
@@ -2824,6 +2826,38 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
 
     assert deadlines == {}
     assert twitch_games == {"example-game"}
+
+
+def test_finished_campaign_lookup_is_marked_possibly_stale(monkeypatch):
+    # Twitch nulls a finished campaign's details for any login, so this lookup
+    # must not count toward the TV-login warning (#223).
+    twitch = bare_twitch(monkeypatch)
+    for name, value in (
+        ("_Twitch__get_drops_dashboard", lambda self, status="OPEN": []),
+        ("_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])),
+        ("_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])),
+        ("_Twitch__awarded_benefits", lambda self, inventory: (set(), set())),
+    ):
+        monkeypatch.setattr(Twitch, name, value)
+    calls = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, **kwargs: calls.append((campaigns, kwargs)) or [],
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {
+            "dropCampaignsInProgress": [],
+            "completedRewardCampaigns": [{"id": "finished-1"}],
+        },
+        {"example-game"},
+    )
+
+    assert (
+        [{"id": "finished-1"}],
+        {"may_be_stale": True},
+    ) in calls
 
 
 def test_completed_campaign_stays_authoritative_by_name_and_leaves_advertised_cache(
@@ -2913,7 +2947,7 @@ def test_reward_campaign_tag_survives_initial_merge_with_untagged_source(monkeyp
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns: campaigns,
+        lambda self, campaigns, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
@@ -2959,7 +2993,7 @@ def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns: campaigns,
+        lambda self, campaigns, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch,
@@ -3030,7 +3064,7 @@ def test_subscription_reward_campaign_is_never_active_incomplete(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch,
@@ -3104,7 +3138,7 @@ def test_watchable_campaign_survives_alongside_reward_campaign_for_same_game(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch,
@@ -3168,7 +3202,7 @@ def test_partial_completed_inventory_does_not_resurrect_category(monkeypatch, wr
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns: [campaign_data()] if campaigns else [],
+        lambda self, campaigns, **kwargs: [campaign_data()] if campaigns else [],
     )
     monkeypatch.setattr(
         Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
@@ -3214,7 +3248,7 @@ def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
         lambda self: ([], []),
     )
 
-    def resolve_details(self, campaigns):
+    def resolve_details(self, campaigns, **kwargs):
         detail_requests.extend(campaigns)
         return [campaign_data()] if campaigns else []
 
@@ -3254,7 +3288,7 @@ def test_full_completed_inventory_campaign_prevents_fallback_resurrection(monkey
         lambda self: ([], []),
     )
 
-    def resolve_details(self, campaigns):
+    def resolve_details(self, campaigns, **kwargs):
         detail_requests.extend(campaigns)
         return []
 
@@ -3305,7 +3339,7 @@ def test_wrapped_completed_inventory_campaign_prevents_fallback_resurrection(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns: [],
+        lambda self, campaigns, **kwargs: [],
     )
     monkeypatch.setattr(
         Twitch,
@@ -3484,7 +3518,7 @@ def test_channel_advertised_campaigns_are_recorded_on_the_stream(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: [],
     )
     streamer = category_streamer()
 
@@ -3759,7 +3793,7 @@ def listing_twitch(monkeypatch, channel_campaigns, details=None):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: details or [],
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: details or [],
     )
     return twitch
 
@@ -4149,7 +4183,7 @@ def _stub_campaign_sources(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch,
@@ -4451,7 +4485,7 @@ def test_campaign_whose_scope_was_never_learned_is_stored_as_open(monkeypatch, s
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: [],
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: [],
     )
 
     twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
@@ -4499,7 +4533,7 @@ def _sync_with_details(monkeypatch, twitch, campaign, details_load, requested):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: (
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: (
             [copy.deepcopy(campaign)] if details_load else []
         ),
     )
@@ -4749,7 +4783,7 @@ def test_never_learned_campaign_keeps_a_mixed_game_mixed_for_discovery(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: [
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: [
             copy.deepcopy(restricted)
         ],
     )
@@ -4868,7 +4902,7 @@ def test_category_given_by_twitch_slug_matches_its_games_twitch_campaign(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
-        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+        lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
     )
     monkeypatch.setattr(
         Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
