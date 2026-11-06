@@ -33,9 +33,14 @@ from TwitchChannelPointsMiner.classes.entities.Campaign import (
     Campaign,
     CampaignChannelScope,
     campaign_channel_scope,
+    campaign_includes_watch_requirement,
 )
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
-from TwitchChannelPointsMiner.classes.entities.Drop import Drop
+from TwitchChannelPointsMiner.classes.entities.Drop import (
+    Drop,
+    drop_required_subs,
+    drop_sub_requirement_unmet,
+)
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_source,
     discovery_sources,
@@ -717,6 +722,9 @@ class Twitch(object):
 
                 if required_minutes <= 0 or current_minutes >= required_minutes:
                     continue
+                # Watching alone cannot earn it until the account subscribes.
+                if drop_sub_requirement_unmet(drop):
+                    continue
 
                 progress_by_game.setdefault(game_slug, []).append(
                     (
@@ -772,14 +780,18 @@ class Twitch(object):
         for drop in campaign.get("timeBasedDrops", []) or []:
             drop_id = str(drop.get("id") or "") if isinstance(drop, dict) else ""
             if drop_id in minutes_by_drop_id and not isinstance(drop.get("self"), dict):
-                drop = {
-                    **drop,
-                    "self": {
-                        "isClaimed": False,
-                        "hasPreconditionsMet": True,
-                        "currentMinutesWatched": minutes_by_drop_id[drop_id],
-                    },
+                drop_self = {
+                    "isClaimed": False,
+                    "hasPreconditionsMet": True,
+                    "currentMinutesWatched": minutes_by_drop_id[drop_id],
                 }
+                required_subs = drop_required_subs(drop)
+                if required_subs:
+                    # The snapshot keeps only drops whose subscription
+                    # requirement the account had met (see
+                    # __cache_drop_inventory_progress).
+                    drop_self["currentSubs"] = required_subs
+                drop = {**drop, "self": drop_self}
                 changed = True
             drops.append(drop)
         if not changed:
@@ -1915,6 +1927,10 @@ class Twitch(object):
 
             minutes_required = drop.get("requiredMinutesWatched") or 0
             if minutes_required <= 0:
+                continue
+            # A drop that also needs a subscription the account has not made
+            # cannot be finished by watching.
+            if drop_sub_requirement_unmet(drop):
                 continue
 
             starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
@@ -6959,6 +6975,18 @@ class Twitch(object):
                 campaign
             ):
                 running_badge_listed = True
+            if campaign_includes_watch_requirement(campaign) is False:
+                # Twitch says none of its drops needs watch time, so watching
+                # cannot earn it (a subscription-only campaign, say). Asked
+                # after the badge check: a badge needs no watch time either.
+                self.__log_drop_check(
+                    f"campaign '{campaign.get('name') or campaign_id}' on "
+                    f"'{streamer.username}' can't be earned by watching "
+                    "(Twitch: no watch-time requirement); skipping",
+                    level=logging.DEBUG,
+                )
+                rejected_listed_ids.add(campaign_id)
+                continue
             # Finished drops are deliberately not passed here: dropping a
             # finished campaign at this point would send the channel to the
             # fallback campaigns below instead of the count that rules it out.
@@ -7015,7 +7043,11 @@ class Twitch(object):
             ):
                 campaign_id = str(campaign.get("id") or "")
                 if campaign_id:
-                    normalized_campaign = self.__normalize_advertised_campaign(campaign)
+                    normalized_campaign = self.__normalize_advertised_campaign(
+                        self.__with_listing_requirements(
+                            campaign, self.advertised_drop_campaigns.get(campaign_id)
+                        )
+                    )
                     self.advertised_drop_campaigns[campaign_id] = normalized_campaign
 
         authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
@@ -7402,6 +7434,30 @@ class Twitch(object):
                 return campaign
         return None
 
+    @staticmethod
+    def __with_listing_requirements(campaign: dict, listing) -> dict:
+        """The detailed campaign, with the earn requirements only the channel
+        listing (DropsHighlightService_AvailableDrops) sent filled in: the
+        campaign summary and localized text, and each drop's requiredSubs."""
+        if not isinstance(listing, dict):
+            return campaign
+        merged = copy.deepcopy(campaign)
+        for key in ["summary", "localizedContent"]:
+            if merged.get(key) is None and listing.get(key) is not None:
+                merged[key] = copy.deepcopy(listing[key])
+        listed_subs = {
+            str(drop.get("id")): drop_required_subs(drop)
+            for drop in listing.get("timeBasedDrops") or []
+            if isinstance(drop, dict) and drop.get("id") not in [None, ""]
+        }
+        for drop in merged.get("timeBasedDrops") or []:
+            if not isinstance(drop, dict) or drop_required_subs(drop) is not None:
+                continue
+            required_subs = listed_subs.get(str(drop.get("id")))
+            if required_subs is not None:
+                drop["requiredSubs"] = required_subs
+        return merged
+
     def __normalize_advertised_campaign(self, campaign: dict) -> dict:
         normalized = copy.deepcopy(campaign)
         drops = [
@@ -7432,18 +7488,23 @@ class Twitch(object):
     @staticmethod
     def __campaign_debug_summary(campaign: dict) -> dict:
         game = campaign.get("game") or {}
+        summary = campaign.get("summary")
         return {
             "id": campaign.get("id"),
             "name": campaign.get("name"),
             "game": game.get("displayName") or game.get("name"),
             "start_at": campaign.get("startAt") or campaign.get("startsAt"),
             "end_at": campaign.get("endAt") or campaign.get("endsAt"),
+            "sitewide": (
+                summary.get("isSitewide") if isinstance(summary, dict) else None
+            ),
             "drops": [
                 {
                     "id": drop.get("id"),
                     "name": drop.get("name"),
                     "start_at": drop.get("startAt"),
                     "end_at": drop.get("endAt"),
+                    "required_subs": drop_required_subs(drop),
                     "self": drop.get("self"),
                     "benefits": [
                         {
@@ -7850,8 +7911,10 @@ class Twitch(object):
     def __is_running_badge_campaign(self, campaign: dict) -> bool:
         """Whether a channel-listed campaign is a running zero-minute badge.
 
-        True when it has time-based drops, none of them needs watch time,
-        and at least one is inside its date window now.
+        True when it has time-based drops, none of them needs watch time or
+        a subscription, and at least one is inside its date window now. A
+        drop with no watch time that needs a subscription is a sub reward,
+        not a badge, and its campaign may be limited to some channels.
         """
         drops = [
             drop
@@ -7863,6 +7926,8 @@ class Twitch(object):
         for drop in drops:
             minutes = drop.get("requiredMinutesWatched")
             if not isinstance(minutes, (int, float)) or minutes > 0:
+                return False
+            if drop_required_subs(drop):
                 return False
         now = datetime.utcnow()
         for drop in drops:

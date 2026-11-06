@@ -3711,6 +3711,313 @@ def test_listing_that_is_not_a_running_badge_keeps_game_wide_campaign_blocked(
     )
 
 
+def hunt_halloween_campaign():
+    # Twitch's DropsHighlightService_AvailableDrops listing (782dad0f... hash)
+    # of Hunt: Showdown 1896's "HS 1896 Halloween 2026", trimmed: one drop
+    # needs only a subscription, the other only watch time.
+    return {
+        "id": "hunt-halloween",
+        "name": "HS 1896 Halloween 2026",
+        "game": {"name": "Example Game"},
+        "summary": {
+            "includesMWRequirement": True,
+            "includesSubRequirement": True,
+            "isSitewide": False,
+            "isRewardCampaign": False,
+            "isPermanentlyDismissible": False,
+        },
+        "timeBasedDrops": [
+            {
+                "id": "hunt-red",
+                "name": "Hunt Red",
+                "requiredSubs": 1,
+                "requiredMinutesWatched": 0,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+            },
+            {
+                "id": "hunt-white",
+                "name": "Hunt White",
+                "requiredSubs": 0,
+                "requiredMinutesWatched": 15,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+            },
+        ],
+    }
+
+
+def listing_twitch(monkeypatch, channel_campaigns, details=None):
+    twitch = bare_twitch(monkeypatch)
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=channel_campaigns, campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.awarded_game_event_drops = {}
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: details or [],
+    )
+    return twitch
+
+
+def test_listing_with_a_watchable_drop_beside_a_sub_only_drop_is_kept(
+    monkeypatch,
+):
+    twitch = listing_twitch(monkeypatch, [hunt_halloween_campaign()])
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "hunt-halloween"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        1,
+    )
+
+
+def mixed_requirement_campaign(required_subs, current_subs=None):
+    campaign = hunt_halloween_campaign()
+    campaign["timeBasedDrops"] = [campaign["timeBasedDrops"][1]]
+    drop = campaign["timeBasedDrops"][0]
+    if required_subs is None:
+        del drop["requiredSubs"]
+    else:
+        drop["requiredSubs"] = required_subs
+    if current_subs is not None:
+        drop["self"] = {
+            "isClaimed": False,
+            "hasPreconditionsMet": True,
+            "currentMinutesWatched": 0,
+            "currentSubs": current_subs,
+        }
+    return campaign
+
+
+@pytest.mark.parametrize(
+    "listed, expected_ids",
+    [
+        # Watch time and a subscription the account has not made: watching
+        # alone cannot earn it.
+        (mixed_requirement_campaign(1), []),
+        (mixed_requirement_campaign(1, current_subs=0), []),
+        # The account already subscribed.
+        (mixed_requirement_campaign(1, current_subs=1), ["hunt-halloween"]),
+        # Twitch did not say: the minutes-based check decides, as before.
+        (mixed_requirement_campaign(None), ["hunt-halloween"]),
+    ],
+)
+def test_listing_needing_an_unmet_subscription_is_rejected(
+    monkeypatch, listed, expected_ids
+):
+    twitch = listing_twitch(monkeypatch, [listed])
+
+    assert (
+        twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+        == expected_ids
+    )
+
+
+@pytest.mark.parametrize(
+    "summary, expected_ids",
+    [
+        ({"includesMWRequirement": False}, []),
+        ({"includesMWRequirement": True}, ["hunt-halloween"]),
+        # Missing or unreadable: walk the drops, as before.
+        (None, ["hunt-halloween"]),
+        ({"includesMWRequirement": None}, ["hunt-halloween"]),
+    ],
+)
+def test_listing_without_a_watch_time_requirement_is_skipped(
+    monkeypatch, summary, expected_ids
+):
+    listed = hunt_halloween_campaign()
+    listed["summary"] = summary
+    twitch = listing_twitch(monkeypatch, [listed])
+    twitch.log_drop_checks = True
+    logged = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__log_drop_check",
+        lambda self, message, level=logging.INFO: logged.append(message),
+    )
+
+    assert (
+        twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+        == expected_ids
+    )
+    skipped = [
+        message for message in logged if "can't be earned by watching" in message
+    ]
+    assert len(skipped) == (0 if expected_ids else 1)
+
+
+def sub_only_campaign():
+    campaign = zero_minute_badge_campaign()
+    campaign["id"] = "sub-reward"
+    campaign["timeBasedDrops"][0]["requiredSubs"] = 1
+    campaign["summary"] = {
+        "includesMWRequirement": False,
+        "includesSubRequirement": True,
+        "isSitewide": False,
+    }
+    return campaign
+
+
+def test_sub_only_listing_is_not_a_running_badge(monkeypatch):
+    # A zero-minute drop that needs a subscription is a sub reward, and its
+    # campaign may be limited to some channels: unlike a badge, it does not
+    # show the game-wide campaign runs on this channel.
+    twitch = game_wide_campaign_twitch(monkeypatch, [sub_only_campaign()])
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == []
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        0,
+    )
+
+
+def test_badge_listing_with_no_watch_time_summary_is_still_a_badge(monkeypatch):
+    # Twitch's summary would also say a badge needs no watch time.
+    badge = zero_minute_badge_campaign()
+    badge["timeBasedDrops"][0]["requiredSubs"] = 0
+    badge["summary"] = {"includesMWRequirement": False}
+    twitch = game_wide_campaign_twitch(monkeypatch, [badge])
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "launch-campaign"
+    ]
+
+
+def test_campaign_details_keep_the_listing_earn_requirements(monkeypatch):
+    listed = hunt_halloween_campaign()
+    details = copy.deepcopy(listed)
+    del details["summary"]
+    for drop in details["timeBasedDrops"]:
+        del drop["requiredSubs"]
+    details["allow"] = {"channels": None}
+    twitch = listing_twitch(monkeypatch, [listed], details=[details])
+
+    twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+
+    stored = twitch.advertised_drop_campaigns["hunt-halloween"]
+    assert stored["summary"] == listed["summary"]
+    assert [drop["requiredSubs"] for drop in stored["timeBasedDrops"]] == [1, 0]
+    assert stored["allow"] == {"channels": None}
+
+
+def test_campaign_details_requirements_win_over_the_listing(monkeypatch):
+    listed = hunt_halloween_campaign()
+    details = copy.deepcopy(listed)
+    details["summary"] = {"includesMWRequirement": True, "isSitewide": True}
+    details["timeBasedDrops"][0]["requiredSubs"] = 2
+    twitch = listing_twitch(monkeypatch, [listed], details=[details])
+
+    twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
+
+    stored = twitch.advertised_drop_campaigns["hunt-halloween"]
+    assert stored["summary"] == details["summary"]
+    assert stored["timeBasedDrops"][0]["requiredSubs"] == 2
+
+
+def test_campaign_debug_summary_shows_sitewide_and_required_subs():
+    summary = Twitch._Twitch__campaign_debug_summary(hunt_halloween_campaign())
+
+    assert summary["sitewide"] is False
+    assert [drop["required_subs"] for drop in summary["drops"]] == [1, 0]
+
+    unknown = Twitch._Twitch__campaign_debug_summary(zero_minute_badge_campaign())
+
+    assert unknown["sitewide"] is None
+    assert unknown["drops"][0]["required_subs"] is None
+
+
+def inventory_with_drop(required_subs, current_subs):
+    drop = {
+        "id": "hunt-white",
+        "name": "Hunt White",
+        "requiredMinutesWatched": 15,
+        "self": {
+            "currentMinutesWatched": 5,
+            "hasPreconditionsMet": True,
+            "isClaimed": False,
+            "dropInstanceID": None,
+        },
+    }
+    if required_subs is not None:
+        drop["requiredSubs"] = required_subs
+    if current_subs is not None:
+        drop["self"]["currentSubs"] = current_subs
+    return {
+        "dropCampaignsInProgress": [
+            {
+                "id": "hunt-halloween",
+                "name": "HS 1896 Halloween 2026",
+                "game": {"displayName": "Example Game"},
+                "timeBasedDrops": [drop],
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "required_subs, current_subs, tracked",
+    [
+        (1, 0, False),
+        (1, None, False),
+        (1, 1, True),
+        (0, 0, True),
+        (None, None, True),
+    ],
+)
+def test_inventory_progress_skips_drops_needing_an_unmet_subscription(
+    monkeypatch, required_subs, current_subs, tracked
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.accepted_drop_claims = {}
+
+    twitch._Twitch__cache_drop_inventory_progress(
+        inventory_with_drop(required_subs, current_subs)
+    )
+
+    assert ("hunt-white" in twitch.drop_inventory_minutes_by_drop_id) is tracked
+
+
+def test_claimed_sub_drop_still_counts_as_finished(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    twitch.accepted_drop_claims = {}
+    inventory = inventory_with_drop(1, 0)
+    inventory["dropCampaignsInProgress"][0]["timeBasedDrops"][0]["self"][
+        "isClaimed"
+    ] = True
+
+    twitch._Twitch__cache_drop_inventory_progress(inventory)
+
+    assert "hunt-white" in twitch.drop_inventory_finished_ids
+
+
+def test_inventory_overlay_marks_a_tracked_sub_drop_as_subscribed(monkeypatch):
+    # A drop is in the progress snapshot only once its subscription
+    # requirement was met, so its listed copy must not read as unmet.
+    twitch = bare_twitch(monkeypatch)
+    twitch.drop_inventory_progress_updated_at = time.time()
+    twitch.drop_inventory_minutes_by_drop_id = {"hunt-white": 5}
+    listed = mixed_requirement_campaign(1)
+
+    overlaid = twitch._Twitch__with_inventory_drop_progress(listed)
+
+    drop = overlaid["timeBasedDrops"][0]
+    assert drop["self"]["currentSubs"] == 1
+    assert (
+        twitch._Twitch__active_incomplete_drop_deadline(
+            overlaid, set(), set(), set(), log_status=False
+        )
+        is not None
+    )
+
+
 def test_gist_copy_of_a_rejected_listed_campaign_is_not_readmitted(monkeypatch):
     listed = timed_campaign("launch-campaign", 30, "2020-06-01T00:00:00Z")
     twitch = game_wide_campaign_twitch(monkeypatch, [listed])

@@ -1,5 +1,10 @@
+import pytest
+
 from TwitchChannelPointsMiner.classes.Settings import Settings
-from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
+from TwitchChannelPointsMiner.classes.entities.Campaign import (
+    Campaign,
+    campaign_includes_watch_requirement,
+)
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 
 
@@ -101,6 +106,44 @@ def test_has_watchable_drops_treats_null_required_minutes_as_zero():
 
     campaign.drops[1].current_minutes_watched = 10
     assert campaign.has_watchable_drops() is False
+
+
+def test_has_watchable_drops_skips_drops_needing_an_unmet_subscription():
+    data = campaign_data()
+    data["timeBasedDrops"] = [drop_data()]
+    data["timeBasedDrops"][0]["requiredSubs"] = 1
+    campaign = Campaign(data)
+
+    assert campaign.has_watchable_drops() is False
+
+    campaign.drops[0].current_subs = 1
+
+    assert campaign.has_watchable_drops() is True
+
+
+def test_has_watchable_drops_without_required_subs_is_unchanged():
+    data = campaign_data()
+    data["timeBasedDrops"] = [drop_data()]
+    data["timeBasedDrops"][0]["requiredSubs"] = None
+
+    assert Campaign(data).has_watchable_drops() is True
+
+
+@pytest.mark.parametrize(
+    "campaign, expected",
+    [
+        ({"summary": {"includesMWRequirement": True}}, True),
+        ({"summary": {"includesMWRequirement": False}}, False),
+        ({"summary": {"includesMWRequirement": None}}, None),
+        ({"summary": {"includesMWRequirement": "false"}}, None),
+        ({"summary": {}}, None),
+        ({"summary": None}, None),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_campaign_includes_watch_requirement(campaign, expected):
+    assert campaign_includes_watch_requirement(campaign) is expected
 
 
 def test_sync_drops_updates_matching_drop_and_invokes_claim_callback():

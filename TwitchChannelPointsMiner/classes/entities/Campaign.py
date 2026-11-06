@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import Enum, auto
+from typing import Optional
 
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.Settings import Settings
@@ -79,6 +80,24 @@ def campaign_channel_scope(campaign) -> tuple:
     return CampaignChannelScope.UNKNOWN, []
 
 
+def campaign_includes_watch_requirement(campaign) -> Optional[bool]:
+    """Whether Twitch says any of the campaign's drops needs watch time
+    (summary.includesMWRequirement), or None when it did not say.
+
+    Only DropsHighlightService_AvailableDrops sends the summary. False means
+    watching cannot earn the campaign; True does not mean the account can,
+    since a drop may also need a subscription."""
+    if not isinstance(campaign, dict):
+        return None
+    summary = campaign.get("summary")
+    if not isinstance(summary, dict):
+        return None
+    includes_watch_requirement = summary.get("includesMWRequirement")
+    if isinstance(includes_watch_requirement, bool):
+        return includes_watch_requirement
+    return None
+
+
 class Campaign(object):
     __slots__ = [
         "id",
@@ -135,6 +154,7 @@ class Campaign(object):
             drop.dt_match is True
             and drop.is_claimed is False
             and drop.current_minutes_watched < drop.minutes_required
+            and drop.needs_subscription() is False
             for drop in self.drops
         )
 

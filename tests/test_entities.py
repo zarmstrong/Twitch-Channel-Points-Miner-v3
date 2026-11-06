@@ -3,7 +3,13 @@ import json
 
 import pytest
 
-from TwitchChannelPointsMiner.classes.entities.Drop import Drop, parse_datetime
+from TwitchChannelPointsMiner.classes.Settings import Settings
+from TwitchChannelPointsMiner.classes.entities.Drop import (
+    Drop,
+    drop_required_subs,
+    drop_sub_requirement_unmet,
+    parse_datetime,
+)
 from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Stream import Stream
@@ -81,6 +87,77 @@ def test_drop_becomes_unclaimable_after_claim():
 
     assert drop.is_claimed is True
     assert drop.is_claimable is False
+
+
+@pytest.mark.parametrize(
+    "drop, expected",
+    [
+        ({"requiredSubs": 1}, 1),
+        ({"requiredSubs": 0}, 0),
+        # Missing or unreadable: Twitch did not say.
+        ({}, None),
+        ({"requiredSubs": None}, None),
+        ({"requiredSubs": "1"}, None),
+        ({"requiredSubs": True}, None),
+        (None, None),
+    ],
+)
+def test_drop_required_subs_reads_only_an_integer(drop, expected):
+    assert drop_required_subs(drop) == expected
+
+
+@pytest.mark.parametrize(
+    "drop, expected",
+    [
+        # Hunt Red from the Hunt: Showdown 1896 Halloween campaign.
+        ({"requiredSubs": 1, "requiredMinutesWatched": 0}, True),
+        ({"requiredSubs": 1, "self": {"currentSubs": 0}}, True),
+        ({"requiredSubs": 1, "self": {"currentSubs": 1}}, False),
+        ({"requiredSubs": 2, "self": {"currentSubs": 1}}, True),
+        ({"requiredSubs": 1, "self": {"currentSubs": None}}, True),
+        # Hunt White: watch time only.
+        ({"requiredSubs": 0, "requiredMinutesWatched": 15}, False),
+        # Unknown requirement keeps the minutes-based checks in charge.
+        ({"requiredMinutesWatched": 0}, False),
+        ({"requiredSubs": None}, False),
+    ],
+)
+def test_drop_sub_requirement_unmet(drop, expected):
+    assert drop_sub_requirement_unmet(drop) is expected
+
+
+def test_drop_without_required_subs_keeps_its_old_behavior():
+    drop = Drop(drop_data())
+
+    assert drop.subs_required is None
+    assert drop.needs_subscription() is False
+
+
+def test_drop_needs_subscription_until_inventory_reports_it(monkeypatch):
+    monkeypatch.setattr(Settings.logger, "less", True)
+    data = drop_data()
+    data["requiredMinutesWatched"] = 15
+    data["requiredSubs"] = 1
+    drop = Drop(data)
+
+    assert drop.subs_required == 1
+    assert drop.needs_subscription() is True
+    assert str(drop).endswith(" - requires 1 sub(s)")
+
+    progress = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 5,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+    # Progress without currentSubs leaves the requirement unmet.
+    drop.update(progress)
+    assert drop.needs_subscription() is True
+
+    drop.update({**progress, "currentSubs": 1})
+    assert drop.current_subs == 1
+    assert drop.needs_subscription() is False
+    assert "sub(s)" not in str(drop)
 
 
 def test_parse_datetime_accepts_seconds_and_fractional_seconds():
