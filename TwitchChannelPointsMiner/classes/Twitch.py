@@ -77,6 +77,7 @@ from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
     internet_connection_available,
+    twitch_plain_text,
 )
 
 # import json
@@ -6975,24 +6976,55 @@ class Twitch(object):
                 campaign
             ):
                 running_badge_listed = True
+            campaign_label = campaign.get("name") or campaign_id
+            # Twitch's earn text only goes into drop-check debug lines, so it
+            # is built only when those are logged.
+            earn_text = (
+                self.__campaign_earn_text(
+                    campaign, streamer.username, streamer.stream.game_name()
+                )
+                if getattr(self, "log_drop_checks", False) is True
+                else ""
+            )
             if campaign_includes_watch_requirement(campaign) is False:
                 # Twitch says none of its drops needs watch time, so watching
                 # cannot earn it (a subscription-only campaign, say). Asked
                 # after the badge check: a badge needs no watch time either.
+                earned_by = f"; earned by: {earn_text}" if earn_text else ""
                 self.__log_drop_check(
-                    f"campaign '{campaign.get('name') or campaign_id}' on "
-                    f"'{streamer.username}' can't be earned by watching "
-                    "(Twitch: no watch-time requirement); skipping",
+                    f"campaign '{campaign_label}' on '{streamer.username}' "
+                    "can't be earned by watching "
+                    f"(Twitch: no watch-time requirement{earned_by}); skipping",
                     level=logging.DEBUG,
                 )
                 rejected_listed_ids.add(campaign_id)
                 continue
+            campaign_with_progress = self.__with_inventory_drop_progress(campaign)
+            sub_gated_drops = (
+                [
+                    str(drop.get("name") or drop.get("id") or "Unknown drop")
+                    for drop in campaign_with_progress.get("timeBasedDrops") or []
+                    if isinstance(drop, dict) and drop_sub_requirement_unmet(drop)
+                ]
+                if getattr(self, "log_drop_checks", False) is True
+                else []
+            )
+            if sub_gated_drops:
+                twitch_says = f" (Twitch: {earn_text})" if earn_text else ""
+                self.__log_drop_check(
+                    f"campaign '{campaign_label}' on '{streamer.username}': "
+                    f"{', '.join(sub_gated_drops)} "
+                    f"{'needs' if len(sub_gated_drops) == 1 else 'need'} a "
+                    "subscription the account hasn't made; not watching for "
+                    f"{'it' if len(sub_gated_drops) == 1 else 'them'}{twitch_says}",
+                    level=logging.DEBUG,
+                )
             # Finished drops are deliberately not passed here: dropping a
             # finished campaign at this point would send the channel to the
             # fallback campaigns below instead of the count that rules it out.
             if (
                 self.__active_incomplete_drop_deadline(
-                    self.__with_inventory_drop_progress(campaign),
+                    campaign_with_progress,
                     set(),
                     set(),
                     set(),
@@ -7433,6 +7465,22 @@ class Twitch(object):
             ):
                 return campaign
         return None
+
+    @staticmethod
+    def __campaign_earn_text(campaign: dict, channel, category) -> str:
+        """How the channel listing says the campaign is earned
+        (localizedContent.actionItems), as one plain-text line with the
+        channel and category filled in; "" when it did not say."""
+        content = campaign.get("localizedContent")
+        items = content.get("actionItems") if isinstance(content, dict) else None
+        if not isinstance(items, list):
+            return ""
+        placeholders = {"Channel": channel, "Category": category}
+        return "; ".join(
+            text
+            for text in (twitch_plain_text(item, placeholders) for item in items)
+            if text
+        )
 
     @staticmethod
     def __with_listing_requirements(campaign: dict, listing) -> dict:

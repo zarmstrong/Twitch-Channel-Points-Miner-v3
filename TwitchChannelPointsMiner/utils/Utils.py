@@ -116,6 +116,37 @@ def remove_emoji(string: str) -> str:
     return emoji_pattern.sub(r"", string)
 
 
+TWITCH_MARKUP_TAG = re.compile(r"</?[A-Za-z][\w:.-]*(?:\s[^<>]*)?/?>")
+TWITCH_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def twitch_plain_text(text, placeholders=None, max_length=300) -> str:
+    """Twitch's localized display text (a Drops campaign's localizedContent)
+    as plain text for a log line.
+
+    Markup tags such as <x:bold> are dropped, {Placeholders} are filled from
+    placeholders and removed when unknown, whitespace is collapsed, and the
+    result is cut to max_length; a max_length that isn't a positive int
+    leaves it whole. Anything but a string gives ""."""
+    if not isinstance(text, str):
+        return ""
+    placeholders = placeholders or {}
+
+    def fill(match):
+        value = placeholders.get(match.group(1))
+        return "" if value is None else str(value)
+
+    text = TWITCH_PLACEHOLDER.sub(fill, TWITCH_MARKUP_TAG.sub("", text))
+    text = " ".join(text.split())
+    if (
+        isinstance(max_length, int)
+        and not isinstance(max_length, bool)
+        and 0 < max_length < len(text)
+    ):
+        text = text[: max_length - 1].rstrip() + "…"
+    return text
+
+
 def at_least_one_value_in_settings_is(items, attr, value=True):
     for item in items:
         if getattr(item.settings, attr) == value:
