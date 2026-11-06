@@ -8099,12 +8099,13 @@ class Twitch(object):
             if not isinstance(response_item, dict) or response_item.get("errors"):
                 return False
             data = response_item.get("data")
-            user = data.get("user") if isinstance(data, dict) else None
-            return (
-                isinstance(user, dict)
-                and "dropCampaign" in user
-                and user["dropCampaign"] is None
-            )
+            if not isinstance(data, dict):
+                return False
+            # Same response shapes as extract_drop_campaign.
+            for parent in (data.get("user"), data.get("currentUser"), data):
+                if isinstance(parent, dict) and "dropCampaign" in parent:
+                    return parent["dropCampaign"] is None
+            return False
 
         result = []
         misses = 0

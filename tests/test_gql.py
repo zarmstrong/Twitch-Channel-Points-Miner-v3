@@ -1383,10 +1383,21 @@ WITHHELD_CAMPAIGN = {"data": {"user": {"id": "viewer-id", "dropCampaign": None}}
 LOADED_CAMPAIGN = {"data": {"user": {"dropCampaign": {"id": "b", "name": "Drop"}}}}
 
 
-def test_campaign_details_warns_once_when_twitch_withholds_every_campaign(caplog):
+@pytest.mark.parametrize(
+    "withheld_response",
+    [
+        WITHHELD_CAMPAIGN,
+        {"data": {"currentUser": {"id": "viewer-id", "dropCampaign": None}}},
+        {"data": {"dropCampaign": None}},
+    ],
+    ids=["user", "current-user", "top-level"],
+)
+def test_campaign_details_warns_once_when_twitch_withholds_every_campaign(
+    caplog, withheld_response
+):
     # Twitch answers a TV-client login with a null dropCampaign and no errors.
     twitch = campaign_details_twitch(
-        lambda operation_name, requests: [WITHHELD_CAMPAIGN for _ in requests]
+        lambda operation_name, requests: [withheld_response for _ in requests]
     )
 
     with caplog.at_level(logging.WARNING):
