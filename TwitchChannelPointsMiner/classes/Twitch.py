@@ -7018,6 +7018,27 @@ class Twitch(object):
                     normalized_campaign = self.__normalize_advertised_campaign(campaign)
                     self.advertised_drop_campaigns[campaign_id] = normalized_campaign
 
+        authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
+            game_slug, []
+        )
+        # The gist listing one for all channels does vouch for it. Twitch's
+        # channel query (for this client) can omit such a campaign on every
+        # channel it runs on while watching there still earns it: Hunt:
+        # Showdown 1896's weekly campaigns progress on any Drops-enabled
+        # Hunt channel without ever being listed, even on channels that list
+        # the game's Halloween campaign.
+        open_reported_names = (
+            getattr(self, "twitchdrops_app_open_reported_names", None) or {}
+        ).get(game_slug, set())
+        gist_open_ids = {
+            str(campaign.get("id"))
+            for campaign in authoritative_campaigns
+            if campaign.get("id")
+            and str(campaign.get("id")) not in rejected_listed_ids
+            and campaign_channel_scope(campaign)[0] is CampaignChannelScope.OPEN
+            and self.__campaign_name_key(campaign.get("name")) in open_reported_names
+        }
+
         if advertised_campaigns:
             advertised_campaigns = [
                 self.advertised_drop_campaigns[str(campaign["id"])]
@@ -7064,6 +7085,11 @@ class Twitch(object):
                 )
                 return [], None, channel_query_answered
 
+            advertised_ids = [str(campaign["id"]) for campaign in advertised_campaigns]
+            # The gist's all-channel campaigns the channel did not list. They
+            # already passed the account-wide evaluation, which stored them
+            # in active_drop_campaigns, so only completion is checked here.
+            gist_open_extra_ids = sorted(gist_open_ids - set(advertised_ids))
             if is_drop_discovered(streamer):
                 completed_drop_ids = self.__finished_drop_ids()
                 (
@@ -7089,15 +7115,26 @@ class Twitch(object):
                     )
                     is not None
                 )
+                eligible_campaigns += sum(
+                    1
+                    for campaign_id in gist_open_extra_ids
+                    if campaign_id not in self.completed_drop_campaigns
+                )
                 self.__record_channel_verdict(
                     game_slug,
                     streamer.username,
-                    (eligible_campaigns, len(advertised_campaigns)),
+                    (
+                        eligible_campaigns,
+                        len(advertised_campaigns) + len(gist_open_extra_ids),
+                    ),
                 )
 
-            # Only this branch proves the campaigns run on this channel.
-            advertised_ids = [str(campaign["id"]) for campaign in advertised_campaigns]
-            return list(advertised_ids), advertised_ids, channel_query_answered
+            # Only the listed campaigns prove they run on this channel.
+            return (
+                advertised_ids + gist_open_extra_ids,
+                advertised_ids,
+                channel_query_answered,
+            )
 
         # Campaign-restricted categories (e.g. Pokémon GO) resolve their
         # allow-listed channels from Twitch's own authoritative campaign data
@@ -7106,9 +7143,6 @@ class Twitch(object):
         # its own advertised-campaigns query comes back empty -- this is
         # common for official co-stream/viewing-party channels -- so check it
         # before concluding the channel is ineligible.
-        authoritative_campaigns = getattr(self, "active_drop_campaigns", {}).get(
-            game_slug, []
-        )
         # Only a genuine, non-empty allow-list containing this channel counts
         # as evidence to distrust the channel's own (empty) query result. An
         # unrestricted authoritative campaign alone says nothing about this
@@ -7118,22 +7152,6 @@ class Twitch(object):
             streamer.username in campaign_channel_scope(campaign)[1]
             for campaign in authoritative_campaigns
         )
-        # The gist listing one for all channels does vouch for it. Twitch's
-        # channel query (for this client) can omit such a campaign on every
-        # channel it runs on while watching there still earns it: Hunt:
-        # Showdown 1896's weekly campaigns progress on any Drops-enabled
-        # Hunt channel without ever being listed.
-        open_reported_names = (
-            getattr(self, "twitchdrops_app_open_reported_names", None) or {}
-        ).get(game_slug, set())
-        gist_open_ids = {
-            str(campaign.get("id"))
-            for campaign in authoritative_campaigns
-            if campaign.get("id")
-            and str(campaign.get("id")) not in rejected_listed_ids
-            and campaign_channel_scope(campaign)[0] is CampaignChannelScope.OPEN
-            and self.__campaign_name_key(campaign.get("name")) in open_reported_names
-        }
         if (
             getattr(streamer, "from_wildcard_category", False) is True
             and fallback_campaigns
