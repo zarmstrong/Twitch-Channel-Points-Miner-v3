@@ -173,6 +173,21 @@ def test_twitch_plain_text_cuts_long_text():
     assert text.endswith("…")
 
 
+@pytest.mark.parametrize("max_length", [1, 2])
+def test_twitch_plain_text_cut_stays_within_tiny_limits(max_length):
+    text = utils.twitch_plain_text("word " * 100, max_length=max_length)
+
+    assert 0 < len(text) <= max_length
+    assert text.endswith("…")
+
+
+@pytest.mark.parametrize("max_length", [0, -5, None, "20", 2.5, True])
+def test_twitch_plain_text_ignores_an_unusable_max_length(max_length):
+    assert utils.twitch_plain_text("word " * 3, max_length=max_length) == (
+        "word word word"
+    )
+
+
 def test_get_streamer_compares_channel_ids_as_strings():
     streamers = [SimpleNamespace(channel_id="10"), SimpleNamespace(channel_id=20)]
 

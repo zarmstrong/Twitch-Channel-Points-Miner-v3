@@ -126,7 +126,8 @@ def twitch_plain_text(text, placeholders=None, max_length=300) -> str:
 
     Markup tags such as <x:bold> are dropped, {Placeholders} are filled from
     placeholders and removed when unknown, whitespace is collapsed, and the
-    result is cut to max_length. Anything but a string gives ""."""
+    result is cut to max_length; a max_length that isn't a positive int
+    leaves it whole. Anything but a string gives ""."""
     if not isinstance(text, str):
         return ""
     placeholders = placeholders or {}
@@ -137,7 +138,11 @@ def twitch_plain_text(text, placeholders=None, max_length=300) -> str:
 
     text = TWITCH_PLACEHOLDER.sub(fill, TWITCH_MARKUP_TAG.sub("", text))
     text = " ".join(text.split())
-    if len(text) > max_length:
+    if (
+        isinstance(max_length, int)
+        and not isinstance(max_length, bool)
+        and 0 < max_length < len(text)
+    ):
         text = text[: max_length - 1].rstrip() + "…"
     return text
 
