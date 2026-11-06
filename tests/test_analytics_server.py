@@ -105,6 +105,26 @@ def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     analytics_module.response_cache.clear()
 
 
+def test_json_all_keeps_name_letters_that_spell_json(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    for name in ["jackson", "sonja"]:
+        (tmp_path / f"{name}.json").write_text(
+            '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
+        )
+    analytics_module.response_cache.clear()
+    client = AnalyticsServer(password=None).app.test_client()
+
+    response = client.get("/json_all")
+
+    names = sorted(item["name"] for item in json_module.loads(response.get_data(True)))
+    assert names == ["jackson", "sonja"]
+    analytics_module.response_cache.clear()
+
+
 def test_streamers_available_excludes_now_watching_file(monkeypatch, tmp_path):
     monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
     (tmp_path / "example.json").write_text(
