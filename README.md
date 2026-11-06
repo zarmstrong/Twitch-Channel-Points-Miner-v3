@@ -587,6 +587,12 @@ campaigns are checked first. The miner selects up to 20 live channels per
 restricted campaign and checks remaining channel lists in standby batches only
 when a campaign has not reached that target.
 
+The miner signs in as Twitch's TV client. Twitch does not return the Drops
+dashboard or full campaign details to that client, so the miner reads campaigns
+from your inventory, the campaigns that live channels list, and the shared
+gist. When Twitch withholds every campaign's details, the miner logs one
+warning per run.
+
 ##### Refresh behavior
 
 The miner periodically rechecks configured categories for new campaigns and live

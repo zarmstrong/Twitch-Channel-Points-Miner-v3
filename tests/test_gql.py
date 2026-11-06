@@ -1368,6 +1368,114 @@ def test_campaign_details_retries_viewer_context_after_null_user():
     assert calls[1][0]["variables"]["channelLogin"] == "viewer-id"
 
 
+def campaign_details_twitch(post_batch):
+    twitch = twitch_with_gql(SimpleNamespace(post_gql_request_batch_raw=post_batch))
+    twitch.twitch_login = SimpleNamespace(
+        get_user_id=lambda: "viewer-id", username="viewer"
+    )
+    twitch.log_drop_checks = False
+    twitch.campaign_details_withheld_logged = False
+    twitch.campaign_details_withheld_streak = 0
+    return twitch
+
+
+WITHHELD_CAMPAIGN = {"data": {"user": {"id": "viewer-id", "dropCampaign": None}}}
+LOADED_CAMPAIGN = {"data": {"user": {"dropCampaign": {"id": "b", "name": "Drop"}}}}
+
+
+@pytest.mark.parametrize(
+    "withheld_response",
+    [
+        WITHHELD_CAMPAIGN,
+        {"data": {"currentUser": {"id": "viewer-id", "dropCampaign": None}}},
+        {"data": {"dropCampaign": None}},
+    ],
+    ids=["user", "current-user", "top-level"],
+)
+def test_campaign_details_warns_once_when_twitch_withholds_every_campaign(
+    caplog, withheld_response
+):
+    # Twitch answers a TV-client login with a null dropCampaign and no errors.
+    twitch = campaign_details_twitch(
+        lambda operation_name, requests: [withheld_response for _ in requests]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for campaigns in ([{"id": "a"}, {"id": "b"}], [{"id": "c"}, {"id": "d"}]):
+            assert twitch._Twitch__get_campaigns_details(campaigns) == []
+        assert "withholds campaign details" not in caplog.text
+
+        assert twitch._Twitch__get_campaigns_details([{"id": "e"}]) == []
+        assert twitch._Twitch__get_campaigns_details([{"id": "f"}]) == []
+
+    warnings = [r for r in caplog.records if "withholds campaign details" in r.message]
+    assert len(warnings) == 1
+    assert "no details for 5 Drop campaign requests" in warnings[0].message
+
+
+def test_campaign_details_stale_campaign_does_not_warn_when_others_load(caplog):
+    # A working login gets a null campaign for a stale ID, but each sync's
+    # other lookups load campaigns.
+    twitch = campaign_details_twitch(
+        lambda operation_name, requests: [
+            (
+                LOADED_CAMPAIGN
+                if request["variables"]["dropID"] == "b"
+                else WITHHELD_CAMPAIGN
+            )
+            for request in requests
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(6):
+            assert twitch._Twitch__get_campaigns_details([{"id": "stale"}]) == []
+            assert twitch._Twitch__get_campaigns_details([{"id": "b"}]) != []
+
+    assert "withholds campaign details" not in caplog.text
+    assert twitch.campaign_details_withheld_logged is False
+
+
+def test_campaign_details_finished_campaign_lookups_do_not_count(caplog):
+    # A working login with no open campaign can still resolve many finished
+    # campaign IDs from its inventory, and Twitch nulls each stale one.
+    twitch = campaign_details_twitch(
+        lambda operation_name, requests: [WITHHELD_CAMPAIGN for _ in requests]
+    )
+    stale = [{"id": f"finished-{index}"} for index in range(6)]
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert twitch._Twitch__get_campaigns_details(stale, may_be_stale=True) == []
+
+    assert "withholds campaign details" not in caplog.text
+    assert twitch.campaign_details_withheld_streak == 0
+
+
+@pytest.mark.parametrize(
+    "response_item",
+    [
+        {"errors": [{"message": "failed integrity check"}], "data": None},
+        {"data": {"user": None}},
+        {"data": {"user": {"id": "viewer-id"}}},
+    ],
+    ids=["graphql-error", "null-user", "no-campaign-field"],
+)
+def test_campaign_details_does_not_blame_the_login_for_other_misses(
+    caplog, response_item
+):
+    twitch = campaign_details_twitch(
+        lambda operation_name, requests: [response_item for _ in requests]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            twitch._Twitch__get_campaigns_details([{"id": "a"}, {"id": "b"}])
+
+    assert "withholds campaign details" not in caplog.text
+    assert twitch.campaign_details_withheld_streak == 0
+
+
 def test_campaign_sync_accepts_partial_inventory_without_progress(monkeypatch):
     twitch = twitch_with_gql(SimpleNamespace())
     twitch.log_drop_checks = False

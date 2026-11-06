@@ -183,6 +183,8 @@ class Twitch(object):
         "category_log_level",
         "discovered_open_drop_campaigns",
         "campaign_lookup_unavailable",
+        "campaign_details_withheld_logged",
+        "campaign_details_withheld_streak",
         "unevaluated_category_slugs",
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
@@ -301,6 +303,8 @@ class Twitch(object):
         self.category_log_level = logging.INFO
         self.discovered_open_drop_campaigns = None
         self.campaign_lookup_unavailable = False
+        self.campaign_details_withheld_logged = False
+        self.campaign_details_withheld_streak = 0
         self.unevaluated_category_slugs = set()
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
@@ -2178,7 +2182,9 @@ class Twitch(object):
             if campaign_id not in campaigns_by_id
             and campaign_id not in self.campaign_game_slugs
         ]
-        for campaign in self.__get_campaigns_details(completed_campaigns_to_resolve):
+        for campaign in self.__get_campaigns_details(
+            completed_campaigns_to_resolve, may_be_stale=True
+        ):
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
@@ -8073,6 +8079,7 @@ class Twitch(object):
         self,
         campaigns,
         campaign_channel_id_by_id: Optional[Dict[str, str]] = None,
+        may_be_stale: bool = False,
     ):
         def extract_drop_campaign(response_item):
             if not isinstance(response_item, dict):
@@ -8086,8 +8093,23 @@ class Twitch(object):
                     return parent["dropCampaign"]
             return data.get("dropCampaign")
 
+        def withheld(response_item):
+            # Twitch answered without errors but sent no campaign, as it does
+            # for every campaign when the login is the TV client's.
+            if not isinstance(response_item, dict) or response_item.get("errors"):
+                return False
+            data = response_item.get("data")
+            if not isinstance(data, dict):
+                return False
+            # Same response shapes as extract_drop_campaign.
+            for parent in (data.get("user"), data.get("currentUser"), data):
+                if isinstance(parent, dict) and "dropCampaign" in parent:
+                    return parent["dropCampaign"] is None
+            return False
+
         result = []
         misses = 0
+        withheld_misses = 0
         viewer_context = str(
             self.twitch_login.get_user_id() or self.twitch_login.username
         )
@@ -8129,6 +8151,7 @@ class Twitch(object):
                     retry_campaigns.append(campaign)
                 else:
                     misses += 1
+                    withheld_misses += withheld(response_item)
 
             if retry_campaigns:
                 retry_data = []
@@ -8157,11 +8180,37 @@ class Twitch(object):
                         result.append(drop_campaign)
                     else:
                         misses += 1
+                        withheld_misses += withheld(response_item)
 
         if self.log_drop_checks is True and misses > 0:
             self.__log_drop_check(
-                f"DropCampaignDetails misses={misses} campaigns={len(campaigns)}",
+                f"DropCampaignDetails misses={misses} withheld={withheld_misses} "
+                f"campaigns={len(campaigns)}",
                 level=logging.DEBUG,
+            )
+
+        # A working login also gets a null campaign for a stale or unknown ID,
+        # so misses from lookups of IDs that may be stale (finished campaigns)
+        # don't count. Warn only once misses for open campaigns pile up
+        # across calls with no campaign loaded in between.
+        if result:
+            self.campaign_details_withheld_streak = 0
+        elif not may_be_stale:
+            self.campaign_details_withheld_streak = (
+                getattr(self, "campaign_details_withheld_streak", 0) + withheld_misses
+            )
+        if self.campaign_details_withheld_streak >= 5 and not getattr(
+            self, "campaign_details_withheld_logged", False
+        ):
+            self.campaign_details_withheld_logged = True
+            logger.warning(
+                "Twitch returned no details for "
+                f"{self.campaign_details_withheld_streak} Drop campaign "
+                "requests in a row. Twitch withholds campaign details from the TV "
+                "login this miner uses, so Drop names, allowed channels and "
+                "drop lists come from your inventory, the channels' listed "
+                "campaigns and the shared Drops gist instead.",
+                extra={"emoji": ":warning:"},
             )
 
         return result
