@@ -486,6 +486,64 @@ def test_unlisted_twitch_campaign_without_gist_scope_still_blocked(monkeypatch):
     )
 
 
+def listing_collected_campaign_twitch(monkeypatch):
+    # Hunt: Showdown 1896's channels list its running Halloween campaign,
+    # which this account already collected, and still not the weekly one.
+    twitch = gist_open_campaign_twitch(monkeypatch)
+    collected = campaign_data()
+    collected["id"] = "halloween-campaign"
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[collected], campaigns_available=True
+        )
+    )
+    twitch.campaign_detail_attempts = {("halloween-campaign", "12345")}
+    twitch.awarded_game_event_drops = {}
+    twitch.completed_drop_campaigns = {"halloween-campaign"}
+    return twitch
+
+
+def test_channel_listing_another_campaign_keeps_gist_open_campaign(monkeypatch):
+    twitch = listing_collected_campaign_twitch(monkeypatch)
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "halloween-campaign",
+        "weekly-campaign",
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        1,
+        2,
+    )
+
+
+def test_configured_channel_listing_another_campaign_keeps_gist_open_campaign(
+    monkeypatch,
+):
+    twitch = listing_collected_campaign_twitch(monkeypatch)
+    streamer = category_streamer()
+    streamer.from_category = False
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == [
+        "halloween-campaign",
+        "weekly-campaign",
+    ]
+
+
+def test_channel_listing_another_campaign_without_gist_scope_lists_only_it(
+    monkeypatch,
+):
+    twitch = listing_collected_campaign_twitch(monkeypatch)
+    twitch.twitchdrops_app_open_reported_names = {}
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "halloween-campaign"
+    ]
+    assert twitch.category_campaign_eligibility[("example-game", "drops-channel")] == (
+        0,
+        1,
+    )
+
+
 def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypatch):
     # The same authoritative campaign exists, but this channel isn't on its
     # allow-list, so the empty channel query result must still stand.
