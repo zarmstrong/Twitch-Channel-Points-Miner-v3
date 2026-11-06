@@ -15,6 +15,7 @@ from TwitchChannelPointsMiner.logger import NotificationHandler
         ("matrix", SimpleNamespace(room_id="room", access_token="token")),
         ("pushover", SimpleNamespace(userkey="user", token="token")),
         ("gotify", SimpleNamespace(endpoint="https://gotify.example/message")),
+        ("apprise", SimpleNamespace(urls=["discord://123/abc"])),
     ),
 )
 def test_logger_notification_skip_flags_must_be_truthy(provider, notifier):

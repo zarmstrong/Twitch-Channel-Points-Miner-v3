@@ -55,6 +55,7 @@ LOGGER_NOTIFICATION_SETTINGS = (
     "gotify",
     "email",
     "ntfy",
+    "apprise",
 )
 LOGGER_NOTIFICATION_TEMPLATES = {
     "telegram": 'Telegram(chat_id=123456789, token="TOKEN", events=[])',
@@ -65,6 +66,7 @@ LOGGER_NOTIFICATION_TEMPLATES = {
     "gotify": 'Gotify(endpoint="https://example.com/message?token=TOKEN", priority=0, events=[])',
     "email": 'Email(host="smtp.example.com", port=587, sender="miner@example.com", recipients=["you@example.com"], events=[])',
     "ntfy": 'Ntfy(topic="YOUR_NTFY_TOPIC", events=[])',
+    "apprise": 'Apprise(urls=["discord://WEBHOOK_ID/WEBHOOK_TOKEN"], events=[])',
 }
 BET_SETTINGS_DEFAULTS = (
     ("strategy", "None"),

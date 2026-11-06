@@ -73,6 +73,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
             - [Discord](#discord)
             - [Generic Webhook](#generic-webhook)
             - [ntfy](#ntfy)
+            - [Apprise](#apprise)
             - [Matrix](#matrix)
             - [Pushover](#pushover)
             - [Gotify](#gotify)
@@ -1071,6 +1072,7 @@ implementing it.
 | `gotify` | Gotify or None | `None` | Send selected events to a Gotify server. |
 | `email` | Email or None | `None` | Send selected events through an SMTP server. |
 | `ntfy` | Ntfy or None | `None` | Publish selected events to an ntfy topic. |
+| `apprise` | Apprise or None | `None` | Send selected events to any service Apprise supports. |
 | `daily_report` | bool | `False` | Generate a daily channel-points and Drop activity report. |
 | `daily_report_time` | str | `"00:00"` | Local delivery time for the daily report, in 24-hour `HH:MM` format. |
 
@@ -1146,6 +1148,7 @@ Placeholder values are ignored; use real credentials and never commit them.
 | Gotify | Self-hosted Gotify application | `Gotify` |
 | Email | Addresses reached through SMTP | `Email` |
 | ntfy | ntfy topic (hosted or self-hosted) | `Ntfy` |
+| Apprise | Any of 100+ services, one URL each | `Apprise` |
 
 Telegram, Discord and Pushover split a message that is too long to send in
 one piece into consecutive messages, breaking at line ends where possible. A
@@ -1246,6 +1249,31 @@ Ntfy(
     priority=3,
     tags=["twitch"],
     events=[Events.STREAMER_OFFLINE, Events.DROP_CLAIM],
+)
+```
+
+##### Apprise
+
+`Apprise` sends notifications through [Apprise](https://github.com/caronc/apprise),
+which supports more than 100 services. Each destination is one URL, such as
+`discord://`, `tgram://` or `ntfy://`; see the
+[Apprise wiki](https://github.com/caronc/apprise/wiki) for every format.
+
+Apprise is optional. Install it with `pip install apprise` only if you use this
+notifier. Without it, the miner logs one warning and keeps running.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `urls` | str or list | Required | One or more Apprise service URLs. |
+| `events` | list | Required | Events to send. |
+| `title` | str | `"Twitch Channel Points Miner"` | Notification title. |
+
+```python
+from TwitchChannelPointsMiner.classes.Apprise import Apprise
+
+Apprise(
+    urls=["discord://WEBHOOK_ID/WEBHOOK_TOKEN", "tgram://BOT_TOKEN/CHAT_ID"],
+    events=[Events.DROP_CLAIM, Events.STREAMER_OFFLINE],
 )
 ```
 
