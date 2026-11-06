@@ -54,12 +54,19 @@ def main() -> None:
         target=watch_for_stop, name="stop-flag-watcher", daemon=True
     ).start()
 
-    # Behave as if started as `python -m TwitchChannelPointsMiner.runner --config-dir ...` from miner_dir.
-    # argv[0] is "-m" so the runner's restart_process() (os.execv of sys.argv) relaunches it as a module.
+    run_runner(miner_dir, config_dir)
+
+
+def run_runner(miner_dir: str, config_dir: str) -> None:
+    """Runs the runner the way `python -m TwitchChannelPointsMiner.runner
+    --config-dir <config_dir>` does from miner_dir: argparse reads sys.argv[1:],
+    and alter_sys sets sys.argv[0] to the module's file, as -m does."""
     os.chdir(miner_dir)
     sys.path[0] = miner_dir
-    sys.argv = ["-m", "TwitchChannelPointsMiner.runner", "--config-dir", config_dir]
-    runpy.run_module("TwitchChannelPointsMiner.runner", run_name="__main__")
+    sys.argv = [sys.argv[0], "--config-dir", config_dir]
+    runpy.run_module(
+        "TwitchChannelPointsMiner.runner", run_name="__main__", alter_sys=True
+    )
 
 
 if __name__ == "__main__":

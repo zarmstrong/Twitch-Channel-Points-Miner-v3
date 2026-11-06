@@ -72,3 +72,40 @@ def test_supervisor_and_ctl_commands_are_excluded(miner_dir):
     assert not miner_common.is_supervised_miner_command(cmd, config)
     cmd = f"python {SUPERVISOR_DIR / 'minerctl.py'} status {config} miner_wrapper.py"
     assert not miner_common.is_supervised_miner_command(cmd, config)
+
+
+def test_wrapper_passes_only_runner_arguments_to_argparse(tmp_path):
+    # The wrapper must hand the runner the same argv `python -m` would: the
+    # module name must not reach argparse ("unrecognized arguments").
+    import subprocess
+
+    miner = tmp_path / "miner"
+    package = miner / "TwitchChannelPointsMiner"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "runner.py").write_text(
+        "import argparse, os, sys\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--config-dir')\n"
+        "args = parser.parse_args()\n"
+        "print(os.path.basename(sys.argv[0]), args.config_dir, os.getcwd())\n",
+        encoding="utf-8",
+    )
+    config = miner / "config"
+    config.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SUPERVISOR_DIR / "miner_wrapper.py"),
+            str(miner),
+            str(config),
+            str(tmp_path / "stop.flag"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["runner.py", str(config), str(miner)]
