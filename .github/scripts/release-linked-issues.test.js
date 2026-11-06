@@ -35,9 +35,10 @@ test('issue selection is open-only and deduplicated', () => {
   assert.equal(shouldCloseIssue({ state: 'OPEN', labels: { nodes: [] } }), false);
 });
 
-test('marking is idempotent when label and comment already exist', async () => {
-  let mutations = 0;
-  const github = {
+function markingGithub({ pulls, mutations, comments = [] }) {
+  const listPullRequestsAssociatedWithCommit = () => {};
+  const listComments = () => {};
+  return {
     graphql: async () => ({ repository: { pullRequest: {
       closingIssuesReferences: {
         nodes: [{
@@ -48,22 +49,81 @@ test('marking is idempotent when label and comment already exist', async () => {
         pageInfo: { hasNextPage: false },
       },
     } } }),
-    paginate: async () => [{ body: '<!-- awaiting-release -->' }],
-    rest: { issues: {
-      listComments() {},
-      addLabels: async () => { mutations += 1; },
-      createComment: async () => { mutations += 1; },
-    } },
+    paginate: async (method) => {
+      if (method === listPullRequestsAssociatedWithCommit) return pulls;
+      if (method === listComments) return comments;
+      throw new Error('Unexpected paginated method');
+    },
+    rest: {
+      repos: { listPullRequestsAssociatedWithCommit },
+      issues: {
+        listComments,
+        addLabels: async (input) => mutations.push(['label', input]),
+        createComment: async (input) => mutations.push(['comment', input]),
+      },
+    },
   };
+}
+
+test('marking is idempotent when label and comment already exist', async () => {
+  const mutations = [];
   await markIssuesAwaitingRelease({
-    github,
+    github: markingGithub({
+      pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+      mutations,
+      comments: [{ body: '<!-- awaiting-release -->' }],
+    }),
     context: {
       repo: { owner: 'o', repo: 'r' },
-      payload: { pull_request: { number: 9, labels: [] } },
+      payload: { after: 'abc', commits: [{ id: 'abc' }] },
     },
     core: { info() {} },
   });
-  assert.equal(mutations, 0);
+  assert.deepEqual(mutations, []);
+});
+
+test('marking finds the merged PR from the pushed merge commit', async () => {
+  const mutations = [];
+  await markIssuesAwaitingRelease({
+    github: markingGithub({
+      pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+      mutations,
+    }),
+    context: {
+      repo: { owner: 'o', repo: 'r' },
+      payload: { after: 'abc', commits: [{ id: 'abc' }] },
+    },
+    core: { info() {} },
+  });
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0][0], 'comment');
+  assert.match(mutations[0][1].body, /The fix in #9 was merged/);
+});
+
+test('marking skips direct pushes and Release Please merges', async () => {
+  for (const pulls of [
+    [],
+    [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'other', labels: [] }],
+    [{
+      number: 9,
+      merged_at: '2026-01-01',
+      merge_commit_sha: 'abc',
+      labels: [{ name: 'autorelease: pending' }],
+    }],
+  ]) {
+    const mutations = [];
+    const info = [];
+    await markIssuesAwaitingRelease({
+      github: markingGithub({ pulls, mutations }),
+      context: {
+        repo: { owner: 'o', repo: 'r' },
+        payload: { after: 'abc', commits: [{ id: 'abc' }] },
+      },
+      core: { info: (message) => info.push(message) },
+    });
+    assert.deepEqual(mutations, []);
+    assert.match(info.at(-1), /No merged ordinary PR/);
+  }
 });
 
 test('release PR selection requires a range commit to be the merge commit', () => {

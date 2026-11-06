@@ -70,15 +70,7 @@ async function hasComment(github, owner, repo, issueNumber, marker) {
   return comments.some((comment) => comment.body && comment.body.includes(marker));
 }
 
-async function markIssuesAwaitingRelease({ github, context, core }) {
-  const pull = context.payload.pull_request;
-  const labels = pull.labels.map((label) => label.name);
-  if (isReleasePleasePullRequest(labels)) {
-    core.info(`Skipping Release Please PR #${pull.number}`);
-    return;
-  }
-
-  const { owner, repo } = context.repo;
+async function markPullIssues(github, owner, repo, pull) {
   const issues = uniqueOpenIssues(await linkedIssues(github, owner, repo, pull.number));
   for (const issue of issues) {
     if (!issue.labels.nodes.some((label) => label.name === AWAITING_LABEL)) {
@@ -94,6 +86,29 @@ async function markIssuesAwaitingRelease({ github, context, core }) {
         body: `${AWAITING_MARKER}\nThe fix in #${pull.number} was merged and is awaiting release.`,
       });
     }
+  }
+}
+
+async function markIssuesAwaitingRelease({ github, context, core }) {
+  // Runs on push to the default branch, so the merged PR comes from its merge commit.
+  const { owner, repo } = context.repo;
+  const commitShas = (context.payload.commits || []).map((commit) => commit.id);
+  if (!commitShas.length && context.payload.after) commitShas.push(context.payload.after);
+
+  const associations = {};
+  for (const sha of commitShas) {
+    associations[sha] = await github.paginate(
+      github.rest.repos.listPullRequestsAssociatedWithCommit,
+      { owner, repo, commit_sha: sha, per_page: 100 },
+    );
+  }
+  const pulls = releasePullRequests(commitShas, associations);
+  if (!pulls.length) {
+    core.info('No merged ordinary PR found for the pushed commits');
+    return;
+  }
+  for (const pull of pulls) {
+    await markPullIssues(github, owner, repo, pull);
   }
 }
 
