@@ -139,11 +139,10 @@ def test_game_wide_watch_campaign_converts_every_tier():
     }
     assert result["startAt"] == START_AT
     assert result["endAt"] == END_AT
-    assert result["allow"] == {"channels": None}
+    assert "allow" not in result
     assert result["summary"] == {
         "includesMWRequirement": True,
         "includesSubRequirement": False,
-        "isSitewide": True,
     }
     drops = result["timeBasedDrops"]
     assert [drop["requiredMinutesWatched"] for drop in drops] == [60, 120, 240]
@@ -173,7 +172,6 @@ def test_sub_badge_campaign_is_restricted_to_its_channel():
     assert result["summary"] == {
         "includesMWRequirement": False,
         "includesSubRequirement": True,
-        "isSitewide": False,
     }
     [drop] = result["timeBasedDrops"]
     assert drop["name"] == "Synthetic Sub Badge"
@@ -248,10 +246,25 @@ def test_bad_date_or_missing_id_returns_none():
     assert campaign_from_channel_progress(None) is None
 
 
-def test_converted_game_wide_campaign_is_open_scope():
+def test_converted_campaign_without_channel_list_has_unknown_scope():
+    # Twitch sends channels: null for channel-restricted campaigns as well as
+    # game-wide ones, so a null list must not read as open to every channel.
     result = campaign_from_channel_progress(_game_wide_campaign())
 
-    assert campaign_channel_scope(result) == (CampaignChannelScope.OPEN, [])
+    assert campaign_channel_scope(result) == (CampaignChannelScope.UNKNOWN, [])
+
+
+def test_converted_campaign_keeps_a_remembered_allow_list():
+    twitch = object.__new__(Twitch)
+    twitch.known_campaign_scopes = {
+        "campaign-game-wide": (CampaignChannelScope.RESTRICTED, ("allowedchannel",))
+    }
+    result = campaign_from_channel_progress(_game_wide_campaign())
+
+    assert twitch._Twitch__known_campaign_scope("campaign-game-wide", result) == (
+        CampaignChannelScope.RESTRICTED,
+        ["allowedchannel"],
+    )
 
 
 def test_converted_sub_badge_scope_is_unknown_without_logins():

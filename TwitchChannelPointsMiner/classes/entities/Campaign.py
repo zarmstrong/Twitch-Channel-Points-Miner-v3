@@ -185,29 +185,31 @@ def campaign_from_channel_progress(campaign) -> Optional[dict]:
     if not drops:
         return None
 
-    allow = (
-        [{"id": channel_id} for channel_id in allow_channels]
-        if has_channel_list
-        else None
-    )
     game = campaign.get("game")
-    return {
+    converted = {
         "id": campaign_id,
         "name": campaign_name or campaign_id,
         "status": "ACTIVE",
         "game": game if isinstance(game, dict) else {},
         "startAt": start_at,
         "endAt": end_at,
-        "allow": {"channels": allow},
         "summary": {
             "includesMWRequirement": any(
                 drop["requiredMinutesWatched"] > 0 for drop in drops
             ),
             "includesSubRequirement": any(drop["requiredSubs"] > 0 for drop in drops),
-            "isSitewide": allow is None,
         },
         "timeBasedDrops": drops,
     }
+    # Twitch sends channels: null for channel-restricted campaigns too, so a
+    # missing list says nothing about who can earn the campaign. Leave the
+    # allow block out, as a channel's listing does, so the campaign reads as
+    # unknown and a remembered allow-list still applies.
+    if has_channel_list:
+        converted["allow"] = {
+            "channels": [{"id": channel_id} for channel_id in allow_channels]
+        }
+    return converted
 
 
 class Campaign(object):
