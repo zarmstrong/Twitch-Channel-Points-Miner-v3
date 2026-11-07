@@ -7582,10 +7582,33 @@ class Twitch(object):
     ) -> Tuple[List[dict], bool, bool]:
         """Return (campaigns, campaign_data_available, query_answered).
 
+        Campaigns come from DropChannelCampaignsProgress, falling back to
+        DropsHighlightService_AvailableDrops when that request fails or returns
+        no list.
+
         query_answered is True whenever Twitch answered the channel query,
         including a null campaign list, and False only when the request or
         its parsing failed.
         """
+        # getattr keeps gql stubs that only implement get_available_drops working.
+        progress_query = getattr(self.gql, "get_channel_drop_campaigns_progress", None)
+        if callable(progress_query):
+            try:
+                response = progress_query(str(channel_id))
+                if response.campaigns_available:
+                    return response.campaigns, True, True
+            except RetryError as error:
+                self.__log_drop_check(
+                    f"unable to load channel campaign progress for {channel_id}: "
+                    f"{error}; using the channel's drops listing",
+                    level=logging.DEBUG,
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                self.__log_drop_check(
+                    f"invalid channel campaign progress response for {channel_id}: "
+                    f"{error}; using the channel's drops listing",
+                    level=logging.DEBUG,
+                )
         try:
             response = self.gql.get_available_drops(str(channel_id))
             return response.campaigns, response.campaigns_available, True
