@@ -52,7 +52,10 @@ from TwitchChannelPointsMiner.classes.Exceptions import (
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
 )
-from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.gql.Errors import (
+    RetryError,
+    is_persisted_query_not_found,
+)
 from TwitchChannelPointsMiner.classes.gql.Integration import GQLFactory
 from TwitchChannelPointsMiner.classes.Settings import (
     Events,
@@ -209,6 +212,7 @@ class Twitch(object):
         "unverified_drop_picks",
         "known_campaign_scopes",
         "channel_query_failures",
+        "channel_progress_query_retired",
         "category_campaign_deadlines",
         "last_category_drop_selection",
         "last_wildcard_category_drop_selection",
@@ -347,6 +351,9 @@ class Twitch(object):
         # (game_slug, login) -> (consecutive failed campaign queries, time of
         # the last one) for a provisional wildcard channel.
         self.channel_query_failures = {}
+        # Set once Twitch reports the DropChannelCampaignsProgress hash as
+        # unknown; the channel's drops listing is used for the rest of the session.
+        self.channel_progress_query_retired = False
         self.category_campaign_deadlines = {}
         self.last_category_drop_selection = None
         self.last_wildcard_category_drop_selection = None
@@ -7592,12 +7599,23 @@ class Twitch(object):
         """
         # getattr keeps gql stubs that only implement get_available_drops working.
         progress_query = getattr(self.gql, "get_channel_drop_campaigns_progress", None)
-        if callable(progress_query):
+        if callable(progress_query) and not getattr(
+            self, "channel_progress_query_retired", False
+        ):
             try:
                 response = progress_query(str(channel_id))
                 if response.campaigns_available:
                     return response.campaigns, True, True
             except RetryError as error:
+                if is_persisted_query_not_found(error):
+                    # A retired hash won't come back this session, so stop
+                    # paying a request for it on every channel check.
+                    self.channel_progress_query_retired = True
+                    logger.warning(
+                        "Twitch no longer recognizes the DropChannelCampaignsProgress "
+                        "query; using each channel's drops listing for the rest of "
+                        "this session"
+                    )
                 self.__log_drop_check(
                     f"unable to load channel campaign progress for {channel_id}: "
                     f"{error}; using the channel's drops listing",
