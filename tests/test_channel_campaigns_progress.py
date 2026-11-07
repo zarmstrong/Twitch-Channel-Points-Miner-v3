@@ -7,9 +7,15 @@ from TwitchChannelPointsMiner.classes.entities.Campaign import (
     campaign_from_channel_progress,
     campaign_includes_watch_requirement,
 )
-from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.gql.Errors import (
+    GQLResponseErrors,
+    RetryError,
+    is_persisted_query_not_found,
+)
+from TwitchChannelPointsMiner.classes.gql.data.response.Error import Error
 from TwitchChannelPointsMiner.classes.gql.data.Parser import Parser
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.utils.AttemptStrategy import ExceptionContext
 
 START_AT = "2026-10-22T16:00:00Z"
 END_AT = "2026-11-12T16:59:59.999Z"
@@ -424,3 +430,91 @@ def test_channel_campaigns_log_progress_failure_at_debug(caplog):
 
 def _raise(error):
     raise error
+
+
+def _persisted_query_not_found():
+    return RetryError(
+        "DropChannelCampaignsProgress",
+        [
+            ExceptionContext(
+                GQLResponseErrors(
+                    "DropChannelCampaignsProgress",
+                    [Error(False, "PersistedQueryNotFound")],
+                ),
+                None,
+            )
+        ],
+    )
+
+
+def test_persisted_query_not_found_is_detected_inside_a_retry_error():
+    assert is_persisted_query_not_found(_persisted_query_not_found())
+    assert not is_persisted_query_not_found(
+        RetryError(
+            "DropChannelCampaignsProgress",
+            [
+                ExceptionContext(
+                    GQLResponseErrors(
+                        "DropChannelCampaignsProgress",
+                        [Error(True, "service timeout")],
+                    ),
+                    None,
+                )
+            ],
+        )
+    )
+    assert not is_persisted_query_not_found(RetryError("x", []))
+    assert not is_persisted_query_not_found(ValueError("PersistedQueryNotFound"))
+
+
+def test_channel_progress_query_stops_after_persisted_query_not_found(caplog):
+    progress_calls = []
+
+    def progress(channel_id):
+        progress_calls.append(channel_id)
+        raise _persisted_query_not_found()
+
+    twitch = _twitch_with_gql(
+        SimpleNamespace(
+            get_channel_drop_campaigns_progress=progress,
+            get_available_drops=lambda channel_id: _listing_response(
+                "listing-campaign"
+            ),
+        )
+    )
+    twitch.channel_progress_query_retired = False
+
+    with caplog.at_level(logging.WARNING):
+        first = twitch._Twitch__get_campaigns_from_channel_id("1")
+        second = twitch._Twitch__get_campaigns_from_channel_id("2")
+
+    listing = [{"id": "listing-campaign", "listing": True}]
+    assert first == (listing, True, True)
+    assert second == (listing, True, True)
+    assert progress_calls == ["1"]
+    assert twitch.channel_progress_query_retired is True
+    assert caplog.text.count("no longer recognizes") == 1
+
+
+def test_channel_progress_query_keeps_running_after_other_errors():
+    progress_calls = []
+
+    def progress(channel_id):
+        progress_calls.append(channel_id)
+        raise RetryError("DropChannelCampaignsProgress", [])
+
+    twitch = _twitch_with_gql(
+        SimpleNamespace(
+            get_channel_drop_campaigns_progress=progress,
+            get_available_drops=lambda channel_id: _listing_response(
+                "listing-campaign"
+            ),
+        )
+    )
+    twitch.channel_progress_query_retired = False
+
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+    twitch._Twitch__get_campaigns_from_channel_id("2")
+
+    assert progress_calls == ["1", "2"]
+    assert twitch.channel_progress_query_retired is False
