@@ -133,7 +133,6 @@ def campaign_from_channel_progress(campaign) -> Optional[dict]:
 
     drops = []
     allow_channels = {}
-    has_channel_list = False
     groups = campaign.get("rewardGroups")
     for group in groups if isinstance(groups, list) else []:
         if not isinstance(group, dict):
@@ -178,7 +177,6 @@ def campaign_from_channel_progress(campaign) -> Optional[dict]:
         )
         channels = criteria.get("channels")
         if isinstance(channels, list):
-            has_channel_list = True
             for channel in channels:
                 if isinstance(channel, dict) and channel.get("id"):
                     allow_channels.setdefault(str(channel["id"]), None)
@@ -202,10 +200,11 @@ def campaign_from_channel_progress(campaign) -> Optional[dict]:
         "timeBasedDrops": drops,
     }
     # Twitch sends channels: null for channel-restricted campaigns too, so a
-    # missing list says nothing about who can earn the campaign. Leave the
-    # allow block out, as a channel's listing does, so the campaign reads as
-    # unknown and a remembered allow-list still applies.
-    if has_channel_list:
+    # missing or empty list says nothing about who can earn the campaign.
+    # Leave the allow block out, as a channel's listing does, so the campaign
+    # reads as unknown and a remembered allow-list still applies: an empty
+    # allow block would read as open to every channel.
+    if allow_channels:
         converted["allow"] = {
             "channels": [{"id": channel_id} for channel_id in allow_channels]
         }

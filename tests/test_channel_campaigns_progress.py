@@ -254,6 +254,17 @@ def test_converted_campaign_without_channel_list_has_unknown_scope():
     assert campaign_channel_scope(result) == (CampaignChannelScope.UNKNOWN, [])
 
 
+def test_converted_campaign_with_empty_channel_list_has_unknown_scope():
+    campaign = _game_wide_campaign()
+    for group in campaign["rewardGroups"]:
+        group["progressCriteria"]["channels"] = []
+
+    result = campaign_from_channel_progress(campaign)
+
+    assert "allow" not in result
+    assert campaign_channel_scope(result) == (CampaignChannelScope.UNKNOWN, [])
+
+
 def test_converted_campaign_keeps_a_remembered_allow_list():
     twitch = object.__new__(Twitch)
     twitch.known_campaign_scopes = {
