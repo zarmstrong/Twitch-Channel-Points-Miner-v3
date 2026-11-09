@@ -485,3 +485,37 @@ def test_exit_after_crash_only_ends_the_thread_off_the_main_thread():
 
     exit_mock.assert_not_called()
     assert outcome == [1]
+
+
+def test_on_open_closes_a_socket_that_was_force_closed_before_it_started():
+    # run_forever() resets keep_running, so end()'s close() on a replacement
+    # whose thread had not yet entered run_forever was lost and the socket
+    # kept running after shutdown.
+    ws = SimpleNamespace(forced_close=True, close=MagicMock(), is_opened=False)
+
+    WebSocketsPool.on_open(ws)
+
+    ws.close.assert_called_once_with()
+    assert ws.is_opened is False
+
+
+def test_start_does_not_run_a_socket_force_closed_before_its_thread_ran(monkeypatch):
+    ran = []
+    websocket = SimpleNamespace(
+        index=0, forced_close=True, run_forever=lambda **kw: ran.append(kw)
+    )
+    pool = _pool([websocket])
+    threads = []
+    real_thread = threading.Thread
+
+    def capture(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(f"{POOL_MODULE}.Thread", capture)
+
+    pool._WebSocketsPool__start(0)
+    threads[0].join(timeout=5)
+
+    assert ran == []

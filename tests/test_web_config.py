@@ -1384,6 +1384,7 @@ def test_websocket_on_open_drains_pending_topics_outside_lock(monkeypatch):
         pending_topics=[topic],
         is_opened=False,
         is_closed=True,
+        forced_close=False,
         ping=lambda: None,
         listen=listen,
         unlisten=lambda _topic, _token: pytest.fail("unexpected unlisten"),
