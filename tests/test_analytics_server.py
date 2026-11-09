@@ -1,6 +1,5 @@
 import os
 import re
-import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,13 +22,22 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
 
-def test_ttl_response_cache_expires_after_ttl():
-    cache = TTLResponseCache(ttl_seconds=0.05)
+def test_ttl_response_cache_expires_after_ttl(monkeypatch):
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    # Drive the clock directly: time.monotonic() on Windows ticks about every
+    # 15.6 ms, so a real sleep just past the TTL can still read as unexpired.
+    now = [1000.0]
+    monkeypatch.setattr(analytics_module.time, "monotonic", lambda: now[0])
+    cache = TTLResponseCache(ttl_seconds=60)
 
     cache.set("key", "payload")
     assert cache.get("key") == "payload"
 
-    time.sleep(0.06)
+    now[0] += 59
+    assert cache.get("key") == "payload"
+
+    now[0] += 1
     assert cache.get("key") is None
 
 
@@ -52,15 +60,19 @@ def test_ttl_response_cache_clear_drops_all_entries():
     assert cache.get("b") is None
 
 
-def test_ttl_response_cache_sweeps_expired_entries_on_set():
+def test_ttl_response_cache_sweeps_expired_entries_on_set(monkeypatch):
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
     # A caller that varies its key per-request (e.g. keying on a file's
     # mtime, as /now_watching does) must not accumulate one entry forever -
     # once its old key has expired, the next unrelated set() call should
     # sweep it away rather than leaving it for a get() that will never come.
-    cache = TTLResponseCache(ttl_seconds=0.05)
+    now = [1000.0]
+    monkeypatch.setattr(analytics_module.time, "monotonic", lambda: now[0])
+    cache = TTLResponseCache(ttl_seconds=60)
 
     cache.set("now_watching:1", "a")
-    time.sleep(0.06)
+    now[0] += 60
     cache.set("now_watching:2", "b")
     cache.set("unrelated", "c")
 

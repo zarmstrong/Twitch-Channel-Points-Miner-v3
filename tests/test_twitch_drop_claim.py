@@ -857,6 +857,40 @@ def test_answered_channel_query_replaces_stale_negative_verdict(monkeypatch):
     assert twitch._Twitch__category_drops_condition(streamer) is True
 
 
+def test_fresh_negative_verdict_is_cleared_when_channel_becomes_eligible(monkeypatch):
+    # #150: a fresh negative verdict must not keep hiding a channel that became
+    # eligible. The positive check clears it, so discovery's seed (which defers
+    # to fresh verdicts) cannot pull the channel back to ineligible.
+    twitch = per_streamer_campaigns_twitch(
+        monkeypatch,
+        lambda channel_id: SimpleNamespace(campaigns=[], campaigns_available=False),
+    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    now = [10_000.0]
+    monkeypatch.setattr(twitch_module.time, "time", lambda: now[0])
+    twitch.twitchdrops_app_campaigns["example-game"].append(
+        {"id": "gist-open", "name": "General Drops", "channels": []}
+    )
+    key = ("example-game", "drops-channel")
+    twitch.category_campaign_eligibility[key] = (0, 0)
+    twitch.category_channel_verdicts = {key: ((0, 0), now[0] - 60)}
+    twitch.evaluated_category_campaigns = {"example-game"}
+    streamer = category_streamer()
+    streamer.is_online = True
+    streamer.settings = SimpleNamespace(claim_drops=True)
+    streamer.stream.campaigns_ids = []
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == ["gist-open"]
+    assert twitch.category_campaign_eligibility[key] == (1, 1)
+    assert key not in twitch.category_channel_verdicts
+
+    twitch._Twitch__replace_category_campaign_eligibility(
+        "example-game", {"drops-channel": (1, 1)}
+    )
+
+    assert twitch.category_campaign_eligibility[key] == (1, 1)
+
+
 def test_channel_verdicts_store_only_fresh_negative_results(monkeypatch):
     # Only negative verdicts can outrank discovery, and expired ones (for
     # example from games no longer discovered) are pruned on every record.

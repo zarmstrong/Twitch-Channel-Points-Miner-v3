@@ -621,7 +621,7 @@ def main():
             operation = copy.deepcopy(GQLOperations.DropCampaignDetails)
             operation["variables"] = {
                 "dropID": str(campaign_id),
-                "channelLogin": args.channel,
+                "channelLogin": str(channel_id),
             }
             result = run_operation(
                 twitch,
