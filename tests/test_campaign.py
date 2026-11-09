@@ -201,3 +201,34 @@ def test_community_goal_parses_graphql_and_pubsub_shapes():
 
     assert gql == pubsub
     assert gql.amount_left() == 750
+
+
+def test_campaign_and_drop_windows_compare_against_utc(monkeypatch):
+    # Twitch timestamps are UTC. On a machine behind UTC, comparing them with
+    # the local clock would read a drop that started a minute ago as not
+    # started yet.
+    from datetime import datetime, timedelta, timezone
+
+    from TwitchChannelPointsMiner.classes.entities import Drop as drop_module
+
+    utc = datetime(2026, 1, 1, 12, 0)
+
+    class UtcMinusFive(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return utc - timedelta(hours=5)
+            return utc.replace(tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(drop_module, "datetime", UtcMinusFive)
+    data = campaign_data()
+    data["startAt"] = "2026-01-01T11:59:00Z"
+    data["endAt"] = "2026-01-01T13:00:00Z"
+    for drop in data["timeBasedDrops"]:
+        drop["startAt"] = data["startAt"]
+        drop["endAt"] = data["endAt"]
+
+    campaign = Campaign(data)
+
+    assert campaign.dt_match is True
+    assert [drop.dt_match for drop in campaign.drops] == [True, True]

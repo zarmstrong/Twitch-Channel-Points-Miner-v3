@@ -365,7 +365,9 @@ def json_all():
     payload = json.dumps(
         [
             {
-                "name": streamer.strip(".json"),
+                # removesuffix, not strip: strip(".json") also eats those
+                # letters from the name itself ("jackson" became "jack").
+                "name": streamer.removesuffix(".json"),
                 "data": read_json(streamer, return_response=False),
             }
             for streamer in streamers_available()

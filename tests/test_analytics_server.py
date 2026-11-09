@@ -1,6 +1,5 @@
 import os
 import re
-import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,13 +22,22 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
 
-def test_ttl_response_cache_expires_after_ttl():
-    cache = TTLResponseCache(ttl_seconds=0.05)
+def test_ttl_response_cache_expires_after_ttl(monkeypatch):
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    # Drive the clock directly: time.monotonic() on Windows ticks about every
+    # 15.6 ms, so a real sleep just past the TTL can still read as unexpired.
+    now = [1000.0]
+    monkeypatch.setattr(analytics_module.time, "monotonic", lambda: now[0])
+    cache = TTLResponseCache(ttl_seconds=60)
 
     cache.set("key", "payload")
     assert cache.get("key") == "payload"
 
-    time.sleep(0.06)
+    now[0] += 59
+    assert cache.get("key") == "payload"
+
+    now[0] += 1
     assert cache.get("key") is None
 
 
@@ -52,15 +60,19 @@ def test_ttl_response_cache_clear_drops_all_entries():
     assert cache.get("b") is None
 
 
-def test_ttl_response_cache_sweeps_expired_entries_on_set():
+def test_ttl_response_cache_sweeps_expired_entries_on_set(monkeypatch):
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
     # A caller that varies its key per-request (e.g. keying on a file's
     # mtime, as /now_watching does) must not accumulate one entry forever -
     # once its old key has expired, the next unrelated set() call should
     # sweep it away rather than leaving it for a get() that will never come.
-    cache = TTLResponseCache(ttl_seconds=0.05)
+    now = [1000.0]
+    monkeypatch.setattr(analytics_module.time, "monotonic", lambda: now[0])
+    cache = TTLResponseCache(ttl_seconds=60)
 
     cache.set("now_watching:1", "a")
-    time.sleep(0.06)
+    now[0] += 60
     cache.set("now_watching:2", "b")
     cache.set("unrelated", "c")
 
@@ -102,6 +114,26 @@ def test_streamers_endpoint_uses_ttl_cache(monkeypatch, tmp_path):
     # Second request must be served from cache without re-reading files.
     assert len(calls) == 1
 
+    analytics_module.response_cache.clear()
+
+
+def test_json_all_keeps_name_letters_that_spell_json(monkeypatch, tmp_path):
+    import json as json_module
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as analytics_module
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    for name in ["jackson", "sonja"]:
+        (tmp_path / f"{name}.json").write_text(
+            '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
+        )
+    analytics_module.response_cache.clear()
+    client = AnalyticsServer(password=None).app.test_client()
+
+    response = client.get("/json_all")
+
+    names = sorted(item["name"] for item in json_module.loads(response.get_data(True)))
+    assert names == ["jackson", "sonja"]
     analytics_module.response_cache.clear()
 
 
