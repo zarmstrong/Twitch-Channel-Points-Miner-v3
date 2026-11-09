@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
@@ -13,6 +13,13 @@ def parse_datetime(datetime_str):
         except ValueError:
             continue
     raise ValueError(f"time data '{datetime_str}' does not match format")
+
+
+def utc_now():
+    """The current UTC time as a naive datetime, comparable with parse_datetime.
+    Twitch timestamps are UTC, so the local clock would shift every window by
+    the machine's UTC offset."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def drop_required_subs(drop) -> Optional[int]:
@@ -94,7 +101,7 @@ class Drop(object):
 
         self.end_at = parse_datetime(dict["endAt"])
         self.start_at = parse_datetime(dict["startAt"])
-        self.dt_match = self.start_at < datetime.now() < self.end_at
+        self.dt_match = self.start_at < utc_now() < self.end_at
 
     def __extract_item_art_url(self, benefit_edges):
         for edge in benefit_edges:
