@@ -6,7 +6,10 @@ import pytest
 import requests
 
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
-from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.gql.Errors import (
+    RetryError,
+    is_persisted_query_not_found_message,
+)
 from TwitchChannelPointsMiner.classes.gql.Integration import GQL
 from TwitchChannelPointsMiner.constants import GQLOperations
 from TwitchChannelPointsMiner.utils import AttemptStrategy
@@ -76,6 +79,35 @@ def test_persisted_query_not_found_resends_raw_query_and_returns_data(caplog):
     assert calls[1]["query"] == GQLOperations.raw_queries["ViewerDropsDashboard"]
     assert calls[1]["operationName"] == "ViewerDropsDashboard"
     assert caplog.text.count("Persisted query hash for ViewerDropsDashboard") == 1
+
+
+def test_persisted_query_not_found_match_ignores_case_and_position(caplog):
+    post, calls = scripted_post(
+        [
+            {"errors": [{"message": "persistedQueryNotFound: unknown hash"}]},
+            DASHBOARD_DATA,
+        ]
+    )
+    gql = GQL(client_session(), post_request=post)
+
+    with caplog.at_level(logging.WARNING):
+        response = gql.post_gql_request_raw("ViewerDropsDashboard", dashboard_request())
+
+    assert response == DASHBOARD_DATA
+    assert len(calls) == 2
+    assert "extensions" in calls[0]
+    assert "extensions" not in calls[1]
+    assert calls[1]["query"] == GQLOperations.raw_queries["ViewerDropsDashboard"]
+    assert calls[1]["operationName"] == "ViewerDropsDashboard"
+    assert caplog.text.count("Persisted query hash for ViewerDropsDashboard") == 1
+
+
+def test_persisted_query_not_found_message_helper():
+    assert is_persisted_query_not_found_message("PersistedQueryNotFound") is True
+    assert is_persisted_query_not_found_message("persistedQueryNotFound: x") is True
+    assert is_persisted_query_not_found_message("service timeout") is False
+    assert is_persisted_query_not_found_message(None) is False
+    assert is_persisted_query_not_found_message(123) is False
 
 
 def test_rejected_operation_is_sent_raw_first_on_later_calls(caplog):

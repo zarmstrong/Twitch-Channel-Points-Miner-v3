@@ -40,6 +40,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
     GQLError,
     InvalidJsonShapeException,
     RetryError,
+    is_persisted_query_not_found_message,
 )
 from TwitchChannelPointsMiner.classes.Settings import FollowersOrder
 from TwitchChannelPointsMiner.constants import CLIENT_ID, GQLOperations
@@ -309,7 +310,7 @@ class GQL:
             isinstance(item, dict)
             and any(
                 isinstance(error, dict)
-                and error.get("message") == "PersistedQueryNotFound"
+                and is_persisted_query_not_found_message(error.get("message"))
                 for error in (item.get("errors") or [])
             )
             for item in items
