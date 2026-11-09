@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Optional
 
-from TwitchChannelPointsMiner.classes.entities.Drop import Drop
+from TwitchChannelPointsMiner.classes.entities.Drop import Drop, utc_now
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
 
@@ -240,7 +240,7 @@ class Campaign(object):
 
         self.end_at = parse_datetime(dict["endAt"])
         self.start_at = parse_datetime(dict["startAt"])
-        self.dt_match = self.start_at < datetime.now() < self.end_at
+        self.dt_match = self.start_at < utc_now() < self.end_at
 
         self.drops = list(map(lambda x: Drop(x), dict["timeBasedDrops"]))
 
