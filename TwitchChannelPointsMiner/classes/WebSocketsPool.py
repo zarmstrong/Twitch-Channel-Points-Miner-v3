@@ -165,8 +165,15 @@ class WebSocketsPool:
         thread_ws.start()
 
     def end(self):
-        for websocket in list(self.ws):
-            websocket.forced_close = True
+        # Mark under topic_lock so a reconnection in progress either installs
+        # its replacement before this snapshot (and it gets closed here) or
+        # sees forced_close and gives up. Close outside the lock: close() can
+        # call back into on_close.
+        with self.topic_lock:
+            websockets = list(self.ws)
+            for websocket in websockets:
+                websocket.forced_close = True
+        for websocket in websockets:
             websocket.close()
 
     @staticmethod

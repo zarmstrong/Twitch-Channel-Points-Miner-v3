@@ -259,6 +259,56 @@ def test_pool_end_survives_websockets_retired_mid_loop():
     assert closed == [0, 1]
 
 
+def test_pool_end_closes_a_replacement_created_by_an_in_flight_reconnection(
+    monkeypatch,
+):
+    # Reproduces #170: end() snapshotted self.ws mid-reconnection, so the
+    # replacement installed afterwards was never marked or closed.
+    closed = []
+    old = SimpleNamespace(
+        index=0,
+        forced_close=False,
+        is_reconnecting=False,
+        topics=[],
+        is_closed=False,
+        keep_running=True,
+        close=lambda: closed.append("old"),
+    )
+    replacement = SimpleNamespace(
+        index=0,
+        forced_close=False,
+        topics=[],
+        close=lambda: closed.append("replacement"),
+    )
+    pool = _pool([old])
+    old.parent_pool = pool
+    ender = None
+    ender_blocked = None
+
+    def fake_new(self, index):
+        nonlocal ender, ender_blocked
+        ender = threading.Thread(target=pool.end)
+        ender.start()
+        ender.join(timeout=0.2)
+        ender_blocked = ender.is_alive()
+        return replacement
+
+    monkeypatch.setattr(WebSocketsPool, "_WebSocketsPool__new", fake_new)
+    monkeypatch.setattr(
+        WebSocketsPool, "_WebSocketsPool__start", lambda _self, _index: None
+    )
+    monkeypatch.setattr(f"{POOL_MODULE}.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(f"{POOL_MODULE}.internet_connection_available", lambda: True)
+
+    WebSocketsPool.handle_reconnection(old)
+    ender.join(timeout=5)
+
+    assert ender_blocked is True
+    assert not ender.is_alive()
+    assert replacement.forced_close is True
+    assert closed == ["replacement"]
+
+
 def test_reconnection_replay_skips_a_replacement_retired_while_sleeping(monkeypatch):
     # The replacement can itself be retired during the sleep before topics are
     # replayed; replaying onto its old slot raised IndexError.
