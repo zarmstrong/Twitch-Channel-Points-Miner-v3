@@ -84,3 +84,19 @@ class RetryError(GQLError):
             )
         else:
             return False
+
+
+def is_persisted_query_not_found(error: Exception) -> bool:
+    """True if Twitch rejected a request because it no longer knows the
+    persisted query hash, either directly or in any attempt of a RetryError."""
+    if isinstance(error, RetryError):
+        return any(
+            is_persisted_query_not_found(getattr(attempt, "exception", attempt))
+            for attempt in error.errors
+        )
+    if isinstance(error, GQLResponseErrors):
+        return any(
+            isinstance(message, str) and "persistedquerynotfound" in message.lower()
+            for message in (getattr(item, "message", None) for item in error.errors)
+        )
+    return False

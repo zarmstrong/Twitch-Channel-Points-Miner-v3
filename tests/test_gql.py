@@ -17,6 +17,7 @@ from TwitchChannelPointsMiner.classes.Exceptions import (
 from TwitchChannelPointsMiner.classes.gql.Errors import (
     InvalidJsonShapeException,
     RetryError,
+    is_persisted_query_not_found,
 )
 from TwitchChannelPointsMiner.classes.gql.Integration import (
     GQL,
@@ -4769,3 +4770,24 @@ def test_open_helix_campaigns_skip_a_rejected_request(monkeypatch, status_code):
 
     assert campaigns == []
     assert pages == []
+
+
+def test_unknown_channel_progress_hash_is_not_retried_and_is_detected():
+    posts = []
+
+    def post(*args, **kwargs):
+        posts.append(kwargs["json"]["operationName"])
+        return FakeResponse(
+            {
+                "errors": [{"message": "PersistedQueryNotFound"}],
+                "extensions": {"operationName": "DropChannelCampaignsProgress"},
+            }
+        )
+
+    gql = GQL(client_session(), post_request=post)
+
+    with pytest.raises(RetryError) as raised:
+        gql.get_channel_drop_campaigns_progress("1")
+
+    assert posts == ["DropChannelCampaignsProgress"]
+    assert is_persisted_query_not_found(raised.value)
