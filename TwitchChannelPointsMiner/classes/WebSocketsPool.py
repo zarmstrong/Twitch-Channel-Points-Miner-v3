@@ -149,17 +149,21 @@ class WebSocketsPool:
         # Resolve the websocket now: the pool can shrink before the new
         # thread gets around to running it.
         websocket = self.ws[index]
+
+        def run_forever(**kwargs):
+            if websocket.forced_close is True:
+                return
+            websocket.run_forever(**kwargs)
+
         if Settings.disable_ssl_cert_verification is True:
             import ssl
 
             thread_ws = Thread(
-                target=lambda: websocket.run_forever(
-                    sslopt={"cert_reqs": ssl.CERT_NONE}
-                )
+                target=lambda: run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
             )
             logger.warn("SSL certificate verification is disabled! Be aware!")
         else:
-            thread_ws = Thread(target=lambda: websocket.run_forever())
+            thread_ws = Thread(target=run_forever)
         thread_ws.daemon = True
         thread_ws.name = f"WebSocket #{websocket.index}"
         thread_ws.start()
@@ -178,6 +182,13 @@ class WebSocketsPool:
 
     @staticmethod
     def on_open(ws):
+        # run_forever() resets keep_running to True, so a close() that landed
+        # before it started (end() racing a freshly started socket) is lost.
+        # Re-apply it now that the socket is connected and can be closed.
+        if ws.forced_close is True:
+            ws.close()
+            return
+
         def run():
             ws.is_opened = True
             ws.ping()
