@@ -96,7 +96,7 @@ def is_persisted_query_not_found(error: Exception) -> bool:
         )
     if isinstance(error, GQLResponseErrors):
         return any(
-            getattr(item, "message", None) == "PersistedQueryNotFound"
-            for item in error.errors
+            isinstance(message, str) and "persistedquerynotfound" in message.lower()
+            for message in (getattr(item, "message", None) for item in error.errors)
         )
     return False

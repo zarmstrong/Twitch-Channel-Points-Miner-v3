@@ -1,4 +1,5 @@
 import logging
+import threading
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.entities.Campaign import (
@@ -14,6 +15,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
 )
 from TwitchChannelPointsMiner.classes.gql.data.response.Error import Error
 from TwitchChannelPointsMiner.classes.gql.data.Parser import Parser
+from TwitchChannelPointsMiner.classes import Twitch as twitch_module
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.utils.AttemptStrategy import ExceptionContext
 
@@ -443,14 +445,14 @@ def _raise(error):
     raise error
 
 
-def _persisted_query_not_found():
+def _persisted_query_not_found(message="PersistedQueryNotFound"):
     return RetryError(
         "DropChannelCampaignsProgress",
         [
             ExceptionContext(
                 GQLResponseErrors(
                     "DropChannelCampaignsProgress",
-                    [Error(False, "PersistedQueryNotFound")],
+                    [Error(False, message)],
                 ),
                 None,
             )
@@ -460,29 +462,77 @@ def _persisted_query_not_found():
 
 def test_persisted_query_not_found_is_detected_inside_a_retry_error():
     assert is_persisted_query_not_found(_persisted_query_not_found())
-    assert not is_persisted_query_not_found(
-        RetryError(
-            "DropChannelCampaignsProgress",
-            [
-                ExceptionContext(
-                    GQLResponseErrors(
-                        "DropChannelCampaignsProgress",
-                        [Error(True, "service timeout")],
-                    ),
-                    None,
-                )
-            ],
-        )
+    assert is_persisted_query_not_found(
+        _persisted_query_not_found("persistedQueryNotFound: unknown hash")
     )
+    assert not is_persisted_query_not_found(
+        _persisted_query_not_found("service timeout")
+    )
+    assert not is_persisted_query_not_found(_persisted_query_not_found(None))
     assert not is_persisted_query_not_found(RetryError("x", []))
     assert not is_persisted_query_not_found(ValueError("PersistedQueryNotFound"))
 
 
-def test_channel_progress_query_stops_after_persisted_query_not_found(caplog):
-    progress_calls = []
-
+def _twitch_with_unknown_progress_hash(progress_calls):
     def progress(channel_id):
         progress_calls.append(channel_id)
+        raise _persisted_query_not_found()
+
+    return _twitch_with_gql(
+        SimpleNamespace(
+            get_channel_drop_campaigns_progress=progress,
+            get_available_drops=lambda channel_id: _listing_response(
+                "listing-campaign"
+            ),
+        )
+    )
+
+
+def test_channel_progress_query_stops_after_persisted_query_not_found(caplog):
+    progress_calls = []
+    # Built without __init__, so this also covers the attribute never being set.
+    twitch = _twitch_with_unknown_progress_hash(progress_calls)
+
+    with caplog.at_level(logging.WARNING):
+        first = twitch._Twitch__get_campaigns_from_channel_id("1")
+        second = twitch._Twitch__get_campaigns_from_channel_id("2")
+
+    listing = [{"id": "listing-campaign", "listing": True}]
+    assert first == (listing, True, True)
+    assert second == (listing, True, True)
+    assert progress_calls == ["1"]
+    assert twitch.channel_progress_query_retired_until is not None
+    assert caplog.text.count("no longer recognizes") == 1
+
+
+def test_channel_progress_query_is_tried_again_after_the_retry_window(
+    monkeypatch, caplog
+):
+    now = [1000.0]
+    monkeypatch.setattr(twitch_module.time, "time", lambda: now[0])
+    progress_calls = []
+    twitch = _twitch_with_unknown_progress_hash(progress_calls)
+
+    with caplog.at_level(logging.WARNING):
+        twitch._Twitch__get_campaigns_from_channel_id("1")
+        now[0] += twitch_module.CHANNEL_PROGRESS_QUERY_RETRY_SECONDS - 1
+        twitch._Twitch__get_campaigns_from_channel_id("2")
+        now[0] += 1
+        twitch._Twitch__get_campaigns_from_channel_id("3")
+
+    assert progress_calls == ["1", "3"]
+    assert caplog.text.count("no longer recognizes") == 2
+    assert twitch.channel_progress_query_retired_until == (
+        now[0] + twitch_module.CHANNEL_PROGRESS_QUERY_RETRY_SECONDS
+    )
+
+
+def test_concurrent_persisted_query_not_found_warns_once(caplog):
+    # Both checks are past the retired check before either fails.
+    both_sent = threading.Barrier(2, timeout=5)
+
+    def progress(channel_id):
+        both_sent.wait()
         raise _persisted_query_not_found()
 
     twitch = _twitch_with_gql(
@@ -493,17 +543,19 @@ def test_channel_progress_query_stops_after_persisted_query_not_found(caplog):
             ),
         )
     )
-    twitch.channel_progress_query_retired = False
+    results = []
+
+    def check(channel_id):
+        results.append(twitch._Twitch__get_campaigns_from_channel_id(channel_id))
 
     with caplog.at_level(logging.WARNING):
-        first = twitch._Twitch__get_campaigns_from_channel_id("1")
-        second = twitch._Twitch__get_campaigns_from_channel_id("2")
+        threads = [threading.Thread(target=check, args=(str(i),)) for i in (1, 2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
 
-    listing = [{"id": "listing-campaign", "listing": True}]
-    assert first == (listing, True, True)
-    assert second == (listing, True, True)
-    assert progress_calls == ["1"]
-    assert twitch.channel_progress_query_retired is True
+    assert len(results) == 2
     assert caplog.text.count("no longer recognizes") == 1
 
 
@@ -522,10 +574,9 @@ def test_channel_progress_query_keeps_running_after_other_errors():
             ),
         )
     )
-    twitch.channel_progress_query_retired = False
 
     twitch._Twitch__get_campaigns_from_channel_id("1")
     twitch._Twitch__get_campaigns_from_channel_id("2")
 
     assert progress_calls == ["1", "2"]
-    assert twitch.channel_progress_query_retired is False
+    assert getattr(twitch, "channel_progress_query_retired_until", None) is None
