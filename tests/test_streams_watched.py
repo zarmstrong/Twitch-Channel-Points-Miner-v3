@@ -170,6 +170,7 @@ def _run_one_watch_iteration(
     category_drops_override_streamers=False,
     configured_category_slugs=None,
     drop_slot_covering_streamer=None,
+    category_campaign_eligibility=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -184,6 +185,8 @@ def _run_one_watch_iteration(
         for streamer in streamers
         if streamer.from_category and streamer.drops_condition()
     }
+    if category_campaign_eligibility:
+        twitch.category_campaign_eligibility.update(category_campaign_eligibility)
     twitch.category_campaign_deadlines = category_campaign_deadlines or {}
     twitch.last_category_drop_selection = None
     twitch.last_wildcard_category_drop_selection = None
@@ -1594,6 +1597,48 @@ def test_only_one_badge_campaign_streamer_is_watched_per_cycle(monkeypatch):
         "https://spade.test/badge-one",
         "https://spade.test/explicit",
     ]
+
+
+def test_badge_streamer_without_eligible_campaign_is_not_watched_or_labelled_for_drops(
+    monkeypatch,
+):
+    # Regression (#151): a badge-tier streamer whose drop eligibility is (0, N)
+    # must neither take a watch slot nor appear under "watching for drops:".
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    slug = Twitch.__new__(Twitch)._Twitch__slugify("badge-ineligible")
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer(
+                "badge-ineligible",
+                from_category=True,
+                from_badge_campaign=True,
+                # The stream itself reports drops, so only the (0, 2)
+                # eligibility below can keep this channel out.
+                drops_eligible=True,
+            ),
+            _watch_streamer("explicit"),
+        ],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.BADGES, StreamerSource.STREAMERS],
+        category_campaign_eligibility={
+            ("special-events", "badge-ineligible"): (0, 2),
+            (slug, "badge-ineligible"): (0, 2),
+        },
+    )
+
+    assert posted == ["https://spade.test/explicit"]
+    status_lines = [message for message in messages if "watching for drops:" in message]
+    assert status_lines
+    assert not any("badge-ineligible" in line for line in status_lines)
 
 
 def test_drop_pick_transient_hold_releases_when_drop_cannot_finish(monkeypatch):
