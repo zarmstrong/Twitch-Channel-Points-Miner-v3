@@ -6,7 +6,7 @@ import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, cli, g, render_template, request
@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 MAX_LOG_TAIL_BYTES = 1024 * 1024
 UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
 RESPONSE_CACHE_TTL_SECONDS = 10.0
+# Grace for the restart response to flush to the client before the restart
+# event wakes the main loop: the restart execs the process once it lands, and
+# a connection reset on the request that triggered it would look like a failure.
+RESTART_REQUEST_DELAY_SECONDS = 0.5
 
 # Extensions the static-file route serves without authentication (see
 # require_authentication() below) - the assets folder this route reads from
@@ -810,6 +814,7 @@ class AnalyticsServer(Thread):
         log_poll_interval: int = 5,
         logs_file: str = None,
         trust_proxy_auth: bool = False,
+        on_restart=None,
     ):
         super(AnalyticsServer, self).__init__()
 
@@ -830,6 +835,7 @@ class AnalyticsServer(Thread):
         self.password = password
         self.logs_file = logs_file
         self.trust_proxy_auth = trust_proxy_auth
+        self.on_restart = on_restart
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
         if host not in LOOPBACK_HOSTS and not password and not trust_proxy_auth:
@@ -1009,6 +1015,24 @@ class AnalyticsServer(Thread):
                 )
             return response
 
+        def request_miner_restart():
+            if self.on_restart is None:
+                return Response(
+                    json.dumps({"error": "Restart is unavailable."}),
+                    status=503,
+                    mimetype="application/json",
+                )
+            # Delayed so this response flushes before the restart lands: the
+            # main loop execs the process the moment the event is set.
+            Timer(RESTART_REQUEST_DELAY_SECONDS, self.on_restart).start()
+            logger.info(
+                "Miner restart requested from the dashboard",
+                extra={"emoji": ":repeat:"},
+            )
+            return Response(
+                json.dumps({"ok": True}), status=202, mimetype="application/json"
+            )
+
         self.app.add_url_rule(
             "/",
             "index",
@@ -1043,6 +1067,12 @@ class AnalyticsServer(Thread):
         self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
         self.app.add_url_rule(
             "/config", "web_config", web_config, methods=["GET", "POST"]
+        )
+        self.app.add_url_rule(
+            "/config/restart",
+            "restart_miner",
+            request_miner_restart,
+            methods=["POST"],
         )
         self.app.add_url_rule(
             "/config/notifications/<string:provider>/test",

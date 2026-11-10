@@ -750,6 +750,7 @@ class TwitchChannelPointsMiner:
                 log_poll_interval=log_poll_interval,
                 logs_file=self.logs_file,
                 trust_proxy_auth=trust_proxy_auth,
+                on_restart=lambda: self.twitch.restart_requested.set(),
             )
             http_server.daemon = True
             http_server.name = "Analytics Thread"

@@ -923,6 +923,7 @@ ANALYTICS_CONFIG = None
         "days_ago": 7,
         "password": "generated-secret",
         "log_poll_interval": 5,
+        "trust_proxy_auth": False,
     }
 
 

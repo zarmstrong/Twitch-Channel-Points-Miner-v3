@@ -3,6 +3,7 @@ import errno
 import logging
 import os
 import re
+import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -972,6 +973,7 @@ def test_config_ui_exposes_requested_management_controls():
         "logging-settings-form",
         "update-settings-form",
         "notification-settings",
+        "restart-miner",
     ):
         assert f'id="{selector}"' in template
     for setting in (
@@ -1002,6 +1004,46 @@ def test_config_ui_exposes_requested_management_controls():
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "reorder_streamers" in script
     assert "Sortable.create" in script
+    assert "/config/restart" in script
+
+
+def test_config_restart_route_requests_miner_restart():
+    calls = []
+    server = AnalyticsServer(
+        username="user", password="secret", on_restart=lambda: calls.append(True)
+    )
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 202
+    # The request lands on a timer so the response flushes before the process
+    # is exec'd; wait out the grace period.
+    deadline = time.time() + 3
+    while not calls and time.time() < deadline:
+        time.sleep(0.05)
+    assert calls == [True]
+
+
+def test_config_restart_without_callback_reports_unavailable():
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 503
+
+
+def test_config_restart_requires_authentication():
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post("/config/restart")
+
+    assert response.status_code == 403
 
 
 def test_web_config_lists_support_drag_and_drop_reordering():
