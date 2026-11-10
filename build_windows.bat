@@ -36,6 +36,10 @@ rem setup-python installed it into; the launcher picks the newest Python
 rem on the machine, which may not have PyInstaller.
 if not defined PYINSTALLER_PYTHON set PYINSTALLER_PYTHON=py
 
+rem irc (since 20.5.0) reads irc\codes.txt at import time, and PyInstaller
+rem only bundles a package's data files when told to. Without it the exe dies
+rem on startup with FileNotFoundError - and as a --windowed exe that means an
+rem error dialog, which hangs the CI smoke test instead of failing it.
 %PYINSTALLER_PYTHON% -m PyInstaller ^
   --clean ^
   --noconfirm ^
@@ -46,6 +50,7 @@ if not defined PYINSTALLER_PYTHON set PYINSTALLER_PYTHON=py
   --collect-all TwitchChannelPointsMiner ^
   --collect-all webview ^
   --collect-all pystray ^
+  --collect-data irc ^
   --hidden-import PIL.IcoImagePlugin ^
   --hidden-import PIL.PngImagePlugin ^
   --add-data "assets;assets" ^
