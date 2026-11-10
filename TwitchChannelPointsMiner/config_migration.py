@@ -22,6 +22,7 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("claim_drops", "True"),
     ("claim_moments", "True"),
     ("watch_streak", "True"),
+    ("streak_only", "False"),
     ("favorite", "False"),
     ("points_limit", "None"),
     ("community_goals", "False"),

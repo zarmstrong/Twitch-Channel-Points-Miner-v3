@@ -25,6 +25,7 @@ STREAMER_SETTING_DEFAULTS = {
     "claim_moments": True,
     "chat": "ONLINE",
     "points_limit": None,
+    "streak_only": False,
 }
 STREAMER_SETTING_NAMES = set(STREAMER_SETTING_DEFAULTS)
 CATEGORY_SORTS = {

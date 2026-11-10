@@ -948,6 +948,7 @@ def test_config_ui_exposes_requested_management_controls():
         "claim_moments",
         "chat",
         "points_limit",
+        "streak_only",
     ):
         assert setting in script
     assert "reorder_categories" in script

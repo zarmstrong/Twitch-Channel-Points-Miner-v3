@@ -1393,7 +1393,8 @@ function renderConfiguredStreamers(streamers) {
             ['make_predictions', 'Predictions'],
             ['follow_raid', 'Follow raids'],
             ['claim_drops', 'Claim Drops'],
-            ['claim_moments', 'Claim moments']
+            ['claim_moments', 'Claim moments'],
+            ['streak_only', 'Streak only']
         ].forEach(function (setting) {
             var label = $('<label>').addClass('checkbox config-checkbox').text(` ${setting[1]}`);
             label.prepend($('<input>').attr('type', 'checkbox').attr('data-setting', setting[0]).prop('checked', settings[setting[0]] === true));

@@ -396,6 +396,7 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
                 "claim_moments": True,
                 "chat": "NEVER",
                 "points_limit": 25000,
+                "streak_only": True,
             },
         },
     )
@@ -403,6 +404,7 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     assert [item["username"] for item in result["streamers"]] == ["one"]
     assert result["categories"] == ["beta", "alpha"]
     assert result["streamers"][0]["settings"]["points_limit"] == 25000
+    assert result["streamers"][0]["settings"]["streak_only"] is True
     assert not (tmp_path / "web-config.json").exists()
     assert config.read_text(encoding="utf-8") != original_source
     loaded = _load_config(config)

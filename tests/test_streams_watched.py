@@ -117,6 +117,7 @@ def _watch_streamer(
     points=0,
     points_limit=None,
     watch_streak=False,
+    streak_only=False,
     minute_watched=0,
 ):
     # Production builds wildcard and badge-campaign streamers with
@@ -152,6 +153,7 @@ def _watch_streamer(
             favorite=favorite,
             points_limit=points_limit,
             watch_streak=watch_streak,
+            streak_only=streak_only,
         ),
         drops_condition=lambda: drops_eligible,
     )
@@ -496,6 +498,107 @@ def test_pending_watch_streak_bypasses_points_limit(monkeypatch):
     )
 
     assert posted == ["https://spade.test/capped-streak"]
+
+
+def test_minute_watcher_skips_streak_only_streamers(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("streak-only", streak_only=True),
+            _watch_streamer("eligible"),
+        ],
+        streams_watched=2,
+    )
+
+    assert posted == ["https://spade.test/eligible"]
+
+
+def test_pending_watch_streak_bypasses_streak_only(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("streak-only", streak_only=True, watch_streak=True)],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/streak-only"]
+
+
+def test_confirmed_watch_streak_drops_streak_only_streamer(monkeypatch):
+    streamer = _watch_streamer("streak-only", streak_only=True, watch_streak=True)
+    streamer.stream.watch_streak_missing = False
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+
+
+def test_streak_only_streamer_stops_after_the_watch_window(monkeypatch):
+    streamer = _watch_streamer(
+        "streak-only",
+        streak_only=True,
+        watch_streak=True,
+        minute_watched=10,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+
+
+def test_streak_only_integer_sets_a_custom_window(monkeypatch):
+    in_window = _watch_streamer(
+        "custom-window",
+        streak_only=5,
+        watch_streak=True,
+        minute_watched=3,
+    )
+    at_window = _watch_streamer(
+        "custom-window-done",
+        streak_only=5,
+        watch_streak=True,
+        minute_watched=5,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [in_window, at_window],
+        streams_watched=2,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/custom-window"]
+
+
+def test_watch_window_applies_only_to_streak_only_streamers(monkeypatch):
+    # A points-capped streamer with a long pending streak still gets watched
+    # (its streak payout may only arrive near the end of the broadcast).
+    streamer = _watch_streamer(
+        "capped-long-streak",
+        points=500,
+        points_limit=500,
+        watch_streak=True,
+        minute_watched=45,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/capped-long-streak"]
 
 
 def test_pending_watch_streak_honors_explicit_zero_timestamp():

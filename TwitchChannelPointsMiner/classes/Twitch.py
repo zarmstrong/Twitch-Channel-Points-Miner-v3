@@ -241,6 +241,10 @@ UNLINKED_CLAIM_RETRY_SECONDS = 6 * 60 * 60
 # the claim is forgotten: long enough to ride out short or empty responses,
 # short enough that an ended campaign leaves the daily report the same day.
 UNLINKED_CLAIM_MISSING_GRACE_SECONDS = 15 * 60
+# Default per-broadcast watch window for streak_only streamers: one broadcast
+# advances a multi-broadcast streak after only a few minutes, so watch that
+# window instead of camping the whole stream until the payout on the last one.
+STREAK_ONLY_WATCH_MINUTES = 10
 
 
 class Twitch(object):
@@ -6527,6 +6531,31 @@ class Twitch(object):
         return offline_at == 0 or ((timestamp - offline_at) // 60) > 30
 
     @staticmethod
+    def _is_streak_only(streamer):
+        settings = getattr(streamer, "settings", None)
+        return getattr(settings, "streak_only", False) not in (None, False)
+
+    @staticmethod
+    def _streak_only_watch_window(streamer):
+        # streak_only accepts a Boolean (STREAK_ONLY_WATCH_MINUTES per
+        # broadcast) or an integer minute count; the dashboard writes the
+        # Boolean, config.py can set a custom window.
+        streak_only = getattr(getattr(streamer, "settings", None), "streak_only", False)
+        return streak_only if type(streak_only) is int else STREAK_ONLY_WATCH_MINUTES
+
+    def _streak_worth_watching(self, streamer, now=None):
+        # A streamer's pending streak is worth a slot for anyone, but a
+        # streak-only channel only needs the first minutes of a broadcast to
+        # advance a multi-broadcast streak: stop camping the whole stream
+        # until Twitch finally pays out on the last broadcast.
+        if not self._has_pending_watch_streak(streamer, now):
+            return False
+        if self._is_streak_only(streamer) is not True:
+            return True
+        minutes = getattr(getattr(streamer, "stream", None), "minute_watched", 0) or 0
+        return minutes < self._streak_only_watch_window(streamer)
+
+    @staticmethod
     def _has_reached_points_limit(streamer):
         settings = getattr(streamer, "settings", None)
         points_limit = getattr(settings, "points_limit", None)
@@ -6785,8 +6814,12 @@ class Twitch(object):
                         or (now - streamers_snapshot[i].online_at) > 30
                     )
                     and (
-                        self._has_reached_points_limit(streamers_snapshot[i]) is False
-                        or self._has_pending_watch_streak(streamers_snapshot[i], now)
+                        (
+                            self._has_reached_points_limit(streamers_snapshot[i])
+                            is False
+                            and not self._is_streak_only(streamers_snapshot[i])
+                        )
+                        or self._streak_worth_watching(streamers_snapshot[i], now)
                     )
                     and (
                         (
