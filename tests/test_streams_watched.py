@@ -3262,7 +3262,7 @@ def test_unchanged_watch_status_is_logged_once_then_at_debug(monkeypatch):
     assert records[0][1] == records[1][1]
     assert records[0][1] == (
         "Watching for points: one (streamer), two (streamer); "
-        "watching for drops: none"
+        "watching for drops: none; watching for watch streak: none"
     )
 
 
@@ -3287,7 +3287,9 @@ def test_watch_status_logs_change_in_drops_list(monkeypatch):
     _log_watch_status(twitch, streamers, sources, drop_indexes={0})
 
     assert [level for level, _, _ in records] == ["info", "info"]
-    assert records[0][1].endswith("watching for drops: none")
+    assert records[0][1].endswith(
+        "watching for drops: none; watching for watch streak: none"
+    )
     assert "Example Game drop campaign 'Alpha'" in records[1][1]
 
 
