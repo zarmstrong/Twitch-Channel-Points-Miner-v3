@@ -11,4 +11,4 @@ pystray==0.19.5
 # this produced a broken, partially-built Pillow with no compiled extension
 # rather than a loud failure. 11.3.0 is the first release with a cp314
 # Windows wheel.
-Pillow==11.3.0
+Pillow==13.0.0
