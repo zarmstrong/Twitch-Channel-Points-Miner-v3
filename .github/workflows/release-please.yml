@@ -51,7 +51,7 @@ jobs:
           target-branch: master
 
       - name: Checkout link automation
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -62,7 +62,7 @@ jobs:
       - name: Link PR references in release notes
         # Cosmetic; never block the release, Docker, or Windows jobs.
         continue-on-error: true
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ steps.release_retry_2.outputs.tag_name || steps.release_retry_1.outputs.tag_name || steps.release.outputs.tag_name }}
         with:
@@ -86,12 +86,12 @@ jobs:
       issues: write
     steps:
       - name: Checkout released automation
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release_please.outputs.tag_name }}
 
       - name: Close issues included in the release
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
         with:
@@ -126,12 +126,12 @@ jobs:
         flavor: [standard, portable]
     steps:
       - name: Checkout released source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release_please.outputs.tag_name }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
 
@@ -181,7 +181,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout released source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release_please.outputs.tag_name }}
 
@@ -232,7 +232,7 @@ jobs:
           "installer_path=dist/TwitchChannelPointsMiner-$version-Setup.exe" >> $env:GITHUB_OUTPUT
 
       - name: Upload Windows artifacts to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release_please.outputs.tag_name }}
           files: |
