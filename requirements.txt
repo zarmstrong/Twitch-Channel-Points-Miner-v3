@@ -1,6 +1,6 @@
 requests==2.34.2
 websocket-client==1.9.2
-python-dateutil==2.9.0.post0
+python-dateutil==4.0.0
 emoji==2.16.0
 millify==0.1.1
 colorama==0.4.6
