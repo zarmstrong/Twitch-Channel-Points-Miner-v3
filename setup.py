@@ -26,7 +26,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     include_package_data=True,
     install_requires=[
-        "requests==2.32.5",
+        "requests==2.34.2",
         "websocket-client==1.7.0",
         "python-dateutil==2.9.0.post0",
         "emoji==2.10.1",
