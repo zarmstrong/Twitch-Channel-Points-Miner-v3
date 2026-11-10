@@ -2,7 +2,7 @@
 # (windows_launcher.py). Not needed by the Docker image or a plain source
 # checkout, which keep using requirements.txt.
 -r requirements.txt
-pywebview==5.3.2
+pywebview==6.2.1
 pystray==0.19.5
 # 10.4.0 (the version originally pinned here) has no prebuilt Windows wheel
 # for Python 3.14 and silently fails its from-source build - pip's overall
@@ -11,4 +11,4 @@ pystray==0.19.5
 # this produced a broken, partially-built Pillow with no compiled extension
 # rather than a loud failure. 11.3.0 is the first release with a cp314
 # Windows wheel.
-Pillow==11.3.0
+Pillow==13.0.0
