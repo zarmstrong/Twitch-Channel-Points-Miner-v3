@@ -356,9 +356,7 @@ def watch_streak_milestone_parser(
     value: Any,
 ) -> RewardList.WatchStreakMilestone | None:
     expect_dict(value)
-    milestone = parse_value(
-        value, "watchStreakMilestone", optional_parser(expect_dict)
-    )
+    milestone = parse_value(value, "watchStreakMilestone", optional_parser(expect_dict))
     if milestone is None:
         return None
 
@@ -372,9 +370,7 @@ def watch_streak_milestone_parser(
     return RewardList.WatchStreakMilestone(
         value=parse_value(milestone, "value", optional_parser(expect_str)),
         achievement_timestamp=achievement_timestamp,
-        expires_at=parse_value(
-            value, "expiresAt", optional_parser(expect_iso_8601)
-        ),
+        expires_at=parse_value(value, "expiresAt", optional_parser(expect_iso_8601)),
     )
 
 
