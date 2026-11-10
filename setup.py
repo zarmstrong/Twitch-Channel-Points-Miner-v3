@@ -32,7 +32,7 @@ setuptools.setup(
         "emoji==2.10.1",
         "millify==0.1.1",
         "colorama==0.4.6",
-        "flask==3.0.2",
+        "flask==3.1.3",
         "waitress==3.0.2",
         "irc==20.4.0",
         "pytz==2024.1",
