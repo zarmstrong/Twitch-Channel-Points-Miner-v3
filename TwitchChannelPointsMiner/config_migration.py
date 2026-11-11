@@ -91,6 +91,7 @@ MINER_CONFIG_DEFAULTS = (
     ("update_check", "True"),
     ("update_check_interval_hours", "24"),
     ("streams_watched", "2"),
+    ("android_login", "False"),
 )
 MINE_CONFIG_DEFAULTS = (
     ("blacklist", "[]"),
