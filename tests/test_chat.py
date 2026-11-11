@@ -69,3 +69,11 @@ def test_client_irc_falls_back_to_plaintext_port_when_tls_unavailable(monkeypatc
     server = client.servers.peek()
     assert server.port == IRC_PORT
     assert "connect_factory" not in client._SingleServerIRCBot__connect_params
+
+
+def test_irc_tls_context_requires_tls12_and_verifies_hostname():
+    context = Chat._irc_tls_context()
+
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
+    assert context.check_hostname is True
+    assert context.verify_mode == ssl.CERT_REQUIRED

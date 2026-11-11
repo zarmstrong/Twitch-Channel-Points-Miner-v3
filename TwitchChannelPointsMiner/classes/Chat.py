@@ -18,6 +18,14 @@ _tls_probe_lock = Lock()
 _tls_supported = None
 
 
+def _irc_tls_context():
+    """TLS settings for Twitch IRC: certificate and hostname checks from the
+    default context, and never anything older than TLS 1.2."""
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
 def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
     """Probe once per process whether a TLS handshake to Twitch's IRC endpoint
     succeeds. The chat OAuth token is otherwise sent over plaintext port 6667 -
@@ -27,7 +35,7 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
     with _tls_probe_lock:
         if _tls_supported is None:
             try:
-                context = ssl.create_default_context()
+                context = _irc_tls_context()
                 with socket.create_connection((host, port), timeout=timeout) as sock:
                     with context.wrap_socket(sock, server_hostname=host):
                         _tls_supported = True
@@ -61,7 +69,7 @@ class ClientIRC(SingleServerIRCBot):
         port = IRC_PORT
         if _irc_tls_available():
             port = IRC_TLS_PORT
-            context = ssl.create_default_context()
+            context = _irc_tls_context()
             connect_params["connect_factory"] = irc.connection.Factory(
                 wrapper=partial(context.wrap_socket, server_hostname=IRC)
             )
