@@ -132,7 +132,8 @@ def test_gift_sub_to_us_thanks_when_enabled(monkeypatch, caplog):
 
 def test_gift_sub_logged_but_not_thanked_when_disabled(monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    client = _client_with(monkeypatch)
+    client = _client_with(monkeypatch, gift_sub_thanks=False)
+    assert client.settings is not None
     connection = MagicMock()
 
     client.on_usernotice(connection, _subgift())
