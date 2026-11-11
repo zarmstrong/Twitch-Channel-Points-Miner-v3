@@ -32,6 +32,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
 )
 from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
 from TwitchChannelPointsMiner.utils.Utils import set_default_settings
+from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 
 
 def test_streams_watched_defaults_to_two():
@@ -885,8 +886,8 @@ def test_wildcard_category_wins_shared_slot_when_ranked_above_preferred(monkeypa
             StreamerSource.CATEGORIES,
         ],
         category_campaign_deadlines={
-            "preferred": datetime.utcnow() + timedelta(minutes=1),
-            "wildcard": datetime.utcnow() + timedelta(minutes=60),
+            "preferred": utc_now() + timedelta(minutes=1),
+            "wildcard": utc_now() + timedelta(minutes=60),
         },
     )
 
@@ -1176,9 +1177,8 @@ def test_drop_pick_hold_releases_when_drop_cannot_finish(monkeypatch):
         [current, sooner],
         streams_watched=2,
         category_campaign_deadlines={
-            "current-game": datetime.utcnow() + timedelta(minutes=deadline_in_minutes),
-            "sooner-game": datetime.utcnow()
-            + timedelta(minutes=deadline_in_minutes // 2),
+            "current-game": utc_now() + timedelta(minutes=deadline_in_minutes),
+            "sooner-game": utc_now() + timedelta(minutes=deadline_in_minutes // 2),
         },
         drop_pick_stickiness_minutes=15,
         last_drop_pick_streamer="current-pick",
@@ -1220,7 +1220,7 @@ def test_drop_pick_hold_yields_to_challenger_with_real_deadline_when_previous_ha
         [current, sooner],
         streams_watched=2,
         category_campaign_deadlines={
-            "sooner-game": datetime.utcnow() + timedelta(minutes=5),
+            "sooner-game": utc_now() + timedelta(minutes=5),
         },
         drop_pick_stickiness_minutes=15,
         last_drop_pick_streamer="current-pick",
@@ -1446,8 +1446,8 @@ def test_badge_campaign_streamer_does_not_steal_preferred_category_slot(monkeypa
         # picks the badge streamer as kept_discovered_index and the trim loop
         # evicts the real category candidate.
         category_campaign_deadlines={
-            "badge-streamer": datetime.utcnow() + timedelta(minutes=1),
-            "category-streamer": datetime.utcnow() + timedelta(minutes=60),
+            "badge-streamer": utc_now() + timedelta(minutes=1),
+            "category-streamer": utc_now() + timedelta(minutes=60),
         },
     )
 
@@ -1663,9 +1663,7 @@ def test_drop_pick_transient_hold_releases_when_drop_cannot_finish(monkeypatch):
         priority=[Priority.DROPS],
         # Needs 5 minutes (current=10, required=15) but the deadline is only
         # 2 minutes away: the drop cannot finish in time.
-        category_campaign_deadlines={
-            "current-game": datetime.utcnow() + timedelta(minutes=2)
-        },
+        category_campaign_deadlines={"current-game": utc_now() + timedelta(minutes=2)},
         drop_pick_stickiness_minutes=15,
         last_drop_pick_streamer="current-pick",
         drop_inventory_progress={"current-game": _drop_progress(current=10)},
