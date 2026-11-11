@@ -371,7 +371,9 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     assert config.read_text(encoding="utf-8") != original_source
     loaded = _load_config(config)
     assert loaded.MINE_CONFIG["categories"] == ["beta", "alpha"]
-    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    # Windows has no POSIX permission bits; chmod only toggles read-only.
+    if os.name == "posix":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o640
 
 
 def test_managed_web_config_updates_categories_when_replace_is_ebusy(

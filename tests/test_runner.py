@@ -1,3 +1,4 @@
+import os
 import threading
 from types import SimpleNamespace
 
@@ -38,7 +39,9 @@ def test_main_creates_default_config_for_fresh_install(tmp_path, monkeypatch, ca
     assert (config_dir / "config.py").read_text(encoding="utf-8") == (
         "# default configuration\n"
     )
-    assert (config_dir / "config.py").stat().st_mode & 0o777 == 0o600
+    # Windows has no POSIX permission bits; chmod only toggles read-only.
+    if os.name == "posix":
+        assert (config_dir / "config.py").stat().st_mode & 0o777 == 0o600
     output = capsys.readouterr().out
     assert "Created default configuration" in output
     assert "restart the container" in output
