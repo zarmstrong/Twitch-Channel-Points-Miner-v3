@@ -75,41 +75,17 @@ def get_user_agent(browser: str) -> str:
 
 def remove_emoji(string: str) -> str:
     emoji_pattern = re.compile(
+        # The union of the emoji, symbol, pictograph, flag and dingbat ranges
+        # this class used to list, rewritten without overlaps. Everything
+        # from U+2589 up is removed; U+2588 ("\u2588") is kept on purpose.
         "["
-        "\U0001f600-\U0001f64f"  # emoticons
-        "\U0001f300-\U0001f5ff"  # symbols & pictographs
-        "\U0001f680-\U0001f6ff"  # transport & map symbols
-        "\U0001f1e0-\U0001f1ff"  # flags (iOS)
-        "\U00002500-\U00002587"  # chinese char
-        "\U00002589-\U00002bef"  # I need Unicode Character “█” (U+2588)
-        "\U00002702-\U000027b0"
-        "\U00002702-\U000027b0"
-        "\U000024c2-\U00002587"
-        "\U00002589-\U0001f251"
-        "\U0001f926-\U0001f937"
-        "\U00010000-\U0010ffff"
-        "\u2640-\u2642"
-        "\u2600-\u2b55"
-        "\u200d"
-        "\u23cf"
-        "\u23e9"
-        "\u231a"
-        "\ufe0f"  # dingbats
-        "\u3030"
-        "\u231b"
-        "\u2328"
-        "\u23cf"
-        "\u23e9"
-        "\u23ea"
-        "\u23eb"
-        "\u23ec"
-        "\u23ed"
-        "\u23ee"
-        "\u23ef"
-        "\u23f0"
-        "\u23f1"
-        "\u23f2"
-        "\u23f3"
+        "\u200d"  # zero-width joiner
+        "\u231a-\u231b"  # watch, hourglass
+        "\u2328"  # keyboard
+        "\u23cf"  # eject
+        "\u23e9-\u23f3"  # media controls, alarm clock, timers
+        "\u24c2-\u2587"  # enclosed alphanumerics, box drawing, blocks
+        "\u2589-\U0010ffff"
         "]+",
         flags=re.UNICODE,
     )
