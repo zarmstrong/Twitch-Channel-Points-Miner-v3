@@ -29,7 +29,7 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
-def test_gist_scraper_fetches_once_and_returns_independent_data():
+def test_gist_scraper_fetches_once_per_sync_and_returns_independent_data():
     payload = {
         "indexed_games": [
             {"slug": "example", "url": "https://twitchdrops.app/game/example"}
@@ -50,9 +50,11 @@ def test_gist_scraper_fetches_once_and_returns_independent_data():
     index[0]["slug"] = "changed"
     report["game"] = "Changed"
 
-    assert scraper.scrape_front_page()[0]["slug"] == "example"
     assert scraper.scrape("https://twitchdrops.app/game/example")["game"] == "Example"
     assert len(session.calls) == 1
+    # The next sync starts with the front page and must see fresh gist data.
+    assert scraper.scrape_front_page()[0]["slug"] == "example"
+    assert len(session.calls) == 2
     assert session.calls[0][0] == DROPS_GIST_URL
     assert session.calls[0][1]["headers"]["Accept"] == "application/json"
 

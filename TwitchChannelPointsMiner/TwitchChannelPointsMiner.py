@@ -2941,6 +2941,12 @@ class TwitchChannelPointsMiner:
                 else str(configured).lower().strip()
             )
             if username in existing:
+                # Already tracked from followers, a category or a badge
+                # campaign: mark it configured so a later refresh of that
+                # source does not retire a channel the user now lists.
+                for tracked in self.streamers:
+                    if tracked.username == username:
+                        tracked.explicitly_configured = True
                 continue
             try:
                 streamer = (

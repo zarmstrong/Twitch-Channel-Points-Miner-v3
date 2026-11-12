@@ -136,6 +136,18 @@ class TTLResponseCache:
             self._entries.clear()
 
 
+def _secret_matches(supplied, expected):
+    """Constant-time comparison that also accepts non-ASCII text.
+
+    secrets.compare_digest raises TypeError for str arguments containing
+    non-ASCII characters, which would turn a password such as "pässword" (or
+    any request carrying one) into an HTTP 500 instead of a login check.
+    """
+    return secrets.compare_digest(
+        str(supplied).encode("utf-8"), str(expected).encode("utf-8")
+    )
+
+
 def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -870,12 +882,12 @@ class AnalyticsServer(Thread):
                 return None
             if self.shell_bypass_token:
                 cookie_token = request.cookies.get(SHELL_BYPASS_COOKIE)
-                if cookie_token and secrets.compare_digest(
+                if cookie_token and _secret_matches(
                     cookie_token, self.shell_bypass_token
                 ):
                     return None
                 query_token = request.args.get("shell_token")
-                if query_token and secrets.compare_digest(
+                if query_token and _secret_matches(
                     query_token, self.shell_bypass_token
                 ):
                     # The cookie above is what authenticates every later
@@ -885,10 +897,10 @@ class AnalyticsServer(Thread):
                     g.tcpm_set_shell_bypass_cookie = True
                     return None
             authorization = request.authorization
-            valid_username = authorization is not None and secrets.compare_digest(
+            valid_username = authorization is not None and _secret_matches(
                 authorization.username or "", self.username or ""
             )
-            valid_password = authorization is not None and secrets.compare_digest(
+            valid_password = authorization is not None and _secret_matches(
                 authorization.password or "", self.password
             )
             if valid_username and valid_password:
