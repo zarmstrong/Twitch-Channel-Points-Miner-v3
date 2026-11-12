@@ -11,6 +11,7 @@ import logging
 import os
 import pickle
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from logging.handlers import QueueHandler
 from time import monotonic, sleep
@@ -59,12 +60,32 @@ def _wait_for_queued_logs(timeout=2.0):
         sleep(0.01)
 
 
+def _android_prompt():
+    """The paste prompt, cyan on a terminal that understands it. input()
+    writes the prompt itself, past colorama's stdout wrapper, so a Windows
+    console or a non-terminal would show the raw escape codes."""
+    text = "Redirect URL or access token: "
+    stdout = sys.stdout
+    if os.name != "nt" and stdout is not None and stdout.isatty():
+        return f"{ANDROID_LOGIN_COLOR}{text}{Fore.RESET}"
+    return text
+
+
+# The sign-in steps must reach the console even when console_level hides
+# INFO, or the miner waits at a prompt with no instructions; category_log
+# lets a record past the console's level filter.
 def _android_info(message):
-    logger.info(message, extra={"default_color": ANDROID_LOGIN_COLOR})
+    logger.info(
+        message,
+        extra={"default_color": ANDROID_LOGIN_COLOR, "category_log": True},
+    )
 
 
 def _android_error(message):
-    logger.error(message, extra={"default_color": ANDROID_LOGIN_ERROR_COLOR})
+    logger.error(
+        message,
+        extra={"default_color": ANDROID_LOGIN_ERROR_COLOR, "category_log": True},
+    )
 
 
 def parse_android_login(pasted):
@@ -281,9 +302,7 @@ class TwitchLogin(object):
             # prompt straight away; let the steps above print first.
             _wait_for_queued_logs()
             try:
-                pasted = read_input(
-                    f"{ANDROID_LOGIN_COLOR}Redirect URL or access token: {Fore.RESET}"
-                )
+                pasted = read_input(_android_prompt())
             # EOFError: stdin closed; RuntimeError: no stdin at all (the
             # windowed Windows app); OSError: a detached console.
             except (EOFError, OSError, RuntimeError):

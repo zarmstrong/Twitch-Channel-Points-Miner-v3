@@ -28,7 +28,9 @@ from TwitchChannelPointsMiner.classes.TwitchLogin import (
 from TwitchChannelPointsMiner.logger import (
     ANDROID_LOGIN_COLOR,
     ANDROID_LOGIN_ERROR_COLOR,
+    CategoryConsoleFilter,
     LoggerSettings,
+    configure_loggers,
 )
 from TwitchChannelPointsMiner.constants import (
     ANDROID_CLIENT_ID,
@@ -220,7 +222,7 @@ def test_android_login_messages_are_colored(monkeypatch, caplog):
     assert all(r.default_color == ANDROID_LOGIN_ERROR_COLOR for r in errors)
 
 
-def test_prompt_waits_for_queued_steps_and_is_colored(monkeypatch):
+def test_prompt_waits_for_queued_steps(monkeypatch):
     # input() prints its prompt at once, but log lines go through a queue:
     # the queue is drained first so the prompt comes after the steps.
     login, _ = android_login(monkeypatch, valid_response())
@@ -237,10 +239,53 @@ def test_prompt_waits_for_queued_steps_and_is_colored(monkeypatch):
 
     assert login.android_login_flow(read_input=read_input) is True
 
-    assert events == [
-        "drained",
-        f"{ANDROID_LOGIN_COLOR}Redirect URL or access token: {Fore.RESET}",
-    ]
+    assert events == ["drained", twitch_login_module._android_prompt()]
+
+
+@pytest.mark.parametrize(
+    "os_name, is_tty, colored",
+    [("posix", True, True), ("posix", False, False), ("nt", True, False)],
+    ids=["terminal", "not-a-terminal", "windows"],
+)
+def test_prompt_is_colored_only_on_a_terminal_that_shows_it(
+    monkeypatch, os_name, is_tty, colored
+):
+    monkeypatch.setattr(twitch_login_module.os, "name", os_name)
+    monkeypatch.setattr(
+        twitch_login_module.sys, "stdout", SimpleNamespace(isatty=lambda: is_tty)
+    )
+
+    prompt = twitch_login_module._android_prompt()
+
+    plain = prompt.replace(ANDROID_LOGIN_COLOR, "").replace(Fore.RESET, "")
+    assert plain == "Redirect URL or access token: "
+    assert (ANDROID_LOGIN_COLOR in prompt) is colored
+
+
+def test_queued_steps_reach_the_real_console_before_the_prompt(
+    tmp_path, monkeypatch, capsys
+):
+    # The real logging pipeline: queue handler on the root logger, listener
+    # thread writing to the console.
+    monkeypatch.chdir(tmp_path)
+    root_logger = logging.getLogger()
+    existing_handlers = set(root_logger.handlers)
+    existing_level = root_logger.level
+    _, listener = configure_loggers("someone", LoggerSettings(save=False))
+    try:
+        twitch_login_module._android_info("3. step before the prompt")
+        twitch_login_module._wait_for_queued_logs(timeout=5)
+        # Read while the listener still runs: nothing has flushed it but the
+        # wait.
+        assert "3. step before the prompt" in capsys.readouterr().out
+    finally:
+        listener.stop()
+        for handler in listener.handlers:
+            handler.close()
+        for handler in set(root_logger.handlers) - existing_handlers:
+            root_logger.removeHandler(handler)
+            handler.close()
+        root_logger.setLevel(existing_level)
 
 
 def test_wait_for_queued_logs_returns_once_the_queue_is_written(monkeypatch):
@@ -279,6 +324,18 @@ def test_wait_for_queued_logs_gives_up_after_the_timeout():
         assert time.monotonic() - started < 1
     finally:
         root_logger.removeHandler(handler)
+
+
+def test_sign_in_steps_reach_a_console_that_hides_info(monkeypatch, caplog):
+    login, _ = android_login(monkeypatch, valid_response())
+    console_filter = CategoryConsoleFilter(logging.WARNING)
+
+    with caplog.at_level(logging.INFO):
+        assert login.android_login_flow(read_input=lambda prompt: REDIRECT) is True
+
+    steps = [r for r in caplog.records if r.getMessage().startswith(("1. ", "3. "))]
+    assert len(steps) == 2
+    assert all(console_filter.filter(record) for record in steps)
 
 
 def test_paste_without_a_token_is_asked_again(monkeypatch):
