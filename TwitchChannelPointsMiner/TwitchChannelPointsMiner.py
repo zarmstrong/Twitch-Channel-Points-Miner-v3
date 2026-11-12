@@ -2613,6 +2613,7 @@ class TwitchChannelPointsMiner:
                     self.ws_pool.submit(
                         PubsubTopic("community-points-channel-v1", streamer=streamer)
                     )
+                self.__subscribe_user_drop_events()
             except StreamerDoesNotExistException:
                 logger.info(
                     f"Streamer {username} does not exist",
