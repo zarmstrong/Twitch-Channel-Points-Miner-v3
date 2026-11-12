@@ -6,6 +6,7 @@ import json
 import logging
 import queue
 import signal
+import socket
 import threading
 import time
 from logging.handlers import QueueHandler
@@ -449,6 +450,9 @@ def test_startup_reports_the_android_login_after_loggers_are_ready(
 ):
     # Logged before configure_loggers, the line had no handler and was lost.
     monkeypatch.chdir(tmp_path)
+    # The constructor waits in a loop until twitch.tv resolves; keep the test
+    # off the network so it cannot hang without DNS.
+    monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.0.0.1")
     miner_module = importlib.import_module(
         "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
     )
