@@ -2,7 +2,7 @@ FROM python:3.14-bookworm
 
 WORKDIR /usr/src/app
 
-COPY ./requirements.txt ./
+COPY ./requirements.txt ./requirements-optional.txt ./
 
 ENV PYTHONUNBUFFERED=1
 
@@ -21,7 +21,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --fix-missing --no-ins
     ninja-build \
     g++ \
     subversion \
-  && pip install -r requirements.txt \
+  && pip install -r requirements.txt -r requirements-optional.txt \
   && pip cache purge \
   && apt-get remove -y gcc \
   && apt-get autoremove -y \

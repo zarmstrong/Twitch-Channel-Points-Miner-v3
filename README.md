@@ -1259,8 +1259,9 @@ which supports more than 100 services. Each destination is one URL, such as
 `discord://`, `tgram://` or `ntfy://`; see the
 [Apprise wiki](https://github.com/caronc/apprise/wiki) for every format.
 
-Apprise is optional. Install it with `pip install apprise` only if you use this
-notifier. Without it, the miner logs one warning and keeps running.
+The Docker image includes Apprise. A source checkout installs it only if it uses
+this notifier, with `pip install -r requirements-optional.txt`. Without it,
+the miner logs one warning and keeps running.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
