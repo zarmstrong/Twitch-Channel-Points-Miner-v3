@@ -25,6 +25,10 @@ from TwitchChannelPointsMiner.constants import (
     USER_AGENTS,
     GQLOperations,
 )
+from TwitchChannelPointsMiner.logger import (
+    ANDROID_LOGIN_COLOR,
+    ANDROID_LOGIN_ERROR_COLOR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,14 @@ BARE_TOKEN_RE = re.compile(r"[A-Za-z0-9]{20,64}")
 def _running_in_container():
     """Docker and Podman; there, nobody sees a prompt unless they attach."""
     return os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+
+def _android_info(message):
+    logger.info(message, extra={"default_color": ANDROID_LOGIN_COLOR})
+
+
+def _android_error(message):
+    logger.error(message, extra={"default_color": ANDROID_LOGIN_ERROR_COLOR})
 
 
 def parse_android_login(pasted):
@@ -210,19 +222,24 @@ class TwitchLogin(object):
         it in the TWITCH_ANDROID_LOGIN environment variable. The token is
         never logged."""
         read_input = read_input or input
-        logger.info("You'll have to log in to Twitch with the Android app login!")
+        _android_info("You'll have to log in to Twitch with the Android app login!")
         supplied = os.environ.get(ANDROID_LOGIN_ENV_VAR)
-        if supplied:
+        if supplied is not None and not supplied.strip():
+            _android_error(
+                f"{ANDROID_LOGIN_ENV_VAR} is set but empty. Set it to the "
+                "redirect URL from step 2 below."
+            )
+        if supplied and supplied.strip():
             if self.__accept_android_token(parse_android_login(supplied)):
                 return True
-            logger.error(
+            _android_error(
                 f"{ANDROID_LOGIN_ENV_VAR} does not hold a valid Android login "
                 "for this account"
             )
 
-        logger.info(f"1. While signed in to Twitch as {self.username}, open:")
-        logger.info(f"   {ANDROID_LOGIN_URL}")
-        logger.info(
+        _android_info(f"1. While signed in to Twitch as {self.username}, open:")
+        _android_info(f"   {ANDROID_LOGIN_URL}")
+        _android_info(
             "2. Twitch approves its own app without asking and redirects to "
             "https://www.twitch.tv/#access_token=... - the page then hides that "
             "address. Copy it from your browser history, or from the Location "
@@ -231,7 +248,7 @@ class TwitchLogin(object):
         )
         in_container = _running_in_container()
         if in_container:
-            logger.info(
+            _android_info(
                 f"3. In Docker, set the {ANDROID_LOGIN_ENV_VAR} environment "
                 "variable to that URL and recreate the container (for example "
                 "docker compose up -d), or attach to this container's console "
@@ -239,7 +256,7 @@ class TwitchLogin(object):
                 "full-access login for your account: don't share it."
             )
         else:
-            logger.info(
+            _android_info(
                 "3. Paste it below. It is a full-access login for your account: "
                 "don't share it."
             )
@@ -254,7 +271,7 @@ class TwitchLogin(object):
                     if in_container
                     else "start the miner again"
                 )
-                logger.error(
+                _android_error(
                     "No console to paste into. Set the "
                     f"{ANDROID_LOGIN_ENV_VAR} environment variable to the "
                     f"redirect URL and {restart}."
@@ -262,7 +279,7 @@ class TwitchLogin(object):
                 return False
             token = parse_android_login(pasted)
             if token is None:
-                logger.error("No access token found in what was pasted")
+                _android_error("No access token found in what was pasted")
                 continue
             if self.__accept_android_token(token):
                 return True
@@ -280,20 +297,20 @@ class TwitchLogin(object):
                 timeout=(5, 30),
             )
         except requests.RequestException as error:
-            logger.error(f"Could not validate the Android login: {error}")
+            _android_error(f"Could not validate the Android login: {error}")
             return False
         if response.status_code != 200:
-            logger.error(
+            _android_error(
                 f"Twitch rejected the Android login (HTTP {response.status_code})"
             )
             return False
         data = response.json() if response.content else {}
         if data.get("client_id") != ANDROID_CLIENT_ID:
-            logger.error("That login was not issued to the Twitch Android app")
+            _android_error("That login was not issued to the Twitch Android app")
             return False
         login = str(data.get("login") or "")
         if login.lower() != str(self.username).lower():
-            logger.error(f"That login belongs to '{login}', not '{self.username}'")
+            _android_error(f"That login belongs to '{login}', not '{self.username}'")
             return False
         self.set_token(token)
         if data.get("user_id"):
