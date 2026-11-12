@@ -496,6 +496,13 @@ Run it once by hand, finish the login, Ctrl+C, then run this again:
             }
         } else { Write-Host "Pushover config found: $AlertConfig" }
 
+        $cfg = Get-AlertConfig
+        if ($cfg -and ($cfg.appriseUrls -or $cfg.appriseUrgentUrls)) {
+            Write-Host 'Installing optional requirements for Apprise alerts ...'
+            & $py -m pip install --disable-pip-version-check -q -r (Join-Path $script:Dir 'requirements-optional.txt')
+            if ($LASTEXITCODE -ne 0) { throw 'Apprise optional requirements install failed. Fix the error above and run Install again.' }
+        }
+
         # 6. Register tasks (absolute paths so PATH differences don't matter).
         $psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
         $user  = "$env:USERDOMAIN\$env:USERNAME"

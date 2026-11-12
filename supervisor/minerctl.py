@@ -730,6 +730,26 @@ def cmd_install(p: Paths, args) -> int:
                 f"Saved {ALERT_CONFIG} (mode 600). Test it with: minerctl.py test-alert"
             )
 
+    cfg = load_alert_config() or {}
+    if cfg.get("appriseUrls") or cfg.get("appriseUrgentUrls"):
+        print("Installing optional requirements for Apprise alerts ...")
+        r = subprocess.run(
+            [
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "-q",
+                "-r",
+                str(p.miner_dir / "requirements-optional.txt"),
+            ]
+        )
+        if r.returncode != 0:
+            sys.exit(
+                "Apprise optional requirements install failed - fix the error above and run install again."
+            )
+
     p.log_dir.mkdir(parents=True, exist_ok=True)
     be.install(python, p.miner_dir, args.health_minutes, args.summary_time, args.hours)
     print(
