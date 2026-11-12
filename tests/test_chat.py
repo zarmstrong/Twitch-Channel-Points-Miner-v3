@@ -82,8 +82,8 @@ def test_irc_tls_context_requires_tls12_and_verifies_hostname():
     assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
     assert context.check_hostname is True
     assert context.verify_mode == ssl.CERT_REQUIRED
-    
-    
+
+
 def _usernotice(**tags):
     return types.SimpleNamespace(
         type="usernotice",
