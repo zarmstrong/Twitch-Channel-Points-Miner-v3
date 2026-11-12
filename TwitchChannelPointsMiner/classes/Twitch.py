@@ -1347,7 +1347,7 @@ class Twitch(object):
             )
             response = main_page_request.text
             # logger.info(response)
-            regex_settings = "(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)"
+            regex_settings = r"(https://static\.twitchcdn\.net/config/settings.*?js|https://assets\.twitch\.tv/config/settings.*?\.js)"
             settings_match = re.search(regex_settings, response)
             if settings_match is None:
                 logger.error(
