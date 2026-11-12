@@ -305,8 +305,10 @@ def read_json(streamer, return_response=True):
         with open(os.path.join(path, streamer), "r") as file:
             data = json.load(file)
     except json.JSONDecodeError as e:
-        error_message = f"Error decoding JSON in file '{streamer}': {str(e)}"
-        logger.error(error_message)
+        # The parser's position details stay in the log; the client only
+        # learns that the file could not be read.
+        logger.error(f"Error decoding JSON in file '{streamer}': {e}")
+        error_message = f"Analytics data in '{streamer}' could not be read."
         if return_response:
             return Response(
                 json.dumps({"error": error_message}),
