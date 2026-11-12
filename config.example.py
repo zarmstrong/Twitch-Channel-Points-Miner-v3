@@ -15,6 +15,7 @@ from TwitchChannelPointsMiner.classes.Matrix import Matrix
 from TwitchChannelPointsMiner.classes.Pushover import Pushover
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
 from TwitchChannelPointsMiner.classes.Ntfy import Ntfy
+from TwitchChannelPointsMiner.classes.Apprise import Apprise
 from TwitchChannelPointsMiner.classes.Settings import (
     Priority,
     Events,
@@ -166,6 +167,16 @@ MINER_CONFIG = {
                 Events.DROP_CLAIM,
                 Events.DROP_LINK_REQUIRED,
             ],
+        ),
+        apprise=Apprise(
+            urls=[
+                "discord://WEBHOOK_ID/WEBHOOK_TOKEN",
+                "ntfy://YOUR_NTFY_TOPIC",
+            ],  # One URL per service, see https://github.com/caronc/apprise/wiki
+            events=[
+                Events.STREAMER_ONLINE,
+                Events.DROP_CLAIM,
+            ],  # Docker includes Apprise; not in the Windows .exe. See the README.
         ),
     ),
     "streamer_settings": StreamerSettings(

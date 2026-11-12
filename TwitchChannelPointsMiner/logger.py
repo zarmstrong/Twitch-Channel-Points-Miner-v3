@@ -17,6 +17,7 @@ import emoji
 import pytz
 from colorama import Fore, init
 
+from TwitchChannelPointsMiner.classes.Apprise import Apprise
 from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
@@ -117,6 +118,7 @@ class LoggerSettings:
         "pushover",
         "gotify",
         "ntfy",
+        "apprise",
         "email",
         "daily_report",
         "daily_report_time",
@@ -151,6 +153,7 @@ class LoggerSettings:
         # Added last so existing positional calls keep their meaning.
         console_format: LoggingFormat | str = LoggingFormat.TEXT,
         file_format: LoggingFormat | str = LoggingFormat.TEXT,
+        apprise: Apprise or None = None,
     ):
         self.save = save
         self.less = less
@@ -190,6 +193,7 @@ class LoggerSettings:
         self.pushover = pushover
         self.gotify = gotify
         self.ntfy = ntfy
+        self.apprise = apprise
         self.email = email
         self.daily_report = daily_report
         try:
@@ -464,6 +468,8 @@ class NotificationHandler(logging.Handler):
         "gotify": lambda notifier: notifier.endpoint
         == "https://example.com/message?token=TOKEN",
         "ntfy": lambda notifier: notifier.topic == "YOUR_NTFY_TOPIC",
+        # Apprise drops the example URLs itself, leaving none when unset.
+        "apprise": lambda notifier: not notifier.urls,
         "email": lambda notifier: notifier.host == "smtp.example.com",
     }
 

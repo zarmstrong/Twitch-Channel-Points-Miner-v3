@@ -1,0 +1,7 @@
+# Optional packages that are imported only when a feature that needs them is
+# configured. The Docker image installs them, because its users cannot add
+# packages to the container. A source checkout can skip this file and install
+# a package only when it uses the matching feature.
+#
+# Apprise notifier (LoggerSettings(apprise=Apprise(...)))
+apprise==2.2.0
