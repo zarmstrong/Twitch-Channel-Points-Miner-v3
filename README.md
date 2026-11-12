@@ -73,6 +73,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
             - [Discord](#discord)
             - [Generic Webhook](#generic-webhook)
             - [ntfy](#ntfy)
+            - [Apprise](#apprise)
             - [Matrix](#matrix)
             - [Pushover](#pushover)
             - [Gotify](#gotify)
@@ -268,6 +269,9 @@ pip install -r requirements.txt
 mkdir -p config
 cp config.example.py config/config.py
 ```
+
+To use the optional [Apprise](#apprise) notifier, also run
+`pip install -r requirements-optional.txt`.
 
 Edit `config/config.py`, then start the stable runner:
 
@@ -1071,6 +1075,7 @@ implementing it.
 | `gotify` | Gotify or None | `None` | Send selected events to a Gotify server. |
 | `email` | Email or None | `None` | Send selected events through an SMTP server. |
 | `ntfy` | Ntfy or None | `None` | Publish selected events to an ntfy topic. |
+| `apprise` | Apprise or None | `None` | Send selected events to any service Apprise supports. |
 | `daily_report` | bool | `False` | Generate a daily channel-points and Drop activity report. |
 | `daily_report_time` | str | `"00:00"` | Local delivery time for the daily report, in 24-hour `HH:MM` format. |
 
@@ -1146,6 +1151,7 @@ Placeholder values are ignored; use real credentials and never commit them.
 | Gotify | Self-hosted Gotify application | `Gotify` |
 | Email | Addresses reached through SMTP | `Email` |
 | ntfy | ntfy topic (hosted or self-hosted) | `Ntfy` |
+| Apprise | Any of 100+ services, one URL each (not in the Windows executable, see [Apprise](#apprise)) | `Apprise` |
 
 Telegram, Discord and Pushover split a message that is too long to send in
 one piece into consecutive messages, breaking at line ends where possible. A
@@ -1248,6 +1254,88 @@ Ntfy(
     events=[Events.STREAMER_OFFLINE, Events.DROP_CLAIM],
 )
 ```
+
+##### Apprise
+
+`Apprise` sends notifications through [Apprise](https://github.com/caronc/apprise),
+which supports more than 100 services. Each destination is one URL, such as
+`discord://`, `tgram://` or `ntfy://`; see the
+[Apprise wiki](https://github.com/caronc/apprise/wiki) for every format.
+
+Apprise is an optional package, so whether you can use this notifier depends
+on how you run the miner:
+
+| How you run the miner | Apprise |
+|---|---|
+| [Docker](#docker) | Included. Nothing to install. |
+| [Source checkout](#source-checkout-quick-start) | Install it with `pip install -r requirements-optional.txt`. |
+| [Windows executable](#windows) | Not available. Use one of the built-in providers above (Telegram, Discord, ntfy and the others), or run the miner from a source checkout or Docker. |
+
+Apprise is not part of `requirements.txt` because it brings about 20 more
+packages, one of which is compiled. On platforms without prebuilt packages,
+that would slow down or break every install, even for people who never use
+Apprise. When the package is missing, the miner keeps running and logs one
+warning at the first notification. The warning says how to fix it.
+
+The **Config** tab of the desktop window and web dashboard does not list
+Apprise. Add it to `config/config.py` by hand; saving from the Config tab
+keeps it.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `urls` | str or list | Required | One or more Apprise service URLs. |
+| `events` | list | Required | Events to send. |
+| `title` | str | `"Twitch Channel Points Miner"` | Notification title. `{event}` is replaced with the event name, such as `DROP_CLAIM`. |
+
+```python
+from TwitchChannelPointsMiner.classes.Apprise import Apprise
+
+Apprise(
+    urls=["discord://WEBHOOK_ID/WEBHOOK_TOKEN", "tgram://BOT_TOKEN/CHAT_ID"],
+    events=[Events.DROP_CLAIM, Events.STREAMER_OFFLINE],
+)
+```
+
+###### Custom Discord embeds
+
+Apprise's `discord://` URL can send a custom embed instead of plain text. Point
+its `template` option at a JSON file that holds the full webhook payload.
+Apprise fills in the `{{...}}` tokens before sending.
+
+```json
+{
+  "username": "{{botname}}",
+  "avatar_url": "https://example.com/avatar.png",
+  "embeds": [{
+    "title": "{{app_title}}",
+    "description": "<:pog:123456789012345678> {{app_body}}",
+    "color": {{color}},
+    "thumbnail": {"url": "https://example.com/thumbnail.png"},
+    "footer": {"text": "Twitch Channel Points Miner"}
+  }]
+}
+```
+
+```python
+Apprise(
+    urls=[
+        "discord://WEBHOOK_ID/WEBHOOK_TOKEN"
+        "?template=/path/to/discord.json&:color=9520895&:botname=Points%20Miner"
+    ],
+    events=[Events.DROP_CLAIM, Events.STREAMER_ONLINE],
+    title="{event}",
+)
+```
+
+- `{{app_body}}` is the miner's message. `{{app_title}}` is the `title` value,
+  so `title="{event}"` puts the event name in the embed title.
+- Add your own tokens to the URL as `:name=value` and use them as `{{name}}`.
+  Above, `:color` sets the embed colour as a decimal number (`9520895` is
+  `#9146FF`) and `:botname` sets the webhook's display name.
+- Custom server emoji use Discord's `<:name:id>` syntax.
+- Every event uses the same template. Tested with Apprise 2.1.0; see the
+  [Apprise Discord wiki](https://github.com/caronc/apprise/wiki/Notify_discord)
+  for all options.
 
 ##### Matrix
 
@@ -1771,6 +1859,10 @@ that reauthentication can occur; follow the instructions printed in the logs.
 ## Windows
 The Windows executable does not require Python, Git, or Command Prompt.
 
+It includes every feature except the optional [Apprise](#apprise) notifier.
+All the other notification providers work. To use Apprise on Windows, run the
+miner from a [source checkout](#source-checkout-quick-start) or Docker.
+
 ### Standard vs. portable
 
 Two distributions are published on every release, identical in features and
@@ -1891,6 +1983,11 @@ logs are saved depends on which distribution you installed (see
 - **Windows says it cannot find the configuration (portable build only):**
   Right-click the downloaded ZIP and use **Extract All...** before running the
   executable.
+- **"Notifications to apprise are failing: The Windows executable does not
+  include Apprise":** The executable cannot send through Apprise. Remove
+  `apprise=Apprise(...)` from `MINER_CONFIG["logger_settings"]` and use a
+  built-in provider such as Discord, Telegram or ntfy, or see
+  [Apprise](#apprise) for the setups that include it.
 - **Emoji or symbols look broken:** In `config.py`, use
   `LoggerSettings(emoji=False)` in `MINER_CONFIG["logger_settings"]`. See
   [LoggerSettings](#loggersettings) for the complete example.
