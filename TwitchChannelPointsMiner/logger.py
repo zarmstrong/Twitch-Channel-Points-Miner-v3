@@ -17,7 +17,7 @@ import emoji
 import pytz
 from colorama import Fore, init
 
-from TwitchChannelPointsMiner.classes.Apprise import EXAMPLE_URLS, Apprise
+from TwitchChannelPointsMiner.classes.Apprise import Apprise
 from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.classes.Email import Email
 from TwitchChannelPointsMiner.classes.Gotify import Gotify
@@ -464,8 +464,8 @@ class NotificationHandler(logging.Handler):
         "gotify": lambda notifier: notifier.endpoint
         == "https://example.com/message?token=TOKEN",
         "ntfy": lambda notifier: notifier.topic == "YOUR_NTFY_TOPIC",
-        "apprise": lambda notifier: not notifier.urls
-        or all(url in EXAMPLE_URLS for url in notifier.urls),
+        # Apprise drops the example URLs itself, leaving none when unset.
+        "apprise": lambda notifier: not notifier.urls,
         "email": lambda notifier: notifier.host == "smtp.example.com",
     }
 

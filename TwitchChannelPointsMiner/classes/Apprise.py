@@ -5,6 +5,11 @@ from TwitchChannelPointsMiner.classes.Settings import Events
 
 logger = logging.getLogger(__name__)
 
+# Apprise logs each request URL at DEBUG and some failures at WARNING. Those
+# URLs hold webhook and bot tokens or private ntfy topics, so only errors are
+# kept. Delivery failures still reach the user through send()'s reason.
+logging.getLogger("apprise").setLevel(logging.ERROR)
+
 # URLs from config.example.py. Notifications are skipped until real URLs replace them.
 EXAMPLE_URLS = ("discord://WEBHOOK_ID/WEBHOOK_TOKEN", "ntfy://YOUR_NTFY_TOPIC")
 
@@ -30,6 +35,8 @@ class Apprise(object):
 
     def __init__(self, urls, events: list, title: str = "Twitch Channel Points Miner"):
         self.urls = [urls] if isinstance(urls, str) else [u for u in (urls or []) if u]
+        # An example URL left beside a real one would fail on every send.
+        self.urls = [url for url in self.urls if url not in EXAMPLE_URLS]
         self.events = [str(event) for event in events]
         self.title = title
         self._client = None
@@ -68,5 +75,5 @@ class Apprise(object):
             # Only the type is kept: error text can quote the service URL.
             return False, f"Apprise raised {type(error).__name__}."
         if not delivered:
-            return False, "Apprise could not deliver the notification to any service."
+            return False, "Apprise could not deliver the notification to every service."
         return True, None

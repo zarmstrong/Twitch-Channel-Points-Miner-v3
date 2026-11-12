@@ -1,3 +1,4 @@
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -77,7 +78,7 @@ def test_apprise_reports_undelivered_notification():
 
     assert notifier.send("claimed", Events.DROP_CLAIM) == (
         False,
-        "Apprise could not deliver the notification to any service.",
+        "Apprise could not deliver the notification to every service.",
     )
 
 
@@ -121,6 +122,33 @@ def test_apprise_reports_when_every_url_is_invalid():
         False,
         "No valid Apprise URL is configured.",
     )
+
+
+def test_apprise_drops_example_urls_kept_beside_real_ones():
+    module, client = fake_apprise_module()
+    with patch.dict(sys.modules, {"apprise": module}):
+        notifier = Apprise([*EXAMPLE_URLS, "discord://123/abc"], [Events.DROP_CLAIM])
+
+    assert notifier.urls == ["discord://123/abc"]
+    assert [call.args for call in client.add.call_args_list] == [("discord://123/abc",)]
+
+
+def test_apprise_with_only_example_urls_does_not_import_the_package():
+    with patch.dict(sys.modules, {"apprise": None}):
+        notifier = Apprise(list(EXAMPLE_URLS), [Events.DROP_CLAIM])
+
+    assert notifier.urls == []
+    assert notifier.send("claimed", Events.DROP_CLAIM) == (
+        False,
+        "No Apprise URL is configured.",
+    )
+
+
+def test_apprise_library_logs_are_limited_to_errors():
+    # Its DEBUG and WARNING lines quote service URLs that hold credentials.
+    apprise_logger = logging.getLogger("apprise")
+    assert not apprise_logger.isEnabledFor(logging.WARNING)
+    assert apprise_logger.isEnabledFor(logging.ERROR)
 
 
 def test_logger_skips_example_apprise_urls():
