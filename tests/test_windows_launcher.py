@@ -1312,6 +1312,7 @@ def test_wait_until_dashboard_ready_true_when_server_answers_200():
     finally:
         server.shutdown()
         thread.join()
+        server.server_close()
 
 
 def test_wait_until_dashboard_ready_times_out_when_nothing_listening():
@@ -1343,6 +1344,7 @@ def test_wait_until_dashboard_ready_false_when_a_different_server_answers():
     finally:
         server.shutdown()
         thread.join()
+        server.server_close()
 
 
 def test_window_api_get_console_tail_delegates_to_buffer():
