@@ -89,6 +89,7 @@ MINER_CONFIG = {
                 Events.STREAMER_OFFLINE,
                 Events.BET_LOSE,
                 Events.CHAT_MENTION,
+                Events.GIFTED_SUB,
             ],  # Only these events will be sent to the chat
             disable_notification=True,  # Revoke the notification (sound/vibration)
             message_thread_id=None,  # Optional forum topic ID for supergroup topics
@@ -177,6 +178,8 @@ MINER_CONFIG = {
         points_limit=None,  # Stop watching after reaching this balance; pending watch streaks still take priority
         community_goals=False,  # If True, contributes the max channel points per stream to the streamers' community challenge goals
         chat=ChatPresence.ONLINE,  # Join irc chat to increase watch-time [ALWAYS, NEVER, ONLINE, OFFLINE]
+        gift_sub_thanks=False,  # If True, thank gifters in chat when someone gifts you a sub (requires chat presence)
+        gift_sub_message="Thanks for the sub!",  # Optional placeholders: {gifter}, {channel}, {tier} - e.g. "Thanks for the {tier} sub, {gifter}!"
         bet=BetSettings(
             strategy=Strategy.SMART,  # Choose you strategy!
             percentage=5,  # Place the x% of your channel points

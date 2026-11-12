@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 
 import pytest
@@ -36,7 +37,9 @@ def test_migrate_analytics_directory_versions_existing_files(tmp_path):
         json.loads((tmp_path / "channel.json.v0.bak").read_text(encoding="utf-8"))
         == streamer_payload
     )
-    assert stat.S_IMODE(streamer_file.stat().st_mode) == 0o640
+    # Windows has no POSIX permission bits; chmod only toggles read-only.
+    if os.name == "posix":
+        assert stat.S_IMODE(streamer_file.stat().st_mode) == 0o640
     assert migrate_analytics_directory(tmp_path) == 0
 
 

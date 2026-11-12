@@ -17,6 +17,54 @@ logger = logging.getLogger(__name__)
 _tls_probe_lock = Lock()
 _tls_supported = None
 
+DEFAULT_GIFT_SUB_MESSAGE = "Thanks for the sub!"
+# Twitch rejects chat messages longer than 500 characters.
+MAX_CHAT_MESSAGE_LENGTH = 500
+# The irc library rejects any line longer than this (RFC 2812).
+IRC_MAX_LINE_BYTES = 512
+ANONYMOUS_GIFTER_LOGIN = "ananonymousgifter"
+SUB_PLAN_NAMES = {
+    "1000": "Tier 1",
+    "2000": "Tier 2",
+    "3000": "Tier 3",
+    "Prime": "Prime",
+}
+
+
+class _KeepUnknownPlaceholders(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def format_gift_sub_message(template, gifter, channel, tier):
+    """Fill a thank-you template, leaving unknown {placeholders} as typed and
+    falling back to the default message if the template is malformed. Line
+    breaks are removed so the message can't inject extra IRC commands."""
+    values = _KeepUnknownPlaceholders(gifter=gifter, channel=channel, tier=tier)
+    try:
+        message = str(template).format_map(values)
+    except Exception:
+        # Any template str.format can't fill, e.g. "{gifter[name]}"
+        # (TypeError) as well as "{" (ValueError) or "{0}" (IndexError).
+        message = DEFAULT_GIFT_SUB_MESSAGE.format_map(values)
+    message = " ".join(message.replace("\r", " ").replace("\n", " ").split())
+    message = message[:MAX_CHAT_MESSAGE_LENGTH]
+    # The irc library refuses a line over 512 bytes including the
+    # "PRIVMSG #channel :" prefix and CRLF, so also fit the UTF-8 length.
+    max_bytes = IRC_MAX_LINE_BYTES - len(f"PRIVMSG #{channel} :\r\n".encode("utf-8"))
+    encoded = message.encode("utf-8")
+    if len(encoded) > max_bytes:
+        message = encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+    return message
+
+
+def _irc_tls_context():
+    """TLS settings for Twitch IRC: certificate and hostname checks from the
+    default context, and never anything older than TLS 1.2."""
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
 
 def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
     """Probe once per process whether a TLS handshake to Twitch's IRC endpoint
@@ -27,7 +75,7 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
     with _tls_probe_lock:
         if _tls_supported is None:
             try:
-                context = ssl.create_default_context()
+                context = _irc_tls_context()
                 with socket.create_connection((host, port), timeout=timeout) as sock:
                     with context.wrap_socket(sock, server_hostname=host):
                         _tls_supported = True
@@ -52,8 +100,9 @@ class ChatPresence(Enum):
 
 
 class ClientIRC(SingleServerIRCBot):
-    def __init__(self, username, token, channel):
+    def __init__(self, username, token, channel, settings=None):
         self.token = token
+        self.settings = settings
         self.channel = "#" + channel
         self.__active = False
 
@@ -61,7 +110,7 @@ class ClientIRC(SingleServerIRCBot):
         port = IRC_PORT
         if _irc_tls_available():
             port = IRC_TLS_PORT
-            context = ssl.create_default_context()
+            context = _irc_tls_context()
             connect_params["connect_factory"] = irc.connection.Factory(
                 wrapper=partial(context.wrap_socket, server_hostname=IRC)
             )
@@ -71,6 +120,9 @@ class ClientIRC(SingleServerIRCBot):
         )
 
     def on_welcome(self, client, event):
+        # Tags and commands let USERNOTICE (sub/gift) events through; chat
+        # messages and mentions keep working the same way with them enabled.
+        client.send_raw("CAP REQ :twitch.tv/tags twitch.tv/commands")
         client.join(self.channel)
 
     def start(self):
@@ -121,6 +173,59 @@ class ClientIRC(SingleServerIRCBot):
                 extra={"emoji": ":speech_balloon:", "event": Events.CHAT_MENTION},
             )
 
+    @staticmethod
+    def _tags(event):
+        return {
+            tag.get("key"): tag.get("value")
+            for tag in (getattr(event, "tags", None) or [])
+            if isinstance(tag, dict)
+        }
+
+    def on_usernotice(self, connection, event):
+        tags = self._tags(event)
+        if tags.get("msg-id") != "subgift":
+            return
+        recipient = (tags.get("msg-param-recipient-user-name") or "").lower()
+        if recipient != self._nickname.lower():
+            return
+
+        login = (tags.get("login") or "").lower()
+        if login == ANONYMOUS_GIFTER_LOGIN:
+            gifter = "An Anonymous Gifter"
+        else:
+            gifter = tags.get("display-name") or tags.get("login") or "someone"
+        plan = tags.get("msg-param-sub-plan") or ""
+        tier = SUB_PLAN_NAMES.get(plan, plan)
+        channel = self.channel.lstrip("#")
+        sub = f"a {tier} sub" if tier else "a sub"
+
+        logger.info(
+            f"{gifter} gifted you {sub} in {channel}'s chat",
+            extra={"emoji": ":gift:", "event": Events.GIFTED_SUB},
+        )
+
+        settings = self.settings
+        if settings is None or getattr(settings, "gift_sub_thanks", False) is not True:
+            return
+        template = (
+            getattr(settings, "gift_sub_message", None) or DEFAULT_GIFT_SUB_MESSAGE
+        )
+        message = format_gift_sub_message(template, gifter, channel, tier)
+        if not message:
+            return
+        try:
+            connection.privmsg(self.channel, message)
+        except Exception as error:
+            logger.warning(
+                f"Couldn't send the gift sub thank-you in {channel}'s chat: {error}",
+                extra={"emoji": ":warning:"},
+            )
+            return
+        logger.info(
+            f"Thanked {gifter} in {channel}'s chat: {message}",
+            extra={"emoji": ":speech_balloon:"},
+        )
+
     # """
 
 
@@ -136,9 +241,12 @@ class ThreadChat(Thread):
         self.channel = channel
 
         self.chat_irc = None
+        self.settings = None
 
     def run(self):
-        self.chat_irc = ClientIRC(self.username, self.token, self.channel)
+        self.chat_irc = ClientIRC(
+            self.username, self.token, self.channel, settings=self.settings
+        )
         logger.info(
             f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
         )

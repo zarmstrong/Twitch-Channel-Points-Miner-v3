@@ -145,6 +145,8 @@ HELIX_PERMANENT_STATUS_CODES = {400, 404, 410, 422}
 TWITCH_LOGIN_PATTERN = re.compile(r"[a-z0-9_]{1,25}")
 # Most channels requested from Twitch's Drops-enabled directory for a game.
 DROPS_DIRECTORY_LIMIT = 100
+# Pages of the Drops directory read per category lookup (see #211).
+DROPS_DIRECTORY_MAX_PAGES = 5
 # Outcome of the calling thread's latest drops dashboard request. Thread-local
 # so the campaign sync thread's dashboard calls cannot be mistaken for the
 # category discovery pass's own.
@@ -1365,7 +1367,7 @@ class Twitch(object):
             )
             response = main_page_request.text
             # logger.info(response)
-            regex_settings = "(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)"
+            regex_settings = r"(https://static\.twitchcdn\.net/config/settings.*?js|https://assets\.twitch\.tv/config/settings.*?\.js)"
             settings_match = re.search(regex_settings, response)
             if settings_match is None:
                 logger.error(
@@ -4572,7 +4574,8 @@ class Twitch(object):
                     )
                     return []
                 if forced_streamer_username not in drops_logins:
-                    # The directory returns one page, so in a busy category a
+                    # The directory is read for only a few pages and Twitch
+                    # re-ranks it between them, so in a busy category a
                     # Drops-enabled channel can be missing from it. Ask Twitch
                     # which campaigns that channel itself offers instead. Like
                     # a directory listing, a campaign for the game only shows
@@ -4772,8 +4775,8 @@ class Twitch(object):
             if username:
                 discovered.append(username)
 
-        # The Drops-enabled directory lists at most 100 channels, so in a busy
-        # game the pick can be missing from it. Its own positive eligibility,
+        # Only a few pages of the Drops-enabled directory are read, so in a
+        # busy game the pick can be missing from it. Its own positive eligibility,
         # which every stream refresh re-checks, is accepted instead.
         # A discovered pick only competes for the discovered share of the
         # limit: an allow-listed channel earns every campaign the pick can and
@@ -5274,7 +5277,9 @@ class Twitch(object):
         slugs[game_id] = slug
         return slug
 
-    def __request_drops_directory(self, request_slug: str, game_slug: str) -> dict:
+    def __request_drops_directory(
+        self, request_slug: str, game_slug: str, cursor=None
+    ) -> dict:
         request = copy.deepcopy(GQLOperations.DirectoryPage_Game)
         request["variables"] = {
             "slug": request_slug,
@@ -5287,6 +5292,8 @@ class Twitch(object):
                 "tags": [DROP_ID],
             },
         }
+        if cursor:
+            request["variables"]["cursor"] = cursor
         try:
             response = self.gql.post_gql_request_raw("DirectoryPage_Game", request)
         except RetryError as error:
@@ -5319,6 +5326,7 @@ class Twitch(object):
             )
         response = self.__request_drops_directory(request_slug, game_slug)
         game = (response.get("data") or {}).get("game")
+        directory_slug = request_slug
         # Look the slug up again only on proof the page is not this game's (no
         # game, or another ID). This is deliberately weaker than game_matches
         # below, which needs proof it is: a page without an ID triggers
@@ -5346,11 +5354,7 @@ class Twitch(object):
                 )
                 response = self.__request_drops_directory(resolved_slug, game_slug)
                 game = (response.get("data") or {}).get("game")
-
-        streams = game.get("streams") if isinstance(game, dict) else None
-        edges = streams.get("edges") if isinstance(streams, dict) else None
-        edges_listed = isinstance(edges, list)
-        edges = edges if edges_listed else []
+                directory_slug = resolved_slug
 
         def edge_login(edge):
             node = edge.get("node") if isinstance(edge, dict) else None
@@ -5358,6 +5362,27 @@ class Twitch(object):
             if not isinstance(broadcaster, dict):
                 return ""
             return str(broadcaster.get("login") or "").lower().strip()
+
+        def read_page(page_game):
+            """The page's edges (None when Twitch sent no list), whether
+            Twitch reports a next page, and the cursor to ask for it."""
+            streams = page_game.get("streams") if isinstance(page_game, dict) else None
+            page_edges = streams.get("edges") if isinstance(streams, dict) else None
+            if not isinstance(page_edges, list):
+                page_edges = None
+            page_info = streams.get("pageInfo") if isinstance(streams, dict) else None
+            page_has_next = (
+                page_info.get("hasNextPage") if isinstance(page_info, dict) else None
+            )
+            last_edge = page_edges[-1] if page_edges else None
+            page_cursor = (
+                last_edge.get("cursor") if isinstance(last_edge, dict) else None
+            )
+            return page_edges, page_has_next, page_cursor
+
+        edges, has_next_page, next_cursor = read_page(game)
+        edges_listed = edges is not None
+        edges = edges if edges_listed else []
 
         logins = [edge_login(edge) for edge in edges]
         # Raw requests retain GraphQL errors even when HTTP succeeded. Twitch
@@ -5370,10 +5395,6 @@ class Twitch(object):
                 f"Twitch Drops directory for '{game_slug}' returned GraphQL errors",
                 game_slug=game_slug,
             )
-        page_info = streams.get("pageInfo") if isinstance(streams, dict) else None
-        has_next_page = (
-            page_info.get("hasNextPage") if isinstance(page_info, dict) else None
-        )
         game_matches = game_id is None or (
             isinstance(game, dict) and str(game.get("id") or "") == str(game_id)
         )
@@ -5383,7 +5404,55 @@ class Twitch(object):
             and not response.get("errors")
             and has_next_page is False
         )
-        return {login for login in logins if login}, complete
+        found = {login for login in logins if login}
+
+        # A busy game lists more Drops-enabled channels than one page holds.
+        # Follow Twitch's cursor for a few more pages so discovery can pick
+        # channels beyond the first 100. Twitch re-ranks the directory between
+        # requests, so later pages can repeat channels from earlier ones and
+        # skip others: the merged set is a larger sample, never proof of the
+        # full list, and so never "complete". A later page that fails only
+        # ends the paging; the channels already found stay usable.
+        pages = 1
+        while (
+            has_next_page is True
+            and next_cursor
+            and game_matches
+            and edges_listed
+            and pages < DROPS_DIRECTORY_MAX_PAGES
+        ):
+            try:
+                page_response = self.__request_drops_directory(
+                    directory_slug, game_slug, cursor=next_cursor
+                )
+            except CategoryLookupFailedException:
+                break
+            pages += 1
+            page_game = (page_response.get("data") or {}).get("game")
+            if (
+                not isinstance(page_game, dict)
+                or game_id is not None
+                and str(page_game.get("id") or "") != str(game_id)
+            ):
+                break
+            page_edges, has_next_page, page_cursor = read_page(page_game)
+            if page_edges is None:
+                break
+            page_logins = [edge_login(edge) for edge in page_edges]
+            if page_response.get("errors") and not all(page_logins):
+                break
+            found.update(login for login in page_logins if login)
+            if not page_cursor or page_cursor == next_cursor:
+                break
+            next_cursor = page_cursor
+
+        if pages > 1:
+            self.__log_drop_check(
+                f"Read {pages} pages of the Drops directory for '{game_slug}': "
+                f"{len(found)} channels",
+                level=logging.DEBUG,
+            )
+        return found, complete
 
     def __normalize_category_sort(self, sort_by: Any) -> str:
         if sort_by is None:

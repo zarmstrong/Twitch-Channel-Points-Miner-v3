@@ -5,7 +5,11 @@ import time
 from datetime import datetime
 from threading import Lock
 
-from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
+from TwitchChannelPointsMiner.classes.Chat import (
+    DEFAULT_GIFT_SUB_MESSAGE,
+    ChatPresence,
+    ThreadChat,
+)
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
 from TwitchChannelPointsMiner.classes.entities.Stream import Stream
 from TwitchChannelPointsMiner.classes.Settings import (
@@ -110,6 +114,8 @@ class StreamerSettings(object):
         "community_goals",
         "bet",
         "chat",
+        "gift_sub_thanks",
+        "gift_sub_message",
     ]
 
     def __init__(
@@ -124,6 +130,8 @@ class StreamerSettings(object):
         community_goals: bool = None,
         bet: BetSettings = None,
         chat: ChatPresence = None,
+        gift_sub_thanks: bool = None,
+        gift_sub_message: str = None,
     ):
         self.make_predictions = make_predictions
         self.follow_raid = follow_raid
@@ -135,6 +143,8 @@ class StreamerSettings(object):
         self.community_goals = community_goals
         self.bet = bet
         self.chat = chat
+        self.gift_sub_thanks = gift_sub_thanks
+        self.gift_sub_message = gift_sub_message
 
     def default(self):
         for name in [
@@ -154,9 +164,13 @@ class StreamerSettings(object):
             self.bet = BetSettings()
         if self.chat is None:
             self.chat = ChatPresence.ONLINE
+        if self.gift_sub_thanks is None:
+            self.gift_sub_thanks = False
+        if self.gift_sub_message is None:
+            self.gift_sub_message = DEFAULT_GIFT_SUB_MESSAGE
 
     def __repr__(self):
-        return f"StreamerSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, favorite={self.favorite}, points_limit={self.points_limit}, community_goals={self.community_goals}, bet={self.bet}, chat={self.chat})"
+        return f"StreamerSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, favorite={self.favorite}, points_limit={self.points_limit}, community_goals={self.community_goals}, bet={self.bet}, chat={self.chat}, gift_sub_thanks={self.gift_sub_thanks}, gift_sub_message={self.gift_sub_message!r})"
 
 
 class Streamer(object):
@@ -441,6 +455,7 @@ class Streamer(object):
     def __join_chat(self):
         if self.irc_chat is not None:
             if self.irc_chat.is_alive() is False:
+                self.irc_chat.settings = self.settings
                 self.irc_chat.start()
 
     def toggle_chat(self):
