@@ -280,7 +280,11 @@ def restart_process():
     """Replace the current process, preserving frozen executable arguments."""
     if getattr(sys, "frozen", False):
         return os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
-    return os.execv(sys.executable, [sys.executable, "-u", *sys.argv])
+    # sys.orig_argv keeps "-m TwitchChannelPointsMiner.runner" (the Docker
+    # entrypoint); sys.argv[0] is then the module's file path, and running that
+    # as a script puts the package directory on sys.path instead of its
+    # parent, so the relaunched process cannot import the package.
+    return os.execv(sys.executable, [sys.executable, "-u", *sys.orig_argv[1:]])
 
 
 def _run_legacy(runner, reason):

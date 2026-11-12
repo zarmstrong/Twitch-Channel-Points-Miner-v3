@@ -37,11 +37,17 @@ def float_round(number, ndigits=2):
 
 
 def server_time(message_data):
-    return (
-        datetime.fromtimestamp(message_data["server_time"], timezone.utc).isoformat()
-        + "Z"
+    timestamp = (
+        message_data["server_time"]
         if message_data is not None and "server_time" in message_data
-        else datetime.fromtimestamp(time.time(), timezone.utc).isoformat() + "Z"
+        else time.time()
+    )
+    # isoformat() of an aware datetime already ends in "+00:00"; appending "Z"
+    # as well yields a string dateutil cannot parse.
+    return (
+        datetime.fromtimestamp(timestamp, timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
     )
 
 

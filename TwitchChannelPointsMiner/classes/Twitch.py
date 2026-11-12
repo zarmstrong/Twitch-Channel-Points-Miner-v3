@@ -70,6 +70,7 @@ from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScrape
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
     ANDROID_CLIENT_ID,
+    ANDROID_LOGIN_ENV_VAR,
     CLIENT_ID,
     CLIENT_VERSION,
     DROP_ID,
@@ -78,7 +79,11 @@ from TwitchChannelPointsMiner.constants import (
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
-from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
+from TwitchChannelPointsMiner.logger import (
+    ANDROID_LOGIN_COLOR,
+    SKIP_NOTIFICATIONS,
+    WATCH_STATUS_COLOR,
+)
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -1309,6 +1314,14 @@ class Twitch(object):
         else:
             self.twitch_login.load_cookies(self.cookies_file)
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
+            if self.__client_id() == ANDROID_CLIENT_ID:
+                logger.info(
+                    "Using the saved Android app login "
+                    f"({os.path.basename(self.cookies_file)}); "
+                    f"{ANDROID_LOGIN_ENV_VAR} is only read when that file "
+                    "doesn't exist",
+                    extra={"emoji": ":iphone:", "default_color": ANDROID_LOGIN_COLOR},
+                )
         # Keep the shared typed-GQL session in sync with Twitch's current web
         # client version. The legacy transport refreshed this before every
         # request; once per authenticated startup avoids stale headers without
@@ -1441,12 +1454,22 @@ class Twitch(object):
             try:
                 self.get_spade_url(streamer)
                 self.update_stream(streamer)
+                # get_stream_info() returns None on a transient GQL failure
+                # instead of raising, which leaves the stream un-updated. Only
+                # announce the streamer online once its stream info loaded;
+                # otherwise the next check retries.
+                if streamer.stream.update_required() is True:
+                    return
                 streamer.set_online(self.__streamer_drops_description(streamer))
             except StreamerIsOfflineException:
                 streamer.set_offline()
         else:
             try:
                 self.update_stream(streamer)
+                # A failed extraction while going online is otherwise never
+                # retried for this broadcast, and minute-watched events need it.
+                if streamer.stream.spade_url is None:
+                    self.get_spade_url(streamer)
             except StreamerIsOfflineException:
                 streamer.set_offline()
 
@@ -6658,6 +6681,17 @@ class Twitch(object):
 
                     try:
                         streamer = streamers_snapshot[index]
+                        if streamer.stream.spade_url is None:
+                            # Posting to a None URL raises MissingSchema, which
+                            # would abort this loop for every later streamer.
+                            # check_streamer_online() retries the extraction.
+                            logger.warning(
+                                f"Skipping minute watched for {streamer}: spade URL not loaded yet"
+                            )
+                            self.__chuncked_sleep(
+                                next_iteration - time.time(), chunk_size=chunk_size
+                            )
+                            continue
                         for attempt in range(2):
                             try:
                                 response = requests.post(
@@ -8253,7 +8287,11 @@ class Twitch(object):
         campaigns,
         campaign_channel_id_by_id: Optional[Dict[str, str]] = None,
         may_be_stale: bool = False,
+        failed_ids: Optional[set] = None,
     ):
+        # failed_ids, when given, collects the IDs whose request failed (as
+        # opposed to Twitch answering with no campaign), so a caller can keep
+        # what it already knew about them instead of dropping them.
         def extract_drop_campaign(response_item):
             if not isinstance(response_item, dict):
                 return None
@@ -8313,6 +8351,8 @@ class Twitch(object):
             except RetryError as error:
                 logger.debug(f"Unable to load campaign details: {error}")
                 misses += len(chunk)
+                if failed_ids is not None:
+                    failed_ids.update(str(campaign.get("id")) for campaign in chunk)
                 continue
             retry_campaigns = []
             for index, campaign in enumerate(chunk):
@@ -8343,6 +8383,10 @@ class Twitch(object):
                 except RetryError as error:
                     logger.debug(f"Unable to retry campaign details: {error}")
                     misses += len(retry_campaigns)
+                    if failed_ids is not None:
+                        failed_ids.update(
+                            str(campaign.get("id")) for campaign in retry_campaigns
+                        )
                     continue
                 for index in range(len(retry_campaigns)):
                     response_item = (
@@ -9403,8 +9447,10 @@ class Twitch(object):
     def claim_all_drops_from_inventory(self):
         inventory = self.__get_inventory()
         if inventory not in [None, {}]:
-            if inventory["dropCampaignsInProgress"] not in [None, {}]:
+            if inventory.get("dropCampaignsInProgress") not in [None, {}]:
                 for campaign in inventory["dropCampaignsInProgress"]:
+                    if not isinstance(campaign, dict):
+                        continue
                     progress_game = campaign.get("game") or {}
                     category_name_override = (
                         progress_game.get("displayName")
@@ -9413,7 +9459,13 @@ class Twitch(object):
                     )
                     campaign_name_override = campaign.get("name")
                     campaign_drops = []
-                    for drop_dict in campaign["timeBasedDrops"]:
+                    for drop_dict in campaign.get("timeBasedDrops") or []:
+                        # Twitch can send a null self (or drop); one such
+                        # entry must not abort claiming for every campaign.
+                        if not isinstance(drop_dict, dict) or not isinstance(
+                            drop_dict.get("self"), dict
+                        ):
+                            continue
                         drop = Drop(drop_dict)
                         drop.update(drop_dict["self"])
                         campaign_drops.append(drop)
@@ -9502,20 +9554,18 @@ class Twitch(object):
             self.prompt_claim_pass_lock.release()
 
     def sync_campaigns(self, streamers, chunk_size=3):
-        campaigns_update = 0
+        # Full dashboard refresh every 15 minutes. A failed refresh keeps the
+        # previous campaigns and is retried after CAMPAIGNS_RETRY_SECONDS
+        # rather than blanking every stream's campaigns until the next slot.
+        CAMPAIGNS_REFRESH_SECONDS = 15 * 60
+        CAMPAIGNS_RETRY_SECONDS = 5 * 60
+        next_campaigns_refresh = 0
         campaigns = []
         while self.running:
             try:
-                # Get update from dashboard each 60minutes
-                if (
-                    campaigns_update == 0
-                    # or ((time.time() - campaigns_update) / 60) > 60
-                    # TEMPORARY AUTO DROP CLAIMING FIX
-                    # 30 minutes instead of 60 minutes
-                    or ((time.time() - campaigns_update) / 30) > 30
-                    #####################################
-                ):
-                    campaigns_update = time.time()
+                if time.time() >= next_campaigns_refresh:
+                    # Stays at the retry delay unless the refresh completes.
+                    next_campaigns_refresh = time.time() + CAMPAIGNS_RETRY_SECONDS
 
                     # TEMPORARY AUTO DROP CLAIMING FIX
                     # Share prompt_claim_pass_lock with __run_prompt_claim so a
@@ -9530,7 +9580,13 @@ class Twitch(object):
                     # campaign from the viewer dashboard while a channel still
                     # exposes its campaign ID and drop metadata.
                     campaign_candidates = {}
-                    for candidate in self.__get_drops_dashboard():
+                    dashboard = self.__get_drops_dashboard()
+                    # The dashboard helper reports a failed request as an
+                    # empty list; tell that apart from "no open campaigns".
+                    dashboard_unavailable = bool(
+                        getattr(_drops_dashboard_state, "unavailable", False)
+                    )
+                    for candidate in dashboard:
                         if isinstance(candidate, dict) and candidate.get("id"):
                             campaign_candidates[str(candidate["id"])] = candidate
                     for campaign_id, candidate in getattr(
@@ -9549,9 +9605,11 @@ class Twitch(object):
                         for campaign_id in campaign_candidates
                         if campaign_id in campaign_channel_ids
                     }
+                    failed_detail_ids = set()
                     campaigns_details = self.__get_campaigns_details(
                         campaign_candidate_list,
                         campaign_channel_id_by_id=detail_contexts,
+                        failed_ids=failed_detail_ids,
                     )
                     detailed_ids = {
                         str(campaign.get("id"))
@@ -9576,7 +9634,7 @@ class Twitch(object):
                             or "Unknown"
                         )
                         campaign_name_override = campaign_details.get("name")
-                        for drop_dict in campaign_details.get("timeBasedDrops", []):
+                        for drop_dict in campaign_details.get("timeBasedDrops") or []:
                             self.__save_drop_snapshot_from_dict(
                                 drop_dict,
                                 campaign=None,
@@ -9585,7 +9643,7 @@ class Twitch(object):
                                 category_name_override=category_name_override,
                             )
 
-                    campaigns = []
+                    refreshed_campaigns = []
 
                     # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
                     for index in range(0, len(campaigns_details)):
@@ -9595,9 +9653,29 @@ class Twitch(object):
                                 # Remove all the drops already claimed or with dt not matching
                                 campaign.clear_drops()
                                 if campaign.drops != []:
-                                    campaigns.append(campaign)
+                                    refreshed_campaigns.append(campaign)
                         else:
                             continue
+                    # Keep what a failed request could not refresh: every
+                    # previous campaign if the dashboard itself failed, else
+                    # those whose detail lookup failed. The retry deadline set
+                    # above then stays in place.
+                    refreshed_ids = {campaign.id for campaign in refreshed_campaigns}
+                    kept_campaigns = [
+                        campaign
+                        for campaign in campaigns
+                        if campaign.id not in refreshed_ids
+                        and (dashboard_unavailable or campaign.id in failed_detail_ids)
+                    ]
+                    campaigns = refreshed_campaigns + kept_campaigns
+                    if dashboard_unavailable or failed_detail_ids:
+                        logger.warning(
+                            "Drops campaign refresh was incomplete; keeping the "
+                            "previous campaign data and retrying in "
+                            f"{CAMPAIGNS_RETRY_SECONDS // 60} minutes"
+                        )
+                    else:
+                        next_campaigns_refresh = time.time() + CAMPAIGNS_REFRESH_SECONDS
 
                 # Divide et impera :)
                 campaigns = self.__sync_campaigns(campaigns)
@@ -9657,8 +9735,11 @@ class Twitch(object):
 
             except (ValueError, KeyError, requests.exceptions.ConnectionError) as e:
                 logger.error(f"Error while syncing inventory: {e}")
-                campaigns = []
                 self.__check_connection_handler(chunk_size)
+            except Exception:
+                # Nothing restarts this thread, so an unexpected error must not
+                # end periodic claiming and campaign sync for the session.
+                logger.error("Unexpected error while syncing inventory", exc_info=True)
 
             self.__chuncked_sleep(60, chunk_size=chunk_size)
 

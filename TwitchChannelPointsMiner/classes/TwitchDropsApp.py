@@ -306,6 +306,9 @@ class TwitchDropsGistScraper(object):
         raise ValueError(f"Twitch Drops gist does not contain game '{slug}'")
 
     def scrape_front_page(self):
+        # Each catalog sync starts here; drop the cached gist so a long-running
+        # miner sees games and campaigns added since the previous sync.
+        self._payload = None
         return copy.deepcopy(self._fetch()["indexed_games"])
 
 

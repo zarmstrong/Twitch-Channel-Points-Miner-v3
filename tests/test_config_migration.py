@@ -1031,3 +1031,33 @@ def test_convert_runner_removes_temporary_file_after_failed_replace(
     assert not config.exists()
     assert not config.with_name("config.py.migrating").exists()
     assert not config.with_name(".converted-from-run-py").exists()
+
+
+def test_migrate_config_accepts_utf8_bom(tmp_path):
+    config = tmp_path / "config.py"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text("﻿" + current, encoding="utf-8")
+
+    migrate_config(config)
+
+    source = config.read_text(encoding="utf-8")
+    assert not source.startswith("﻿")
+    namespace = {}
+    exec(source, namespace)
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+
+
+def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
+    config = tmp_path / "config.py"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text(
+        "CONFIG_VERSION = 4\nMINER_CONFIG = {invalid syntax}\n", encoding="utf-8"
+    )
+    (tmp_path / "config.py.v9.bak").write_text(CONFIG, encoding="utf-8")
+    (tmp_path / "config.py.v11.bak").write_text(
+        "# newest\n" + current,
+        encoding="utf-8",
+    )
+
+    assert migrate_config(config) is True
+    assert "# newest" in config.read_text(encoding="utf-8")
