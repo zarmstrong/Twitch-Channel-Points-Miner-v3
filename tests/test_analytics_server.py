@@ -313,6 +313,7 @@ def test_static_assets_are_served_without_authentication():
     server = AnalyticsServer(username="user", password="secret")
 
     response = server.app.test_client().get(server.app.static_url_path + "/style.css")
+    response.close()
 
     assert response.status_code == 200
 
