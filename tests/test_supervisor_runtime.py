@@ -158,6 +158,10 @@ def test_crash_backoff_keeps_supervisor_heartbeat_fresh(tmp_path, monkeypatch):
     clock_now = lambda: epoch + timedelta(seconds=elapsed[0])
     monkeypatch.setattr(miner_common, "now", clock_now)
     monkeypatch.setattr(minerctl, "now", clock_now)
+    # get_health only asks the service manager on Linux and macOS; pin the
+    # platform so the stubbed backend is used on Windows test runs too.
+    monkeypatch.setattr(minerctl, "IS_LINUX", True)
+    monkeypatch.setattr(minerctl, "IS_MAC", False)
     monkeypatch.setattr(
         minerctl, "backend", lambda: SimpleNamespace(state=lambda: (True, "active"))
     )
