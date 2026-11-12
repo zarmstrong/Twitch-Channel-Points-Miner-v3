@@ -24,6 +24,8 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("community_goals", "False"),
     ("bet", "None"),
     ("chat", "None"),
+    ("gift_sub_thanks", "False"),
+    ("gift_sub_message", "None"),
 )
 LOGGER_SETTINGS_DEFAULTS = (
     ("save", "True"),
