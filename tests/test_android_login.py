@@ -49,6 +49,7 @@ def android_login(monkeypatch, response, username="Miner"):
 
     monkeypatch.setattr(twitch_login_module.requests, "get", fake_get)
     monkeypatch.delenv(ANDROID_LOGIN_ENV_VAR, raising=False)
+    monkeypatch.setattr(twitch_login_module, "_running_in_container", lambda: False)
     return TwitchLogin(ANDROID_CLIENT_ID, "device", username, "agent"), calls
 
 
@@ -143,6 +144,35 @@ def test_no_console_tells_the_user_about_the_environment_variable(
 
     assert ANDROID_LOGIN_ENV_VAR in caplog.text
     assert calls == []
+
+
+def test_outside_a_container_the_user_is_asked_to_paste(monkeypatch, caplog):
+    login, _ = android_login(monkeypatch, valid_response())
+
+    with caplog.at_level(logging.INFO):
+        assert login.android_login_flow(read_input=lambda prompt: REDIRECT) is True
+
+    assert "3. Paste it below." in caplog.text
+    assert "docker" not in caplog.text.lower()
+
+
+def test_in_a_container_the_steps_point_at_the_environment_variable(
+    monkeypatch, caplog
+):
+    login, _ = android_login(monkeypatch, valid_response())
+    monkeypatch.setattr(twitch_login_module, "_running_in_container", lambda: True)
+
+    def no_console(prompt):
+        raise EOFError
+
+    with caplog.at_level(logging.INFO):
+        assert login.android_login_flow(read_input=no_console) is False
+
+    assert "Paste it below" not in caplog.text
+    assert f"set the {ANDROID_LOGIN_ENV_VAR} environment variable" in caplog.text
+    assert "docker attach" in caplog.text
+    assert "recreate the container." in caplog.text
+    assert "start the miner again" not in caplog.text
 
 
 def test_paste_without_a_token_is_asked_again(monkeypatch):

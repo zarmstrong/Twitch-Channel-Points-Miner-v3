@@ -34,6 +34,11 @@ ANDROID_LOGIN_ATTEMPTS = 3
 BARE_TOKEN_RE = re.compile(r"[A-Za-z0-9]{20,64}")
 
 
+def _running_in_container():
+    """Docker and Podman; there, nobody sees a prompt unless they attach."""
+    return os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+
 def parse_android_login(pasted):
     """The access token in a pasted redirect URL
     (https://www.twitch.tv/#access_token=...&...), or a pasted bare token.
@@ -224,20 +229,35 @@ class TwitchLogin(object):
             "header of the 'authorize' request in the developer tools' Network "
             "tab (enable 'Preserve log' first)."
         )
-        logger.info(
-            "3. Paste it below. It is a full-access login for your account: "
-            "don't share it."
-        )
+        in_container = _running_in_container()
+        if in_container:
+            logger.info(
+                f"3. In Docker, set the {ANDROID_LOGIN_ENV_VAR} environment "
+                "variable to that URL and recreate the container (for example "
+                "docker compose up -d), or attach to this container's console "
+                "(docker attach <container>) and paste it there. It is a "
+                "full-access login for your account: don't share it."
+            )
+        else:
+            logger.info(
+                "3. Paste it below. It is a full-access login for your account: "
+                "don't share it."
+            )
         for _ in range(ANDROID_LOGIN_ATTEMPTS):
             try:
                 pasted = read_input("Redirect URL or access token: ")
             # EOFError: stdin closed; RuntimeError: no stdin at all (the
             # windowed Windows app); OSError: a detached console.
             except (EOFError, OSError, RuntimeError):
+                restart = (
+                    "recreate the container"
+                    if in_container
+                    else "start the miner again"
+                )
                 logger.error(
                     "No console to paste into. Set the "
                     f"{ANDROID_LOGIN_ENV_VAR} environment variable to the "
-                    "redirect URL and start the miner again."
+                    f"redirect URL and {restart}."
                 )
                 return False
             token = parse_android_login(pasted)
