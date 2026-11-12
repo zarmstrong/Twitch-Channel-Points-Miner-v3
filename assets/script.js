@@ -352,6 +352,7 @@ $(document).ready(function () {
     $('#source-settings-form').submit(saveSourceSettings);
     $('#logging-settings-form').submit(saveLoggingSettings);
     $('#update-settings-form').submit(saveUpdateSettings);
+    $('#login-settings-form').submit(saveLoginSettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
     $('#dismiss-update-banner').click(dismissUpdateBanner);
     $(document).keydown(function (event) {
@@ -1302,6 +1303,7 @@ function renderWebConfig(config) {
     $('#update-check-enabled').prop('checked', config.updates.enabled);
     $('#update-check-interval').val(config.updates.interval_hours);
     $('#update-check-startup-only').prop('checked', config.updates.startup_only);
+    $('#android-login-enabled').prop('checked', Boolean(config.login && config.login.android));
     toggleUpdateInterval();
     renderNotificationSettings(config);
 }
@@ -1627,6 +1629,15 @@ function saveUpdateSettings(event) {
             startup_only: startupOnly
         }
     }, 'Update-check settings were saved. Restart the miner to apply them.', button);
+}
+
+function saveLoginSettings(event) {
+    event.preventDefault();
+    var button = $(this).find('button[type="submit"]');
+    updateWebConfig({
+        action: 'update_login',
+        values: { android: $('#android-login-enabled').prop('checked') }
+    }, 'Login settings were saved. Restart the miner to apply them.', button);
 }
 
 function renderNotificationSettings(config) {

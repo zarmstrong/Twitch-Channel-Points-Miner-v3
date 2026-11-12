@@ -34,6 +34,7 @@ from TwitchChannelPointsMiner.classes.gql.data.response.PlaybackAccessToken impo
     PlaybackAccessTokenResponse,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch, _drops_dashboard_state
+from TwitchChannelPointsMiner.constants import ANDROID_CLIENT_ID
 from TwitchChannelPointsMiner.utils import AttemptStrategy
 
 
@@ -1412,6 +1413,24 @@ def test_campaign_details_warns_once_when_twitch_withholds_every_campaign(
     warnings = [r for r in caplog.records if "withholds campaign details" in r.message]
     assert len(warnings) == 1
     assert "no details for 5 Drop campaign requests" in warnings[0].message
+    # The TV login points users at the opt-in Android login.
+    assert '"android_login": True' in warnings[0].message
+
+
+def test_campaign_details_withheld_warning_under_android_login_has_no_hint(caplog):
+    twitch = campaign_details_twitch(
+        lambda operation_name, requests: [WITHHELD_CAMPAIGN for _ in requests]
+    )
+    twitch.twitch_login.client_id = ANDROID_CLIENT_ID
+
+    with caplog.at_level(logging.WARNING):
+        for index in range(5):
+            twitch._Twitch__get_campaigns_details([{"id": f"campaign-{index}"}])
+
+    warnings = [r for r in caplog.records if "no details for 5" in r.message]
+    assert len(warnings) == 1
+    assert "from the Android app login too" in warnings[0].message
+    assert "android_login" not in warnings[0].message
 
 
 def test_campaign_details_stale_campaign_does_not_warn_when_others_load(caplog):

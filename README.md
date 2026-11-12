@@ -877,6 +877,13 @@ such as `/path/to/cookies:/usr/src/app/cookies`.
 On Windows, use absolute host paths. For example, mount
 `C:\Absolute\Path\config` at `/usr/src/app/config`.
 
+With `"android_login": True`, the miner can't take a pasted sign-in when nobody
+is attached to the container. Set the `TWITCH_ANDROID_LOGIN` environment variable
+to the redirect URL instead (for example `- TWITCH_ANDROID_LOGIN=https://www.twitch.tv/#access_token=...`
+under `environment:`, or `-e TWITCH_ANDROID_LOGIN=...` with `docker run`). It is
+only read when `cookies/<username>-android.pkl` doesn't exist yet. See
+[Android login](#android-login).
+
 #### Graceful Docker shutdowns
 
 The miner handles Docker's normal `SIGTERM` stop signal and writes its
@@ -992,6 +999,52 @@ Set `points_limit` in `StreamerSettings` to stop watching a streamer once its
 channel-points balance reaches that value. A pending watch streak can temporarily
 bypass the limit so its reward is not missed. Set `favorite=True` per streamer
 and include `Priority.FAVORITE` to reserve watch slots for favorites first.
+
+### Android login
+
+By default the miner logs in as Twitch's TV app. Twitch withholds some Drops
+data from that app: the Drops dashboard and campaign details come back empty,
+so the miner works from your inventory, channel listings and a shared campaign
+list instead. Set `"android_login": True` in `MINER_CONFIG` (or tick **Log in as
+the Android app** in the dashboard's **Twitch login** box) to log in as Twitch's
+Android app, which gets the full dashboard and campaign details, including
+channel allow-lists. Watch time, drop progress, drop claims and channel points
+have been verified to work under this login; predictions, raids and moments use
+the same requests but have not yet been tested under it.
+
+The Android app has no activation code, so the first start asks you to sign
+in through a browser:
+
+1. While signed in to Twitch as your miner account, open
+   `https://id.twitch.tv/oauth2/authorize?client_id=kd1unb4b3q4t58fwlpcbzcbnm76a8fp&response_type=token&redirect_uri=https://www.twitch.tv/`
+2. Twitch approves its own app without showing a page and redirects to
+   `https://www.twitch.tv/#access_token=...`, then hides that address. Copy it
+   from your browser history, or from the `Location` header of the `authorize`
+   request in the developer tools' **Network** tab (turn on **Preserve log**
+   before opening the link).
+3. Paste it at the miner's prompt. A bare token also works.
+
+Without a console to paste into (Docker, the Windows app, or a background
+service), put the redirect URL in the `TWITCH_ANDROID_LOGIN` environment
+variable instead. The miner checks that the token was issued to the Android app
+and belongs to the configured username, then saves it as
+`cookies/<username>-android.pkl`. The TV login's `cookies/<username>.pkl` is
+kept, so switching back is a matter of turning the setting off. If Twitch later
+rejects the saved token, the miner deletes that cookie file and asks again, so
+replace an old `TWITCH_ANDROID_LOGIN` value with a fresh redirect URL.
+
+> [!WARNING]
+> This token is a full-access login to your Twitch account that does not
+> expire. Keep the cookie file and the environment variable private. To revoke
+> it, delete the cookie file and send the token to
+> `https://id.twitch.tv/oauth2/revoke` with `client_id=kd1unb4b3q4t58fwlpcbzcbnm76a8fp`,
+> or change your Twitch password.
+
+Like the TV login, this impersonates an official Twitch app. Twitch could change
+or block it at any time.
+
+Thanks to [klept0](https://github.com/klept0) for testing this login live and
+implementing it.
 
 ### LoggerSettings
 

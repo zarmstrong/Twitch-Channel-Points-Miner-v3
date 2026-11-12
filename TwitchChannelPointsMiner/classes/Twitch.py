@@ -8301,13 +8301,27 @@ class Twitch(object):
             self, "campaign_details_withheld_logged", False
         ):
             self.campaign_details_withheld_logged = True
+            if self.__client_id() == ANDROID_CLIENT_ID:
+                cause = (
+                    "Twitch withheld campaign details from the Android app " "login too"
+                )
+                hint = ""
+            else:
+                cause = (
+                    "Twitch withholds campaign details from the TV login "
+                    "this miner uses by default"
+                )
+                hint = (
+                    ' Set "android_login": True in MINER_CONFIG to log in as '
+                    "Twitch's Android app, which gets the full details (see "
+                    "the README's Android login section)."
+                )
             logger.warning(
                 "Twitch returned no details for "
                 f"{self.campaign_details_withheld_streak} Drop campaign "
-                "requests in a row. Twitch withholds campaign details from the TV "
-                "login this miner uses, so Drop names, allowed channels and "
-                "drop lists come from your inventory, the channels' listed "
-                "campaigns and the shared Drops gist instead.",
+                f"requests in a row. {cause}, so Drop names, allowed channels "
+                "and drop lists come from your inventory, the channels' listed "
+                f"campaigns and the shared Drops gist instead.{hint}",
                 extra={"emoji": ":warning:"},
             )
 
