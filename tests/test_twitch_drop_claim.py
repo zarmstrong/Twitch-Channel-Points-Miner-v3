@@ -16,6 +16,7 @@ from TwitchChannelPointsMiner.classes.Twitch import (
     CHANNEL_QUERY_FAILURE_LIMIT,
     Twitch,
 )
+from TwitchChannelPointsMiner.constants import ANDROID_CLIENT_ID, CLIENT_ID
 
 
 def campaign_data():
@@ -4370,35 +4371,48 @@ def test_active_campaign_records_its_campaign_end_for_later_carrying(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "raw_response, unavailable",
+    "raw_response, client_id, unavailable",
     [
-        ({"data": {"currentUser": {"dropCampaigns": []}}}, False),
+        ({"data": {"currentUser": {"dropCampaigns": []}}}, CLIENT_ID, False),
         # A non-fatal error beside the campaign list leaves it usable.
         (
             {
                 "data": {"currentUser": {"dropCampaigns": []}},
                 "errors": [{"message": "timeout"}],
             },
+            CLIENT_ID,
             False,
         ),
         # An invalid token or a GraphQL failure answers with no viewer.
-        ({"data": {"currentUser": None}, "errors": [{"message": "x"}]}, True),
-        ({"data": None, "errors": [{"message": "x"}]}, True),
-        ({}, True),
+        (
+            {"data": {"currentUser": None}, "errors": [{"message": "x"}]},
+            CLIENT_ID,
+            True,
+        ),
+        ({"data": None, "errors": [{"message": "x"}]}, CLIENT_ID, True),
+        ({}, CLIENT_ID, True),
         # An error that nulled the campaign list.
         (
             {
                 "data": {"currentUser": {"dropCampaigns": None}},
                 "errors": [{"message": "x"}],
             },
+            CLIENT_ID,
             True,
         ),
+        # The TV login always gets a null list without errors (Twitch
+        # withholds it), so it still counts as loaded there.
+        ({"data": {"currentUser": {"dropCampaigns": None}}}, CLIENT_ID, False),
+        # Under the Android login the same reply evaluated nothing (#228).
+        ({"data": {"currentUser": {"dropCampaigns": None}}}, ANDROID_CLIENT_ID, True),
+        ({"data": {"currentUser": {"dropCampaigns": []}}}, ANDROID_CLIENT_ID, False),
     ],
 )
 def test_dashboard_without_viewer_data_counts_as_unavailable(
-    monkeypatch, raw_response, unavailable
+    monkeypatch, raw_response, client_id, unavailable
 ):
     twitch = bare_twitch(monkeypatch)
+    twitch.twitch_login = SimpleNamespace(client_id=client_id)
     twitch.gql = SimpleNamespace(
         get_viewer_drops_dashboard=lambda: SimpleNamespace(raw_response=raw_response)
     )
