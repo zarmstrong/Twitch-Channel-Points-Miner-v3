@@ -15,6 +15,31 @@ DROPS_GIST_URL = (
     "https://gist.githubusercontent.com/zarmstrong/"
     "72433778ae596815f4c6ff5e1d278cd2/raw/twitch-drops.json"
 )
+# Major version of the scraper's gist format this miner understands. The
+# scraper (zarmstrong/Twitch-Channel-Points-Miner-v3-Scraper) asks consumers to
+# reject other major versions rather than misread a changed layout.
+SUPPORTED_GIST_VERSION = 1
+
+
+def check_gist_version(payload, name):
+    """Raise ValueError when a gist declares an unsupported major version.
+
+    A payload without "version" predates versioning and is accepted.
+    """
+    version = payload.get("version")
+    if version is None:
+        return
+    try:
+        major = int(str(version).split(".", 1)[0])
+    except ValueError:
+        major = None
+    if major != SUPPORTED_GIST_VERSION:
+        raise ValueError(
+            f"{name} gist has unsupported version {version!r}; this miner "
+            f"supports version {SUPPORTED_GIST_VERSION}. Update the miner."
+        )
+
+
 TWITCH_LOGIN_PATTERN = re.compile(
     r'href=["\']https?://(?:www\.)?twitch\.tv/([^?"\'/#]+)[^"\']*["\']',
     re.IGNORECASE,
@@ -286,6 +311,7 @@ class TwitchDropsGistScraper(object):
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Twitch Drops gist did not contain a JSON object")
+        check_gist_version(payload, "Twitch Drops")
         if not isinstance(payload.get("indexed_games"), list) or not isinstance(
             payload.get("games"), list
         ):

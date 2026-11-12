@@ -123,6 +123,29 @@ def test_fetch_badges_rejects_non_object_json(tmp_path):
         catalog._fetch_badges()
 
 
+def test_fetch_badges_rejects_an_unsupported_gist_version(tmp_path):
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession({"version": 2, "sets": []}),
+    )
+
+    with pytest.raises(ValueError, match="unsupported version 2"):
+        catalog._fetch_badges()
+
+
+def test_fetch_badges_accepts_the_current_gist_version(tmp_path):
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession({"version": 1, "sets": [{"set_id": "x", "versions": []}]}),
+    )
+
+    assert catalog._fetch_badges() == [{"set_id": "x", "versions": []}]
+
+
 def test_badge_matching_accepts_safe_title_variants():
     assert badge_match_reason("Blue LED", "Example Game", "Blue LED") == "exact_title"
     assert (
