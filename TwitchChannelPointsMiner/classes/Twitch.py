@@ -8023,8 +8023,14 @@ class Twitch(object):
         # without the viewer (null currentUser, as an invalid token or a
         # GraphQL error gives) or whose errors nulled its campaign list
         # evaluated nothing either.
-        unavailable = not isinstance(current_user, dict) or bool(
-            response.get("errors") and current_user.get("dropCampaigns") is None
+        # A null campaign list without errors also evaluated nothing under the
+        # Android login (#228). The TV login gets that reply every time,
+        # because Twitch withholds the list from it, so there it still counts
+        # as loaded: treating it as down would keep the dashboard outage
+        # handling on for the whole run.
+        unavailable = not isinstance(current_user, dict) or (
+            current_user.get("dropCampaigns") is None
+            and bool(response.get("errors") or self.__client_id() == ANDROID_CLIENT_ID)
         )
         if unavailable and not request_failed:
             errors = response.get("errors") if isinstance(response, dict) else None
