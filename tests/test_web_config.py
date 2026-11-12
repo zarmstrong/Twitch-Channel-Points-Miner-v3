@@ -4,6 +4,7 @@ import math
 import os
 import stat
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1117,6 +1118,16 @@ def test_remove_streamers_unsubscribes_only_purely_explicit_streamers():
     assert websocket_pool.removed == [explicit]
 
 
+def test_add_streamers_marks_already_tracked_streamer_configured():
+    category = Streamer("category", from_category=True)
+    miner = SimpleNamespace(streamers=[category], original_streamers=[100])
+
+    TwitchChannelPointsMiner._add_streamers(miner, ["Category"])
+
+    assert miner.streamers == [category]
+    assert category.explicitly_configured is True
+
+
 def test_websocket_pool_removes_and_unlistens_streamer_topics():
     target = Streamer("target")
     retained = Streamer("retained")
@@ -1887,3 +1898,99 @@ def test_managed_web_config_rejects_non_boolean_category_drops_override(tmp_path
                 "category_drops_override_streamers": "yes",
             },
         )
+
+
+def _example_config(tmp_path):
+    config = tmp_path / "config.py"
+    example = Path(__file__).resolve().parent.parent / "config.example.py"
+    config.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    return config
+
+
+def test_inserting_after_commented_last_item_keeps_config_valid(tmp_path):
+    # The example's Email(...) ends with "starttls=True,  # Use use_ssl=..."
+    # and has no use_ssl keyword, so saving use_ssl inserts after a comment.
+    config = _example_config(tmp_path)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "email",
+            "values": {"enabled": True, "use_ssl": True, "starttls": False},
+        },
+    )
+
+    email = _load_config(config).MINER_CONFIG["logger_settings"].email
+    assert email.use_ssl is True
+    assert email.starttls is False
+
+
+def test_insert_config_item_handles_comment_without_trailing_comma(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "VALUES = {\n    'a': 1,\n    'b': 2  # note, with a comma\n}\n",
+        encoding="utf-8",
+    )
+
+    config_editor._set_dict_items(config, "VALUES", {"c": "3"})
+
+    namespace = {}
+    exec(config.read_text(encoding="utf-8"), namespace)
+    assert namespace["VALUES"] == {"a": 1, "b": 2, "c": 3}
+
+
+def test_email_tls_defaults_are_reported_when_omitted(tmp_path):
+    config = _example_config(tmp_path)
+    source = config.read_text(encoding="utf-8")
+    config.write_text(
+        source.replace(
+            "            starttls=True,  # Use use_ssl=True and starttls=False "
+            "for implicit TLS (usually port 465)\n",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    assert "starttls" not in config.read_text(encoding="utf-8").split("email=")[1][:400]
+
+    fields = read_managed_web_config(config)["notifications"]["email"]["fields"]
+
+    assert fields["starttls"] is True
+    assert fields["use_ssl"] is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "{'a': (1)}",
+        "{'a': ((1))}",
+        "{'a': (1),}",
+        "{\n    'a': (\n        1\n    )  # trailing, comment\n}",
+        "{\n    'a': (1)  # c\n    ,\n}",
+        "{'a': (1, 2)}",
+    ],
+)
+def test_insert_config_item_handles_parenthesized_last_value(tmp_path, body):
+    config = tmp_path / "config.py"
+    config.write_text(f"VALUES = {body}\n", encoding="utf-8")
+    namespace = {}
+    exec(config.read_text(encoding="utf-8"), namespace)
+    expected = {**namespace["VALUES"], "c": 3}
+
+    config_editor._set_dict_items(config, "VALUES", {"c": "3"})
+
+    namespace = {}
+    exec(config.read_text(encoding="utf-8"), namespace)
+    assert namespace["VALUES"] == expected
+
+
+def test_insert_config_item_refuses_to_write_unparseable_config(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    original = "VALUES = {'a': 1}\n"
+    config.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(config_editor, "_scan_item_tail", lambda segment: (0, True))
+
+    with pytest.raises(ConfigEditError, match="would not parse"):
+        config_editor._set_dict_items(config, "VALUES", {"c": "3"})
+
+    assert config.read_text(encoding="utf-8") == original

@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -600,3 +603,40 @@ def test_run_config_flushes_notifications_whenever_mining_ends(
     runner.run_config(config, tmp_path / "config.py")
 
     assert calls == (["stop", "restart"] if restart else ["stop"])
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="os.execv does not replace the process on Windows"
+)
+def test_restart_process_relaunches_module_entrypoint(tmp_path):
+    # Like the Docker entrypoint (python -m TwitchChannelPointsMiner.runner):
+    # the relaunched process must still run as a module of its package.
+    package = tmp_path / "restartpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "entry.py").write_text(
+        "import os\n"
+        "from TwitchChannelPointsMiner import runner\n"
+        "if os.environ.get('RESTARTED') != '1':\n"
+        "    os.environ['RESTARTED'] = '1'\n"
+        "    runner.restart_process()\n"
+        "print('relaunched as', __spec__.name)\n"
+    )
+    repo_root = Path(runner.__file__).resolve().parent.parent
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(repo_root), str(tmp_path)]),
+    }
+    environment.pop("RESTARTED", None)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "restartpkg.entry"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "relaunched as restartpkg.entry"
