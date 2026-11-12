@@ -11,6 +11,18 @@ CLIENT_ID = "ue6666qo983tsx6so1t0vnawi233wa"  # TV
 # CLIENT_ID = "r8s4dac0uhzifbpu9sjdiwzctle17ff"     # Mobile Browser
 # CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"     # Android App
 # CLIENT_ID = "851cqzxpb9bqu9z6galo155du"           # iOS App
+# Opt-in login (MINER_CONFIG android_login=True). Twitch withholds the Drops
+# dashboard and DropCampaignDetails from the TV client, but returns them to
+# the Android app client (issue #229).
+ANDROID_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
+ANDROID_LOGIN_URL = (
+    "https://id.twitch.tv/oauth2/authorize"
+    f"?client_id={ANDROID_CLIENT_ID}&response_type=token"
+    "&redirect_uri=https://www.twitch.tv/"
+)
+# Environment variable holding the redirect URL (or bare token) for headless
+# runs, e.g. Docker, where nobody can paste at a prompt.
+ANDROID_LOGIN_ENV_VAR = "TWITCH_ANDROID_LOGIN"
 DROP_ID = "c2542d6d-cd10-4532-919b-3d19f30a768b"
 # CLIENT_VERSION = "32d439b2-bd5b-4e35-b82a-fae10b04da70"  # Android App
 CLIENT_VERSION = "ef928475-9403-42f2-8a34-55784bd08e16"  # Browser

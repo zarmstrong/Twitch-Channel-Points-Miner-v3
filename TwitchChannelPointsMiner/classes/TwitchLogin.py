@@ -10,15 +10,45 @@ import json
 import logging
 import os
 import pickle
+import re
 from datetime import datetime, timedelta, timezone
 from time import sleep
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
 from TwitchChannelPointsMiner.classes.Exceptions import WrongCookiesException
-from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS, GQLOperations
+from TwitchChannelPointsMiner.constants import (
+    ANDROID_CLIENT_ID,
+    ANDROID_LOGIN_ENV_VAR,
+    ANDROID_LOGIN_URL,
+    USER_AGENTS,
+    GQLOperations,
+)
 
 logger = logging.getLogger(__name__)
+
+OAUTH_VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
+ANDROID_LOGIN_ATTEMPTS = 3
+# Twitch access tokens are short runs of letters and digits.
+BARE_TOKEN_RE = re.compile(r"[A-Za-z0-9]{20,64}")
+
+
+def parse_android_login(pasted):
+    """The access token in a pasted redirect URL
+    (https://www.twitch.tv/#access_token=...&...), or a pasted bare token.
+    None when there is none."""
+    text = str(pasted or "").strip()
+    if not text:
+        return None
+    if BARE_TOKEN_RE.fullmatch(text):
+        return text
+    parsed = urlparse(text)
+    for part in (parsed.fragment, parsed.query):
+        token = (parse_qs(part).get("access_token") or [""])[0]
+        if BARE_TOKEN_RE.fullmatch(token):
+            return token
+    return None
 
 
 class _LegacyCookieUnpickler(pickle.Unpickler):
@@ -75,6 +105,8 @@ class TwitchLogin(object):
         self.cookies = []
 
     def login_flow(self):
+        if self.client_id == ANDROID_CLIENT_ID:
+            return self.android_login_flow()
         logger.info("You'll have to login to Twitch!")
 
         post_data = {
@@ -120,7 +152,7 @@ class TwitchLogin(object):
                 # webbrowser.open_new_tab("https://www.twitch.tv/activate")
 
                 post_data = {
-                    "client_id": CLIENT_ID,
+                    "client_id": self.client_id,
                     "device_code": device_code,
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 }
@@ -165,6 +197,90 @@ class TwitchLogin(object):
 
         return False
 
+    def android_login_flow(self, read_input=None):
+        """Log in with a token issued to Twitch's Android app client.
+
+        Twitch gives that client no device codes, so the user signs in in a
+        browser and pastes the redirect URL (or the token) here, or supplies
+        it in the TWITCH_ANDROID_LOGIN environment variable. The token is
+        never logged."""
+        read_input = read_input or input
+        logger.info("You'll have to log in to Twitch with the Android app login!")
+        supplied = os.environ.get(ANDROID_LOGIN_ENV_VAR)
+        if supplied:
+            if self.__accept_android_token(parse_android_login(supplied)):
+                return True
+            logger.error(
+                f"{ANDROID_LOGIN_ENV_VAR} does not hold a valid Android login "
+                "for this account"
+            )
+
+        logger.info(f"1. While signed in to Twitch as {self.username}, open:")
+        logger.info(f"   {ANDROID_LOGIN_URL}")
+        logger.info(
+            "2. Twitch approves its own app without asking and redirects to "
+            "https://www.twitch.tv/#access_token=... - the page then hides that "
+            "address. Copy it from your browser history, or from the Location "
+            "header of the 'authorize' request in the developer tools' Network "
+            "tab (enable 'Preserve log' first)."
+        )
+        logger.info(
+            "3. Paste it below. It is a full-access login for your account: "
+            "don't share it."
+        )
+        for _ in range(ANDROID_LOGIN_ATTEMPTS):
+            try:
+                pasted = read_input("Redirect URL or access token: ")
+            # EOFError: stdin closed; RuntimeError: no stdin at all (the
+            # windowed Windows app); OSError: a detached console.
+            except (EOFError, OSError, RuntimeError):
+                logger.error(
+                    "No console to paste into. Set the "
+                    f"{ANDROID_LOGIN_ENV_VAR} environment variable to the "
+                    "redirect URL and start the miner again."
+                )
+                return False
+            token = parse_android_login(pasted)
+            if token is None:
+                logger.error("No access token found in what was pasted")
+                continue
+            if self.__accept_android_token(token):
+                return True
+        return False
+
+    def __accept_android_token(self, token):
+        """Use the token only if Twitch confirms it belongs to the Android
+        client and to this account."""
+        if not token:
+            return False
+        try:
+            response = requests.get(
+                OAUTH_VALIDATE_URL,
+                headers={"Authorization": f"OAuth {token}"},
+                timeout=(5, 30),
+            )
+        except requests.RequestException as error:
+            logger.error(f"Could not validate the Android login: {error}")
+            return False
+        if response.status_code != 200:
+            logger.error(
+                f"Twitch rejected the Android login (HTTP {response.status_code})"
+            )
+            return False
+        data = response.json() if response.content else {}
+        if data.get("client_id") != ANDROID_CLIENT_ID:
+            logger.error("That login was not issued to the Twitch Android app")
+            return False
+        login = str(data.get("login") or "")
+        if login.lower() != str(self.username).lower():
+            logger.error(f"That login belongs to '{login}', not '{self.username}'")
+            return False
+        self.set_token(token)
+        if data.get("user_id"):
+            self.user_id = str(data["user_id"])
+            self.login_check_result = True
+        return self.check_login()
+
     def set_token(self, new_token):
         self.token = new_token
         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
@@ -187,7 +303,7 @@ class TwitchLogin(object):
                 "Accept-Encoding": "gzip",
                 "Accept-Language": "en-US",
                 "Cache-Control": "no-cache",
-                "Client-Id": CLIENT_ID,
+                "Client-Id": self.client_id,
                 "Host": "id.twitch.tv",
                 "Origin": "https://android.tv.twitch.tv",
                 "Pragma": "no-cache",

@@ -185,7 +185,9 @@ class GQL:
             json=request_json,
             headers={
                 "Authorization": f"OAuth {self.client_session.login.get_auth_token()}",
-                "Client-Id": CLIENT_ID,
+                # The client that issued the token: TV, or Android when
+                # android_login is on.
+                "Client-Id": getattr(self.client_session.login, "client_id", CLIENT_ID),
                 "Client-Session-Id": self.client_session.session_id,
                 "Client-Version": self.client_session.version,
                 "User-Agent": self.client_session.user_agent,

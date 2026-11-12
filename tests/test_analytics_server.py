@@ -950,6 +950,9 @@ def test_config_ui_exposes_requested_management_controls():
     assert "test-notification" in script
     assert "update_check" in template.lower().replace("-", "_")
     assert "update_updates" in script
+    assert 'id="android-login-enabled"' in template
+    assert "TWITCH_ANDROID_LOGIN" in template
+    assert "update_login" in script
     assert "interval_hours: startupOnly ? undefined" in script
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "reorder_streamers" in script

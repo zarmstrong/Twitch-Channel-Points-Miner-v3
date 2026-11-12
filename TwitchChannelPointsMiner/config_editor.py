@@ -366,6 +366,7 @@ def _base_web_config(config_path):
             "interval_hours": 24 if startup_only else update_interval,
             "startup_only": startup_only,
         },
+        "login": {"android": miner.get("android_login", False) is True},
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
         # WATCH_STATUS is never sent to notifiers, so it isn't offered.
@@ -1201,6 +1202,18 @@ def _update_managed_web_config(config_path, payload):
         elif "interval_hours" in values:
             miner_values["update_check_interval_hours"] = repr(values["interval_hours"])
         _set_dict_items(config_path, "MINER_CONFIG", miner_values)
+    elif action == "update_login":
+        values = payload.get("values") or {}
+        if not isinstance(values, dict) or set(values) - {"android"}:
+            raise ConfigEditError("Unsupported login setting.")
+        if "android" in values:
+            if not isinstance(values["android"], bool):
+                raise ConfigEditError("android must be true or false.")
+            _set_dict_items(
+                config_path,
+                "MINER_CONFIG",
+                {"android_login": repr(values["android"])},
+            )
     elif action == "update_notification":
         provider = payload.get("provider")
         schema = NOTIFICATION_SCHEMAS.get(provider)

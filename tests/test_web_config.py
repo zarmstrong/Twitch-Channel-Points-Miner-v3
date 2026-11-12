@@ -95,6 +95,40 @@ def test_managed_web_config_masks_credentials_and_reads_effective_settings(tmp_p
         "interval_hours": 24,
         "startup_only": False,
     }
+    assert result["login"] == {"android": False}
+
+
+def test_managed_web_config_updates_android_login(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config, {"action": "update_login", "values": {"android": True}}
+    )
+
+    assert result["login"] == {"android": True}
+    assert _load_config(config).MINER_CONFIG["android_login"] is True
+
+    update_managed_web_config(
+        config, {"action": "update_login", "values": {"android": False}}
+    )
+    assert _load_config(config).MINER_CONFIG["android_login"] is False
+
+
+@pytest.mark.parametrize(
+    "values",
+    [{"android": "yes"}, {"android": 1}, {"token": "abc"}, ["android"]],
+    ids=["string", "int", "unknown-key", "not-a-dict"],
+)
+def test_managed_web_config_rejects_invalid_login_settings(tmp_path, values):
+    config = tmp_path / "config.py"
+    write_config(config)
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(config, {"action": "update_login", "values": values})
+
+    assert config.read_text(encoding="utf-8") == before
 
 
 def test_managed_web_config_updates_release_check_settings(tmp_path):
