@@ -67,6 +67,7 @@ from TwitchChannelPointsMiner.utils import (
     set_default_settings,
 )
 from TwitchChannelPointsMiner.WatchStreakCache import WatchStreakCache
+from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 
 # Suppress:
 #   - chardet.charsetprober - [feed]
@@ -1399,7 +1400,7 @@ class TwitchChannelPointsMiner:
                 next_category_refresh_at = min(
                     next_category_refresh_at,
                     time.time()
-                    + max((upcoming_drop_start - datetime.utcnow()).total_seconds(), 0)
+                    + max((upcoming_drop_start - utc_now()).total_seconds(), 0)
                     + 5,
                 )
             while self.running and self.twitch.running:
@@ -1462,7 +1463,7 @@ class TwitchChannelPointsMiner:
                                     time.time()
                                     + max(
                                         (
-                                            upcoming_drop_start - datetime.utcnow()
+                                            upcoming_drop_start - utc_now()
                                         ).total_seconds(),
                                         0,
                                     )

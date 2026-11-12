@@ -5,6 +5,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 from logging.handlers import QueueHandler, TimedRotatingFileHandler
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -177,7 +178,7 @@ def test_configured_loggers_redact_urllib3_request_lines(tmp_path, monkeypatch):
             None,
         )
 
-    contents = open(log_file, encoding="utf-8").read()
+    contents = Path(log_file).read_text(encoding="utf-8")
     assert "sig=<redacted>&token=<redacted>" in contents
     assert "leaked-signature" not in contents
     assert "leaked-token" not in contents
@@ -213,7 +214,7 @@ def test_configured_loggers_redact_exception_tracebacks(tmp_path, monkeypatch):
         except ConnectionError:
             logging.getLogger("segments").warning("Unable to poll", exc_info=True)
 
-    contents = open(log_file, encoding="utf-8").read()
+    contents = Path(log_file).read_text(encoding="utf-8")
     assert "ConnectionError" in contents
     assert "SIGNEDPLAYLIST" not in contents
     assert "leaked-sig" not in contents
@@ -291,7 +292,7 @@ def test_json_log_file_is_redacted_and_parseable(tmp_path, monkeypatch):
         entry for entry in entries if entry["name"] == "urllib3.connectionpool"
     )
     assert "sig=<redacted>&token=<redacted>" in request["message"]
-    assert "leaked" not in open(log_file, encoding="utf-8").read()
+    assert "leaked" not in Path(log_file).read_text(encoding="utf-8")
     assert request["username"] == "test-user"
     assert request["level"] == "DEBUG"
 
@@ -308,7 +309,7 @@ def test_json_log_file_keeps_event_and_non_ascii(tmp_path, monkeypatch):
     entry = next(e for e in _json_entries(log_file) if e["name"] == "miner")
     assert entry["event"] == "STREAMER_ONLINE"
     assert entry["message"] == "Zoë is live"
-    assert "\\u00eb" not in open(log_file, encoding="utf-8").read()
+    assert "\\u00eb" not in Path(log_file).read_text(encoding="utf-8")
 
 
 def test_text_console_uses_date_format(tmp_path, monkeypatch):
