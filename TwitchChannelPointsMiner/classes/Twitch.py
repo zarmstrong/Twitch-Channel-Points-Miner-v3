@@ -1316,7 +1316,7 @@ class Twitch(object):
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
             if self.__client_id() == ANDROID_CLIENT_ID:
                 logger.info(
-                    "Logged in with the saved Android app login "
+                    "Using the saved Android app login "
                     f"({os.path.basename(self.cookies_file)}); "
                     f"{ANDROID_LOGIN_ENV_VAR} is only read when that file "
                     "doesn't exist",

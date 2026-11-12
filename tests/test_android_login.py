@@ -4,12 +4,17 @@ import copy
 import importlib
 import json
 import logging
+import queue
 import signal
+import threading
+import time
+from logging.handlers import QueueHandler
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from colorama import Fore
 
 from TwitchChannelPointsMiner.classes import TwitchLogin as twitch_login_module
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
@@ -215,23 +220,65 @@ def test_android_login_messages_are_colored(monkeypatch, caplog):
     assert all(r.default_color == ANDROID_LOGIN_ERROR_COLOR for r in errors)
 
 
-def test_prompt_is_logged_after_the_steps_not_printed_by_input(monkeypatch, caplog):
-    # input()'s own prompt bypasses the logging queue and printed before the
-    # sign-in steps; the prompt is logged instead.
+def test_prompt_waits_for_queued_steps_and_is_colored(monkeypatch):
+    # input() prints its prompt at once, but log lines go through a queue:
+    # the queue is drained first so the prompt comes after the steps.
     login, _ = android_login(monkeypatch, valid_response())
-    prompts = []
+    events = []
+    monkeypatch.setattr(
+        twitch_login_module,
+        "_wait_for_queued_logs",
+        lambda: events.append("drained"),
+    )
 
     def read_input(prompt):
-        prompts.append(prompt)
+        events.append(prompt)
         return REDIRECT
 
-    with caplog.at_level(logging.INFO):
-        assert login.android_login_flow(read_input=read_input) is True
+    assert login.android_login_flow(read_input=read_input) is True
 
-    assert prompts == [""]
-    messages = [r.getMessage() for r in caplog.records]
-    waiting = messages.index("Waiting for the redirect URL or access token...")
-    assert waiting > next(i for i, m in enumerate(messages) if m.startswith("3. "))
+    assert events == [
+        "drained",
+        f"{ANDROID_LOGIN_COLOR}Redirect URL or access token: {Fore.RESET}",
+    ]
+
+
+def test_wait_for_queued_logs_returns_once_the_queue_is_written(monkeypatch):
+    log_queue = queue.Queue()
+    handler = QueueHandler(log_queue)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    written = []
+
+    def listener():
+        record = log_queue.get()
+        time.sleep(0.05)
+        written.append(record.getMessage())
+        log_queue.task_done()
+
+    worker = threading.Thread(target=listener)
+    worker.start()
+    try:
+        root_logger.warning("step 3")
+        twitch_login_module._wait_for_queued_logs(timeout=5)
+        assert written == ["step 3"]
+    finally:
+        root_logger.removeHandler(handler)
+        worker.join()
+
+
+def test_wait_for_queued_logs_gives_up_after_the_timeout():
+    log_queue = queue.Queue()
+    log_queue.put("never written")
+    handler = QueueHandler(log_queue)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        started = time.monotonic()
+        twitch_login_module._wait_for_queued_logs(timeout=0.05)
+        assert time.monotonic() - started < 1
+    finally:
+        root_logger.removeHandler(handler)
 
 
 def test_paste_without_a_token_is_asked_again(monkeypatch):

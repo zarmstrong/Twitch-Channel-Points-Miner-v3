@@ -12,10 +12,12 @@ import os
 import pickle
 import re
 from datetime import datetime, timedelta, timezone
-from time import sleep
+from logging.handlers import QueueHandler
+from time import monotonic, sleep
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from colorama import Fore
 
 from TwitchChannelPointsMiner.classes.Exceptions import WrongCookiesException
 from TwitchChannelPointsMiner.constants import (
@@ -41,6 +43,20 @@ BARE_TOKEN_RE = re.compile(r"[A-Za-z0-9]{20,64}")
 def _running_in_container():
     """Docker and Podman; there, nobody sees a prompt unless they attach."""
     return os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+
+def _wait_for_queued_logs(timeout=2.0):
+    """Wait until the root logger's queued records have been written, so a
+    prompt printed next comes after them. Gives up after `timeout` seconds."""
+    queues = [
+        handler.queue
+        for handler in logging.getLogger().handlers
+        if isinstance(handler, QueueHandler)
+        and hasattr(handler.queue, "unfinished_tasks")
+    ]
+    deadline = monotonic() + timeout
+    while any(q.unfinished_tasks for q in queues) and monotonic() < deadline:
+        sleep(0.01)
 
 
 def _android_info(message):
@@ -261,12 +277,13 @@ class TwitchLogin(object):
                 "don't share it."
             )
         for _ in range(ANDROID_LOGIN_ATTEMPTS):
-            # Log the prompt rather than passing it to input(): log lines go
-            # through a background queue, so input()'s own prompt would print
-            # ahead of the steps above.
-            _android_info("Waiting for the redirect URL or access token...")
+            # Log lines go through a background queue, but input() writes its
+            # prompt straight away; let the steps above print first.
+            _wait_for_queued_logs()
             try:
-                pasted = read_input("")
+                pasted = read_input(
+                    f"{ANDROID_LOGIN_COLOR}Redirect URL or access token: {Fore.RESET}"
+                )
             # EOFError: stdin closed; RuntimeError: no stdin at all (the
             # windowed Windows app); OSError: a detached console.
             except (EOFError, OSError, RuntimeError):
