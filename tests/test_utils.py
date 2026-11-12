@@ -355,3 +355,10 @@ def test_split_message_lines_cap_leaves_no_trailing_spaces_before_the_notice(
     )
 
     assert pieces[-1] == "abc" + separator + "[1 more part not sent]"
+
+
+def test_remove_emoji_strips_emoji_and_keeps_full_block_and_ascii():
+    # Boundaries of the class: U+2588 and everything below U+200D stay.
+    text = "a" + chr(0x2588) + chr(0x200D) + chr(0x2589) + chr(0x1F600) + "z"
+    assert utils.remove_emoji(text) == "a" + chr(0x2588) + "z"
+    assert utils.remove_emoji(chr(0x24C1) + chr(0x24C2)) == chr(0x24C1)
