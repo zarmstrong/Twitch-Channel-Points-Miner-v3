@@ -261,8 +261,12 @@ class TwitchLogin(object):
                 "don't share it."
             )
         for _ in range(ANDROID_LOGIN_ATTEMPTS):
+            # Log the prompt rather than passing it to input(): log lines go
+            # through a background queue, so input()'s own prompt would print
+            # ahead of the steps above.
+            _android_info("Waiting for the redirect URL or access token...")
             try:
-                pasted = read_input("Redirect URL or access token: ")
+                pasted = read_input("")
             # EOFError: stdin closed; RuntimeError: no stdin at all (the
             # windowed Windows app); OSError: a detached console.
             except (EOFError, OSError, RuntimeError):

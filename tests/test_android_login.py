@@ -215,6 +215,25 @@ def test_android_login_messages_are_colored(monkeypatch, caplog):
     assert all(r.default_color == ANDROID_LOGIN_ERROR_COLOR for r in errors)
 
 
+def test_prompt_is_logged_after_the_steps_not_printed_by_input(monkeypatch, caplog):
+    # input()'s own prompt bypasses the logging queue and printed before the
+    # sign-in steps; the prompt is logged instead.
+    login, _ = android_login(monkeypatch, valid_response())
+    prompts = []
+
+    def read_input(prompt):
+        prompts.append(prompt)
+        return REDIRECT
+
+    with caplog.at_level(logging.INFO):
+        assert login.android_login_flow(read_input=read_input) is True
+
+    assert prompts == [""]
+    messages = [r.getMessage() for r in caplog.records]
+    waiting = messages.index("Waiting for the redirect URL or access token...")
+    assert waiting > next(i for i, m in enumerate(messages) if m.startswith("3. "))
+
+
 def test_paste_without_a_token_is_asked_again(monkeypatch):
     login, _ = android_login(monkeypatch, valid_response())
     pasted = iter(["https://www.twitch.tv/", REDIRECT])
