@@ -132,7 +132,8 @@ def test_gift_sub_to_us_thanks_when_enabled(monkeypatch, caplog):
 
 def test_gift_sub_logged_but_not_thanked_when_disabled(monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    client = _client_with(monkeypatch)
+    client = _client_with(monkeypatch, gift_sub_thanks=False)
+    assert client.settings is not None
     connection = MagicMock()
 
     client.on_usernotice(connection, _subgift())
@@ -215,9 +216,48 @@ def test_format_gift_sub_message_strips_line_breaks():
     assert "\n" not in message
 
 
-def test_format_gift_sub_message_is_capped_at_500_characters():
-    message = Chat.format_gift_sub_message("x" * 600, "Bob", "chan", "Tier 1")
+def test_format_gift_sub_message_is_capped_at_500_characters(monkeypatch):
+    # The IRC line limit normally cuts first; lift it to see Twitch's cap.
+    monkeypatch.setattr(Chat, "IRC_MAX_LINE_BYTES", 10_000)
+    message = Chat.format_gift_sub_message("x" * 600, "Bob", "c", "Tier 1")
     assert len(message) == Chat.MAX_CHAT_MESSAGE_LENGTH == 500
+
+
+@pytest.mark.parametrize("text", ["x" * 600, "\U0001f381" * 200, "é" * 400])
+def test_format_gift_sub_message_fits_the_irc_line_limit(text):
+    # irc refuses a PRIVMSG line over 512 bytes, prefix and CRLF included,
+    # so a 500-character or multi-byte message must be cut to fit.
+    import irc.client
+
+    channel = "a_twenty_five_char_login_"
+    message = Chat.format_gift_sub_message(text, "Bob", channel, "Tier 1")
+    connection = irc.client.ServerConnection(None)
+    sent = []
+    connection.send_raw = lambda line: sent.append(connection._prep_message(line))
+
+    connection.privmsg("#" + channel, message)
+
+    assert message
+    assert len(sent[0]) <= 512
+
+
+def test_format_gift_sub_message_falls_back_on_unfillable_field():
+    # "{gifter[name]}" raises TypeError rather than ValueError.
+    assert (
+        Chat.format_gift_sub_message("Thanks {gifter[name]}!", "Bob", "c", "Tier 1")
+        == "Thanks for the sub!"
+    )
+
+
+def test_gift_sub_without_plan_reads_naturally(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    client = _client_with(monkeypatch)
+
+    client.on_usernotice(MagicMock(), _subgift(**{"msg-param-sub-plan": ""}))
+
+    assert _gift_records(caplog)[0].getMessage() == (
+        "Gifter_One gifted you a sub in somechannel's chat"
+    )
 
 
 def test_privmsg_failure_is_logged_as_warning_not_raised(monkeypatch, caplog):

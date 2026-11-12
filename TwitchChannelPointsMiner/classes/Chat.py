@@ -20,6 +20,8 @@ _tls_supported = None
 DEFAULT_GIFT_SUB_MESSAGE = "Thanks for the sub!"
 # Twitch rejects chat messages longer than 500 characters.
 MAX_CHAT_MESSAGE_LENGTH = 500
+# The irc library rejects any line longer than this (RFC 2812).
+IRC_MAX_LINE_BYTES = 512
 ANONYMOUS_GIFTER_LOGIN = "ananonymousgifter"
 SUB_PLAN_NAMES = {
     "1000": "Tier 1",
@@ -41,10 +43,19 @@ def format_gift_sub_message(template, gifter, channel, tier):
     values = _KeepUnknownPlaceholders(gifter=gifter, channel=channel, tier=tier)
     try:
         message = str(template).format_map(values)
-    except (ValueError, IndexError, AttributeError):
+    except Exception:
+        # Any template str.format can't fill, e.g. "{gifter[name]}"
+        # (TypeError) as well as "{" (ValueError) or "{0}" (IndexError).
         message = DEFAULT_GIFT_SUB_MESSAGE.format_map(values)
     message = " ".join(message.replace("\r", " ").replace("\n", " ").split())
-    return message[:MAX_CHAT_MESSAGE_LENGTH]
+    message = message[:MAX_CHAT_MESSAGE_LENGTH]
+    # The irc library refuses a line over 512 bytes including the
+    # "PRIVMSG #channel :" prefix and CRLF, so also fit the UTF-8 length.
+    max_bytes = IRC_MAX_LINE_BYTES - len(f"PRIVMSG #{channel} :\r\n".encode("utf-8"))
+    encoded = message.encode("utf-8")
+    if len(encoded) > max_bytes:
+        message = encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+    return message
 
 
 def _irc_tls_context():
@@ -184,11 +195,12 @@ class ClientIRC(SingleServerIRCBot):
         else:
             gifter = tags.get("display-name") or tags.get("login") or "someone"
         plan = tags.get("msg-param-sub-plan") or ""
-        tier = SUB_PLAN_NAMES.get(plan, plan or "a")
+        tier = SUB_PLAN_NAMES.get(plan, plan)
         channel = self.channel.lstrip("#")
+        sub = f"a {tier} sub" if tier else "a sub"
 
         logger.info(
-            f"{gifter} gifted you a {tier} sub in {channel}'s chat",
+            f"{gifter} gifted you {sub} in {channel}'s chat",
             extra={"emoji": ":gift:", "event": Events.GIFTED_SUB},
         )
 

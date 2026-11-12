@@ -4554,7 +4554,8 @@ class Twitch(object):
                     )
                     return []
                 if forced_streamer_username not in drops_logins:
-                    # The directory returns one page, so in a busy category a
+                    # The directory is read for only a few pages and Twitch
+                    # re-ranks it between them, so in a busy category a
                     # Drops-enabled channel can be missing from it. Ask Twitch
                     # which campaigns that channel itself offers instead. Like
                     # a directory listing, a campaign for the game only shows
@@ -4754,8 +4755,8 @@ class Twitch(object):
             if username:
                 discovered.append(username)
 
-        # The Drops-enabled directory lists at most 100 channels, so in a busy
-        # game the pick can be missing from it. Its own positive eligibility,
+        # Only a few pages of the Drops-enabled directory are read, so in a
+        # busy game the pick can be missing from it. Its own positive eligibility,
         # which every stream refresh re-checks, is accepted instead.
         # A discovered pick only competes for the discovered share of the
         # limit: an allow-listed channel earns every campaign the pick can and
