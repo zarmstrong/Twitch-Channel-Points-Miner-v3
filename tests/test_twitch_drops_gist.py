@@ -4,6 +4,7 @@ import pytest
 
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import (
     DROPS_GIST_URL,
+    DROPS_GIST_URL_ENV_VAR,
     TwitchDropsGistScraper,
 )
 
@@ -80,3 +81,23 @@ def test_gist_scraper_skips_non_object_game_entries():
 
     with pytest.raises(ValueError, match="does not contain game 'missing'"):
         scraper.scrape("missing")
+
+
+def test_gist_scraper_reads_the_url_override(monkeypatch):
+    mirror = "https://example.com/mirror/twitch-drops.json"
+    monkeypatch.setenv(DROPS_GIST_URL_ENV_VAR, f"  {mirror}  ")
+    session = FakeSession({"indexed_games": [], "games": []})
+
+    TwitchDropsGistScraper(session=session).scrape_front_page()
+
+    assert session.calls[0][0] == mirror
+
+
+@pytest.mark.parametrize("value", ["", "   ", "file:///etc/passwd", "not a url"])
+def test_gist_scraper_ignores_an_empty_or_non_http_override(monkeypatch, value):
+    monkeypatch.setenv(DROPS_GIST_URL_ENV_VAR, value)
+    session = FakeSession({"indexed_games": [], "games": []})
+
+    TwitchDropsGistScraper(session=session).scrape_front_page()
+
+    assert session.calls[0][0] == DROPS_GIST_URL

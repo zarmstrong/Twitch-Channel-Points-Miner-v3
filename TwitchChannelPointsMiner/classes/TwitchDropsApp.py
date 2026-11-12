@@ -3,11 +3,15 @@
 import copy
 import hashlib
 import html
+import logging
+import os
 import re
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://twitchdrops.app/game/"
 HOME_URL = "https://twitchdrops.app/"
@@ -15,6 +19,26 @@ DROPS_GIST_URL = (
     "https://gist.githubusercontent.com/zarmstrong/"
     "72433778ae596815f4c6ff5e1d278cd2/raw/twitch-drops.json"
 )
+# Point the miner at another copy of the scraper's output, for example a
+# self-hosted Twitch-Channel-Points-Miner-v3-Scraper or a mirror.
+DROPS_GIST_URL_ENV_VAR = "TCPM_DROPS_GIST_URL"
+
+
+def gist_url(env_var, default):
+    """The URL in env_var if it is set to an http(s) URL, else default."""
+    value = (os.environ.get(env_var) or "").strip()
+    if not value:
+        return default
+    if urlparse(value).scheme not in ("http", "https"):
+        logger.warning(f"Ignoring {env_var}: not an http(s) URL; using the default")
+        return default
+    return value
+
+
+def drops_gist_url():
+    return gist_url(DROPS_GIST_URL_ENV_VAR, DROPS_GIST_URL)
+
+
 TWITCH_LOGIN_PATTERN = re.compile(
     r'href=["\']https?://(?:www\.)?twitch\.tv/([^?"\'/#]+)[^"\']*["\']',
     re.IGNORECASE,
@@ -275,7 +299,7 @@ class TwitchDropsGistScraper(object):
         if self._payload is not None:
             return self._payload
         response = self.session.get(
-            DROPS_GIST_URL,
+            drops_gist_url(),
             timeout=self.timeout,
             headers={
                 "Accept": "application/json",

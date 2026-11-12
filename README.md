@@ -619,7 +619,13 @@ from the `twitch-drops.json` and `twitch-badges.json` gists. The game signature
 is compared with the saved state, so only new or changed campaign data is
 processed. Full Twitch badge records, game snapshots,
 classifications, and historical campaign records are stored in
-`drop_badge_catalog.json` beside `config.py`. Rewards confirmed by Twitch are
+`drop_badge_catalog.json` beside `config.py`.
+
+Both gists are published by
+[Twitch-Channel-Points-Miner-v3-Scraper](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3-Scraper).
+To read them from another copy, such as your own scraper instance or a mirror,
+set `TCPM_DROPS_GIST_URL` and `TCPM_BADGES_GIST_URL` to the raw JSON URLs. A
+value that isn't an `http` or `https` URL is ignored with a warning. Rewards confirmed by Twitch are
 marked `BADGE`; unmatched rewards remain `UNKNOWN` rather than being assumed not
 to be badges.
 

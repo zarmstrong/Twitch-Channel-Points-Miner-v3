@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
+    BADGES_GIST_URL,
+    BADGES_GIST_URL_ENV_VAR,
     DropBadgeCatalog,
     badge_match_reason,
     flatten_badges,
@@ -121,6 +123,36 @@ def test_fetch_badges_rejects_non_object_json(tmp_path):
 
     with pytest.raises(ValueError, match="did not contain a JSON object"):
         catalog._fetch_badges()
+
+
+class RecordingSession(FakeSession):
+    def get(self, url, **kwargs):
+        self.url = url
+        return super().get(url, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (
+            "https://example.com/twitch-badges.json",
+            "https://example.com/twitch-badges.json",
+        ),
+        ("", BADGES_GIST_URL),
+        ("ftp://example.com/twitch-badges.json", BADGES_GIST_URL),
+    ],
+)
+def test_fetch_badges_uses_the_url_override(tmp_path, monkeypatch, value, expected):
+    monkeypatch.setenv(BADGES_GIST_URL_ENV_VAR, value)
+    session = RecordingSession()
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(), tmp_path, scraper=FakeScraper(), session=session
+    )
+
+    catalog._fetch_badges()
+
+    assert session.url == expected
+    assert catalog.state["badge_catalog"]["source"] == expected
 
 
 def test_badge_matching_accepts_safe_title_variants():
