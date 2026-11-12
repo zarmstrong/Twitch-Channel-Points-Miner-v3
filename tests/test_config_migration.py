@@ -670,8 +670,10 @@ def test_migrate_config_backs_up_existing_file_and_preserves_mode(tmp_path):
 
     backup = tmp_path / "config.py.v0.bak"
     assert backup.read_text(encoding="utf-8") == CONFIG
-    assert stat.S_IMODE(config.stat().st_mode) == 0o640
-    assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+    # Windows has no POSIX permission bits; chmod only toggles read-only.
+    if os.name == "posix":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o640
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o640
     assert migrate_config(config) is False
 
 
@@ -965,12 +967,16 @@ def test_convert_runner_source_rejects_expanded_keyword_arguments(source):
 def test_convert_runner_writes_private_config_and_audit_marker(tmp_path):
     runner = tmp_path / "run.py"
     config = tmp_path / "config.py"
-    runner.write_text(RUNNER, encoding="utf-8")
+    # newline="\n" keeps the bytes on disk equal to RUNNER on every platform,
+    # so the marker's sha256 of the file matches the hash computed below.
+    runner.write_text(RUNNER, encoding="utf-8", newline="\n")
 
     result = convert_runner(runner, config)
 
     assert result == config
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    # Windows has no POSIX permission bits; chmod only toggles read-only.
+    if os.name == "posix":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert not runner.exists()
     assert runner.with_name("run.py.bak").read_text(encoding="utf-8") == RUNNER
     marker = (tmp_path / ".converted-from-run-py").read_text(encoding="utf-8")

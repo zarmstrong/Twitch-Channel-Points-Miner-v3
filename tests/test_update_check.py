@@ -100,7 +100,7 @@ def test_container_detection_supports_docker_and_container_engines(monkeypatch):
     monkeypatch.setattr(
         miner_module.Path,
         "exists",
-        lambda path: str(path) == "/run/.containerenv",
+        lambda path: path.as_posix() == "/run/.containerenv",
     )
 
     assert _is_running_in_container() is True
