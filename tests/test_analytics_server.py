@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 from io import BytesIO
@@ -1065,3 +1066,18 @@ def test_read_json_hides_parser_details_for_a_corrupt_file(monkeypatch, tmp_path
     # the log only.
     assert "line 1" not in body and "Expecting" not in body
     assert data == {"error": "Analytics data in 'broken.json' could not be read."}
+
+
+def test_non_ascii_dashboard_credentials_authenticate():
+    server = AnalyticsServer(username="user", password="pässwörd")
+    client = server.app.test_client()
+
+    def basic(password):
+        token = base64.b64encode(f"user:{password}".encode("utf-8")).decode()
+        return {"Authorization": f"Basic {token}"}
+
+    page = server.app.static_url_path + "/charts.html"
+
+    assert client.get(page, headers=basic("pässwörd")).status_code == 200
+    assert client.get(page, headers=basic("wrong")).status_code == 401
+    assert client.get(page, headers=basic("pässwort")).status_code == 401

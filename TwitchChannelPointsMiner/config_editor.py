@@ -91,6 +91,13 @@ NOTIFICATION_REQUIRED = {
     "gotify": {"endpoint"},
     "ntfy": {"topic"},
 }
+# Constructor defaults the dashboard must show when a config omits the field.
+# The form renders a missing boolean as unchecked and saves every checkbox,
+# so re-saving an Email notifier would otherwise write starttls=False and
+# send SMTP credentials in cleartext.
+NOTIFICATION_FIELD_DEFAULTS = {
+    "email": {"use_ssl": False, "starttls": True},
+}
 NOTIFICATION_POSITIONAL_FIELDS = {
     "telegram": (
         "chat_id",
@@ -322,6 +329,8 @@ def _base_web_config(config_path):
             for name in schema["fields"]
             if name in configured
         }
+        for name, default in NOTIFICATION_FIELD_DEFAULTS.get(provider, {}).items():
+            fields.setdefault(name, default)
         notifications[provider] = {
             "enabled": bool(configured),
             "fields": fields,
@@ -634,24 +643,81 @@ def _set_dict_items(config_path, assignment_name, values):
             _insert_config_item(config_path, dictionary, f"{name!r}: {rendered}")
 
 
+def _byte_offset(encoded_lines, lineno, col_offset):
+    # ast columns are UTF-8 byte offsets, and bytes.splitlines() breaks lines
+    # exactly where the tokenizer does (unlike str.splitlines()).
+    return sum(len(line) for line in encoded_lines[: lineno - 1]) + col_offset
+
+
+def _container_children(container):
+    if isinstance(container, ast.Dict):
+        return [node for node in container.values if node is not None]
+    if isinstance(container, ast.Call):
+        return [*container.args, *container.keywords]
+    return list(getattr(container, "elts", []))
+
+
+def _scan_item_tail(segment):
+    """Scan the bytes between a container's last element and its closer.
+
+    Only redundant closing parentheses of that element (ast positions exclude
+    them), a separating comma, whitespace and comments can appear there.
+    Returns (offset just past the element's own parentheses, has_comma).
+    """
+    item_end = 0
+    has_comma = False
+    index = 0
+    while index < len(segment):
+        char = segment[index : index + 1]
+        if char == b"#":
+            newline = segment.find(b"\n", index)
+            index = len(segment) if newline == -1 else newline
+            continue
+        if char == b",":
+            has_comma = True
+        elif char == b")" and not has_comma:
+            item_end = index + 1
+        index += 1
+    return item_end, has_comma
+
+
 def _insert_config_item(config_path, container, rendered):
     path = Path(config_path)
     source = path.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
-    end = (
-        sum(len(line.encode("utf-8")) for line in lines[: container.end_lineno - 1])
-        + container.end_col_offset
-    )
     encoded = source.encode("utf-8")
-    closing = end - 1
-    body = encoded[:closing].rstrip()
-    comma = b"" if body.endswith((b"{", b"(", b"[", b",")) else b","
+    encoded_lines = encoded.splitlines(keepends=True)
+    closing = (
+        _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
+    )
+    children = _container_children(container)
+    comma_at = None
+    if children:
+        last = max(children, key=lambda node: (node.end_lineno, node.end_col_offset))
+        last_end = _byte_offset(encoded_lines, last.end_lineno, last.end_col_offset)
+        item_end, has_comma = _scan_item_tail(encoded[last_end:closing])
+        if not has_comma:
+            comma_at = last_end + item_end
     base_indent = lines[container.lineno - 1][
         : len(lines[container.lineno - 1]) - len(lines[container.lineno - 1].lstrip())
     ]
     indentation = base_indent + "    "
-    insertion = comma + f"\n{indentation}{rendered},\n{base_indent}".encode("utf-8")
+    line_start = len(encoded[:closing].rstrip(b" \t"))
+    if encoded[:line_start].endswith((b"\n", b"\r")):
+        # The closing bracket has its own line: add the item above it.
+        closing = line_start
+        insertion = f"{indentation}{rendered},\n".encode("utf-8")
+    else:
+        insertion = f"\n{indentation}{rendered},\n{base_indent}".encode("utf-8")
     updated = encoded[:closing] + insertion + encoded[closing:]
+    if comma_at is not None:
+        updated = updated[:comma_at] + b"," + updated[comma_at:]
+    try:
+        ast.parse(updated)
+    except SyntaxError as error:
+        raise ConfigEditError(
+            f"Refusing to save a configuration that would not parse: {error}"
+        ) from error
     _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 

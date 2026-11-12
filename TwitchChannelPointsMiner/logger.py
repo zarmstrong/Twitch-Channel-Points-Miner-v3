@@ -32,6 +32,10 @@ from TwitchChannelPointsMiner.utils import remove_emoji
 # The "Watching for points" line's color: ColorPalette's WATCH_STATUS default,
 # and the color it keeps on the console with colored=False.
 WATCH_STATUS_COLOR = Fore.GREEN
+# The Android app login's steps and status, and its errors. Colored even with
+# colored=False so the sign-in steps stand out in a busy console.
+ANDROID_LOGIN_COLOR = Fore.CYAN
+ANDROID_LOGIN_ERROR_COLOR = Fore.RED
 
 
 # Fore: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.

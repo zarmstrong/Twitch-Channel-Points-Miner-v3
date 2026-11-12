@@ -682,6 +682,12 @@ def migrate_config_source(source, source_name="config.py"):
     return migrated, version, CONFIG_VERSION
 
 
+def _backup_version(backup, config_name):
+    # Sort config.py.v9.bak before config.py.v11.bak (not lexicographically).
+    version = backup.name[len(config_name) + 2 : -len(".bak")]
+    return (0, int(version)) if version.isdigit() else (-1, 0)
+
+
 def migrate_config(config_path):
     path = Path(config_path)
     if path.is_symlink():
@@ -689,6 +695,10 @@ def migrate_config(config_path):
             f"Refusing to migrate symlinked configuration {path}"
         )
     current_source = path.read_text(encoding="utf-8")
+    # Windows editors can save "UTF-8 with BOM"; ast.parse() and compile()
+    # reject the U+FEFF, so drop it and write the file back without it.
+    had_bom = current_source.startswith("\ufeff")
+    current_source = current_source.removeprefix("\ufeff")
     source = current_source
     recovery_backup = None
     try:
@@ -698,15 +708,18 @@ def migrate_config(config_path):
             raise
         backups = [
             backup
-            for backup in sorted(path.parent.glob(f"{path.name}.v*.bak"))
+            for backup in sorted(
+                path.parent.glob(f"{path.name}.v*.bak"),
+                key=lambda candidate: _backup_version(candidate, path.name),
+            )
             if not backup.is_symlink() and backup.is_file()
         ]
         if not backups:
             raise
         recovery_backup = backups[-1]
-        source = recovery_backup.read_text(encoding="utf-8")
+        source = recovery_backup.read_text(encoding="utf-8").removeprefix("\ufeff")
         migrated, old_version, new_version = migrate_config_source(source, path.name)
-    if migrated == current_source:
+    if migrated == current_source and not had_bom:
         return False
 
     backup = path.with_name(f"{path.name}.v{old_version}.bak")
