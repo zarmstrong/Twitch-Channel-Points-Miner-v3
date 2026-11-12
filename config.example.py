@@ -52,7 +52,7 @@ MINER_CONFIG = {
     "update_check": True,  # Check GitHub Releases for newer versions and alert through all configured notifiers
     "update_check_interval_hours": 24,  # Whole hours from 3 upward; use float("inf") to check only at startup
     "streams_watched": 2,  # Watch 1 stream to reduce concurrent sessions (which may help Twitch Turbo users avoid ads), or 2 for the default maximum
-    "android_login": False,  # Log in as Twitch's Android app to get full Drops campaign data; see README.md#android-login
+    "android_login": False,  # Log in as Twitch's Android app to get full Drops campaign data; see docs/settings.md#android-login
     "streamer_source_priority": [
         StreamerSource.STREAMERS,
         StreamerSource.FOLLOWERS,
