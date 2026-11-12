@@ -1,3 +1,4 @@
+import inspect
 import logging
 import sys
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from TwitchChannelPointsMiner.classes.Apprise import (
     Apprise,
 )
 from TwitchChannelPointsMiner.classes.Settings import Events
-from TwitchChannelPointsMiner.logger import NotificationHandler
+from TwitchChannelPointsMiner.logger import LoggerSettings, NotificationHandler
 
 
 def fake_apprise_module(delivered=True, accepts=True):
@@ -162,11 +163,57 @@ def test_apprise_with_only_example_urls_does_not_import_the_package():
     )
 
 
-def test_apprise_library_logs_are_limited_to_errors():
-    # Its DEBUG and WARNING lines quote service URLs that hold credentials.
-    apprise_logger = logging.getLogger("apprise")
-    assert not apprise_logger.isEnabledFor(logging.WARNING)
-    assert apprise_logger.isEnabledFor(logging.ERROR)
+def test_apprise_library_records_never_reach_the_logs(caplog):
+    # Apprise quotes service URLs, which hold credentials, even at ERROR.
+    secret = "FAKE_SECRET_TOKEN"
+    with caplog.at_level(logging.DEBUG):
+        for level in (logging.DEBUG, logging.WARNING, logging.ERROR, logging.CRITICAL):
+            logging.getLogger("apprise").log(level, f"Unsupported URL: {secret}")
+            logging.getLogger("apprise.plugins").log(level, f"URL: {secret}")
+
+    assert secret not in caplog.text
+
+
+def test_apprise_invalid_url_log_keeps_only_a_valid_scheme(caplog):
+    secret = "FAKE_SECRET_TOKEN"
+    urls = [
+        f"discord://123/{secret}",
+        f"discord:/123/{secret}",
+        secret,
+        f"{secret} ://x",
+    ]
+    module, _ = fake_apprise_module(accepts=False)
+    with caplog.at_level(logging.ERROR), patch.dict(sys.modules, {"apprise": module}):
+        Apprise(urls, [Events.DROP_CLAIM])
+
+    assert secret not in caplog.text
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "Apprise: invalid notification URL ignored: discord://...",
+        "Apprise: invalid notification URL ignored: a URL",
+        "Apprise: invalid notification URL ignored: a URL",
+        "Apprise: invalid notification URL ignored: a URL",
+    ]
+
+
+def test_logger_settings_keeps_positional_arguments_before_apprise():
+    # apprise was added last, so calls written for the earlier signature
+    # still bind email and the settings after it to the same parameters.
+    params = list(inspect.signature(LoggerSettings.__init__).parameters.values())[1:]
+    names = [param.name for param in params]
+    assert names[-1] == "apprise"
+    assert names[names.index("ntfy") + 1] == "email"
+
+    email = object()
+    args = [param.default for param in params[: names.index("email") + 1]]
+    args[-1] = email
+    args += [True, "08:30", "someone"]  # daily_report, daily_report_time, username
+    settings = LoggerSettings(*args)
+
+    assert settings.email is email
+    assert settings.apprise is None
+    assert (settings.daily_report, settings.daily_report_time) == (True, "08:30")
+    assert settings.username == "someone"
 
 
 def test_logger_skips_example_apprise_urls():

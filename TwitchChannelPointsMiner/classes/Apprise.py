@@ -1,4 +1,5 @@
 import logging
+import re
 import sys
 from textwrap import dedent
 
@@ -6,10 +7,14 @@ from TwitchChannelPointsMiner.classes.Settings import Events
 
 logger = logging.getLogger(__name__)
 
-# Apprise logs each request URL at DEBUG and some failures at WARNING. Those
-# URLs hold webhook and bot tokens or private ntfy topics, so only errors are
-# kept. Delivery failures still reach the user through send()'s reason.
-logging.getLogger("apprise").setLevel(logging.ERROR)
+# Apprise logs request URLs at DEBUG and WARNING, and malformed URLs at ERROR.
+# Those URLs hold webhook and bot tokens or private ntfy topics, so none of its
+# records are kept. Failures still reach the user through send()'s reason and
+# the scheme-only message for URLs Apprise rejects.
+logging.getLogger("apprise").setLevel(logging.CRITICAL + 1)
+
+# The scheme of a URL Apprise rejected, the only part safe to log.
+URL_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]{0,31})://")
 
 # URLs from config.example.py. Notifications are skipped until real URLs replace them.
 EXAMPLE_URLS = ("discord://WEBHOOK_ID/WEBHOOK_TOKEN", "ntfy://YOUR_NTFY_TOPIC")
@@ -65,10 +70,11 @@ class Apprise(object):
         client = apprise.Apprise()
         for url in self.urls:
             if not client.add(url):
-                # Log only the scheme: the rest of the URL holds credentials.
-                logger.error(
-                    f"Apprise: invalid notification URL ignored: {url.split('://')[0]}://..."
-                )
+                # Log only a validated scheme: the rest can hold credentials,
+                # and a URL without "://" may be nothing but a secret.
+                match = URL_SCHEME.match(url) if isinstance(url, str) else None
+                scheme = f"{match.group(1)}://..." if match else "a URL"
+                logger.error(f"Apprise: invalid notification URL ignored: {scheme}")
         if len(client) == 0:
             self._reason = "No valid Apprise URL is configured."
             return
