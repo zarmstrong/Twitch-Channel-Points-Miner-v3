@@ -11,6 +11,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
     is_persisted_query_not_found_message,
 )
 from TwitchChannelPointsMiner.classes.gql.Integration import GQL
+from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.constants import GQLOperations
 from TwitchChannelPointsMiner.utils import AttemptStrategy
 
@@ -249,3 +250,35 @@ def test_inventory_fallback_parses_a_nonempty_inventory():
     assert len(calls) == 3
     assert "extensions" in calls[0]
     assert all("extensions" not in call for call in calls[1:])
+
+
+def test_claim_fallback_preserves_unlinked_account_guard(monkeypatch):
+    calls = []
+
+    def post(url, json, headers):
+        calls.append(copy.deepcopy(json))
+        if "query" not in json:
+            return FakeResponse(persisted_not_found())
+        claim = {"status": "ELIGIBLE_FOR_ALL"}
+        if "isUserAccountConnected" in json["query"]:
+            claim["isUserAccountConnected"] = False
+        return FakeResponse({"data": {"claimDropRewards": claim}})
+
+    twitch = object.__new__(Twitch)
+    twitch.gql = GQL(client_session(), post_request=post)
+    twitch.log_drop_checks = False
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda *args: []
+    )
+    drop = SimpleNamespace(id="drop-1", name="Reward", drop_instance_id="instance-1")
+    link = {
+        "campaign_id": "campaign-1",
+        "connected": False,
+        "url": "https://example.test/link",
+    }
+
+    assert twitch.claim_drop(drop, campaign_link=link) is False
+    assert twitch.claim_drop(drop, campaign_link=link) is False
+    assert twitch.unlinked_drop_report()[0]["url"] == link["url"]
+    assert "instance-1" not in twitch.accepted_drop_claims
+    assert len(calls) == 2

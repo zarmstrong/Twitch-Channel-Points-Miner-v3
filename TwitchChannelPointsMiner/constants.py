@@ -271,7 +271,7 @@ class GQLOperations:
     # Raw query text used when a persisted query hash is rejected
     # (PersistedQueryNotFound). Twitch ignores unused variables.
     raw_queries = {
-        "DropsPage_ClaimDropRewards": "mutation DropsPage_ClaimDropRewards($input: ClaimDropRewardsInput!) { claimDropRewards(input: $input) { status } }",
+        "DropsPage_ClaimDropRewards": "mutation DropsPage_ClaimDropRewards($input: ClaimDropRewardsInput!) { claimDropRewards(input: $input) { status isUserAccountConnected } }",
         "Inventory": "query Inventory { currentUser { inventory { dropCampaignsInProgress { id name status startAt endAt allow { channels { id } } self { isAccountConnected } game { id name displayName } timeBasedDrops { id name requiredMinutesWatched requiredSubs startAt endAt benefitEdges { benefit { id name } } self { dropInstanceID isClaimed currentMinutesWatched currentSubs hasPreconditionsMet } } } } } }",
         "ViewerDropsDashboard": "query ViewerDropsDashboard { currentUser { dropCampaigns { id name status startAt endAt game { id name displayName } } } }",
         "DropCampaignDetails": "query DropCampaignDetails($dropID: ID!, $channelLogin: ID!) { user(id: $channelLogin) { id dropCampaign(id: $dropID) { id name status startAt endAt game { id name displayName } allow { channels { id name } } timeBasedDrops { id name requiredMinutesWatched startAt endAt benefitEdges { benefit { id name } } } } } }",
