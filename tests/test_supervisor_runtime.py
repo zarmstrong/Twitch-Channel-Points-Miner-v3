@@ -105,3 +105,48 @@ def test_failed_alert_dependency_install_does_not_start_jobs(installer, monkeypa
         minerctl.cmd_install(installer.paths, installer.args)
 
     assert installer.jobs == []
+
+
+@pytest.mark.parametrize("service_type", [minerctl.Systemd, minerctl.Launchd])
+def test_installed_service_preserves_the_selected_miner_python(
+    tmp_path, monkeypatch, service_type
+):
+    selected_python = str(tmp_path / "custom env/bin/python")
+    existing_python = tmp_path / "venv/bin/python3"
+    existing_python.parent.mkdir(parents=True)
+    existing_python.write_text("", encoding="utf-8")
+    service = service_type()
+    monkeypatch.setattr(
+        minerctl.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+    if isinstance(service, minerctl.Systemd):
+        monkeypatch.setattr(service, "unit_dir", tmp_path / "units")
+        monkeypatch.setattr(service, "ctl", lambda *args, **kwargs: None)
+    else:
+        monkeypatch.setattr(service, "agent_dir", tmp_path / "agents")
+        monkeypatch.setattr(service, "bootstrap", lambda label: None)
+
+    service.install(selected_python, tmp_path, 30, "08:57", 24)
+
+    if isinstance(service, minerctl.Systemd):
+        unit = (service.unit_dir / service.sup).read_text(encoding="utf-8")
+        command = next(
+            line.removeprefix("ExecStart=")
+            for line in unit.splitlines()
+            if line.startswith("ExecStart=")
+        )
+        argv = shlex.split(command)
+    else:
+        argv = plistlib.loads(service.plist(service.sup).read_bytes())[
+            "ProgramArguments"
+        ]
+    assert argv[0] == selected_python
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--miner-dir", type=Path)
+    parser.add_argument("--python", default="")
+    args = parser.parse_args(argv[2:])
+    args.entry = "config/config.py"
+    supervisor = miner_supervisor.Supervisor(args)
+    assert supervisor.python == selected_python

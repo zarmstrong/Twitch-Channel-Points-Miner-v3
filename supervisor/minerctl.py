@@ -98,7 +98,7 @@ class Systemd:
                 Wants=network-online.target
 
                 [Service]
-                ExecStart={q(python)} {q(SUPERVISOR)} --miner-dir {q(miner_dir)}
+                ExecStart={q(python)} {q(SUPERVISOR)} --miner-dir {q(miner_dir)} --python {q(python)}
                 WorkingDirectory={miner_dir}
                 Restart=always
                 RestartSec=300
@@ -261,7 +261,14 @@ class Launchd:
         hh, mm = summary_time.split(":")
         jobs = {
             self.sup: (
-                [python, str(SUPERVISOR), "--miner-dir", str(miner_dir)],
+                [
+                    python,
+                    str(SUPERVISOR),
+                    "--miner-dir",
+                    str(miner_dir),
+                    "--python",
+                    python,
+                ],
                 "    <key>RunAtLoad</key><true/>\n    <key>KeepAlive</key><true/>\n"
                 "    <key>ThrottleInterval</key><integer>300</integer>\n"
                 "    <key>ExitTimeOut</key><integer>180</integer>",
