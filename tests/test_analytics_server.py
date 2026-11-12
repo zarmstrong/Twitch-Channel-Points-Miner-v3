@@ -1041,3 +1041,24 @@ def test_notification_events_use_clickable_capsules():
     assert "aria-pressed" in script
     assert '.event-capsule[aria-pressed="true"]' in script
     assert ".event-capsules" in stylesheet
+
+
+def test_read_json_hides_parser_details_for_a_corrupt_file(monkeypatch, tmp_path):
+    from flask import Flask
+
+    from TwitchChannelPointsMiner.classes.AnalyticsServer import read_json
+
+    (tmp_path / "broken.json").write_text('{"series": [1, 2', encoding="utf-8")
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    with Flask(__name__).test_request_context("/json/broken"):
+        response = read_json("broken")
+        body = response.get_data(as_text=True)
+        data = read_json("broken", return_response=False)
+
+    assert response.status_code == 500
+    assert "could not be read" in body
+    # json.JSONDecodeError text ("Expecting ... line 1 column ...") stays in
+    # the log only.
+    assert "line 1" not in body and "Expecting" not in body
+    assert data == {"error": "Analytics data in 'broken.json' could not be read."}

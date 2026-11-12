@@ -27,6 +27,22 @@ def _isolate_shell_bypass_token_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_single_instance_lock(monkeypatch, request):
+    # On Windows, _acquire_single_instance_lock() creates a real named kernel
+    # mutex and deliberately never closes the handle, so it stays held for
+    # the rest of the pytest process. Left real, the first main() call in a
+    # run takes the lock and every later main() call (including a second
+    # call within the same test) sees ERROR_ALREADY_EXISTS and returns early
+    # as a "second instance". It would also collide with a real running copy
+    # of the app. On other platforms the lock is a no-op, so this only
+    # changes behavior on Windows. The lock's own tests (which fake
+    # kernel32) keep the real function.
+    if request.node.name.startswith("test_acquire_single_instance_lock"):
+        return
+    monkeypatch.setattr(windows_launcher, "_acquire_single_instance_lock", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_launcher_logger_state():
     # main() -> _configure_launcher_logging() mutates the module-level
     # `logger` singleton in place (adds a StreamHandler, sets
@@ -2673,16 +2689,25 @@ class _FakeTrayIcon:
         self.notifications.append((message, title))
 
 
+def _patch_tray_unavailable(monkeypatch):
+    def _raise(on_show, on_quit):
+        raise ImportError("No module named 'pystray'")
+
+    monkeypatch.setattr(windows_launcher, "_build_tray_icon", _raise)
+
+
 def test_launch_shell_falls_back_to_close_confirmation_when_tray_unavailable(
     tmp_path, monkeypatch
 ):
-    # No pystray installed in this environment (the real, un-mocked case for
-    # CI/Linux) - launch_shell must still leave the window closable.
+    # No pystray available (the real, un-mocked case for CI/Linux) -
+    # launch_shell must still leave the window closable. Forced explicitly so
+    # the test also holds on a Windows dev machine with pystray installed.
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
     monkeypatch.setattr(
         windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
     )
+    _patch_tray_unavailable(monkeypatch)
 
     windows_launcher.launch_shell(
         None,
@@ -3018,6 +3043,8 @@ def test_launch_shell_wires_guarded_show_into_single_instance_listener(
     monkeypatch.setattr(
         windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
     )
+    # The close below must go through the quit confirmation, not hide-to-tray.
+    _patch_tray_unavailable(monkeypatch)
 
     captured = {}
     monkeypatch.setattr(

@@ -2974,6 +2974,58 @@ def test_category_search_stops_at_drops_directory_result_count(monkeypatch):
     assert len(stream_calls) == 1
 
 
+def test_category_search_finds_drops_channel_beyond_first_directory_page(
+    monkeypatch,
+):
+    # Issue #211: "beyond" is Drops-enabled but only on the directory's
+    # second page; discovery must still be able to pick it.
+    def directory_page(login, has_next_page):
+        return {
+            "data": {
+                "game": {
+                    "id": "game-id",
+                    "streams": {
+                        "edges": [
+                            {
+                                "cursor": f"after-{login}",
+                                "node": {"broadcaster": {"login": login}},
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": has_next_page},
+                    },
+                }
+            }
+        }
+
+    pages = [directory_page("top", True), directory_page("beyond", False)]
+    gql = SimpleNamespace(post_gql_request_raw=lambda operation, request: pages.pop(0))
+    twitch = twitch_with_gql(gql)
+    twitch.twitchdrops_app_campaigns = {}
+    twitch.twitchdrops_app_game_names = {}
+    twitch.category_campaign_eligibility = {}
+
+    def helix_get(endpoint, params):
+        if endpoint == "search/categories":
+            return {"data": [{"id": "game-id", "name": "Game"}]}
+        return {
+            "data": [
+                {"user_login": login, "game_id": "game-id", "viewer_count": viewers}
+                for login, viewers in (("beyond", 9), ("other", 5), ("top", 1))
+            ]
+        }
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__helix_get", lambda self, *args: helix_get(*args)
+    )
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_live_streamers_for_category("game", limit=300) == [
+        "beyond",
+        "top",
+    ]
+    assert pages == []
+
+
 def _drop_pick_search_twitch(
     monkeypatch, directory, pick_game_id="game-id", pick_lookup_fails=False
 ):
