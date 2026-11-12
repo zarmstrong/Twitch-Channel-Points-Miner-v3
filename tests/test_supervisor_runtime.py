@@ -150,3 +150,68 @@ def test_installed_service_preserves_the_selected_miner_python(
     args.entry = "config/config.py"
     supervisor = miner_supervisor.Supervisor(args)
     assert supervisor.python == selected_python
+
+
+def test_crash_backoff_keeps_supervisor_heartbeat_fresh(tmp_path, monkeypatch):
+    elapsed = [0.0]
+    epoch = datetime(2026, 11, 12, tzinfo=timezone.utc)
+    clock_now = lambda: epoch + timedelta(seconds=elapsed[0])
+    monkeypatch.setattr(miner_common, "now", clock_now)
+    monkeypatch.setattr(minerctl, "now", clock_now)
+    monkeypatch.setattr(
+        minerctl, "backend", lambda: SimpleNamespace(state=lambda: (True, "active"))
+    )
+    monkeypatch.setattr(minerctl, "pid_alive", lambda pid: True)
+    supervisor = miner_supervisor.Supervisor(
+        SimpleNamespace(
+            miner_dir=tmp_path, entry="config/config.py", python=sys.executable
+        )
+    )
+    supervisor.state.update(
+        minerState="crashed-waiting", lastExitTime=miner_common.iso()
+    )
+    supervisor.save_status()
+    heartbeats = [elapsed[0]]
+    save_status = supervisor.save_status
+
+    def record_heartbeat():
+        heartbeats.append(elapsed[0])
+        save_status()
+
+    monkeypatch.setattr(supervisor, "save_status", record_heartbeat)
+    with monkeypatch.context() as clock_patch:
+        clock_patch.setattr(miner_supervisor.time, "time", lambda: elapsed[0])
+        clock_patch.setattr(
+            miner_supervisor.time,
+            "sleep",
+            lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+        )
+        supervisor.sleep(900)
+
+    health = minerctl.get_health(supervisor.p)
+    assert health["verdict"] == "WARNING", health
+    assert all(
+        later - earlier <= 60 for earlier, later in zip(heartbeats, heartbeats[1:])
+    )
+    status = miner_common.read_json(supervisor.p.status)
+    assert clock_now() - miner_common.parse_time(status["heartbeat"]) <= timedelta(
+        minutes=1
+    )
+
+
+def test_backoff_stops_promptly_when_shutdown_is_requested(tmp_path, monkeypatch):
+    supervisor = miner_supervisor.Supervisor(
+        SimpleNamespace(
+            miner_dir=tmp_path, entry="config/config.py", python=sys.executable
+        )
+    )
+    sleeps = []
+
+    def request_shutdown(seconds):
+        sleeps.append(seconds)
+        supervisor.shutdown = True
+
+    monkeypatch.setattr(miner_supervisor.time, "sleep", request_shutdown)
+    supervisor.sleep(900)
+    assert len(sleeps) == 1
+    assert sleeps[0] <= 2

@@ -502,8 +502,12 @@ class Supervisor:
 
     def sleep(self, seconds: float) -> None:
         end = time.time() + seconds
+        next_heartbeat = time.time() + 60
         while not self.shutdown and time.time() < end:
-            time.sleep(min(2, end - time.time()))
+            time.sleep(max(0, min(2, end - time.time())))
+            if time.time() >= next_heartbeat:
+                self.save_status()
+                next_heartbeat = time.time() + 60
 
     def start_miner(self) -> subprocess.Popen:
         env = dict(

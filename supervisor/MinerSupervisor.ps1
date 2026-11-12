@@ -215,6 +215,16 @@ function Save-Status {
     } catch { }
 }
 
+function Wait-WithHeartbeat([int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $remaining = [Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+        if ($remaining -le 0) { break }
+        Start-Sleep -Seconds ([Math]::Min(60, $remaining))
+        Save-Status
+    }
+}
+
 # Pushover priority: -1 quiet (no sound), 0 normal, 1 high (bypasses quiet hours),
 # 2 emergency (repeats every 5 min for up to 1 h until acknowledged).
 function Send-Alert {
@@ -625,7 +635,7 @@ try {
 
             if ($ran.TotalHours -ge 1) { $backoff = 30 }
             $crashed = $true
-            Start-Sleep -Seconds $backoff
+            Wait-WithHeartbeat $backoff
             $backoff = [Math]::Min($backoff * 2, 900)
         }
     }
