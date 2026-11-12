@@ -191,3 +191,61 @@ def test_batch_with_raw_queries_resends_whole_batch_raw():
         GQLOperations.raw_queries["ViewerDropsDashboard"],
         GQLOperations.raw_queries["ModViewChannelQuery"],
     ]
+
+
+def test_inventory_fallback_parses_a_nonempty_inventory():
+    calls = []
+    drop = {
+        "id": "drop-1",
+        "name": "Reward",
+        "startAt": "2020-01-01T00:00:00Z",
+        "endAt": "2099-01-01T00:00:00Z",
+        "benefitEdges": [{"benefit": {"name": "Reward"}}],
+        "requiredMinutesWatched": 10,
+        "requiredSubs": 0,
+        "self": {
+            "hasPreconditionsMet": True,
+            "currentMinutesWatched": 10,
+            "currentSubs": 0,
+            "dropInstanceID": "instance-1",
+            "isClaimed": False,
+        },
+    }
+
+    def post(url, json, headers):
+        calls.append(copy.deepcopy(json))
+        if "query" not in json:
+            return FakeResponse(persisted_not_found())
+        selected_drop = copy.deepcopy(drop)
+        # GraphQL only returns fields selected by the raw fallback. Exercise
+        # the typed parser against that response rather than a raw dict call.
+        if "requiredSubs" not in json["query"]:
+            selected_drop.pop("requiredSubs")
+        if "currentSubs" not in json["query"]:
+            selected_drop["self"].pop("currentSubs")
+        return FakeResponse(
+            {
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [
+                                {"id": "campaign-1", "timeBasedDrops": [selected_drop]}
+                            ],
+                        }
+                    }
+                }
+            }
+        )
+
+    gql = GQL(
+        client_session(),
+        post_request=post,
+        attempt_strategy=AttemptStrategy(attempts=1, attempt_interval_seconds=0),
+    )
+
+    response = gql.get_inventory()
+    assert response.inventory["dropCampaignsInProgress"][0]["timeBasedDrops"][0] == drop
+    assert gql.get_inventory().inventory == response.inventory
+    assert len(calls) == 3
+    assert "extensions" in calls[0]
+    assert all("extensions" not in call for call in calls[1:])
