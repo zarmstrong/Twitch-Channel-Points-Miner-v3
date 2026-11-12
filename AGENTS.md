@@ -20,7 +20,7 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 
 ## Releases and versioning
 
-- The current release baseline is `3.2.0`.
+- The current release version is recorded in [.release-please-manifest.json](.release-please-manifest.json) and mirrored in `__version__` in [TwitchChannelPointsMiner/__init__.py](TwitchChannelPointsMiner/__init__.py). Read it from there; don't copy the number into docs, where it goes stale after the next release.
 - Releases are managed by Release Please through [release-please-config.json](release-please-config.json), [.release-please-manifest.json](.release-please-manifest.json), and [.github/workflows/release-please.yml](.github/workflows/release-please.yml).
 - [TwitchChannelPointsMiner/__init__.py](TwitchChannelPointsMiner/__init__.py) is the package version source consumed by `setup.py`; keep its `__version__` value synchronized with the Release Please manifest when manually changing the release baseline.
 - Preserve the `x-release-please-version` annotation on the `__version__` line so Release Please can update it.
