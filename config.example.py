@@ -176,7 +176,7 @@ MINER_CONFIG = {
             events=[
                 Events.STREAMER_ONLINE,
                 Events.DROP_CLAIM,
-            ],  # Optional: needs `pip install apprise`
+            ],  # Docker includes Apprise; not in the Windows .exe. See the README.
         ),
     ),
     "streamer_settings": StreamerSettings(

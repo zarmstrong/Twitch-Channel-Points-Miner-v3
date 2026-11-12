@@ -1,4 +1,5 @@
 import logging
+import sys
 from textwrap import dedent
 
 from TwitchChannelPointsMiner.classes.Settings import Events
@@ -13,13 +14,25 @@ logging.getLogger("apprise").setLevel(logging.ERROR)
 # URLs from config.example.py. Notifications are skipped until real URLs replace them.
 EXAMPLE_URLS = ("discord://WEBHOOK_ID/WEBHOOK_TOKEN", "ntfy://YOUR_NTFY_TOPIC")
 
+# The Windows executable cannot install packages, so it gets its own advice.
+MISSING_PACKAGE = (
+    "The apprise package is not installed. "
+    "Run: pip install -r requirements-optional.txt"
+)
+MISSING_FROM_EXECUTABLE = (
+    "The Windows executable does not include Apprise. "
+    "Use the Docker image or a source checkout to send Apprise notifications."
+)
+
 
 class Apprise(object):
     """Send events through Apprise (https://github.com/caronc/apprise).
 
     Apprise supports 100+ services, each configured with one URL. The
     package is optional and only imported when this notifier is created.
-    Install it with `pip install apprise`.
+    The Docker image includes it. A source checkout installs it with
+    `pip install -r requirements-optional.txt`. The Windows executable does
+    not include it.
 
         Apprise(
             urls=["discord://WEBHOOK_ID/WEBHOOK_TOKEN", "tgram://BOT_TOKEN/CHAT_ID"],
@@ -46,9 +59,8 @@ class Apprise(object):
         try:
             import apprise
         except ImportError:
-            self._reason = (
-                "The apprise package is not installed. Run: pip install apprise"
-            )
+            frozen = getattr(sys, "frozen", False)
+            self._reason = MISSING_FROM_EXECUTABLE if frozen else MISSING_PACKAGE
             return
         client = apprise.Apprise()
         for url in self.urls:

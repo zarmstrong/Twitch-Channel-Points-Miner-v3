@@ -3,7 +3,12 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from TwitchChannelPointsMiner.classes.Apprise import EXAMPLE_URLS, Apprise
+from TwitchChannelPointsMiner.classes.Apprise import (
+    EXAMPLE_URLS,
+    MISSING_FROM_EXECUTABLE,
+    MISSING_PACKAGE,
+    Apprise,
+)
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.logger import NotificationHandler
 
@@ -97,10 +102,23 @@ def test_apprise_reports_missing_package():
     with patch.dict(sys.modules, {"apprise": None}):
         notifier = Apprise(["discord://123/abc"], [Events.DROP_CLAIM])
 
+    assert notifier.send("claimed", Events.DROP_CLAIM) == (False, MISSING_PACKAGE)
+    assert "requirements-optional.txt" in MISSING_PACKAGE
+
+
+def test_apprise_missing_from_windows_executable_names_alternatives():
+    # pip cannot add packages to the frozen executable, so it must not be advised.
+    with (
+        patch.dict(sys.modules, {"apprise": None}),
+        patch.object(sys, "frozen", True, create=True),
+    ):
+        notifier = Apprise(["discord://123/abc"], [Events.DROP_CLAIM])
+
     assert notifier.send("claimed", Events.DROP_CLAIM) == (
         False,
-        "The apprise package is not installed. Run: pip install apprise",
+        MISSING_FROM_EXECUTABLE,
     )
+    assert "pip" not in MISSING_FROM_EXECUTABLE
 
 
 def test_apprise_without_urls_does_not_import_the_package():
