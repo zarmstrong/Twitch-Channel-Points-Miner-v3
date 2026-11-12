@@ -70,6 +70,7 @@ from TwitchChannelPointsMiner.classes.TwitchDropsApp import TwitchDropsAppScrape
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import (
     ANDROID_CLIENT_ID,
+    ANDROID_LOGIN_ENV_VAR,
     CLIENT_ID,
     CLIENT_VERSION,
     DROP_ID,
@@ -78,7 +79,11 @@ from TwitchChannelPointsMiner.constants import (
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
-from TwitchChannelPointsMiner.logger import SKIP_NOTIFICATIONS, WATCH_STATUS_COLOR
+from TwitchChannelPointsMiner.logger import (
+    ANDROID_LOGIN_COLOR,
+    SKIP_NOTIFICATIONS,
+    WATCH_STATUS_COLOR,
+)
 from TwitchChannelPointsMiner.utils import (
     _millify,
     create_chunks,
@@ -1309,6 +1314,14 @@ class Twitch(object):
         else:
             self.twitch_login.load_cookies(self.cookies_file)
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
+            if self.__client_id() == ANDROID_CLIENT_ID:
+                logger.info(
+                    "Logged in with the saved Android app login "
+                    f"({os.path.basename(self.cookies_file)}); "
+                    f"{ANDROID_LOGIN_ENV_VAR} is only read when that file "
+                    "doesn't exist",
+                    extra={"emoji": ":iphone:", "default_color": ANDROID_LOGIN_COLOR},
+                )
         # Keep the shared typed-GQL session in sync with Twitch's current web
         # client version. The legacy transport refreshed this before every
         # request; once per authenticated startup avoids stale headers without

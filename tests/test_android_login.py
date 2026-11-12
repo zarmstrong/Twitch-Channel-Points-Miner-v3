@@ -1,7 +1,11 @@
 """Opt-in Android app login (issue #229)."""
 
 import copy
+import importlib
+import json
 import logging
+import signal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,6 +19,11 @@ from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.TwitchLogin import (
     TwitchLogin,
     parse_android_login,
+)
+from TwitchChannelPointsMiner.logger import (
+    ANDROID_LOGIN_COLOR,
+    ANDROID_LOGIN_ERROR_COLOR,
+    LoggerSettings,
 )
 from TwitchChannelPointsMiner.constants import (
     ANDROID_CLIENT_ID,
@@ -175,6 +184,37 @@ def test_in_a_container_the_steps_point_at_the_environment_variable(
     assert "start the miner again" not in caplog.text
 
 
+def test_empty_environment_variable_is_reported_and_the_user_is_asked(
+    monkeypatch, caplog
+):
+    # docker compose sets "${TWITCH_ANDROID_LOGIN}" to "" when it's unset.
+    login, _ = android_login(monkeypatch, valid_response())
+    monkeypatch.setenv(ANDROID_LOGIN_ENV_VAR, "  ")
+
+    with caplog.at_level(logging.INFO):
+        assert login.android_login_flow(read_input=lambda prompt: REDIRECT) is True
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert f"{ANDROID_LOGIN_ENV_VAR} is set but empty" in errors[0].getMessage()
+    assert "does not hold a valid Android login" not in caplog.text
+
+
+def test_android_login_messages_are_colored(monkeypatch, caplog):
+    login, _ = android_login(monkeypatch, valid_response(login="someone-else"))
+    pasted = iter([REDIRECT, "", ""])
+
+    with caplog.at_level(logging.INFO):
+        login.android_login_flow(read_input=lambda prompt: next(pasted))
+
+    records = [r for r in caplog.records if r.name == twitch_login_module.__name__]
+    infos = [r for r in records if r.levelno == logging.INFO]
+    errors = [r for r in records if r.levelno == logging.ERROR]
+    assert infos and errors
+    assert all(r.default_color == ANDROID_LOGIN_COLOR for r in infos)
+    assert all(r.default_color == ANDROID_LOGIN_ERROR_COLOR for r in errors)
+
+
 def test_paste_without_a_token_is_asked_again(monkeypatch):
     login, _ = android_login(monkeypatch, valid_response())
     pasted = iter(["https://www.twitch.tv/", REDIRECT])
@@ -246,3 +286,74 @@ def test_gql_requests_send_the_login_client_id():
     )
 
     assert headers[0]["Client-Id"] == ANDROID_CLIENT_ID
+
+
+def write_cookie(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "auth-token", "value": TOKEN},
+                {"name": "persistent", "value": "42"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("android", [True, False], ids=["android", "tv"])
+def test_saved_android_login_is_announced_without_the_token(
+    tmp_path, monkeypatch, caplog, android
+):
+    monkeypatch.chdir(tmp_path)
+    twitch = Twitch("someone", "agent", gql_factory=MagicMock(), android_login=android)
+    monkeypatch.setattr(Twitch, "update_client_version", lambda self: None)
+    write_cookie(tmp_path / "cookies" / Path(twitch.cookies_file).name)
+
+    with caplog.at_level(logging.INFO):
+        twitch.login()
+
+    announced = [r for r in caplog.records if "saved Android app login" in r.msg]
+    assert len(announced) == (1 if android else 0)
+    if android:
+        assert announced[0].default_color == ANDROID_LOGIN_COLOR
+        assert "someone-android.pkl" in announced[0].getMessage()
+    assert TOKEN not in caplog.text
+
+
+def test_startup_reports_the_android_login_after_loggers_are_ready(
+    tmp_path, monkeypatch, capsys
+):
+    # Logged before configure_loggers, the line had no handler and was lost.
+    monkeypatch.chdir(tmp_path)
+    miner_module = importlib.import_module(
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
+    )
+    root_logger = logging.getLogger()
+    existing_handlers = set(root_logger.handlers)
+    existing_level = root_logger.level
+    signals = (signal.SIGINT, signal.SIGSEGV, signal.SIGTERM)
+    existing_signal_handlers = {sign: signal.getsignal(sign) for sign in signals}
+
+    try:
+        miner = miner_module.TwitchChannelPointsMiner(
+            "someone",
+            android_login=True,
+            update_check=False,
+            logger_settings=LoggerSettings(save=False),
+        )
+        miner.queue_listener.stop()
+        for handler in miner.queue_listener.handlers:
+            handler.close()
+    finally:
+        # The miner configures the root logger and installs signal handlers;
+        # undo both so later tests see the defaults.
+        for handler in set(root_logger.handlers) - existing_handlers:
+            root_logger.removeHandler(handler)
+            handler.close()
+        root_logger.setLevel(existing_level)
+        for sign, handler in existing_signal_handlers.items():
+            signal.signal(sign, handler)
+
+    output = capsys.readouterr()
+    assert "Using the Android app login" in output.out + output.err

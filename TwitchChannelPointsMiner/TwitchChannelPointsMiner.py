@@ -51,6 +51,7 @@ from TwitchChannelPointsMiner.data_migration import (
     migrate_analytics_directory,
 )
 from TwitchChannelPointsMiner.logger import (
+    ANDROID_LOGIN_COLOR,
     LoggerSettings,
     LoggingFormat,
     configure_loggers,
@@ -572,11 +573,6 @@ class TwitchChannelPointsMiner:
             gql_factory = gql
         else:
             raise ValueError("gql must be None, AttemptStrategy, or GQLFactory")
-        if android_login:
-            logger.info(
-                "Using the Android app login (android_login=True)",
-                extra={"emoji": ":iphone:"},
-            )
         self.twitch = Twitch(
             self.username,
             user_agent,
@@ -698,6 +694,13 @@ class TwitchChannelPointsMiner:
 
         logger.info(f"Twitch Channel Points Miner - {__version__}")
         logger.info(GITHUB_REPOSITORY_URL)
+        if android_login:
+            # Logged here, not where android_login is read: until
+            # configure_loggers runs, messages have no handler and are lost.
+            logger.info(
+                "Using the Android app login (android_login=True)",
+                extra={"emoji": ":iphone:", "default_color": ANDROID_LOGIN_COLOR},
+            )
         self.__check_for_update()
 
         self._register_signal_handlers()
