@@ -85,6 +85,7 @@ class Events(Enum):
     DROP_STATUS = auto()
     DROP_LINK_REQUIRED = auto()
     CHAT_MENTION = auto()
+    GIFTED_SUB = auto()
     CONFIGURATION = auto()
     # The "Watching for points" status line; console and file logs only,
     # never sent to notifiers.
