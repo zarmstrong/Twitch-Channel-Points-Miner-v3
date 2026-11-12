@@ -66,6 +66,9 @@ class Supervisor:
         self.git = shutil.which("git")
         self.use_wrapper = WRAPPER.is_file()
         self.shutdown = False
+        # Set when an update changes supervisor/ itself: the running process
+        # still has the old code, so the loop exits and main() re-executes it.
+        self.restart_requested = False
         self.state = {
             "supervisorPid": os.getpid(),
             "supervisorStarted": iso(),
@@ -224,6 +227,12 @@ class Supervisor:
         self.set_update_result(
             f"Updated {old_head[:7]} -> {new_short} ({behind} commits)."
         )
+        if old_head != "?":
+            code, changed = self.git_cmd(
+                "diff", "--name-only", old_head, "HEAD", "--", "supervisor"
+            )
+            if code == 0 and changed.strip():
+                self.restart_requested = True
         pip_note = ""
         req_after = self.req_hash()
         if (
@@ -602,6 +611,13 @@ class Supervisor:
                 except Exception as e:
                     self.set_update_result(f"Update check error: {e}", "ERROR")
                 last_update = time.time()
+                if self.restart_requested:
+                    self.log(
+                        "The update changed the supervisor itself - restarting it "
+                        "to load the new code."
+                    )
+                    self.stop_miner("supervisor reload")
+                    return RESTART_SELF
 
             # Fresh run: clean up leftovers and reset per-run trackers.
             self.stop_miner("leftover before start")
@@ -736,6 +752,19 @@ class Supervisor:
         return 0
 
 
+# loop() returns this when the supervisor must re-execute itself.
+RESTART_SELF = 75
+
+
+def restart_self() -> None:
+    """Replace this process with a fresh supervisor using the same command.
+
+    On Linux and macOS the PID stays the same, so systemd and launchd keep
+    tracking it.
+    """
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+
 def acquire_lock(path: Path):
     """Single instance. Returns an open file holding the lock, or None if another supervisor runs."""
     f = open(path, "a+")
@@ -785,7 +814,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, sup.on_signal)
     signal.signal(signal.SIGINT, sup.on_signal)
     try:
-        return sup.loop()
+        result = sup.loop()
     except Exception as e:
         sup.log(f"Supervisor crashed: {e!r}", "ERROR")
         sup.state["minerState"] = "stopped"
@@ -799,6 +828,9 @@ def main() -> int:
         return 1
     finally:
         lock.close()
+    if result == RESTART_SELF:
+        restart_self()
+    return result
 
 
 if __name__ == "__main__":

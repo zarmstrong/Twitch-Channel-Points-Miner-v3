@@ -809,6 +809,9 @@ from the checkout, restarts it on crashes and on a daily schedule, applies
 `git` updates, and sends alerts. It reads `config/config.py` like every other
 run method. The Windows executable and Docker do not need it.
 
+When an update changes files in `supervisor/`, the supervisor restarts itself
+right after updating, so the new supervisor code runs without a manual restart.
+
 ```sh
 cd Twitch-Channel-Points-Miner-v3
 python3 supervisor/minerctl.py install   # checks config/config.py, creates .venv, registers the jobs

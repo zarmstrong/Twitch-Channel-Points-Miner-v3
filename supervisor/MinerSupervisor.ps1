@@ -206,6 +206,8 @@ $script:State = [ordered]@{
     crashes           = @()             # last 20: @{ time; exitCode; ranMinutes; commit }
 }
 
+$script:RestartSelf = $false   # set by Update-Miner when supervisor\ itself changed
+
 function Save-Status {
     $script:State.heartbeat = (Get-Date).ToString('o')
     try {
@@ -319,6 +321,9 @@ function Update-Miner {
     $newShort = Get-Commit -Short
     $script:State.version = $newShort
     Set-UpdateResult "Updated $($oldHead.Substring(0, 7)) -> $newShort ($behind commits)."
+    # This process still runs the old supervisor code; reload it when the update changed it.
+    $changed = Invoke-Native $Git @('-C', $MinerDir, 'diff', '--name-only', $oldHead, 'HEAD', '--', 'supervisor')
+    if ($changed.ExitCode -eq 0 -and $changed.Output) { $script:RestartSelf = $true }
 
     $reqAfter = if (Test-Path -LiteralPath $ReqFile) { (Get-FileHash -LiteralPath $ReqFile).Hash } else { '' }
     $pipNote = ''
@@ -543,6 +548,15 @@ try {
         if ($sinceUpdate.TotalHours -ge $UpdateHours -or ($crashed -and $sinceUpdate.TotalHours -ge 1)) {
             try { Update-Miner } catch { Set-UpdateResult "Update check error: $_" 'ERROR' }
             $lastUpdate = Get-Date
+            if ($script:RestartSelf) {
+                # Run the updated script in this same process, so Task Scheduler keeps
+                # tracking it and MinerTask.ps1 -Action Stop still stops it.
+                Write-Log 'The update changed the supervisor itself - reloading it to load the new code.'
+                Stop-Miner -Reason 'supervisor reload'
+                if ($haveMutex) { try { $mutex.ReleaseMutex() } catch { }; $haveMutex = $false }
+                & $PSCommandPath @PSBoundParameters
+                exit $LASTEXITCODE
+            }
         }
 
         # Fresh run: clean up leftovers and reset per-run trackers.

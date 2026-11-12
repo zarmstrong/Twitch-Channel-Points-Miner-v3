@@ -219,3 +219,67 @@ def test_backoff_stops_promptly_when_shutdown_is_requested(tmp_path, monkeypatch
     supervisor.sleep(900)
     assert len(sleeps) == 1
     assert sleeps[0] <= 2
+
+
+def _updating_supervisor(tmp_path, monkeypatch, changed):
+    supervisor = miner_supervisor.Supervisor(
+        SimpleNamespace(
+            miner_dir=tmp_path,
+            entry="config/config.py",
+            python=sys.executable,
+            branch="master",
+        )
+    )
+    supervisor.git = "git"
+    heads = iter(["a" * 40, "b" * 40])
+    monkeypatch.setattr(
+        supervisor,
+        "commit",
+        lambda rev="HEAD", short=False: (
+            "bbbbbbb" if short else ("c" * 40 if rev != "HEAD" else next(heads))
+        ),
+    )
+    replies = {"rev-list": "2", "diff": changed}
+    monkeypatch.setattr(supervisor, "git_cmd", lambda *a: (0, replies.get(a[0], "")))
+    monkeypatch.setattr(supervisor, "alert", lambda *a, **k: None)
+    return supervisor
+
+
+def test_update_that_changes_the_supervisor_requests_a_reload(tmp_path, monkeypatch):
+    supervisor = _updating_supervisor(
+        tmp_path, monkeypatch, "supervisor/miner_supervisor.py"
+    )
+
+    supervisor.update_miner()
+
+    assert supervisor.restart_requested
+
+
+def test_update_that_leaves_the_supervisor_alone_keeps_running(tmp_path, monkeypatch):
+    supervisor = _updating_supervisor(tmp_path, monkeypatch, "")
+
+    supervisor.update_miner()
+
+    assert not supervisor.restart_requested
+
+
+def test_main_reexecutes_the_supervisor_after_a_reload_request(monkeypatch):
+    lock = SimpleNamespace(closed=False)
+    lock.close = lambda: setattr(lock, "closed", True)
+    restarted = []
+    monkeypatch.setattr(sys, "argv", ["miner_supervisor.py"])
+    monkeypatch.setattr(miner_supervisor, "acquire_lock", lambda path: lock)
+    monkeypatch.setattr(miner_supervisor.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(
+        miner_supervisor.Supervisor,
+        "loop",
+        lambda self: miner_supervisor.RESTART_SELF,
+    )
+    monkeypatch.setattr(
+        miner_supervisor, "restart_self", lambda: restarted.append(lock.closed)
+    )
+
+    miner_supervisor.main()
+
+    # The lock is released first, so the new process can take it.
+    assert restarted == [True]
