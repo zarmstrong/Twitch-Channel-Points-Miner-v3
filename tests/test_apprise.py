@@ -47,6 +47,19 @@ def test_apprise_accepts_a_single_url_string():
     assert client.add.call_count == 1
 
 
+def test_apprise_title_can_name_the_event():
+    module, client = fake_apprise_module()
+    with patch.dict(sys.modules, {"apprise": module}):
+        notifier = Apprise(
+            "discord://123/abc", [Events.DROP_CLAIM], title="Miner: {event}"
+        )
+
+    assert notifier.send("Drop claimed", Events.DROP_CLAIM) == (True, None)
+    client.notify.assert_called_once_with(
+        title="Miner: DROP_CLAIM", body="Drop claimed"
+    )
+
+
 def test_apprise_ignores_events_not_selected():
     notifier, client = make_apprise(events=[Events.DROP_CLAIM])
 

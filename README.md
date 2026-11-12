@@ -1266,7 +1266,7 @@ notifier. Without it, the miner logs one warning and keeps running.
 |---|---|---|---|
 | `urls` | str or list | Required | One or more Apprise service URLs. |
 | `events` | list | Required | Events to send. |
-| `title` | str | `"Twitch Channel Points Miner"` | Notification title. |
+| `title` | str | `"Twitch Channel Points Miner"` | Notification title. `{event}` is replaced with the event name, such as `DROP_CLAIM`. |
 
 ```python
 from TwitchChannelPointsMiner.classes.Apprise import Apprise
@@ -1276,6 +1276,47 @@ Apprise(
     events=[Events.DROP_CLAIM, Events.STREAMER_OFFLINE],
 )
 ```
+
+###### Custom Discord embeds
+
+Apprise's `discord://` URL can send a custom embed instead of plain text. Point
+its `template` option at a JSON file that holds the full webhook payload.
+Apprise fills in the `{{...}}` tokens before sending.
+
+```json
+{
+  "username": "{{botname}}",
+  "avatar_url": "https://example.com/avatar.png",
+  "embeds": [{
+    "title": "{{app_title}}",
+    "description": "<:pog:123456789012345678> {{app_body}}",
+    "color": {{color}},
+    "thumbnail": {"url": "https://example.com/thumbnail.png"},
+    "footer": {"text": "Twitch Channel Points Miner"}
+  }]
+}
+```
+
+```python
+Apprise(
+    urls=[
+        "discord://WEBHOOK_ID/WEBHOOK_TOKEN"
+        "?template=/path/to/discord.json&:color=9520895&:botname=Points%20Miner"
+    ],
+    events=[Events.DROP_CLAIM, Events.STREAMER_ONLINE],
+    title="{event}",
+)
+```
+
+- `{{app_body}}` is the miner's message. `{{app_title}}` is the `title` value,
+  so `title="{event}"` puts the event name in the embed title.
+- Add your own tokens to the URL as `:name=value` and use them as `{{name}}`.
+  Above, `:color` sets the embed colour as a decimal number (`9520895` is
+  `#9146FF`) and `:botname` sets the webhook's display name.
+- Custom server emoji use Discord's `<:name:id>` syntax.
+- Every event uses the same template. Tested with Apprise 2.1.0; see the
+  [Apprise Discord wiki](https://github.com/caronc/apprise/wiki/Notify_discord)
+  for all options.
 
 ##### Matrix
 

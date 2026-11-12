@@ -22,6 +22,8 @@ class Apprise(object):
         )
 
     URL formats: https://github.com/caronc/apprise/wiki
+
+    `{event}` in `title` is replaced with the event name, such as DROP_CLAIM.
     """
 
     __slots__ = ["urls", "events", "title", "_client", "_reason"]
@@ -60,7 +62,8 @@ class Apprise(object):
         if self._client is None:
             return False, self._reason
         try:
-            delivered = self._client.notify(title=self.title, body=dedent(message))
+            title = self.title.replace("{event}", str(event))
+            delivered = self._client.notify(title=title, body=dedent(message))
         except Exception as error:
             # Only the type is kept: error text can quote the service URL.
             return False, f"Apprise raised {type(error).__name__}."
