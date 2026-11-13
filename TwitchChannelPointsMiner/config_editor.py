@@ -91,6 +91,19 @@ NOTIFICATION_REQUIRED = {
     "gotify": {"endpoint"},
     "ntfy": {"topic"},
 }
+# Every constructor argument without a default. Enabling a notifier without
+# one would write a call that raises TypeError, so the miner wouldn't start.
+# Unlike NOTIFICATION_REQUIRED, an empty events list counts as given here.
+NOTIFICATION_CONSTRUCTOR_REQUIRED = {
+    "telegram": {"chat_id", "token", "events"},
+    "discord": {"webhook_api", "events"},
+    "webhook": {"endpoint", "method", "events"},
+    "email": {"host", "port", "sender", "recipients", "events"},
+    "matrix": {"username", "password", "homeserver", "room_id", "events"},
+    "pushover": {"userkey", "token", "priority", "sound", "events"},
+    "gotify": {"endpoint", "priority", "events"},
+    "ntfy": {"topic", "events"},
+}
 # Constructor defaults the dashboard must show when a config omits the field.
 # The form renders a missing boolean as unchecked and saves every checkbox,
 # so re-saving an Email notifier would otherwise write starttls=False and
@@ -1346,7 +1359,16 @@ def _update_managed_web_config(config_path, payload):
                 for name in schema["secrets"]
                 if isinstance(values.get(name), str) and values[name]
             )
-            missing = sorted(NOTIFICATION_REQUIRED[provider] - available)
+            # An empty list is still an argument the constructor accepts.
+            given = available | {
+                name
+                for name, value in {**state["fields"], **values}.items()
+                if isinstance(value, list)
+            }
+            missing = sorted(
+                (NOTIFICATION_REQUIRED[provider] - available)
+                | (NOTIFICATION_CONSTRUCTOR_REQUIRED[provider] - given)
+            )
             if missing:
                 raise ConfigEditError(f"{provider} requires: {', '.join(missing)}.")
         _write_notification(config_path, provider, values)
