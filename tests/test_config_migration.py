@@ -1061,3 +1061,76 @@ def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
 
     assert migrate_config(config) is True
     assert "# newest" in config.read_text(encoding="utf-8")
+
+
+def test_migration_uses_utf8_byte_columns_for_non_ascii_before_edit():
+    source = """\
+CONFIG_VERSION = 10
+MINER_CONFIG = {"username": "é", "logger_settings": None}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 10
+    assert new_version == CONFIG_VERSION
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["username"] == "é"
+    assert "logger_settings" in namespace["MINER_CONFIG"]
+
+
+def test_migration_removes_password_after_non_ascii_text_on_same_line():
+    source = f"""\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{"username": "é", "password": "secret"}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == CONFIG_VERSION
+    assert new_version == CONFIG_VERSION
+    assert "password" not in migrated
+    assert namespace["MINER_CONFIG"] == {"username": "é"}
+
+
+def test_migration_counts_non_ascii_comment_on_multiline_dict_line():
+    source = """\
+# café \U0001f600
+CONFIG_VERSION = 9
+MINER_CONFIG = {"username": "é"}
+STREAMERS = []
+MINE_CONFIG = {
+    "drop_pick_stickiness_minutes": 15,  # éé
+}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 9
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINE_CONFIG"]["drop_pick_stickiness_minutes"] == 15
+    assert namespace["MINE_CONFIG"]["category_drops_override_streamers"] is False
+
+
+def test_migration_handles_form_feed_and_line_separator_in_comments():
+    source = '# form\x0cfeed and   separator\nCONFIG_VERSION = 9\n# vertical\x0btab\nMINER_CONFIG = {"username": "alice"}\nSTREAMERS = []\nMINE_CONFIG = {"drop_pick_stickiness_minutes": 15}\nANALYTICS_CONFIG = None\n'
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 9
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["username"] == "alice"
