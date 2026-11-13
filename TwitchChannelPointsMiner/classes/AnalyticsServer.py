@@ -764,6 +764,7 @@ class AnalyticsServer(Thread):
         username: str = None,
         password: str = None,
         log_poll_interval: int = 5,
+        logs_file: str = None,
     ):
         super(AnalyticsServer, self).__init__()
 
@@ -782,12 +783,20 @@ class AnalyticsServer(Thread):
         self.days_ago = days_ago
         self.username = username
         self.password = password
+        self.logs_file = logs_file
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
         if host not in {"127.0.0.1", "localhost", "::1"} and not password:
             raise ValueError("Analytics exposed beyond localhost requires a password")
 
         def generate_log():
+            if self.logs_file is None:
+                return Response(
+                    "File logging is disabled. Set save=True in logger_settings to see logs here.",
+                    status=404,
+                    mimetype="text/plain",
+                    headers={"X-Log-Unavailable": "disabled"},
+                )
             raw_position = request.args.get("lastIndex", "0")
             raw_tail_bytes = request.args.get("tailBytes")
             try:
@@ -806,8 +815,7 @@ class AnalyticsServer(Thread):
                 if tail_bytes <= 0 or tail_bytes > MAX_LOG_TAIL_BYTES:
                     return Response("Invalid log tail size.", status=400)
 
-            logs_path = os.path.join(Path().absolute(), "logs")
-            log_file_path = os.path.join(logs_path, f"{username}.log")
+            log_file_path = self.logs_file
             try:
                 file_size = os.path.getsize(log_file_path)
                 requested_position = (
