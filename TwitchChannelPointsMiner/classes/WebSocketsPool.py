@@ -252,6 +252,17 @@ class WebSocketsPool:
             # So the external ping check will be locked
             ws.is_reconnecting = True
 
+        # keep_running = False only stops run_forever() after its current
+        # read, which never returns on a half-open connection, leaking the
+        # thread. Close the socket too. Outside the lock: close() calls back
+        # into on_close, which lands here and returns at is_reconnecting.
+        close = getattr(ws, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception as error:
+                logger.debug(f"#{ws.index} - Closing the old WebSocket failed: {error}")
+
         if ws.forced_close is False:
             logger.info(
                 f"#{ws.index} - Reconnecting to Twitch PubSub server in ~60 seconds"

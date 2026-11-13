@@ -1,6 +1,7 @@
 import logging
 import socket
 import ssl
+import threading
 import types
 from unittest.mock import MagicMock, call
 
@@ -310,3 +311,44 @@ def test_thread_chat_run_passes_settings_to_client(monkeypatch):
     thread.run()
 
     assert created["kwargs"] == {"settings": sentinel}
+
+
+def test_thread_chat_is_a_daemon_thread():
+    assert ThreadChat("u", "t", "c").daemon is True
+
+
+def test_thread_chat_stopped_while_connecting_never_joins(monkeypatch):
+    # stop() used to do nothing while ClientIRC was still being created.
+    started = []
+    thread = ThreadChat("u", "t", "c")
+
+    class SlowClient:
+        def __init__(self, *_args, **_kwargs):
+            thread.stop()
+
+        def start(self):
+            started.append(True)
+
+    monkeypatch.setattr(Chat, "ClientIRC", SlowClient)
+
+    thread.run()
+
+    assert started == []
+    assert thread.chat_irc is None
+
+
+def test_client_irc_stopped_before_start_does_not_connect(monkeypatch):
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setenv("TCPM_ALLOW_PLAINTEXT_IRC", "1")
+    client = ClientIRC("someuser", "sometoken", "somechannel")
+    connects = []
+    monkeypatch.setattr(client, "_connect", lambda: connects.append(True))
+
+    client.die()
+    # In a thread: before the fix, start() looped forever after die().
+    runner = threading.Thread(target=client.start, daemon=True)
+    runner.start()
+    runner.join(timeout=5)
+
+    assert not runner.is_alive()
+    assert connects == []
