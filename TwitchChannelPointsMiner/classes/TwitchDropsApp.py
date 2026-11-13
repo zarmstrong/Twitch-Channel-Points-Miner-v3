@@ -29,10 +29,16 @@ def gist_url(env_var, default):
     value = (os.environ.get(env_var) or "").strip()
     if not value:
         return default
-    if urlparse(value).scheme not in ("http", "https"):
-        logger.warning(f"Ignoring {env_var}: not an http(s) URL; using the default")
-        return default
-    return value
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme in ("http", "https") and parsed.hostname:
+            # Validate the URL as requests will, without making a network call.
+            requests.PreparedRequest().prepare_url(value, None)
+            return value
+    except (ValueError, requests.RequestException):
+        pass
+    logger.warning(f"Ignoring {env_var}: not a valid http(s) URL; using the default")
+    return default
 
 
 def drops_gist_url():

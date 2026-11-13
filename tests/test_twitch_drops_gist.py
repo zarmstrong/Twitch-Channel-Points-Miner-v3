@@ -83,8 +83,15 @@ def test_gist_scraper_skips_non_object_game_entries():
         scraper.scrape("missing")
 
 
-def test_gist_scraper_reads_the_url_override(monkeypatch):
-    mirror = "https://example.com/mirror/twitch-drops.json"
+@pytest.mark.parametrize(
+    "mirror",
+    [
+        "https://example.com/mirror/twitch-drops.json",
+        "http://localhost:8080/twitch-drops.json",
+        "http://[::1]:8080/twitch-drops.json",
+    ],
+)
+def test_gist_scraper_reads_the_url_override(monkeypatch, mirror):
     monkeypatch.setenv(DROPS_GIST_URL_ENV_VAR, f"  {mirror}  ")
     session = FakeSession({"indexed_games": [], "games": []})
 
@@ -93,11 +100,27 @@ def test_gist_scraper_reads_the_url_override(monkeypatch):
     assert session.calls[0][0] == mirror
 
 
-@pytest.mark.parametrize("value", ["", "   ", "file:///etc/passwd", "not a url"])
-def test_gist_scraper_ignores_an_empty_or_non_http_override(monkeypatch, value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "   ",
+        "file:///etc/passwd",
+        "not a url",
+        "https:/example.com/twitch-drops.json",
+        "https://",
+        "https://[invalid",
+        "file://[invalid",
+        "https://example.com:invalid/twitch-drops.json",
+        "https://example.com:65536/twitch-drops.json",
+    ],
+)
+def test_gist_scraper_ignores_an_empty_or_invalid_override(monkeypatch, caplog, value):
     monkeypatch.setenv(DROPS_GIST_URL_ENV_VAR, value)
     session = FakeSession({"indexed_games": [], "games": []})
 
     TwitchDropsGistScraper(session=session).scrape_front_page()
 
     assert session.calls[0][0] == DROPS_GIST_URL
+    if value.strip():
+        assert f"Ignoring {DROPS_GIST_URL_ENV_VAR}" in caplog.text

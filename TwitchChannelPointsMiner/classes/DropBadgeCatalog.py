@@ -258,6 +258,9 @@ class DropBadgeCatalog:
         os.replace(temporary, self.path)
 
     def _badge_catalog_is_fresh(self):
+        source = gist_url(BADGES_GIST_URL_ENV_VAR, BADGES_GIST_URL)
+        if self.state["badge_catalog"].get("source") != source:
+            return False
         fetched_at = _parse_timestamp(self.state["badge_catalog"].get("fetched_at"))
         if fetched_at is None:
             return False
