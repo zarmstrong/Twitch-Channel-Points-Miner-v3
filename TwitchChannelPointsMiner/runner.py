@@ -5,6 +5,7 @@
 import argparse
 import hashlib
 import logging
+import math
 import os
 import shutil
 import sys
@@ -246,10 +247,26 @@ def _watch_config(path, miner, initial_config, interval):
             )
 
 
+def _config_reload_interval():
+    """Read TCPM_CONFIG_RELOAD_SECONDS: a finite number of seconds, at least 1."""
+    raw = os.environ.get("TCPM_CONFIG_RELOAD_SECONDS", "5")
+    try:
+        interval = float(raw)
+    except ValueError:
+        interval = math.nan
+    if not math.isfinite(interval):
+        raise SystemExit(
+            "TCPM_CONFIG_RELOAD_SECONDS must be a finite number of seconds, "
+            f"got {raw!r}"
+        )
+    return max(interval, 1)
+
+
 def run_config(config, path, on_miner_ready=None):
     from TwitchChannelPointsMiner import TwitchChannelPointsMiner
     from TwitchChannelPointsMiner.classes.Settings import Settings
 
+    interval = _config_reload_interval()
     config.MINE_CONFIG.setdefault("categories", [])
     Settings.config_path = str(path.parent.resolve())
     miner = TwitchChannelPointsMiner(**config.MINER_CONFIG)
@@ -260,7 +277,6 @@ def run_config(config, path, on_miner_ready=None):
         # shell, which can't rely on SIGINT/SIGTERM) reach this miner later
         # to request a graceful shutdown - see TwitchChannelPointsMiner.end().
         on_miner_ready(miner)
-    interval = max(float(os.environ.get("TCPM_CONFIG_RELOAD_SECONDS", "5")), 1)
     watcher = threading.Thread(
         target=_watch_config,
         args=(path, miner, config, interval),

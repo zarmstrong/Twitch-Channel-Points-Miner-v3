@@ -19,7 +19,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     StreamerSettings,
 )
 from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
-from TwitchChannelPointsMiner.runner import _load_config
+from TwitchChannelPointsMiner.runner import _config_reload_interval, _load_config
 
 
 def test_main_creates_default_config_for_fresh_install(tmp_path, monkeypatch, capsys):
@@ -640,3 +640,31 @@ def test_restart_process_relaunches_module_entrypoint(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "relaunched as restartpkg.entry"
+
+
+def test_config_reload_interval_defaults_to_five_seconds(monkeypatch):
+    monkeypatch.delenv("TCPM_CONFIG_RELOAD_SECONDS", raising=False)
+
+    assert _config_reload_interval() == 5.0
+
+
+def test_config_reload_interval_reads_seconds(monkeypatch):
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", "10")
+
+    assert _config_reload_interval() == 10.0
+
+
+def test_config_reload_interval_enforces_one_second_minimum(monkeypatch):
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", "0.2")
+
+    assert _config_reload_interval() == 1
+
+
+@pytest.mark.parametrize("value", ["5s", "nan", "inf", "-inf"])
+def test_config_reload_interval_rejects_non_finite_values(monkeypatch, value):
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", value)
+
+    with pytest.raises(SystemExit) as raised:
+        _config_reload_interval()
+
+    assert "TCPM_CONFIG_RELOAD_SECONDS" in str(raised.value)
