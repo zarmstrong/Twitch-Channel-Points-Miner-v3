@@ -1,5 +1,6 @@
 import copy
 import logging
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from TwitchChannelPointsMiner.classes.gql.Integration import GQL
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.constants import GQLOperations
 from TwitchChannelPointsMiner.utils import AttemptStrategy
+from test_twitch_drop_claim import bare_twitch, campaign_data
 
 
 class FakeResponse:
@@ -282,3 +284,169 @@ def test_claim_fallback_preserves_unlinked_account_guard(monkeypatch):
     assert twitch.unlinked_drop_report()[0]["url"] == link["url"]
     assert "instance-1" not in twitch.accepted_drop_claims
     assert len(calls) == 2
+
+
+def project_raw_query(query, data):
+    """Model field selection for these simple queries against a server fixture."""
+    # Remove operation variables and field arguments before reading selections.
+    query = re.sub(r"\([^)]*\)", "", query)
+    tokens = iter(re.findall(r"\w+|[{}]", query[query.index("{") :]))
+    assert next(tokens) == "{"
+
+    def selections():
+        fields = {}
+        for token in tokens:
+            if token == "}":
+                return fields
+            if token == "{":
+                fields[name] = selections()
+            else:
+                name = token
+                fields[name] = None
+        raise AssertionError("Unclosed query selection")
+
+    def project(value, fields):
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [project(item, fields) for item in value]
+        return {
+            key: project(value[key], nested) if nested else copy.deepcopy(value[key])
+            for key, nested in fields.items()
+        }
+
+    return project(data, selections())
+
+
+def subscription_campaign():
+    campaign = campaign_data()
+    campaign["game"] = {
+        "id": "game-1",
+        "name": "Example Game",
+        "displayName": "Example Game",
+        "slug": "example-game",
+    }
+    campaign["timeBasedDrops"][0]["requiredSubs"] = 1
+    campaign["timeBasedDrops"][0]["benefitEdges"][0]["benefit"]["id"] = "reward-1"
+    return campaign
+
+
+def campaign_details_post(campaign, calls):
+    def post(url, json, headers):
+        calls.append(copy.deepcopy(json))
+        if "query" not in json[0]:
+            return FakeResponse([persisted_not_found()])
+        data = {"user": {"id": "1", "dropCampaign": campaign}}
+        return FakeResponse(
+            [{"data": project_raw_query(request["query"], data)} for request in json]
+        )
+
+    return post
+
+
+@pytest.mark.parametrize("raw_data", [False, True])
+def test_campaign_details_fallback_preserves_parser_fields(raw_data):
+    calls = []
+    gql = GQL(
+        client_session(),
+        post_request=campaign_details_post(subscription_campaign(), calls),
+        attempt_strategy=AttemptStrategy(attempts=1, attempt_interval_seconds=0),
+    )
+
+    for _ in range(2):
+        if raw_data:
+            campaign = gql.get_drop_campaign_data(["campaign-1"])[0]
+            assert campaign["game"]["slug"] == "example-game"
+            assert campaign["timeBasedDrops"][0]["requiredSubs"] == 1
+        else:
+            campaign = gql.get_drop_campaign_details(["campaign-1"])[0].campaign
+            assert campaign.game.slug == "example-game"
+            assert campaign.time_based_drops[0].required_subs == 1
+
+    assert len(calls) == 3
+    assert "extensions" in calls[0][0]
+    assert all("extensions" not in call[0] for call in calls[1:])
+
+
+def test_campaign_details_fallback_keeps_subscription_gated_drops_ineligible(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    twitch.twitch_login = client_session().login
+    twitch.campaign_details_withheld_streak = 0
+    campaign = subscription_campaign()
+    twitch.gql = GQL(client_session(), post_request=campaign_details_post(campaign, []))
+
+    def deadline(data):
+        return twitch._Twitch__active_incomplete_drop_deadline(
+            data, set(), set(), set(), log_status=False
+        )
+
+    assert deadline(campaign) is None
+    loaded = twitch._Twitch__get_campaigns_details([{"id": "campaign-1"}])
+
+    assert len(loaded) == 1
+    assert deadline(loaded[0]) is None
+
+
+def test_inventory_fallback_preserves_completed_campaigns_and_awarded_rewards():
+    calls = []
+    inventory = {
+        "dropCampaignsInProgress": [],
+        "completedRewardCampaigns": [
+            {
+                "id": "completed-1",
+                "name": "Completed campaign",
+                "startsAt": "2020-01-01T00:00:00Z",
+                "endsAt": "2099-01-01T00:00:00Z",
+                "status": "ACTIVE",
+                "game": {
+                    "id": "game-1",
+                    "slug": "example-game",
+                    "displayName": "Example Game",
+                },
+            }
+        ],
+        "gameEventDrops": [
+            {
+                "id": "reward-1",
+                "name": "Reward",
+                "imageURL": "https://example.test/reward.png",
+                "lastAwardedAt": "2026-01-01T00:00:00Z",
+            }
+        ],
+    }
+
+    def post(url, json, headers):
+        calls.append(copy.deepcopy(json))
+        if "query" not in json:
+            return FakeResponse(persisted_not_found())
+        data = {"currentUser": {"inventory": inventory}}
+        return FakeResponse({"data": project_raw_query(json["query"], data)})
+
+    gql = GQL(client_session(), post_request=post)
+    # A fresh session must retain completion evidence without relying on a cache.
+    twitch = object.__new__(Twitch)
+    twitch.awarded_game_event_drops = {}
+    expected_signatures = twitch.completed_badge_campaign_signatures_or_cached(
+        inventory
+    )
+    assert expected_signatures
+
+    for _ in range(2):
+        result = gql.get_inventory().inventory
+        assert result == inventory
+        assert (
+            twitch.completed_badge_campaign_signatures_or_cached(result)
+            == expected_signatures
+        )
+        assert twitch._Twitch__completed_campaign_ids_from_inventory(result) == {
+            "completed-1"
+        }
+        benefit_ids, fingerprints = twitch._Twitch__awarded_benefits(result)
+        assert benefit_ids == {"reward-1"}
+        assert ("reward", "https://example.test/reward.png") in fingerprints
+
+    assert len(calls) == 3
+    assert "extensions" in calls[0]
+    assert all("extensions" not in call for call in calls[1:])
