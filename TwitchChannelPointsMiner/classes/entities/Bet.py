@@ -344,14 +344,16 @@ class Bet(object):
                 int(balance * (self.settings.percentage / 100)),
                 self.settings.max_points,
             )
+            top_points = self.outcomes[index][OutcomeKeys.TOP_POINTS]
+            # Stealth keeps the bet under the current top bettor. With no top
+            # bettor yet (TOP_POINTS is 0), there is nobody to stay under, so
+            # the amount is left as is instead of going negative.
             if (
                 self.settings.stealth_mode is True
-                and self.decision["amount"]
-                >= self.outcomes[index][OutcomeKeys.TOP_POINTS]
+                and top_points > 0
+                and self.decision["amount"] >= top_points
             ):
                 reduce_amount = uniform(1, 5)
-                self.decision["amount"] = (
-                    self.outcomes[index][OutcomeKeys.TOP_POINTS] - reduce_amount
-                )
+                self.decision["amount"] = max(top_points - reduce_amount, 0)
             self.decision["amount"] = int(self.decision["amount"])
         return self.decision
