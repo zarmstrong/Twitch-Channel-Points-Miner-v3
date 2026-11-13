@@ -152,6 +152,62 @@ def test_installed_service_preserves_the_selected_miner_python(
     assert supervisor.python == selected_python
 
 
+def test_systemd_reinstall_applies_updated_commands_and_timer_schedules(
+    tmp_path, monkeypatch
+):
+    service = minerctl.Systemd()
+    monkeypatch.setattr(service, "unit_dir", tmp_path / "units")
+    loaded = {}
+    running = {}
+    enabled = set()
+
+    def ctl(*args, **kwargs):
+        if args[0] == "daemon-reload":
+            loaded.update(
+                (unit.name, unit.read_text(encoding="utf-8"))
+                for unit in service.unit_dir.iterdir()
+            )
+        elif args[0] == "enable":
+            units = [arg for arg in args[1:] if not arg.startswith("--")]
+            enabled.update(units)
+            if "--now" in args:
+                # Starting an active unit leaves its process/timer unchanged.
+                for unit in units:
+                    running.setdefault(unit, loaded[unit])
+        elif args[0] == "restart":
+            for unit in args[1:]:
+                running[unit] = loaded[unit]
+
+    monkeypatch.setattr(service, "ctl", ctl)
+    monkeypatch.setattr(
+        minerctl.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+    first_python = str(tmp_path / "first env/bin/python")
+    first_checkout = tmp_path / "first checkout"
+    service.install(first_python, first_checkout, 30, "08:57", 24)
+
+    expected_units = {
+        service.sup,
+        f"{service.health}.timer",
+        f"{service.summary}.timer",
+    }
+    assert enabled == expected_units
+    assert set(running) == expected_units
+    assert first_python in running[service.sup]
+    assert str(first_checkout) in running[service.sup]
+
+    second_python = str(tmp_path / "second env/bin/python")
+    second_checkout = tmp_path / "second checkout"
+    service.install(second_python, second_checkout, 10, "12:34", 48)
+
+    assert second_python in running[service.sup]
+    assert str(second_checkout) in running[service.sup]
+    assert "OnUnitActiveSec=10min" in running[f"{service.health}.timer"]
+    assert "OnCalendar=*-*-* 12:34:00" in running[f"{service.summary}.timer"]
+
+
 def test_crash_backoff_keeps_supervisor_heartbeat_fresh(tmp_path, monkeypatch):
     elapsed = [0.0]
     epoch = datetime(2026, 11, 12, tzinfo=timezone.utc)
