@@ -1061,3 +1061,49 @@ def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
 
     assert migrate_config(config) is True
     assert "# newest" in config.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
+def test_migration_keeps_platform_dependent_emoji_default(
+    monkeypatch, system, expected
+):
+    source = """\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    monkeypatch.setattr("platform.system", lambda: system)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert 'emoji=platform.system() != "Windows"' in migrated
+    assert migrated.count("import platform") == 1
+    assert namespace["LOGGER"].emoji is expected
+
+
+def test_migration_keeps_explicit_emoji_and_existing_platform_import():
+    source = """\
+CONFIG_VERSION = 2
+import platform
+from TwitchChannelPointsMiner.logger import LoggerSettings
+FIRST = LoggerSettings(emoji=True)
+SECOND = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": FIRST}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert migrated.count("import platform") == 1
+    assert "LoggerSettings(emoji=True" in migrated
+    assert namespace["FIRST"].emoji is True

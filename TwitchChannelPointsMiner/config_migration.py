@@ -37,7 +37,8 @@ LOGGER_SETTINGS_DEFAULTS = (
     ("date_format", '"dd/mm/yy"'),
     ("file_format", '"text"'),
     ("file_level", "logging.DEBUG"),
-    ("emoji", "True"),
+    # The runtime default: emoji stay off on Windows consoles.
+    ("emoji", 'platform.system() != "Windows"'),
     ("colored", "False"),
     ("color_palette", "ColorPalette()"),
     ("auto_clear", "True"),
@@ -553,6 +554,12 @@ def migrate_config_source(source, source_name="config.py"):
                 and "import logging" not in required_imports
             ):
                 required_imports.append("import logging")
+            if (
+                any(item.startswith("emoji=") for item in missing)
+                and not _name_is_defined(tree, "platform")
+                and "import platform" not in required_imports
+            ):
+                required_imports.append("import platform")
             color_palette_import = (
                 "from TwitchChannelPointsMiner.logger import ColorPalette"
             )
