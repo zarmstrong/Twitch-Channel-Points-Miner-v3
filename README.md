@@ -212,6 +212,9 @@ Edit `config/config.py`, then start the stable runner:
 python -m TwitchChannelPointsMiner.runner --config-dir ./config
 ```
 
+For unattended source checkouts, see the
+[optional supervisor](docs/configuration.md#supervisor-optional).
+
 For every method, keep the populated configuration private: never commit or
 share account names, passwords, webhook URLs, or notification credentials.
 Portainer is a Docker deployment. The [Termux](docs/other-platforms.md#termux) instructions are
@@ -257,6 +260,7 @@ categories, and analytics.
 | Guide | Covers |
 | :-- | :-- |
 | [Configuration](docs/configuration.md) | `MINER_CONFIG`, `STREAMERS`, `MINE_CONFIG`, `ANALYTICS_CONFIG`, runner behavior and live reloads |
+| [Supervisor](docs/configuration.md#supervisor-optional) | Optional source-checkout supervision, installation, health checks and alerts |
 | [Category-based Drops](docs/categories-and-drops.md) | Category discovery, campaign filtering, wildcard fallback, examples and troubleshooting |
 | [Settings](docs/settings.md) | Android login, `LoggerSettings`, color palette, `StreamerSettings` |
 | [Notifications](docs/notifications.md) | Telegram, Discord, webhook, ntfy, Apprise, Matrix, Pushover, Gotify, email, events |
