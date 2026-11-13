@@ -155,7 +155,15 @@ class Systemd:
         self.ctl("daemon-reload", check=True)
         self.ctl(
             "enable",
-            "--now",
+            self.sup,
+            f"{self.health}.timer",
+            f"{self.summary}.timer",
+            check=True,
+        )
+        # Starting an active unit leaves its old command or schedule running.
+        # Restart also starts inactive units, so first installation works too.
+        self.ctl(
+            "restart",
             self.sup,
             f"{self.health}.timer",
             f"{self.summary}.timer",
