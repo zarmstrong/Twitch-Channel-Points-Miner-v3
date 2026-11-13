@@ -52,6 +52,7 @@ class FakeTwitch:
         self.unevaluated_category_slugs = set()
         self.twitch_login = SimpleNamespace(
             get_auth_token=lambda: "token",
+            get_user_id=lambda: "viewer-1",
         )
         self.completed_badge_campaign_signature_cache = None
 
@@ -965,7 +966,7 @@ def test_category_refresh_adds_replacements_before_retiring_stale_streamers():
     miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
 
     miner.category_lookup_failure_streaks = {}
-    stale = Streamer("stale", from_category=True)
+    stale = Streamer("stale", settings=defaults, from_category=True)
     miner.username = "testuser"
     miner.streamers = [stale]
     miner.original_streamers = [10]
