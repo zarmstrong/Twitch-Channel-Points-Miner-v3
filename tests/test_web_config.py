@@ -1994,3 +1994,158 @@ def test_insert_config_item_refuses_to_write_unparseable_config(tmp_path, monkey
         config_editor._set_dict_items(config, "VALUES", {"c": "3"})
 
     assert config.read_text(encoding="utf-8") == original
+
+
+COMMENTED_STREAMERS = """\
+STREAMERS = [
+    # Favourites first.
+    Streamer("one", settings=StreamerSettings(favorite=True)),  # main channel
+    "two",  # second
+    # Weekend streams.
+    "three",
+    EXTRA_STREAMER,
+]
+"""
+
+
+def write_commented_config(path, streamers=COMMENTED_STREAMERS):
+    write_config(path)
+    source = path.read_text(encoding="utf-8")
+    source = source.replace(
+        'STREAMERS = [Streamer("one", settings=StreamerSettings(favorite=True)), "two"]\n',
+        'EXTRA_STREAMER = "extra"\n' + streamers,
+    )
+    path.write_text(source, encoding="utf-8")
+
+
+def _usernames(config):
+    return [
+        getattr(streamer, "username", streamer)
+        for streamer in _load_config(config).STREAMERS
+    ]
+
+
+def test_streamer_edits_keep_comments_and_unmanaged_entries(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config)
+
+    update_managed_web_config(
+        config, {"action": "add", "kind": "streamers", "value": "four"}
+    )
+    update_managed_web_config(
+        config,
+        {"action": "reorder_streamers", "usernames": ["three", "one", "two", "four"]},
+    )
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": "two"}
+    )
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "three",
+            "settings": {"chat": "NEVER"},
+        },
+    )
+
+    source = config.read_text(encoding="utf-8")
+    for comment in ("# Favourites first.", "# main channel", "# Weekend streams."):
+        assert comment in source
+    assert "EXTRA_STREAMER," in source
+    # A comment after an entry on its line moves with the entry.
+    assert (
+        'Streamer("one", settings=StreamerSettings(favorite=True)),  # main channel'
+        in source
+    )
+    assert '    "four",\n]' in source
+    assert _usernames(config) == ["three", "one", "extra", "four"]
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].settings.chat is ChatPresence.NEVER
+    assert loaded.STREAMERS[1].settings.favorite is True
+
+
+def test_update_streamer_writes_only_changed_settings(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "two",
+            "settings": {"favorite": True},
+        },
+    )
+
+    assert (
+        'STREAMERS = [Streamer("one", settings=StreamerSettings(favorite=True)), '
+        'Streamer("two", settings=StreamerSettings(favorite=True))]'
+    ) in config.read_text(encoding="utf-8")
+
+
+def test_update_streamer_edits_positional_settings_without_duplicating(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [Streamer("one", StreamerSettings(favorite=True)), "two"]\n',
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "ALWAYS"},
+        },
+    )
+
+    assert "settings=" not in config.read_text(encoding="utf-8").split("STREAMERS")[1]
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].settings.favorite is True
+    assert loaded.STREAMERS[0].settings.chat is ChatPresence.ALWAYS
+
+
+def test_update_streamer_refuses_settings_defined_elsewhere(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings(favorite=True, make_predictions=False)\n"
+        'STREAMERS = [Streamer("one", settings=ONE_SETTINGS), "two"]\n',
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit them in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"chat": "NEVER"},
+            },
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "streamers, removed, expected",
+    [
+        ('STREAMERS = ["one", "two", "three"]\n', "one", ["two", "three"]),
+        ('STREAMERS = ["one", "two", "three"]\n', "two", ["one", "three"]),
+        ('STREAMERS = ["one", "two", "three"]\n', "three", ["one", "two"]),
+        ('STREAMERS = ["one",]\n', "one", []),
+        ('STREAMERS = [\n    "one",\n    "two",\n]\n', "two", ["one"]),
+        ('STREAMERS = [\n    "one",\n    "two",\n]\n', "one", ["two"]),
+    ],
+)
+def test_removing_streamers_keeps_the_list_valid(
+    tmp_path, streamers, removed, expected
+):
+    config = tmp_path / "config.py"
+    write_commented_config(config, streamers)
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": removed}
+    )
+
+    assert _usernames(config) == expected
