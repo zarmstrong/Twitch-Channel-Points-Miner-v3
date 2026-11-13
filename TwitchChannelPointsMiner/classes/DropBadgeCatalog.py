@@ -11,6 +11,7 @@ import requests
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import (
     TwitchDropsAppScraper,
     check_gist_version,
+    gist_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ BADGES_GIST_URL = (
     "https://gist.githubusercontent.com/zarmstrong/"
     "d4fc5f87e2a5258a28421f7fdb8037d6/raw/twitch-badges.json"
 )
+BADGES_GIST_URL_ENV_VAR = "TCPM_BADGES_GIST_URL"
 
 
 def _now():
@@ -257,6 +259,9 @@ class DropBadgeCatalog:
         os.replace(temporary, self.path)
 
     def _badge_catalog_is_fresh(self):
+        source = gist_url(BADGES_GIST_URL_ENV_VAR, BADGES_GIST_URL)
+        if self.state["badge_catalog"].get("source") != source:
+            return False
         fetched_at = _parse_timestamp(self.state["badge_catalog"].get("fetched_at"))
         if fetched_at is None:
             return False
@@ -264,8 +269,9 @@ class DropBadgeCatalog:
         return age < self.badge_refresh_hours * 3600
 
     def _fetch_badges(self):
+        url = gist_url(BADGES_GIST_URL_ENV_VAR, BADGES_GIST_URL)
         response = self.session.get(
-            BADGES_GIST_URL,
+            url,
             headers={
                 "Accept": "application/json",
                 "User-Agent": "TwitchDropsMiner/1.0",
@@ -282,7 +288,7 @@ class DropBadgeCatalog:
             raise ValueError("Twitch badge gist did not contain sets")
         self.state["badge_catalog"] = {
             "fetched_at": _iso_now(),
-            "source": BADGES_GIST_URL,
+            "source": url,
             "sets": badge_sets,
         }
         self._save()

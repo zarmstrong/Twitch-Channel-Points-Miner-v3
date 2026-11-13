@@ -197,6 +197,15 @@ classifications, and historical campaign records are stored in
 marked `BADGE`; unmatched rewards remain `UNKNOWN` rather than being assumed not
 to be badges.
 
+Both gists are published by
+[Twitch-Channel-Points-Miner-v3-Scraper](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3-Scraper).
+To use your own scraper instance or a mirror, set `TCPM_DROPS_GIST_URL` and
+`TCPM_BADGES_GIST_URL` to the raw JSON URLs in your shell or Docker environment.
+The defaults remain the shared gists. Leading and trailing spaces are trimmed;
+empty values use the defaults, and invalid or non-HTTP(S) URLs are ignored with
+a warning. Changing the badge URL refreshes the cached badge catalog on its next
+check, even if the old cache has not expired.
+
 Set `auto_mine_badge_drops=True` to use that catalog to add eligible live
 channels automatically. The feature only considers active watch-time campaigns,
 skips badges already available to the authenticated account, honors `blacklist`,

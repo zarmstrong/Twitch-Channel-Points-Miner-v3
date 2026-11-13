@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
+    BADGES_GIST_URL,
+    BADGES_GIST_URL_ENV_VAR,
     DropBadgeCatalog,
     badge_match_reason,
     flatten_badges,
@@ -121,6 +123,85 @@ def test_fetch_badges_rejects_non_object_json(tmp_path):
 
     with pytest.raises(ValueError, match="did not contain a JSON object"):
         catalog._fetch_badges()
+
+
+class RecordingSession(FakeSession):
+    def get(self, url, **kwargs):
+        self.url = url
+        return super().get(url, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (
+            "https://example.com/twitch-badges.json",
+            "https://example.com/twitch-badges.json",
+        ),
+        ("", BADGES_GIST_URL),
+        ("ftp://example.com/twitch-badges.json", BADGES_GIST_URL),
+        ("https:/example.com/twitch-badges.json", BADGES_GIST_URL),
+        ("https://[invalid", BADGES_GIST_URL),
+    ],
+)
+def test_fetch_badges_uses_the_url_override(tmp_path, monkeypatch, value, expected):
+    monkeypatch.setenv(BADGES_GIST_URL_ENV_VAR, value)
+    session = RecordingSession()
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(), tmp_path, scraper=FakeScraper(), session=session
+    )
+
+    catalog._fetch_badges()
+
+    assert session.url == expected
+    assert catalog.state["badge_catalog"]["source"] == expected
+
+
+@pytest.mark.parametrize(
+    "initial, replacement",
+    [
+        ("", "https://example.com/twitch-badges.json"),
+        ("https://example.com/first.json", "https://example.com/second.json"),
+        ("https://example.com/twitch-badges.json", ""),
+    ],
+)
+def test_sync_refreshes_badges_when_source_changes_after_restart(
+    tmp_path, monkeypatch, initial, replacement
+):
+    monkeypatch.setenv(BADGES_GIST_URL_ENV_VAR, initial)
+    original_session = RecordingSession({"sets": [{"set_id": "old", "versions": []}]})
+    original = DropBadgeCatalog(
+        SimpleNamespace(), tmp_path, scraper=FakeScraper(), session=original_session
+    )
+    original.sync()
+    assert (
+        original.state["games"]["example"]["report"]["drops"][0][
+            "badge_classification"
+        ]["status"]
+        == "UNKNOWN"
+    )
+
+    monkeypatch.setenv(BADGES_GIST_URL_ENV_VAR, replacement)
+    session = RecordingSession()
+    scraper = FakeScraper()
+    restarted = DropBadgeCatalog(
+        SimpleNamespace(), tmp_path, scraper=scraper, session=session
+    )
+    restarted.sync()
+
+    assert session.calls == 1
+    assert session.url == (replacement or BADGES_GIST_URL)
+    assert restarted.state["badge_catalog"]["source"] == session.url
+    assert scraper.scrape_calls == 0
+    assert (
+        restarted.state["games"]["example"]["report"]["drops"][0][
+            "badge_classification"
+        ]["status"]
+        == "BADGE"
+    )
+    monkeypatch.setenv(BADGES_GIST_URL_ENV_VAR, f"  {session.url}  ")
+    restarted.sync()
+    assert session.calls == 1
 
 
 def test_fetch_badges_rejects_an_unsupported_gist_version(tmp_path):
