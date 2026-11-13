@@ -308,6 +308,15 @@ class WebSocketsPool:
             ws.last_message_timestamp = message.timestamp
             ws.last_message_type_channel = message.identifier
 
+            # user-drop-events are per user: channel_id may be a channel we don't
+            # track, so handle them before the streamer lookup.
+            if message.topic == "user-drop-events":
+                if message.type == "drop-claim":
+                    ws.twitch.claim_drops_from_event(message.data)
+                elif message.type == "drop-progress":
+                    logger.debug(f"Drop progress: {message.data}")
+                return
+
             # Resolve the streamer once: the list can shrink or reorder while
             # this message is handled, so never index into it again below.
             streamer = get_streamer(ws.streamers, message.channel_id)

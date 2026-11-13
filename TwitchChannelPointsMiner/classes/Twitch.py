@@ -9489,6 +9489,41 @@ class Twitch(object):
                                 "waiting for inventory completion confirmation"
                             )
 
+    def claim_drops_from_event(self, data):
+        """Handles a PubSub user-drop-events 'drop-claim' message: a drop just became
+        claimable, so sweep the inventory now instead of waiting for the next sync.
+        Runs the sweep on a background thread; the websocket thread never blocks."""
+        if not isinstance(data, dict):
+            return
+        logger.debug(f"PubSub drop-claim received: {data}")
+        if not data.get("drop_instance_id"):
+            return
+        Thread(
+            target=self.__claim_drops_from_event_worker,
+            name="Drop claim (PubSub)",
+            daemon=True,
+        ).start()
+
+    def __claim_drops_from_event_worker(self):
+        # Give the inventory a moment to reflect the new dropInstanceID
+        time.sleep(random.uniform(2, 5))
+        # A running pass may hold an inventory that predates this drop: wait for
+        # it to finish, then run our own sweep rather than dropping the event.
+        if not self.prompt_claim_pass_lock.acquire(timeout=300):
+            logger.warning(
+                "Drop claim after PubSub event timed out waiting for a running claim pass"
+            )
+            return
+        try:
+            self.claim_all_drops_from_inventory()
+        except Exception:
+            logger.error(
+                "Claim after PubSub drop-claim event failed; the sync cycle will retry",
+                exc_info=True,
+            )
+        finally:
+            self.prompt_claim_pass_lock.release()
+
     def __claim_completed_drop_promptly(self, drop, campaign):
         # A drop that just reached 100% needs no more watch time, but waiting
         # for the next sync cycle (up to 30 minutes) delays the claim and keeps

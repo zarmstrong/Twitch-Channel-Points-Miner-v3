@@ -358,7 +358,9 @@ class FakeTwitch:
         self.filter_calls = []
         self.inventory_fetch_count = 0
         self.selectors = []
-        self.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
+        self.twitch_login = SimpleNamespace(
+            get_auth_token=lambda: "token", get_user_id=lambda: "viewer-1"
+        )
         self.discovered_open_drop_campaigns = None
         self.unevaluated_category_slugs = set()
 
@@ -422,6 +424,24 @@ def _bare_miner(twitch):
     miner.config_reload_lock = threading.Lock()
     miner.sync_campaigns_thread = object()
     return miner
+
+
+@pytest.mark.parametrize("wildcard", [False, True])
+@pytest.mark.parametrize("claim_drops", [False, True])
+def test_category_addition_subscribes_to_user_drop_events(wildcard, claim_drops):
+    miner = _bare_miner(FakeTwitch(eligible_categories=[], wildcard_categories=[]))
+    Settings.streamer_settings.claim_drops = claim_drops
+    miner._TwitchChannelPointsMiner__subscribe_user_drop_events()
+    assert miner.ws_pool.topics == []
+
+    added = miner._TwitchChannelPointsMiner__add_discovered_category_streamers(
+        ["new-channel"], [], ChatPresence.NEVER, wildcard=wildcard
+    )
+
+    assert added == 1
+    assert miner.streamers[0].settings.claim_drops is claim_drops
+    topics = [str(topic) for topic in miner.ws_pool.topics]
+    assert ("user-drop-events.viewer-1" in topics) is claim_drops
 
 
 def test_wildcard_discovery_only_runs_when_preferred_pass_finds_a_streamer():
@@ -494,7 +514,7 @@ def test_standdown_does_not_retire_existing_wildcard_streamer_in_unrelated_game(
     # re-evaluated this cycle.
     twitch = FakeTwitch(eligible_categories=["gameA"], wildcard_categories=[])
     miner = _bare_miner(twitch)
-    gamex = Streamer("gamex-streamer", from_category=True, from_wildcard_category=True)
+    gamex = _tracked("gamex-streamer", wildcard=True)
     gamex.is_online = True
     gamex.stream.game = {"name": "GameX", "displayName": "GameX"}
     gamex.irc_chat = FakeIrcChat()
@@ -535,7 +555,7 @@ def test_real_wildcard_discovery_still_retires_genuinely_closed_streamer():
     # all -- gameX must still be retired in this case.
     twitch = FakeTwitch(eligible_categories=[], wildcard_categories=["still-open-game"])
     miner = _bare_miner(twitch)
-    gamex = Streamer("gamex-streamer", from_category=True, from_wildcard_category=True)
+    gamex = _tracked("gamex-streamer", wildcard=True)
     gamex.is_online = True
     gamex.stream.game = {"name": "GameX", "displayName": "GameX"}
     gamex.irc_chat = FakeIrcChat()
@@ -752,9 +772,7 @@ def test_refresh_skips_inventory_fetch_when_drops_disabled():
 def test_wildcard_disabled_retires_previously_discovered_wildcard_streamers():
     twitch = FakeTwitch(eligible_categories=["preferred-game"], wildcard_categories=[])
     miner = _bare_miner(twitch)
-    stale_wildcard = Streamer(
-        "stale-wild", from_category=True, from_wildcard_category=True
-    )
+    stale_wildcard = _tracked("stale-wild", wildcard=True)
     miner.streamers = [stale_wildcard]
     miner.original_streamers = [10]
 
@@ -885,7 +903,12 @@ def _refresh(miner, categories, wildcard_categories=False, count_failures=True):
 
 
 def _tracked(username, wildcard=False):
-    streamer = Streamer(username, from_category=True, from_wildcard_category=wildcard)
+    streamer = Streamer(
+        username,
+        settings=StreamerSettings(claim_drops=True),
+        from_category=True,
+        from_wildcard_category=wildcard,
+    )
     streamer.irc_chat = FakeIrcChat()
     return streamer
 
