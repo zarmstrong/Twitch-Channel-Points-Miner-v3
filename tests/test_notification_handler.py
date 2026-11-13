@@ -43,6 +43,8 @@ def _configured(settings, username="test-user"):
         yield listener
     finally:
         listener.stop()
+        for handler in listener.handlers:
+            handler.close()
         for handler in set(root_logger.handlers) - existing_handlers:
             root_logger.removeHandler(handler)
             handler.close()

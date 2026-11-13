@@ -16,6 +16,7 @@ from TwitchChannelPointsMiner.classes.Twitch import (
     CHANNEL_QUERY_FAILURE_LIMIT,
     Twitch,
 )
+from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 from TwitchChannelPointsMiner.constants import ANDROID_CLIENT_ID, CLIENT_ID
 
 
@@ -693,7 +694,7 @@ def test_answered_channel_query_excludes_completed_fallback_campaign(monkeypatch
 
 
 def test_answered_channel_query_excludes_fallback_after_game_deadline(monkeypatch):
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     twitch = per_streamer_campaigns_twitch(
         monkeypatch,
@@ -703,7 +704,7 @@ def test_answered_channel_query_excludes_fallback_after_game_deadline(monkeypatc
         {"id": "sword", "name": "Sword", "channels": ["drops-channel"]}
     )
     twitch.category_campaign_deadlines = {
-        "example-game": datetime.utcnow() - timedelta(minutes=1)
+        "example-game": utc_now() - timedelta(minutes=1)
     }
 
     twitch._Twitch__get_campaign_ids_from_streamer(category_streamer())
@@ -717,7 +718,7 @@ def test_answered_channel_query_excludes_fallback_after_game_deadline(monkeypatc
 def fallback_twitch_with_full_campaign(monkeypatch, minutes_left):
     # The gist summary carries no drops, but Twitch already returned the full
     # campaign to another channel's query.
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     twitch = per_streamer_campaigns_twitch(
         monkeypatch,
@@ -727,7 +728,7 @@ def fallback_twitch_with_full_campaign(monkeypatch, minutes_left):
     twitch.twitchdrops_app_campaigns["example-game"].append(
         {"id": "gist-open", "name": "General Drops", "channels": []}
     )
-    now = datetime.utcnow()
+    now = utc_now()
     twitch.advertised_drop_campaigns["gist-open"] = {
         "id": "gist-open",
         "name": "General Drops",
@@ -1851,11 +1852,9 @@ def _late_campaign_twitch(monkeypatch, minutes_by_drop_id, snapshot_age=60):
     # EXFIL Brothers Day 4: one advertised campaign whose next drop needs
     # more minutes than are left, unless the account's inventory progress on
     # that drop is counted.
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
-    ends_at = (datetime.utcnow() + timedelta(minutes=275)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    ends_at = (utc_now() + timedelta(minutes=275)).strftime("%Y-%m-%dT%H:%M:%SZ")
     campaign = advertised_campaign()
     campaign["endAt"] = ends_at
     drop = campaign["timeBasedDrops"][0]
@@ -1902,11 +1901,9 @@ def _finished_daily_campaign_twitch(monkeypatch):
     # Albion Online "Dragonfire 7 - #4/7": one 180m drop per day, already
     # fully watched and claimed, but the inventory never confirms the claim
     # because the game account is not linked.
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
-    ends_at = (datetime.utcnow() + timedelta(minutes=1200)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    ends_at = (utc_now() + timedelta(minutes=1200)).strftime("%Y-%m-%dT%H:%M:%SZ")
     campaign = advertised_campaign()
     campaign["endAt"] = ends_at
     drop = campaign["timeBasedDrops"][0]
@@ -4294,7 +4291,7 @@ def test_carried_allowlists_still_expire_during_a_dashboard_outage(monkeypatch):
     # reported are carried over, but not past their campaign's end or once
     # the inventory reports the campaign completed.
     twitch = bare_twitch(monkeypatch)
-    now = datetime.utcnow()
+    now = utc_now()
     live = {"id": "live", "name": "Live", "channels": ["a"]}
     ended = {"id": "ended", "name": "Ended", "channels": ["b"]}
     done = {"id": "done", "name": "Done", "channels": ["c"]}
@@ -4970,3 +4967,123 @@ def test_category_given_by_twitch_slug_matches_its_games_twitch_campaign(
         ["hunt-showdown|psychoghost"], inventory=inventory
     ) == ["hunt-showdown|psychoghost"]
     assert set(twitch.active_drop_campaigns) == {"hunt-showdown-1896"}
+
+
+def claimable_inventory(connected=None):
+    # One unclaimed, finished drop; `connected` sets the campaign's game-account
+    # link state as the inventory reports it (None: no self edge sent).
+    data = campaign_data()
+    if connected is not None:
+        data["self"] = {"isAccountConnected": connected}
+        data["accountLinkURL"] = "https://example.test/link"
+    data["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    return data
+
+
+def drop_event_twitch(monkeypatch, inventory, statuses=("ELIGIBLE_FOR_ALL",)):
+    twitch, _drop, requests, _saved, now = claim_recording_twitch(
+        monkeypatch, statuses=statuses
+    )
+    # Set by __init__ on a real Twitch; bare_twitch skips __init__.
+    twitch.prompt_claim_pass_lock = Lock()
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(twitch_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"dropCampaignsInProgress": [inventory]},
+    )
+    return twitch, requests, now
+
+
+def test_drop_claim_event_starts_a_background_worker(monkeypatch):
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    started = []
+
+    class RecordingThread:
+        def __init__(self, target, name, daemon):
+            started.append((target, name, daemon))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(twitch_module, "Thread", RecordingThread)
+    twitch = object.__new__(Twitch)
+
+    twitch.claim_drops_from_event({"drop_instance_id": "instance-1"})
+
+    assert len(started) == 1
+    target, _name, daemon = started[0]
+    assert target == twitch._Twitch__claim_drops_from_event_worker
+    assert daemon is True
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(None, id="no-payload"),
+        pytest.param("instance-1", id="string-payload"),
+        pytest.param([], id="list-payload"),
+        pytest.param({}, id="empty-payload"),
+        pytest.param({"drop_instance_id": ""}, id="empty-instance-id"),
+        pytest.param({"drop_id": "drop-1"}, id="missing-instance-id"),
+    ],
+)
+def test_drop_claim_event_ignores_malformed_payloads(monkeypatch, data):
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    started = []
+    monkeypatch.setattr(
+        twitch_module,
+        "Thread",
+        lambda **kwargs: started.append(kwargs),
+    )
+    twitch = object.__new__(Twitch)
+
+    twitch.claim_drops_from_event(data)
+
+    assert started == []
+
+
+def test_drop_claim_event_claims_drop_once(monkeypatch):
+    twitch, requests, _now = drop_event_twitch(
+        monkeypatch, claimable_inventory(connected=True)
+    )
+
+    twitch._Twitch__claim_drops_from_event_worker()
+
+    assert requests == ["instance-1"]
+    assert twitch.accepted_drop_ids == frozenset({"drop-1"})
+
+
+def test_drop_claim_event_does_not_reclaim_an_accepted_drop(monkeypatch):
+    # A duplicate drop-claim, or one that arrives while the inventory still
+    # lists the drop as unclaimed, must not send a second claim.
+    twitch, requests, _now = drop_event_twitch(
+        monkeypatch, claimable_inventory(connected=True)
+    )
+
+    twitch._Twitch__claim_drops_from_event_worker()
+    twitch._Twitch__claim_drops_from_event_worker()
+
+    assert requests == ["instance-1"]
+
+
+def test_drop_claim_event_does_not_repeat_claim_for_unlinked_account(monkeypatch):
+    # Twitch accepts the claim but delivers nothing while the game account is
+    # unlinked; the unlinked record stops later events from claiming again.
+    twitch, requests, _now = drop_event_twitch(
+        monkeypatch,
+        claimable_inventory(connected=False),
+        statuses=(("ELIGIBLE_FOR_ALL", False),),
+    )
+
+    twitch._Twitch__claim_drops_from_event_worker()
+    twitch._Twitch__claim_drops_from_event_worker()
+
+    assert requests == ["instance-1"]
+    assert "instance-1" in twitch.unlinked_drop_claims

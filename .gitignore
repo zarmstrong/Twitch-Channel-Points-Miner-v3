@@ -159,3 +159,7 @@ replit.nix
 
 # VS Code
 .vscode/settings.json
+
+# Supervisor: local alert config and runtime state
+supervisor/miner-alerts.json
+supervisor-logs/

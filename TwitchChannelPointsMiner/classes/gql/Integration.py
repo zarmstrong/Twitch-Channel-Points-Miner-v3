@@ -40,6 +40,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
     GQLError,
     InvalidJsonShapeException,
     RetryError,
+    is_persisted_query_not_found_message,
 )
 from TwitchChannelPointsMiner.classes.Settings import FollowersOrder
 from TwitchChannelPointsMiner.constants import CLIENT_ID, GQLOperations
@@ -157,6 +158,8 @@ class GQL:
         """Function for posting GQL requests."""
         self.on_unauthorized = on_unauthorized
         """Callback invoked when Twitch rejects the current authorization token."""
+        self.raw_query_operations: set[str] = set()
+        """Operations whose persisted query hash Twitch rejected; later requests send their raw query text."""
 
     @staticmethod
     def __default_post_request(url: str, json: dict | list, headers: dict[str, str]):
@@ -180,6 +183,37 @@ class GQL:
     def __post_gql_request(
         self, request_json: dict | list, parse: Callable[[Any], T]
     ) -> T | list[T]:
+        operation_names = self.__operation_names(request_json)
+        raw_request = None
+        if operation_names and all(
+            name in self.raw_query_operations for name in operation_names
+        ):
+            # Twitch already rejected these persisted hashes: send the raw query first
+            raw_request = self.__to_raw_request(request_json)
+        response_json = self.__post_json(
+            request_json if raw_request is None else raw_request
+        )
+        if raw_request is None and self.__is_persisted_query_not_found(response_json):
+            # PersistedQueryNotFound means Twitch rejected the request before running
+            # the operation, so resending it as raw text cannot repeat a mutation
+            # (e.g. claiming a drop or spending points twice).
+            raw_request = self.__to_raw_request(request_json)
+            names = ", ".join(operation_names) or "unknown"
+            if raw_request is None:
+                logger.warning(
+                    f"Persisted query hash for {names} was rejected and no raw query is available",
+                    extra={"emoji": ":warning:"},
+                )
+            else:
+                logger.warning(
+                    f"Persisted query hash for {names} was rejected, using the raw query",
+                    extra={"emoji": ":warning:"},
+                )
+                self.raw_query_operations.update(operation_names)
+                response_json = self.__post_json(raw_request)
+        return self.__parse_response(request_json, response_json, parse)
+
+    def __post_json(self, request_json: dict | list) -> Any:
         response = self.post_request(
             GQLOperations.url,
             json=request_json,
@@ -208,6 +242,12 @@ class GQL:
             and self.on_unauthorized is not None
         ):
             self.on_unauthorized()
+        return response_json
+
+    @staticmethod
+    def __parse_response(
+        request_json: dict | list, response_json: Any, parse: Callable[[Any], T]
+    ) -> T | list[T]:
         if isinstance(request_json, list):
             # A batched request should result in a batched response
             if isinstance(response_json, list):
@@ -225,6 +265,56 @@ class GQL:
                 )
         else:
             return parse(response_json)
+
+    @staticmethod
+    def __operation_names(request_json: dict | list) -> list[str]:
+        items = request_json if isinstance(request_json, list) else [request_json]
+        return [
+            item["operationName"]
+            for item in items
+            if isinstance(item, dict) and item.get("operationName")
+        ]
+
+    @staticmethod
+    def __to_raw_request(request_json: dict | list) -> dict | list | None:
+        """
+        Converts a persisted request to a raw query request, dropping `extensions`.
+        :return: The raw request, or None if any operation has no raw query.
+        """
+
+        def convert(operation: Any) -> dict | None:
+            query = (
+                GQLOperations.raw_queries.get(operation.get("operationName"))
+                if isinstance(operation, dict)
+                else None
+            )
+            if query is None:
+                return None
+            raw = {
+                key: value for key, value in operation.items() if key != "extensions"
+            }
+            raw["query"] = query
+            return raw
+
+        if isinstance(request_json, list):
+            converted = [convert(operation) for operation in request_json]
+            if not converted or any(item is None for item in converted):
+                return None
+            return converted
+        return convert(request_json)
+
+    @staticmethod
+    def __is_persisted_query_not_found(response_json: Any) -> bool:
+        items = response_json if isinstance(response_json, list) else [response_json]
+        return any(
+            isinstance(item, dict)
+            and any(
+                isinstance(error, dict)
+                and is_persisted_query_not_found_message(error.get("message"))
+                for error in (item.get("errors") or [])
+            )
+            for item in items
+        )
 
     @staticmethod
     def __handle_result(

@@ -40,6 +40,7 @@ from TwitchChannelPointsMiner.classes.entities.Drop import (
     Drop,
     drop_required_subs,
     drop_sub_requirement_unmet,
+    utc_now,
 )
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_source,
@@ -1128,8 +1129,7 @@ class Twitch(object):
             or drop.current_minutes_watched >= drop.minutes_required
         )
         is_expired = (
-            getattr(drop, "end_at", None) is not None
-            and datetime.utcnow() > drop.end_at
+            getattr(drop, "end_at", None) is not None and utc_now() > drop.end_at
         )
 
         progress_key = self.__drop_tracking_key(
@@ -1226,7 +1226,7 @@ class Twitch(object):
                 )
                 is_expired = (
                     getattr(drop, "end_at", None) is not None
-                    and datetime.utcnow() > drop.end_at
+                    and utc_now() > drop.end_at
                 )
 
                 if drop.has_preconditions_met is not False:
@@ -1645,10 +1645,7 @@ class Twitch(object):
                 drop.is_claimed is False
                 and drop.current_minutes_watched < drop.minutes_required
             ):
-                if (
-                    getattr(drop, "end_at", None) is None
-                    or datetime.utcnow() <= drop.end_at
-                ):
+                if getattr(drop, "end_at", None) is None or utc_now() <= drop.end_at:
                     return True
 
         return False
@@ -1964,7 +1961,7 @@ class Twitch(object):
         ambiguous_benefit_ids: Optional[set] = None,
         ambiguous_benefit_names: Optional[set] = None,
     ) -> Optional[datetime]:
-        now = datetime.utcnow()
+        now = utc_now()
         earliest_deadline = None
         campaign_game = campaign.get("game") or {}
         if isinstance(campaign_game, dict):
@@ -2425,7 +2422,7 @@ class Twitch(object):
             # were reported (by the inventory, say). A carried campaign still
             # drops out once it ends or the inventory reports it completed,
             # however long the outage lasts.
-            now = datetime.utcnow()
+            now = utc_now()
             previous_deadlines = (
                 getattr(self, "active_drop_campaign_deadlines", None) or {}
             )
@@ -2524,7 +2521,7 @@ class Twitch(object):
         # prevents the wildcard pass from immediately repeating the same fetch.
         self.twitchdrops_app_catalog_complete = catalog_complete
         scraper = TwitchDropsAppScraper(timeout=20)
-        now = datetime.utcnow()
+        now = utc_now()
         # Inventory benefit names are not campaign-scoped.  Games commonly reuse
         # consumable reward names (for example ESO's Crown Crates), so treating a
         # historical award with the same name as completion can suppress a new
@@ -2543,7 +2540,10 @@ class Twitch(object):
                     # cannot compare None with a string.
                     game_slug or "*",
                     campaign_name or "*",
-                    datetime.utcfromtimestamp(ends_at_epoch).isoformat() + "Z",
+                    datetime.fromtimestamp(ends_at_epoch, timezone.utc)
+                    .replace(tzinfo=None)
+                    .isoformat()
+                    + "Z",
                 ]
                 for game_slug, campaign_name, ends_at_epoch in completed_campaign_signatures
             ),
@@ -2830,7 +2830,7 @@ class Twitch(object):
 
     def next_upcoming_drop_start(self) -> Optional[datetime]:
         """Return the next known configured-category campaign start in UTC."""
-        now = datetime.utcnow()
+        now = utc_now()
         future_starts = [
             starts_at
             for starts_at in self.twitchdrops_app_upcoming_starts.values()
@@ -3546,7 +3546,7 @@ class Twitch(object):
         # have no active campaign, so it must not be preserved even though
         # it's also absent -- otherwise a campaign that just ended keeps its
         # old deadline until that timestamp elapses on its own.
-        now = datetime.utcnow()
+        now = utc_now()
         preserved_deadlines = {
             game_slug: deadline
             for game_slug, deadline in (
@@ -3705,7 +3705,7 @@ class Twitch(object):
                 | set(tracked_category_slugs or ())
                 if slug not in active_category_deadlines
             }
-            now = datetime.utcnow()
+            now = utc_now()
             unevaluated_slugs = (
                 self.unevaluated_category_slugs | preferred_unevaluated_slugs
             )
@@ -3752,7 +3752,7 @@ class Twitch(object):
             deadline = eligible[slug]
             if deadline == datetime.max:
                 return f"{slug} (no known deadline)"
-            minutes_left = max((deadline - datetime.utcnow()).total_seconds() / 60, 0)
+            minutes_left = max((deadline - utc_now()).total_seconds() / 60, 0)
             return f"{slug} ({minutes_left:.0f}m)"
 
         top_candidates = ", ".join(describe_deadline(slug) for slug in ranked[:5])
@@ -4006,9 +4006,9 @@ class Twitch(object):
         # mathematically cannot complete until the deadline passes on its own.
         if deadline is None:
             return True
-        if deadline <= datetime.utcnow():
+        if deadline <= utc_now():
             return False
-        minutes_to_deadline = (deadline - datetime.utcnow()).total_seconds() / 60
+        minutes_to_deadline = (deadline - utc_now()).total_seconds() / 60
         return needs_minutes <= minutes_to_deadline
 
     def __log_category_drop_pick(
@@ -4046,9 +4046,7 @@ class Twitch(object):
             if deadline == datetime.max:
                 time_left = "no known deadline"
             else:
-                minutes_left = max(
-                    (deadline - datetime.utcnow()).total_seconds() / 60, 0
-                )
+                minutes_left = max((deadline - utc_now()).total_seconds() / 60, 0)
                 time_left = f"{minutes_left:.0f}m left"
             return f"{streamer.username} ({game_name}: {time_left})"
 
@@ -5975,9 +5973,7 @@ class Twitch(object):
                 def _deadline_label(deadline):
                     if deadline == datetime.max:
                         return "no known deadline"
-                    minutes = max(
-                        (deadline - datetime.utcnow()).total_seconds() / 60, 0
-                    )
+                    minutes = max((deadline - utc_now()).total_seconds() / 60, 0)
                     return f"{minutes:.0f}m left"
 
                 (
@@ -6015,7 +6011,7 @@ class Twitch(object):
                             f"(needs {needs_minutes:.0f}m, no campaign deadline)"
                         )
                     minutes_to_deadline = max(
-                        (deadline - datetime.utcnow()).total_seconds() / 60, 0
+                        (deadline - utc_now()).total_seconds() / 60, 0
                     )
                     if needs_minutes > minutes_to_deadline:
                         return None
@@ -7544,7 +7540,7 @@ class Twitch(object):
             )
             eligible_ids = (
                 []
-                if deadline is not None and deadline <= datetime.utcnow()
+                if deadline is not None and deadline <= utc_now()
                 else [
                     campaign_id
                     for campaign_id in campaign_ids
@@ -8143,7 +8139,7 @@ class Twitch(object):
 
     def __is_open_drop_campaign(self, campaign: dict) -> bool:
         status = str(campaign.get("status") or "").upper()
-        now = datetime.utcnow()
+        now = utc_now()
 
         starts_at_raw = campaign.get("startsAt") or campaign.get("startAt")
         ends_at_raw = campaign.get("endsAt") or campaign.get("endAt")
@@ -8190,7 +8186,7 @@ class Twitch(object):
                 return False
             if drop_required_subs(drop):
                 return False
-        now = datetime.utcnow()
+        now = utc_now()
         for drop in drops:
             starts_at = self.__parse_twitch_datetime(
                 drop.get("startAt") or campaign.get("startAt")
@@ -8766,7 +8762,7 @@ class Twitch(object):
             "failed_to_achieve": (
                 status != "captured"
                 and getattr(drop, "end_at", None) is not None
-                and datetime.utcnow() > drop.end_at
+                and utc_now() > drop.end_at
                 and drop.current_minutes_watched < drop.minutes_required
             ),
             "item_art_url": (
@@ -9492,6 +9488,41 @@ class Twitch(object):
                                 f"campaign {campaign_id} final inventory drop claimed; "
                                 "waiting for inventory completion confirmation"
                             )
+
+    def claim_drops_from_event(self, data):
+        """Handles a PubSub user-drop-events 'drop-claim' message: a drop just became
+        claimable, so sweep the inventory now instead of waiting for the next sync.
+        Runs the sweep on a background thread; the websocket thread never blocks."""
+        if not isinstance(data, dict):
+            return
+        logger.debug(f"PubSub drop-claim received: {data}")
+        if not data.get("drop_instance_id"):
+            return
+        Thread(
+            target=self.__claim_drops_from_event_worker,
+            name="Drop claim (PubSub)",
+            daemon=True,
+        ).start()
+
+    def __claim_drops_from_event_worker(self):
+        # Give the inventory a moment to reflect the new dropInstanceID
+        time.sleep(random.uniform(2, 5))
+        # A running pass may hold an inventory that predates this drop: wait for
+        # it to finish, then run our own sweep rather than dropping the event.
+        if not self.prompt_claim_pass_lock.acquire(timeout=300):
+            logger.warning(
+                "Drop claim after PubSub event timed out waiting for a running claim pass"
+            )
+            return
+        try:
+            self.claim_all_drops_from_inventory()
+        except Exception:
+            logger.error(
+                "Claim after PubSub drop-claim event failed; the sync cycle will retry",
+                exc_info=True,
+            )
+        finally:
+            self.prompt_claim_pass_lock.release()
 
     def __claim_completed_drop_promptly(self, drop, campaign):
         # A drop that just reached 100% needs no more watch time, but waiting

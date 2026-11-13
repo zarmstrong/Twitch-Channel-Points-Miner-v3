@@ -67,6 +67,7 @@ from TwitchChannelPointsMiner.utils import (
     set_default_settings,
 )
 from TwitchChannelPointsMiner.WatchStreakCache import WatchStreakCache
+from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 
 # Suppress:
 #   - chardet.charsetprober - [feed]
@@ -1349,6 +1350,8 @@ class TwitchChannelPointsMiner:
                     )
                 )
 
+            self.__subscribe_user_drop_events()
+
             for streamer in self.streamers:
                 self.ws_pool.submit(
                     PubsubTopic("video-playback-by-id", streamer=streamer)
@@ -1399,7 +1402,7 @@ class TwitchChannelPointsMiner:
                 next_category_refresh_at = min(
                     next_category_refresh_at,
                     time.time()
-                    + max((upcoming_drop_start - datetime.utcnow()).total_seconds(), 0)
+                    + max((upcoming_drop_start - utc_now()).total_seconds(), 0)
                     + 5,
                 )
             while self.running and self.twitch.running:
@@ -1462,7 +1465,7 @@ class TwitchChannelPointsMiner:
                                     time.time()
                                     + max(
                                         (
-                                            upcoming_drop_start - datetime.utcnow()
+                                            upcoming_drop_start - utc_now()
                                         ).total_seconds(),
                                         0,
                                     )
@@ -1476,6 +1479,19 @@ class TwitchChannelPointsMiner:
             # A requested restart leaves through here without stopping the
             # workers, so keep what was recorded since the last pass.
             self.__save_daily_report_state_safely(retire_all=True)
+
+    def __subscribe_user_drop_events(self):
+        # Claim drops as soon as Twitch reports them claimable. Only needed when
+        # some streamer claims drops; submit() is idempotent per topic.
+        if (
+            at_least_one_value_in_settings_is(self.streamers, "claim_drops", True)
+            is not True
+        ):
+            return
+        user_id = self.twitch.twitch_login.get_user_id()
+        if not user_id:
+            return
+        self.ws_pool.submit(PubsubTopic("user-drop-events", user_id=user_id))
 
     # Both loops iterate snapshots: the badge Drop and category refresh threads
     # retire streamers (and their now-empty websockets) by shrinking these
@@ -2065,6 +2081,7 @@ class TwitchChannelPointsMiner:
                                 "community-points-channel-v1", streamer=streamer
                             )
                         )
+                    self.__subscribe_user_drop_events()
                 except StreamerDoesNotExistException:
                     logger.info(
                         f"Streamer {username} does not exist",
@@ -2597,6 +2614,7 @@ class TwitchChannelPointsMiner:
                     self.ws_pool.submit(
                         PubsubTopic("community-points-channel-v1", streamer=streamer)
                     )
+                self.__subscribe_user_drop_events()
             except StreamerDoesNotExistException:
                 logger.info(
                     f"Streamer {username} does not exist",
@@ -2991,6 +3009,7 @@ class TwitchChannelPointsMiner:
                     self.ws_pool.submit(
                         PubsubTopic("community-points-channel-v1", streamer=streamer)
                     )
+                self.__subscribe_user_drop_events()
                 logger.info(
                     f"Added {streamer.username} from the reloaded configuration",
                     extra={"emoji": ":heavy_plus_sign:"},

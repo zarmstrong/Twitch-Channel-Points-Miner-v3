@@ -10,6 +10,7 @@ import requests
 
 from TwitchChannelPointsMiner.classes.TwitchDropsApp import (
     TwitchDropsAppScraper,
+    check_gist_version,
     gist_url,
 )
 
@@ -281,6 +282,7 @@ class DropBadgeCatalog:
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Twitch badge gist did not contain a JSON object")
+        check_gist_version(payload, "Twitch badge")
         badge_sets = payload.get("sets")
         if not isinstance(badge_sets, list):
             raise ValueError("Twitch badge gist did not contain sets")
