@@ -5765,6 +5765,9 @@ class Twitch(object):
         drop_pick_stickiness_minutes=0,
         watch_status_interval_minutes=15,
     ):
+        # Streamers already warned about a missing spade URL, so the warning
+        # is logged once per outage instead of on every watch cycle.
+        spade_url_warned = set()
         while self.running:
             iteration_started_at = time.time()
             try:
@@ -6681,13 +6684,17 @@ class Twitch(object):
                             # Posting to a None URL raises MissingSchema, which
                             # would abort this loop for every later streamer.
                             # check_streamer_online() retries the extraction.
-                            logger.warning(
-                                f"Skipping minute watched for {streamer}: spade URL not loaded yet"
-                            )
+                            message = f"Skipping minute watched for {streamer}: spade URL not loaded yet"
+                            if streamer.username in spade_url_warned:
+                                logger.debug(message)
+                            else:
+                                spade_url_warned.add(streamer.username)
+                                logger.warning(message)
                             self.__chuncked_sleep(
                                 next_iteration - time.time(), chunk_size=chunk_size
                             )
                             continue
+                        spade_url_warned.discard(streamer.username)
                         for attempt in range(2):
                             try:
                                 response = requests.post(

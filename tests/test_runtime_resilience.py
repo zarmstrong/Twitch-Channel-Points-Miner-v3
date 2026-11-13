@@ -76,6 +76,27 @@ def test_minute_watcher_skips_stream_without_spade_url(monkeypatch, caplog):
     assert "Exception raised in send minute watched" not in caplog.text
 
 
+def test_minute_watcher_warns_once_per_streamer_without_spade_url(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    first = _watch_streamer("first")
+    first.stream.spade_url = None
+    second = _watch_streamer("second")
+    second.stream.spade_url = None
+
+    posted = _run_one_watch_iteration(monkeypatch, [first, second], streams_watched=2)
+
+    assert posted == []
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "spade URL not loaded yet" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert any("first" in message for message in warnings)
+    assert any("second" in message for message in warnings)
+
+
 def test_claim_all_drops_skips_drop_with_null_self(monkeypatch):
     twitch = bare_twitch(monkeypatch)
     campaign = campaign_data()
@@ -238,3 +259,39 @@ def test_sync_campaigns_survives_unexpected_error(monkeypatch, caplog):
     assert len(refreshes) == 2
     assert synced[-1] == ["campaign-1"]
     assert "Unexpected error while syncing inventory" in caplog.text
+
+
+def test_minute_watcher_warns_again_only_after_spade_url_recovers(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    streamer = _watch_streamer("flaky")
+    streamer.stream.spade_url = None
+    # The spade URL per watch cycle: missing for two cycles, loaded for one,
+    # then missing again.
+    urls = [None, None, "https://spade.test/flaky", None]
+    cycles = []
+    sleeps = []
+
+    def on_sleep(self, *args, **kwargs):
+        # Each cycle sleeps twice: once after the streamer, then once in the
+        # loop's finally block. The second sleep ends the cycle.
+        sleeps.append(None)
+        if len(sleeps) % 2:
+            return
+        cycles.append(streamer.stream.spade_url)
+        if len(cycles) == len(urls):
+            self.running = False
+        else:
+            streamer.stream.spade_url = urls[len(cycles)]
+
+    posted = _run_one_watch_iteration(
+        monkeypatch, [streamer], streams_watched=1, on_sleep=on_sleep
+    )
+
+    assert cycles == urls
+    assert posted == ["https://spade.test/flaky"]
+    levels = [
+        record.levelno
+        for record in caplog.records
+        if "spade URL not loaded yet" in record.getMessage()
+    ]
+    assert levels == [logging.WARNING, logging.DEBUG, logging.WARNING]

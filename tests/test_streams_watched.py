@@ -172,6 +172,7 @@ def _run_one_watch_iteration(
     configured_category_slugs=None,
     drop_slot_covering_streamer=None,
     category_campaign_eligibility=None,
+    on_sleep=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -237,7 +238,9 @@ def _run_one_watch_iteration(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__chuncked_sleep",
-        lambda self, *args, **kwargs: setattr(self, "running", False),
+        # By default the first sleep ends the run after one cycle. on_sleep
+        # replaces that, so a test can drive several cycles.
+        on_sleep or (lambda self, *args, **kwargs: setattr(self, "running", False)),
     )
 
     twitch.send_minute_watched_events(
