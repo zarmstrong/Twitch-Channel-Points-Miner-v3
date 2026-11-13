@@ -1,4 +1,5 @@
 import abc
+from typing import Any
 
 from TwitchChannelPointsMiner.classes.gql.data.response.Error import Error
 
@@ -86,6 +87,12 @@ class RetryError(GQLError):
             return False
 
 
+def is_persisted_query_not_found_message(message: Any) -> bool:
+    """True if a GraphQL error message says Twitch no longer knows the
+    persisted query hash. Matches regardless of case and position."""
+    return isinstance(message, str) and "persistedquerynotfound" in message.lower()
+
+
 def is_persisted_query_not_found(error: Exception) -> bool:
     """True if Twitch rejected a request because it no longer knows the
     persisted query hash, either directly or in any attempt of a RetryError."""
@@ -96,7 +103,7 @@ def is_persisted_query_not_found(error: Exception) -> bool:
         )
     if isinstance(error, GQLResponseErrors):
         return any(
-            isinstance(message, str) and "persistedquerynotfound" in message.lower()
-            for message in (getattr(item, "message", None) for item in error.errors)
+            is_persisted_query_not_found_message(getattr(item, "message", None))
+            for item in error.errors
         )
     return False

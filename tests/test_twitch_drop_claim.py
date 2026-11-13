@@ -4967,3 +4967,123 @@ def test_category_given_by_twitch_slug_matches_its_games_twitch_campaign(
         ["hunt-showdown|psychoghost"], inventory=inventory
     ) == ["hunt-showdown|psychoghost"]
     assert set(twitch.active_drop_campaigns) == {"hunt-showdown-1896"}
+
+
+def claimable_inventory(connected=None):
+    # One unclaimed, finished drop; `connected` sets the campaign's game-account
+    # link state as the inventory reports it (None: no self edge sent).
+    data = campaign_data()
+    if connected is not None:
+        data["self"] = {"isAccountConnected": connected}
+        data["accountLinkURL"] = "https://example.test/link"
+    data["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    return data
+
+
+def drop_event_twitch(monkeypatch, inventory, statuses=("ELIGIBLE_FOR_ALL",)):
+    twitch, _drop, requests, _saved, now = claim_recording_twitch(
+        monkeypatch, statuses=statuses
+    )
+    # Set by __init__ on a real Twitch; bare_twitch skips __init__.
+    twitch.prompt_claim_pass_lock = Lock()
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(twitch_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"dropCampaignsInProgress": [inventory]},
+    )
+    return twitch, requests, now
+
+
+def test_drop_claim_event_starts_a_background_worker(monkeypatch):
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    started = []
+
+    class RecordingThread:
+        def __init__(self, target, name, daemon):
+            started.append((target, name, daemon))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(twitch_module, "Thread", RecordingThread)
+    twitch = object.__new__(Twitch)
+
+    twitch.claim_drops_from_event({"drop_instance_id": "instance-1"})
+
+    assert len(started) == 1
+    target, _name, daemon = started[0]
+    assert target == twitch._Twitch__claim_drops_from_event_worker
+    assert daemon is True
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(None, id="no-payload"),
+        pytest.param("instance-1", id="string-payload"),
+        pytest.param([], id="list-payload"),
+        pytest.param({}, id="empty-payload"),
+        pytest.param({"drop_instance_id": ""}, id="empty-instance-id"),
+        pytest.param({"drop_id": "drop-1"}, id="missing-instance-id"),
+    ],
+)
+def test_drop_claim_event_ignores_malformed_payloads(monkeypatch, data):
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    started = []
+    monkeypatch.setattr(
+        twitch_module,
+        "Thread",
+        lambda **kwargs: started.append(kwargs),
+    )
+    twitch = object.__new__(Twitch)
+
+    twitch.claim_drops_from_event(data)
+
+    assert started == []
+
+
+def test_drop_claim_event_claims_drop_once(monkeypatch):
+    twitch, requests, _now = drop_event_twitch(
+        monkeypatch, claimable_inventory(connected=True)
+    )
+
+    twitch._Twitch__claim_drops_from_event_worker()
+
+    assert requests == ["instance-1"]
+    assert twitch.accepted_drop_ids == frozenset({"drop-1"})
+
+
+def test_drop_claim_event_does_not_reclaim_an_accepted_drop(monkeypatch):
+    # A duplicate drop-claim, or one that arrives while the inventory still
+    # lists the drop as unclaimed, must not send a second claim.
+    twitch, requests, _now = drop_event_twitch(
+        monkeypatch, claimable_inventory(connected=True)
+    )
+
+    twitch._Twitch__claim_drops_from_event_worker()
+    twitch._Twitch__claim_drops_from_event_worker()
+
+    assert requests == ["instance-1"]
+
+
+def test_drop_claim_event_does_not_repeat_claim_for_unlinked_account(monkeypatch):
+    # Twitch accepts the claim but delivers nothing while the game account is
+    # unlinked; the unlinked record stops later events from claiming again.
+    twitch, requests, _now = drop_event_twitch(
+        monkeypatch,
+        claimable_inventory(connected=False),
+        statuses=(("ELIGIBLE_FOR_ALL", False),),
+    )
+
+    twitch._Twitch__claim_drops_from_event_worker()
+    twitch._Twitch__claim_drops_from_event_worker()
+
+    assert requests == ["instance-1"]
+    assert "instance-1" in twitch.unlinked_drop_claims
