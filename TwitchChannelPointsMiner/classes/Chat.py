@@ -1,4 +1,5 @@
 import logging
+import os
 import socket
 import ssl
 import time
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _tls_probe_lock = Lock()
 _tls_supported = None
+ALLOW_PLAINTEXT_IRC_ENV = "TCPM_ALLOW_PLAINTEXT_IRC"
 
 DEFAULT_GIFT_SUB_MESSAGE = "Thanks for the sub!"
 # Twitch rejects chat messages longer than 500 characters.
@@ -66,27 +68,37 @@ def _irc_tls_context():
     return context
 
 
+class IRCTLSUnavailable(Exception):
+    """TLS to Twitch IRC failed and plaintext IRC was not explicitly allowed."""
+
+
+def _plaintext_irc_allowed():
+    """Plaintext IRC sends the OAuth token unencrypted, so it is opt-in."""
+    value = os.environ.get(ALLOW_PLAINTEXT_IRC_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
-    """Probe once per process whether a TLS handshake to Twitch's IRC endpoint
-    succeeds. The chat OAuth token is otherwise sent over plaintext port 6667 -
-    prefer TLS when it's reachable, but keep working on networks that block or
-    intercept 6697 by falling back to plaintext."""
+    """Check whether a TLS handshake to Twitch's IRC endpoint succeeds. A
+    success is cached for the process; a failure is not cached, so the next
+    connect probes again. The chat OAuth token is never sent over plaintext
+    unless TCPM_ALLOW_PLAINTEXT_IRC is set."""
     global _tls_supported
     with _tls_probe_lock:
-        if _tls_supported is None:
-            try:
-                context = _irc_tls_context()
-                with socket.create_connection((host, port), timeout=timeout) as sock:
-                    with context.wrap_socket(sock, server_hostname=host):
-                        _tls_supported = True
-            except (OSError, ssl.SSLError) as error:
-                logger.warning(
-                    f"IRC TLS handshake with {host}:{port} failed ({error}), "
-                    f"falling back to plaintext IRC on port {IRC_PORT}",
-                    extra={"emoji": ":warning:"},
-                )
-                _tls_supported = False
-        return _tls_supported
+        if _tls_supported is True:
+            return True
+        try:
+            context = _irc_tls_context()
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host):
+                    _tls_supported = True
+        except (OSError, ssl.SSLError) as error:
+            logger.warning(
+                f"IRC TLS handshake with {host}:{port} failed ({error})",
+                extra={"emoji": ":warning:"},
+            )
+            return False
+        return True
 
 
 class ChatPresence(Enum):
@@ -107,12 +119,21 @@ class ClientIRC(SingleServerIRCBot):
         self.__active = False
 
         connect_params = {}
-        port = IRC_PORT
         if _irc_tls_available():
             port = IRC_TLS_PORT
             context = _irc_tls_context()
             connect_params["connect_factory"] = irc.connection.Factory(
                 wrapper=partial(context.wrap_socket, server_hostname=IRC)
+            )
+        elif _plaintext_irc_allowed():
+            port = IRC_PORT
+            logger.warning(
+                f"Using plaintext IRC on port {IRC_PORT} because {ALLOW_PLAINTEXT_IRC_ENV} is set; the chat OAuth token is sent unencrypted",
+                extra={"emoji": ":warning:"},
+            )
+        else:
+            raise IRCTLSUnavailable(
+                f"TLS to {IRC}:{IRC_TLS_PORT} is unavailable and {ALLOW_PLAINTEXT_IRC_ENV} is not set"
             )
 
         super(ClientIRC, self).__init__(
@@ -244,9 +265,16 @@ class ThreadChat(Thread):
         self.settings = None
 
     def run(self):
-        self.chat_irc = ClientIRC(
-            self.username, self.token, self.channel, settings=self.settings
-        )
+        try:
+            self.chat_irc = ClientIRC(
+                self.username, self.token, self.channel, settings=self.settings
+            )
+        except IRCTLSUnavailable:
+            logger.warning(
+                f"Not joining IRC chat {self.channel}: TLS to {IRC}:{IRC_TLS_PORT} is unavailable. Chat is retried the next time it is joined; set {ALLOW_PLAINTEXT_IRC_ENV}=1 to allow plaintext IRC.",
+                extra={"emoji": ":speech_balloon:"},
+            )
+            return
         logger.info(
             f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
         )
