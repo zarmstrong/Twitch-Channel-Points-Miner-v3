@@ -4415,6 +4415,122 @@ def test_drops_dashboard_failure_is_recorded_for_category_discovery(monkeypatch)
     assert _drops_dashboard_state.unavailable is False
 
 
+DASHBOARD_NULL_LIST_REPLY = {"data": {"currentUser": {"dropCampaigns": None}}}
+DASHBOARD_LIST_REPLY = {"data": {"currentUser": {"dropCampaigns": []}}}
+DASHBOARD_ERROR_REPLY = {
+    "data": {"currentUser": {"dropCampaigns": None}},
+    "errors": [{"message": "service error"}],
+}
+
+
+def android_dashboard_twitch(replies):
+    replies = iter(replies)
+    twitch = twitch_with_gql(
+        SimpleNamespace(
+            get_viewer_drops_dashboard=lambda: SimpleNamespace(
+                raw_response=next(replies)
+            )
+        )
+    )
+    twitch.twitch_login = SimpleNamespace(client_id=ANDROID_CLIENT_ID)
+    twitch.log_drop_checks = False
+    return twitch
+
+
+def test_drops_dashboard_android_withheld_list_logs_error_once_then_warns_once(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    twitch = android_dashboard_twitch([DASHBOARD_NULL_LIST_REPLY] * 5)
+    unavailable = []
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(5):
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+            unavailable.append(_drops_dashboard_state.unavailable)
+
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "carried no campaign data" in r.getMessage()
+    ]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "withheld the Drops campaign list" in r.getMessage()
+    ]
+    assert len(errors) == 1
+    assert len(warnings) == 1
+    assert "for 3 refreshes in a row" in warnings[0].getMessage()
+    assert warnings[0].emoji == ":warning:"
+    assert unavailable == [True, True, False, False, False]
+
+
+def test_drops_dashboard_android_withheld_streak_resets_on_list_reply(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    twitch = android_dashboard_twitch(
+        [
+            DASHBOARD_NULL_LIST_REPLY,
+            DASHBOARD_NULL_LIST_REPLY,
+            DASHBOARD_LIST_REPLY,
+            DASHBOARD_NULL_LIST_REPLY,
+        ]
+    )
+    unavailable = []
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(4):
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+            unavailable.append(_drops_dashboard_state.unavailable)
+
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "carried no campaign data" in r.getMessage()
+    ]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "withheld the Drops campaign list" in r.getMessage()
+    ]
+    assert len(errors) == 2
+    assert warnings == []
+    assert unavailable == [True, True, False, True]
+
+
+def test_drops_dashboard_android_reply_with_errors_logs_error_every_time(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    twitch = android_dashboard_twitch([DASHBOARD_ERROR_REPLY] * 4)
+    unavailable = []
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(4):
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+            unavailable.append(_drops_dashboard_state.unavailable)
+
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "carried no campaign data" in r.getMessage()
+    ]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "withheld the Drops campaign list" in r.getMessage()
+    ]
+    assert len(errors) == 4
+    assert warnings == []
+    assert unavailable == [True, True, True, True]
+    assert getattr(twitch, "drops_dashboard_withheld_streak", 0) == 0
+
+
 def test_live_streams_failure_after_first_page_carries_found_channels(monkeypatch):
     # The category stays unevaluated, but page one's channels are reported on
     # the exception so the caller can still add them this cycle.
