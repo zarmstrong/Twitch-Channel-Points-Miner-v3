@@ -8,6 +8,7 @@ import socket
 import stat
 import threading
 import types
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1315,6 +1316,41 @@ def test_wait_until_dashboard_ready_true_when_server_answers_200():
         server.server_close()
 
 
+def test_wait_until_dashboard_ready_ignores_system_proxy_settings(monkeypatch):
+    # With HTTP_PROXY pointing at a dead port, plain urlopen() would route the
+    # local probe through it and never see the dashboard.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        _host, dead_port = probe.getsockname()
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead_port}")
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead_port}")
+    server, thread = _start_http_server(_OkHandler)
+    try:
+        host, port = server.server_address
+        assert (
+            windows_launcher._wait_until_dashboard_ready(
+                f"http://{host}:{port}/", timeout=1, interval=0.05
+            )
+            is True
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def test_local_opener_has_no_proxy_handler_registered():
+    # A default opener registers an env-driven ProxyHandler for each scheme
+    # (handle_open); the local opener must register none.
+    registered = [
+        handler
+        for handlers in windows_launcher._LOCAL_OPENER.handle_open.values()
+        for handler in handlers
+    ]
+
+    assert not any(isinstance(h, urllib.request.ProxyHandler) for h in registered)
+
+
 def test_wait_until_dashboard_ready_times_out_when_nothing_listening():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1719,6 +1755,32 @@ def test_window_api_submit_username_saves_and_starts_mining(tmp_path):
     assert started == [True]
     assert api.get_setup_info() == {"needs_username": False}
     assert f"'username': {_REAL_USERNAME!r}" in config_path.read_text(encoding="utf-8")
+
+
+def test_window_api_submit_username_twice_starts_mining_only_once(tmp_path):
+    # The Enter key handler in the shell bypasses the disabled button, so a
+    # second submit can reach here while the first one is still running.
+    config_path = tmp_path / "config.py"
+    config_path.write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n", encoding="utf-8"
+    )
+    started = []
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=config_path,
+        needs_username=True,
+        start_mining=lambda: started.append(True),
+        logs_dir=None,
+    )
+
+    first = api.submit_username(_REAL_USERNAME)
+    second = api.submit_username(_REAL_USERNAME)
+
+    assert first == {"success": True, "message": None}
+    assert second == {"success": True, "message": None}
+    assert started == [True]
 
 
 def test_window_api_submit_username_reports_invalid_username_without_starting(tmp_path):
@@ -2729,6 +2791,66 @@ def test_launch_shell_falls_back_to_close_confirmation_when_tray_unavailable(
     assert fake_webview.window.events.closing.handler() is True
 
 
+def test_launch_shell_shows_hidden_window_when_tray_is_unavailable(
+    tmp_path, monkeypatch
+):
+    # start_minimized creates the window hidden on the assumption the tray
+    # restores it. With no tray there would be no way to reach it at all.
+    fake_webview = _FakeWebview()
+    fake_webview.window.hidden = True
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
+    _patch_tray_unavailable(monkeypatch)
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=False),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+        start_minimized=True,
+    )
+
+    assert fake_webview.window.hidden is False
+
+
+def test_launch_shell_keeps_window_hidden_when_tray_is_available(tmp_path, monkeypatch):
+    fake_webview = _FakeWebview()
+    fake_webview.window.hidden = True
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(
+        windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None
+    )
+    monkeypatch.setattr(
+        windows_launcher,
+        "_build_tray_icon",
+        lambda on_show, on_quit: types.SimpleNamespace(
+            run=lambda: None, stop=lambda: None
+        ),
+    )
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=False),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+        start_minimized=True,
+    )
+
+    assert fake_webview.window.hidden is True
+
+
 def test_launch_shell_wires_hide_to_tray_when_tray_is_available(tmp_path, monkeypatch):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
@@ -3299,6 +3421,89 @@ def test_main_convert_only_is_exempt_from_the_single_instance_check(
 # --- Start on Windows login -----------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolate_startup_folder(monkeypatch, request, tmp_path):
+    # set_autostart_enabled() deletes the installer's Startup-folder shortcut
+    # under %APPDATA%. Point APPDATA at a temp dir for autostart tests so a
+    # developer's real installed shortcut is never touched.
+    if "autostart" not in request.node.name:
+        return
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+
+
+def _create_installer_shortcut():
+    shortcut = windows_launcher._startup_shortcut_path()
+    shortcut.parent.mkdir(parents=True)
+    shortcut.write_text("shortcut", encoding="utf-8")
+    return shortcut
+
+
+def test_startup_shortcut_path_none_when_appdata_unset(monkeypatch):
+    monkeypatch.delenv("APPDATA", raising=False)
+
+    assert windows_launcher._startup_shortcut_path() is None
+
+
+def test_is_autostart_enabled_true_when_installer_shortcut_present(monkeypatch):
+    monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
+    fake_winreg, _store = _fake_winreg_module()
+    monkeypatch.setitem(windows_launcher.sys.modules, "winreg", fake_winreg)
+    _create_installer_shortcut()
+
+    assert windows_launcher.is_autostart_enabled() is True
+
+
+def test_set_autostart_enabled_false_removes_installer_shortcut(monkeypatch):
+    monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
+    fake_winreg, _store = _fake_winreg_module()
+    monkeypatch.setitem(windows_launcher.sys.modules, "winreg", fake_winreg)
+    shortcut = _create_installer_shortcut()
+
+    success, _message = windows_launcher.set_autostart_enabled(False)
+
+    assert success is True
+    assert not shortcut.exists()
+    assert windows_launcher.is_autostart_enabled() is False
+
+
+def test_set_autostart_enabled_true_removes_installer_shortcut_and_sets_run_value(
+    monkeypatch,
+):
+    monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
+    fake_winreg, store = _fake_winreg_module()
+    monkeypatch.setitem(windows_launcher.sys.modules, "winreg", fake_winreg)
+    shortcut = _create_installer_shortcut()
+
+    success, _message = windows_launcher.set_autostart_enabled(True)
+
+    assert success is True
+    assert not shortcut.exists()
+    assert (
+        store[windows_launcher._AUTOSTART_KEY_PATH][
+            windows_launcher._AUTOSTART_VALUE_NAME
+        ]
+        == windows_launcher._autostart_command()
+    )
+
+
+def test_set_autostart_enabled_reports_shortcut_removal_failure(monkeypatch):
+    monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
+    fake_winreg, _store = _fake_winreg_module()
+    monkeypatch.setitem(windows_launcher.sys.modules, "winreg", fake_winreg)
+    shortcut = _create_installer_shortcut()
+
+    def _fail(self, missing_ok=False):
+        raise PermissionError("locked by explorer")
+
+    monkeypatch.setattr(windows_launcher.Path, "unlink", _fail)
+
+    success, message = windows_launcher.set_autostart_enabled(False)
+
+    assert success is False
+    assert "locked by explorer" in message
+    assert shortcut.exists()
+
+
 def _fake_winreg_module():
     """A minimal stand-in for the stdlib `winreg` module (Windows-only, so
     real registry access can't be exercised here) - a plain dict backs a
@@ -3485,6 +3690,17 @@ def test_read_close_behavior_ignores_unrecognized_stored_value(tmp_path):
         '{"close_behavior": "bogus"}', encoding="utf-8"
     )
 
+    assert windows_launcher._read_close_behavior(config_path) == "tray"
+
+
+@pytest.mark.parametrize("content", ["[]", '"text"', "42", "null"])
+def test_read_shell_prefs_returns_empty_dict_for_non_object_json(tmp_path, content):
+    config_path = tmp_path / "config.py"
+    windows_launcher._shell_prefs_path(config_path).write_text(
+        content, encoding="utf-8"
+    )
+
+    assert windows_launcher._read_shell_prefs(config_path) == {}
     assert windows_launcher._read_close_behavior(config_path) == "tray"
 
 
