@@ -337,6 +337,9 @@ class ThreadChat(Thread):
         self.settings = None
         # Set by stop(); also wakes run() while it waits to retry TLS.
         self._stop_event = Event()
+        # Set by Streamer.retire_chat() when the streamer leaves the miner, so
+        # a late online/offline update can't join this chat again.
+        self.retired = False
         # Orders stop() against run() publishing chat_irc, so a stop during
         # the TLS probe or ClientIRC construction prevents the join.
         self._lifecycle_lock = Lock()

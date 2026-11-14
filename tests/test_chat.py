@@ -733,3 +733,64 @@ def test_concurrent_rejoins_start_the_chat_once(monkeypatch):
 
     assert errors == []
     assert len(starts) == 1
+
+
+@pytest.mark.parametrize("presence", ["ALWAYS", "ONLINE"])
+def test_late_status_update_does_not_rejoin_a_retired_chat(monkeypatch, presence):
+    # The watch worker can still hold a streamer that was just removed; its
+    # late online/offline update must not start a new chat for it.
+    from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+    from TwitchChannelPointsMiner.classes.entities import Streamer as streamer_module
+    from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+
+    started = []
+
+    class RecordingChat(ThreadChat):
+        def start(self):
+            started.append(self)
+            super().start()
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(streamer_module, "ThreadChat", RecordingChat)
+    streamer = Streamer(
+        "somechannel", settings=StreamerSettings(chat=ChatPresence[presence])
+    )
+    streamer.irc_chat = RecordingChat("u", "t", "somechannel")
+    streamer.is_online = True
+    streamer.toggle_chat()
+    streamer.irc_chat.join(timeout=5)
+    started.clear()
+
+    streamer.retire_chat()
+    streamer.is_online = False
+    streamer.toggle_chat()
+    streamer.is_online = True
+    streamer.toggle_chat()
+
+    assert started == []
+    assert streamer.irc_chat.retired is True
+
+
+def test_streamer_added_back_with_a_new_chat_can_join(monkeypatch):
+    from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+    from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+
+    class EndsAtOnce(ThreadChat):
+        def run(self):
+            pass
+
+    streamer = Streamer(
+        "somechannel", settings=StreamerSettings(chat=ChatPresence.ALWAYS)
+    )
+    streamer.irc_chat = EndsAtOnce("u", "t", "somechannel")
+    streamer.retire_chat()
+
+    # Re-adding a streamer assigns a fresh ThreadChat.
+    fresh = EndsAtOnce("u", "t", "somechannel")
+    streamer.irc_chat = fresh
+    streamer.toggle_chat()
+    fresh.join(timeout=5)
+
+    assert fresh.ident is not None

@@ -454,6 +454,8 @@ class Streamer(object):
     def __leave_chat(self):
         if self.irc_chat is not None:
             self.irc_chat.stop()
+            if self.__chat_retired():
+                return
 
             # Recreate a new thread to start again
             # raise RuntimeError("threads can only be started once")
@@ -463,8 +465,24 @@ class Streamer(object):
                 self.username,
             )
 
+    def __chat_retired(self):
+        return getattr(self.irc_chat, "retired", False) is True
+
+    def retire_chat(self, timeout=5):
+        """Stop the chat of a streamer that is leaving the miner, and keep
+        online/offline updates that are still in flight from joining it again.
+        A streamer added back later gets a new ThreadChat."""
+        with _chat_lifecycle_lock:
+            irc_chat = self.irc_chat
+            if irc_chat is None:
+                return
+            irc_chat.retired = True
+        if irc_chat.is_alive():
+            irc_chat.stop()
+            irc_chat.join(timeout=timeout)
+
     def __join_chat(self):
-        if self.irc_chat is not None:
+        if self.irc_chat is not None and not self.__chat_retired():
             if self.irc_chat.is_alive() is False:
                 if self.irc_chat.ident is not None:
                     # This thread already ran and ended (IRC died, or chat
