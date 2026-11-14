@@ -35,7 +35,7 @@ test('issue selection is open-only and deduplicated', () => {
   assert.equal(shouldCloseIssue({ state: 'OPEN', labels: { nodes: [] } }), false);
 });
 
-function markingGithub({ pulls, mutations, comments = [] }) {
+function markingGithub({ pulls, mutations, comments = [], compare }) {
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
   return {
@@ -49,13 +49,21 @@ function markingGithub({ pulls, mutations, comments = [] }) {
         pageInfo: { hasNextPage: false },
       },
     } } }),
-    paginate: async (method) => {
-      if (method === listPullRequestsAssociatedWithCommit) return pulls;
+    paginate: async (method, ...args) => {
+      if (method === listPullRequestsAssociatedWithCommit) {
+        return typeof pulls === 'function' ? pulls(args[0].commit_sha) : pulls;
+      }
       if (method === listComments) return comments;
       throw new Error('Unexpected paginated method');
     },
     rest: {
-      repos: { listPullRequestsAssociatedWithCommit },
+      repos: {
+        listPullRequestsAssociatedWithCommit,
+        compareCommitsWithBasehead: async (input) => {
+          if (!compare) throw new Error('Unexpected compare');
+          return compare(input);
+        },
+      },
       issues: {
         listComments,
         addLabels: async (input) => mutations.push(['label', input]),
@@ -274,4 +282,71 @@ test('release orchestration comments, closes, and tolerates an already removed l
   );
   assert.equal(calls[2][0], 'remove');
   assert.match(info.at(-1), /no longer has awaiting-release/);
+});
+
+function pullFor(sha) {
+  const numbers = { m1: 11, m2: 12 };
+  return numbers[sha]
+    ? [{ number: numbers[sha], merged_at: '2026-01-01', merge_commit_sha: sha, labels: [] }]
+    : [];
+}
+
+test('marking recovers merges the push payload left out', async () => {
+  const mutations = [];
+  const compared = [];
+  await markIssuesAwaitingRelease({
+    github: markingGithub({
+      pulls: pullFor,
+      mutations,
+      compare: async (input) => {
+        compared.push(input.basehead);
+        return { data: { status: 'ahead', total_commits: 3, commits: [
+          { sha: 'm1' }, { sha: 'm2' }, { sha: 'direct' },
+        ] } };
+      },
+    }),
+    context: {
+      repo: { owner: 'o', repo: 'r' },
+      // The truncated payload lists only the last commit, a direct one.
+      payload: { before: 'b0', after: 'direct', commits: [{ id: 'direct' }] },
+    },
+    core: { info() {} },
+  });
+  assert.deepEqual(compared, ['b0...direct']);
+  const commented = mutations.filter(([kind]) => kind === 'comment').map(([, input]) => input.body);
+  assert.equal(commented.length, 2);
+  assert.match(commented[0], /The fix in #11 was merged/);
+  assert.match(commented[1], /The fix in #12 was merged/);
+});
+
+test('marking falls back to the payload when a force push diverges', async () => {
+  const mutations = [];
+  await markIssuesAwaitingRelease({
+    github: markingGithub({
+      pulls: pullFor,
+      mutations,
+      compare: async () => ({ data: { status: 'diverged', total_commits: 0, commits: [] } }),
+    }),
+    context: {
+      repo: { owner: 'o', repo: 'r' },
+      payload: { before: 'b0', after: 'm1', commits: [{ id: 'm1' }] },
+    },
+    core: { info() {} },
+  });
+  assert.equal(mutations.filter(([kind]) => kind === 'comment').length, 1);
+});
+
+test('marking skips the compare for a new branch or deleted head', async () => {
+  for (const payload of [
+    { before: '0000000000000000000000000000000000000000', after: 'm1', commits: [{ id: 'm1' }] },
+    { before: 'b0', after: '0000000000000000000000000000000000000000', commits: [] },
+  ]) {
+    const mutations = [];
+    await markIssuesAwaitingRelease({
+      github: markingGithub({ pulls: pullFor, mutations }),
+      context: { repo: { owner: 'o', repo: 'r' }, payload },
+      core: { info() {} },
+    });
+    assert.equal(mutations.length, payload.after === 'm1' ? 1 : 0);
+  }
 });

@@ -89,15 +89,30 @@ async function markPullIssues(github, owner, repo, pull) {
   }
 }
 
+async function pushedCommitShas(github, owner, repo, payload) {
+  // The payload's commit list can be truncated, so include the pushed head and
+  // every commit in before...after. A force push diverges; keep the payload's.
+  const isSha = (sha) => Boolean(sha) && !/^0+$/.test(sha);
+  const shas = new Set((payload.commits || []).map((commit) => commit.id));
+  if (isSha(payload.after)) {
+    shas.add(payload.after);
+    if (isSha(payload.before)) {
+      try {
+        for (const sha of await commitsBetween(github, owner, repo, payload.before, payload.after)) {
+          shas.add(sha);
+        }
+      } catch (error) {
+        if (!/have diverged/.test(error.message)) throw error;
+      }
+    }
+  }
+  return [...shas];
+}
+
 async function markIssuesAwaitingRelease({ github, context, core }) {
   // Runs on push to the default branch, so the merged PR comes from its merge commit.
   const { owner, repo } = context.repo;
-  // The payload's commit list can be truncated, so always include the pushed head.
-  const shas = new Set((context.payload.commits || []).map((commit) => commit.id));
-  if (context.payload.after && !/^0+$/.test(context.payload.after)) {
-    shas.add(context.payload.after);
-  }
-  const commitShas = [...shas];
+  const commitShas = await pushedCommitShas(github, owner, repo, context.payload);
 
   const associations = {};
   for (const sha of commitShas) {
