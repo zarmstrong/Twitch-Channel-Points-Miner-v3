@@ -4,8 +4,8 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 
 ## Workflows
 
-- `workflows/tests.yml` runs on every push and pull request:
-  - Black and pytest on Python 3.11 to 3.14.
+- `workflows/tests.yml` runs on pushes to `master`, on every pull request and on manual dispatch:
+  - Black (on Python 3.13) and pytest (on Python 3.11 to 3.14).
   - The Node tests for the release scripts.
   - Both Windows executables and the installer.
 
