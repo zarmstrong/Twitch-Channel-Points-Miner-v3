@@ -2811,6 +2811,86 @@ def test_update_is_written_when_unpacking_may_supply_the_defaults(tmp_path, mine
     )
 
 
+def test_reorder_leaves_code_after_the_closing_bracket_alone(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [\n    "one",  # keep"\n    "two"]; LABEL = "#label"\n',
+    )
+
+    update_managed_web_config(
+        config, {"action": "reorder_streamers", "usernames": ["two", "one"]}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert 'STREAMERS = [\n    "two",\n    "one"  # keep"\n]; LABEL = "#label"\n' in (
+        source
+    )
+    assert _load_config(config).LABEL == "#label"
+
+
+def test_migrated_new_streamer_gets_settings_its_unreadable_defaults_hide(
+    tmp_path,
+):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one"]\n')
+    source = config.read_text(encoding="utf-8")
+    source = source.replace(
+        '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE)',
+        '"streamer_settings": DEFAULTS',
+    ).replace(
+        "MINER_CONFIG = {",
+        "DEFAULTS = StreamerSettings(favorite=True)\nMINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    (tmp_path / "web-config.json").write_text(
+        json.dumps(
+            {
+                "streamers": [
+                    {"username": "one"},
+                    {"username": "new", "settings": {"favorite": False}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrate_web_config(config)
+
+    streamers = _load_config(config).STREAMERS
+    assert [getattr(item, "username", item) for item in streamers] == ["one", "new"]
+    assert streamers[1].settings.favorite is False
+
+
+def test_migration_checks_the_first_record_of_a_duplicated_username(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one"]\n')
+    source = config.read_text(encoding="utf-8")
+    source = source.replace(
+        '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE)',
+        '"streamer_settings": DEFAULTS',
+    ).replace(
+        "MINER_CONFIG = {",
+        "DEFAULTS = StreamerSettings(favorite=True)\nMINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    (tmp_path / "web-config.json").write_text(
+        json.dumps(
+            {
+                "streamers": [
+                    {"username": "one", "settings": {"favorite": False}},
+                    {"username": "one"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrate_web_config(config)
+
+    assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
 def test_import_is_not_added_above_a_future_import(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = ["one", "two"]\n')

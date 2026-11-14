@@ -449,9 +449,10 @@ def migrate_web_config(config_path):
             always_write = {}
             for record in records:
                 key = record["username"].lower()
-                if record.get("settings") and key not in always_write:
+                # _write_streamers uses the first record for each username.
+                if key not in always_write:
                     always_write[key] = _require_editable_settings(
-                        config_path, key, record["settings"]
+                        config_path, key, record.get("settings") or {}
                     )
             _write_streamers(
                 config_path,
@@ -872,13 +873,15 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
         removed_key = _streamer_key(streamers.elts[index])
         updated, (first, last) = _remove_list_item(encoded, streamers, index)
         # Only comments on the removed entry's own lines may go.
-        kept = [text for line, text in _comments(encoded) if not first <= line <= last]
-        remaining = [text for _line, text in _comments(updated)]
         try:
             ast.parse(updated)
+            kept = [
+                text for line, text in _comments(encoded) if not first <= line <= last
+            ]
+            remaining = [text for _line, text in _comments(updated)]
             for text in kept:
                 remaining.remove(text)
-        except (SyntaxError, ValueError):
+        except (SyntaxError, ValueError, tokenize.TokenError):
             # e.g. a comma that starts the next entry's line.
             raise ConfigEditError(
                 f"{removed_key} can't be removed from the dashboard because of "
@@ -1130,7 +1133,12 @@ def _reorder_list_items(encoded, container, order):
         or elements[index + 1].lineno > elements[index].end_lineno
         for index in range(len(elements))
     )
-    tails = [_line_tail(encoded, end) for _start, end in spans]
+    closing = (
+        _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
+    )
+    # Stop at the list's closing bracket: code after it on the same line
+    # isn't part of any entry.
+    tails = [_line_tail(encoded, end)[: max(closing - end, 0)] for _start, end in spans]
     comments = [
         tail[tail.index(b"#") :].rstrip() if b"#" in tail else b"" for tail in tails
     ]
@@ -1143,6 +1151,12 @@ def _reorder_list_items(encoded, container, order):
             comment = b"  " + comments[source] if comments[source] else b""
             replacement = texts[source] + separator.rstrip() + comment
             end += len(tail)
+            if comment and end == closing:
+                # The closing bracket follows on this line: move it to its
+                # own line, so the comment doesn't swallow it.
+                line = encoded_lines[container.lineno - 1].decode("utf-8")
+                indent = line[: len(line) - len(line.lstrip())]
+                replacement += f"{_newline(encoded)}{indent}".encode("utf-8")
         else:
             replacement = texts[source]
         encoded = encoded[:start] + replacement + encoded[end:]
@@ -1254,8 +1268,10 @@ def _require_editable_settings(config_path, username, names):
         ),
         None,
     )
+    tree = ast.parse(encoded)
     if node is None:
-        return set()
+        # A streamer the edit adds inherits every setting.
+        return {name for name in names if _inherited_setting_unknown(tree, name)}
     settings = _settings_argument(node) if isinstance(node, ast.Call) else None
     explicit = set()
     if isinstance(settings, ast.Call):
@@ -1273,7 +1289,6 @@ def _require_editable_settings(config_path, username, names):
                 isinstance(keyword.value, ast.Constant) and keyword.value.value is None
             ):
                 explicit.add(name)
-    tree = ast.parse(encoded)
     return {
         name
         for name in names
