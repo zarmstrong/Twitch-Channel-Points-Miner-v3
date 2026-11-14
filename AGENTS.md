@@ -9,6 +9,14 @@ This repository is a Python Twitch channel points miner. Keep changes focused, p
 - Project overview and setup notes: [README.md](README.md)
 - Contribution and style expectations: [CONTRIBUTING.md](CONTRIBUTING.md)
 
+## Subsystem guidance
+
+Read the scoped guide before working in these folders. Each folder's `CLAUDE.md` imports its `AGENTS.md`, so both point to the same text.
+
+- [TwitchChannelPointsMiner/AGENTS.md](TwitchChannelPointsMiner/AGENTS.md): threads and shared state, editing `config.py`, dashboard authentication, secrets.
+- [tests/AGENTS.md](tests/AGENTS.md): offline test conventions and Windows-only tests.
+- [.github/AGENTS.md](.github/AGENTS.md): workflows, release scripts and their tests.
+
 ## Working conventions
 
 - Preserve `__slots__` usage and existing enum-based settings patterns when touching classes.
