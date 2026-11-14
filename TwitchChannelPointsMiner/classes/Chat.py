@@ -105,6 +105,10 @@ class ClientIRC(SingleServerIRCBot):
         self.settings = settings
         self.channel = "#" + channel
         self.__active = False
+        # die() can run before start() (from the thread that stops chat), so
+        # start() must not undo it.
+        self.__stopped = False
+        self.__lifecycle_lock = Lock()
 
         connect_params = {}
         port = IRC_PORT
@@ -126,7 +130,10 @@ class ClientIRC(SingleServerIRCBot):
         client.join(self.channel)
 
     def start(self):
-        self.__active = True
+        with self.__lifecycle_lock:
+            if self.__stopped:
+                return
+            self.__active = True
         self._connect()
         while self.__active:
             try:
@@ -141,9 +148,14 @@ class ClientIRC(SingleServerIRCBot):
                     logger.error(
                         f"Exception raised: {e}. Thread is active: {self.__active}"
                     )
+        # die() may have run between the check above and _connect(), before
+        # there was a connection to close.
+        self.connection.disconnect()
 
     def die(self, msg="Bye, cruel world!"):
-        self.__active = False
+        with self.__lifecycle_lock:
+            self.__stopped = True
+            self.__active = False
         self.connection.disconnect(msg)
 
     """
@@ -234,7 +246,9 @@ class ThreadChat(Thread):
         return None
 
     def __init__(self, username, token, channel):
-        super(ThreadChat, self).__init__()
+        # A daemon thread, so a chat that is still connecting (or wasn't
+        # stopped) can't keep the process alive after the miner has stopped.
+        super(ThreadChat, self).__init__(daemon=True)
 
         self.username = username
         self.token = token
@@ -242,19 +256,30 @@ class ThreadChat(Thread):
 
         self.chat_irc = None
         self.settings = None
+        self._stop_lock = Lock()
+        self._stop_requested = False
 
     def run(self):
-        self.chat_irc = ClientIRC(
+        chat_irc = ClientIRC(
             self.username, self.token, self.channel, settings=self.settings
         )
+        # stop() can arrive while ClientIRC was being created and chat_irc was
+        # still None, so it couldn't stop it.
+        with self._stop_lock:
+            if self._stop_requested:
+                return
+            self.chat_irc = chat_irc
         logger.info(
             f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
         )
-        self.chat_irc.start()
+        chat_irc.start()
 
     def stop(self):
-        if self.chat_irc is not None:
+        with self._stop_lock:
+            self._stop_requested = True
+            chat_irc = self.chat_irc
+        if chat_irc is not None:
             logger.info(
                 f"Leave IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
             )
-            self.chat_irc.die()
+            chat_irc.die()

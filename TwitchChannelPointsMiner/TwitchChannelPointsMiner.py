@@ -839,6 +839,17 @@ class TwitchChannelPointsMiner:
                 # Flush the alert above even if stopping a worker failed.
                 self.queue_listener.stop()
                 _exit_after_crash()
+        else:
+            # run() also returns when Twitch stops the miner without asking
+            # for a restart (e.g. the cached login can't be cleared). Stop the
+            # workers then, or the process lingers with nothing running and a
+            # container restart policy never recovers it. A requested restart
+            # replaces the process, and end() has already stopped them.
+            restart_requested = getattr(self.twitch, "restart_requested", None)
+            if self.running and not (
+                restart_requested is not None and restart_requested.is_set()
+            ):
+                self.__stop_workers()
 
     def run(
         self,
@@ -1507,7 +1518,15 @@ class TwitchChannelPointsMiner:
                 logger.info(
                     f"#{websocket.index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
                 )
-                WebSocketsPool.handle_reconnection(websocket)
+                # Reconnecting waits at least 30 seconds, and longer while
+                # offline; on this thread it would hold up the daily report,
+                # the category refresh and restart requests.
+                threading.Thread(
+                    target=WebSocketsPool.handle_reconnection,
+                    args=(websocket,),
+                    name=f"WebSocket #{websocket.index} reconnection",
+                    daemon=True,
+                ).start()
 
     def __refresh_channel_points_context(self):
         for streamer in list(self.streamers):
