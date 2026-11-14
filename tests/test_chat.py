@@ -16,8 +16,10 @@ from TwitchChannelPointsMiner.constants import IRC_PORT, IRC_TLS_PORT
 @pytest.fixture(autouse=True)
 def reset_tls_probe_cache():
     Chat._tls_supported = None
+    Chat._tls_failure_warned = False
     yield
     Chat._tls_supported = None
+    Chat._tls_failure_warned = False
 
 
 class FakeSocket:
@@ -354,16 +356,154 @@ def test_thread_chat_run_passes_settings_to_client(monkeypatch):
     assert created["kwargs"] == {"settings": sentinel}
 
 
-def test_thread_chat_run_skips_join_without_tls_or_opt_in(monkeypatch, caplog):
-    caplog.set_level(logging.WARNING)
+class _StopAfterWaits:
+    """Stands in for ThreadChat._stop_event: records each backoff delay and
+    reports a stop after the given number of waits."""
+
+    def __init__(self, stop_after):
+        self.delays = []
+        self.stop_after = stop_after
+
+    def is_set(self):
+        return False
+
+    def wait(self, delay):
+        self.delays.append(delay)
+        return len(self.delays) >= self.stop_after
+
+    def set(self):
+        pass
+
+
+def test_thread_chat_run_waits_for_tls_without_opt_in(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
     monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
     monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
     thread = ThreadChat("u", "t", "c")
+    thread._stop_event = _StopAfterWaits(stop_after=4)
 
     thread.run()
 
     assert thread.chat_irc is None
-    assert any(
-        r.levelno == logging.WARNING and "TCPM_ALLOW_PLAINTEXT_IRC" in r.getMessage()
+    # Backoff doubles from the initial delay and is capped.
+    assert thread._stop_event.delays == [30, 60, 120, 240]
+    warnings = [
+        r
         for r in caplog.records
+        if r.levelno == logging.WARNING and "TCPM_ALLOW_PLAINTEXT_IRC" in r.getMessage()
+    ]
+    # One warning per outage, the retries at DEBUG.
+    assert len(warnings) == 1
+
+
+def test_thread_chat_backoff_is_capped(monkeypatch):
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
+    thread = ThreadChat("u", "t", "c")
+    thread._stop_event = _StopAfterWaits(stop_after=8)
+
+    thread.run()
+
+    assert max(thread._stop_event.delays) == Chat.IRC_TLS_RETRY_MAX_SECONDS
+    assert thread._stop_event.delays[-1] == Chat.IRC_TLS_RETRY_MAX_SECONDS
+
+
+def test_thread_chat_joins_once_tls_becomes_available(monkeypatch):
+    monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
+    attempts = []
+    started = []
+
+    class FlakyClientIRC:
+        def __init__(self, *args, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise Chat.IRCTLSUnavailable("no TLS")
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(Chat, "ClientIRC", FlakyClientIRC)
+    thread = ThreadChat("u", "t", "c")
+    thread._stop_event = _StopAfterWaits(stop_after=99)
+
+    thread.run()
+
+    assert len(attempts) == 3
+    assert started == [thread.chat_irc]
+    assert thread._stop_event.delays == [30, 60]
+
+
+def test_thread_chat_stop_ends_the_tls_wait_promptly(monkeypatch):
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
+    thread = ThreadChat("u", "t", "c")
+    thread.daemon = True
+
+    thread.start()
+    thread.stop()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert thread.chat_irc is None
+
+
+def test_tls_probe_failure_warns_once_until_a_success(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    outcomes = iter([OSError("down"), OSError("down"), None, OSError("down")])
+
+    def connect(address, timeout=None):
+        outcome = next(outcomes)
+        if outcome is not None:
+            raise outcome
+        return FakeSocket()
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    monkeypatch.setattr(
+        ssl.SSLContext, "wrap_socket", lambda self, sock, server_hostname=None: sock
     )
+
+    def handshake_warnings():
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "handshake" in r.getMessage()
+        ]
+
+    assert Chat._irc_tls_available() is False
+    assert Chat._irc_tls_available() is False
+    assert len(handshake_warnings()) == 1
+    assert Chat._irc_tls_available() is True
+    # A success is cached, so force a fresh probe to model a later outage.
+    Chat._tls_supported = None
+    assert Chat._irc_tls_available() is False
+    assert len(handshake_warnings()) == 2
+
+
+def test_streamer_rejoins_chat_after_its_thread_ended(monkeypatch):
+    from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+    from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+
+    class EndsAtOnce(ThreadChat):
+        def run(self):
+            pass
+
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Streamer.ThreadChat", EndsAtOnce
+    )
+    streamer = Streamer(
+        "somechannel", settings=StreamerSettings(chat=ChatPresence.ALWAYS)
+    )
+    first = EndsAtOnce("u", "t", "somechannel")
+    streamer.irc_chat = first
+
+    streamer.toggle_chat()
+    first.join(timeout=5)
+    # Before the fix, the second join called start() on the finished thread
+    # and raised "threads can only be started once".
+    streamer.toggle_chat()
+    streamer.irc_chat.join(timeout=5)
+
+    assert streamer.irc_chat is not first
+    assert streamer.irc_chat.ident is not None
+    assert streamer.irc_chat.username == "u"
+    assert streamer.irc_chat.token == "t"

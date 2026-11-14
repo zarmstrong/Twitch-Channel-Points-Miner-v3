@@ -455,6 +455,15 @@ class Streamer(object):
     def __join_chat(self):
         if self.irc_chat is not None:
             if self.irc_chat.is_alive() is False:
+                if self.irc_chat.ident is not None:
+                    # This thread already ran and ended (IRC died, or chat
+                    # was stopped while waiting for TLS). A thread can only
+                    # be started once, so start a fresh one.
+                    self.irc_chat = ThreadChat(
+                        self.irc_chat.username,
+                        self.irc_chat.token,
+                        self.username,
+                    )
                 self.irc_chat.settings = self.settings
                 self.irc_chat.start()
 

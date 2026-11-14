@@ -5,7 +5,7 @@ import ssl
 import time
 from enum import Enum, auto
 from functools import partial
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 import irc.connection
 from irc.bot import SingleServerIRCBot
@@ -17,7 +17,13 @@ logger = logging.getLogger(__name__)
 
 _tls_probe_lock = Lock()
 _tls_supported = None
+# Set after a failed probe has been logged at WARNING, cleared on success, so
+# chats retrying during one outage don't repeat the warning.
+_tls_failure_warned = False
 ALLOW_PLAINTEXT_IRC_ENV = "TCPM_ALLOW_PLAINTEXT_IRC"
+# Without TLS, a chat waits and probes again: 30 s, doubling up to 15 min.
+IRC_TLS_RETRY_INITIAL_SECONDS = 30
+IRC_TLS_RETRY_MAX_SECONDS = 15 * 60
 
 DEFAULT_GIFT_SUB_MESSAGE = "Thanks for the sub!"
 # Twitch rejects chat messages longer than 500 characters.
@@ -83,7 +89,7 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
     success is cached for the process; a failure is not cached, so the next
     connect probes again. The chat OAuth token is never sent over plaintext
     unless TCPM_ALLOW_PLAINTEXT_IRC is set."""
-    global _tls_supported
+    global _tls_supported, _tls_failure_warned
     with _tls_probe_lock:
         if _tls_supported is True:
             return True
@@ -93,11 +99,14 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
                 with context.wrap_socket(sock, server_hostname=host):
                     _tls_supported = True
         except (OSError, ssl.SSLError) as error:
-            logger.warning(
-                f"IRC TLS handshake with {host}:{port} failed ({error})",
-                extra={"emoji": ":warning:"},
-            )
+            message = f"IRC TLS handshake with {host}:{port} failed ({error})"
+            if _tls_failure_warned:
+                logger.debug(message)
+            else:
+                logger.warning(message, extra={"emoji": ":warning:"})
+                _tls_failure_warned = True
             return False
+        _tls_failure_warned = False
         return True
 
 
@@ -263,17 +272,33 @@ class ThreadChat(Thread):
 
         self.chat_irc = None
         self.settings = None
+        # Set by stop(); also wakes run() while it waits to retry TLS.
+        self._stop_event = Event()
 
     def run(self):
-        try:
-            self.chat_irc = ClientIRC(
-                self.username, self.token, self.channel, settings=self.settings
-            )
-        except IRCTLSUnavailable:
-            logger.warning(
-                f"Not joining IRC chat {self.channel}: TLS to {IRC}:{IRC_TLS_PORT} is unavailable. Chat is retried the next time it is joined; set {ALLOW_PLAINTEXT_IRC_ENV}=1 to allow plaintext IRC.",
-                extra={"emoji": ":speech_balloon:"},
-            )
+        delay = IRC_TLS_RETRY_INITIAL_SECONDS
+        warned = False
+        while not self._stop_event.is_set():
+            try:
+                self.chat_irc = ClientIRC(
+                    self.username, self.token, self.channel, settings=self.settings
+                )
+                break
+            except IRCTLSUnavailable:
+                message = (
+                    f"Not joining IRC chat {self.channel} yet: TLS to "
+                    f"{IRC}:{IRC_TLS_PORT} is unavailable. Retrying in {delay}s; "
+                    f"set {ALLOW_PLAINTEXT_IRC_ENV}=1 to allow plaintext IRC."
+                )
+                if warned:
+                    logger.debug(message)
+                else:
+                    logger.warning(message, extra={"emoji": ":speech_balloon:"})
+                    warned = True
+            if self._stop_event.wait(delay):
+                return
+            delay = min(delay * 2, IRC_TLS_RETRY_MAX_SECONDS)
+        else:
             return
         logger.info(
             f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
@@ -281,6 +306,7 @@ class ThreadChat(Thread):
         self.chat_irc.start()
 
     def stop(self):
+        self._stop_event.set()
         if self.chat_irc is not None:
             logger.info(
                 f"Leave IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
