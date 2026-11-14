@@ -783,6 +783,9 @@ class TwitchChannelPointsMiner:
         wildcard_category_streamer_limit: int = 1,
         wildcard_category_pin_active: bool = True,
     ):
+        # run() refuses to start a second session on a running instance;
+        # that refusal must not stop the session that is already running.
+        already_running = self.running
         try:
             self.run(
                 streamers=streamers,
@@ -842,12 +845,15 @@ class TwitchChannelPointsMiner:
         else:
             # run() also returns when Twitch stops the miner without asking
             # for a restart (e.g. the cached login can't be cleared). Stop the
-            # workers then, or the process lingers with nothing running and a
-            # container restart policy never recovers it. A requested restart
-            # replaces the process, and end() has already stopped them.
+            # workers then, or the non-daemon workers keep the process alive
+            # with nothing running, and it never exits for a restart policy
+            # to act on. A requested restart replaces the process, and end()
+            # has already stopped them.
             restart_requested = getattr(self.twitch, "restart_requested", None)
-            if self.running and not (
-                restart_requested is not None and restart_requested.is_set()
+            if (
+                not already_running
+                and self.running
+                and not (restart_requested is not None and restart_requested.is_set())
             ):
                 self.__stop_workers()
 
