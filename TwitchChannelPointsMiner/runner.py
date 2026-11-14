@@ -247,17 +247,32 @@ def _watch_config(path, miner, initial_config, interval):
             )
 
 
+CONFIG_RELOAD_ENV = "TCPM_CONFIG_RELOAD_SECONDS"
+DEFAULT_CONFIG_RELOAD_SECONDS = 5.0
+# Longer intervals are almost certainly a mistake, and large enough ones make
+# time.sleep() raise OverflowError, silently ending the config watcher.
+MAX_CONFIG_RELOAD_SECONDS = 24 * 60 * 60
+
+
 def _config_reload_interval():
-    """Read TCPM_CONFIG_RELOAD_SECONDS: a finite number of seconds, at least 1."""
-    raw = os.environ.get("TCPM_CONFIG_RELOAD_SECONDS", "5")
+    """Read TCPM_CONFIG_RELOAD_SECONDS: seconds between config checks.
+
+    Unset or blank means the default. Values below one second are raised to
+    one. Anything that isn't a number up to one day stops startup with a
+    RuntimeError, which cli() prints and the Windows app shows in a dialog
+    (a SystemExit raised on the Windows app's miner thread would be lost).
+    """
+    raw = os.environ.get(CONFIG_RELOAD_ENV, "")
+    if not raw.strip():
+        return DEFAULT_CONFIG_RELOAD_SECONDS
     try:
         interval = float(raw)
     except ValueError:
         interval = math.nan
-    if not math.isfinite(interval):
-        raise SystemExit(
-            "TCPM_CONFIG_RELOAD_SECONDS must be a finite number of seconds, "
-            f"got {raw!r}"
+    if not math.isfinite(interval) or interval > MAX_CONFIG_RELOAD_SECONDS:
+        raise RuntimeError(
+            f"{CONFIG_RELOAD_ENV} must be a number of seconds up to "
+            f"{MAX_CONFIG_RELOAD_SECONDS}, got {raw!r}"
         )
     return max(interval, 1)
 

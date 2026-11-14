@@ -660,11 +660,64 @@ def test_config_reload_interval_enforces_one_second_minimum(monkeypatch):
     assert _config_reload_interval() == 1
 
 
-@pytest.mark.parametrize("value", ["5s", "nan", "inf", "-inf"])
-def test_config_reload_interval_rejects_non_finite_values(monkeypatch, value):
+@pytest.mark.parametrize("value", ["", "   ", "\t"])
+def test_config_reload_interval_treats_blank_as_the_default(monkeypatch, value):
+    # e.g. TCPM_CONFIG_RELOAD_SECONDS=${X:-} in a compose file, or a blank
+    # .env entry.
     monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", value)
 
-    with pytest.raises(SystemExit) as raised:
+    assert _config_reload_interval() == 5.0
+
+
+def test_config_reload_interval_accepts_one_day(monkeypatch):
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", "86400")
+
+    assert _config_reload_interval() == 86400.0
+
+
+@pytest.mark.parametrize(
+    "value", ["5s", "nan", "inf", "-inf", "1e309", "86401", "1e300", "9e15"]
+)
+def test_config_reload_interval_rejects_invalid_values(monkeypatch, value):
+    # 1e300 and 9e15 are finite but make time.sleep() raise OverflowError.
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", value)
+
+    with pytest.raises(RuntimeError) as raised:
         _config_reload_interval()
 
     assert "TCPM_CONFIG_RELOAD_SECONDS" in str(raised.value)
+
+
+def test_run_config_rejects_the_interval_before_building_the_miner(monkeypatch):
+    import TwitchChannelPointsMiner as package
+    from TwitchChannelPointsMiner.runner import run_config
+
+    built = []
+    monkeypatch.setattr(
+        package, "TwitchChannelPointsMiner", lambda **kwargs: built.append(kwargs)
+    )
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", "nan")
+    config = SimpleNamespace(
+        MINER_CONFIG={"username": "alice"},
+        MINE_CONFIG={},
+        ANALYTICS_CONFIG=None,
+        STREAMERS=[],
+    )
+
+    with pytest.raises(RuntimeError):
+        run_config(config, Path("config/config.py"))
+
+    assert built == []
+
+
+def test_cli_reports_an_invalid_interval_and_exits_with_1(monkeypatch, capsys):
+    from TwitchChannelPointsMiner import runner
+
+    def fail(argv=None):
+        runner._config_reload_interval()
+
+    monkeypatch.setenv("TCPM_CONFIG_RELOAD_SECONDS", "inf")
+    monkeypatch.setattr(runner, "main", fail)
+
+    assert runner.cli([]) == 1
+    assert "TCPM_CONFIG_RELOAD_SECONDS" in capsys.readouterr().err
