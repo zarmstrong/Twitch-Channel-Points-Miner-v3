@@ -4,12 +4,14 @@
 
 import ast
 import errno
+import io
 import json
 import os
 import re
 import stat
 import tempfile
 import threading
+import tokenize
 from pathlib import Path
 
 CONFIG_FILE_MUTEX = threading.Lock()
@@ -444,15 +446,24 @@ def migrate_web_config(config_path):
                 raise ConfigEditError("Each managed streamer needs a valid username.")
             _validate_streamer_settings(record.get("settings", {}))
         try:
+            always_write = {}
+            for record in records:
+                key = record["username"].lower()
+                if record.get("settings") and key not in always_write:
+                    always_write[key] = _require_editable_settings(
+                        config_path, key, record["settings"]
+                    )
             _write_streamers(
                 config_path,
                 records,
                 {str(record.get("username", "")).lower() for record in records},
+                always_write=always_write,
             )
         except ConfigEditError as error:
             raise ConfigEditError(
                 f"Couldn't move the streamers saved in {path.name} into "
-                f"config.py: {error} Then delete {path.name}."
+                f"config.py. {error} To discard them instead, delete "
+                f"{path.name}."
             ) from error
     if "categories" in overrides:
         categories = overrides["categories"]
@@ -804,7 +815,7 @@ def _write_call_keywords(config_path, find_call, values):
             _insert_config_item(config_path, call, f"{name}={rendered}")
 
 
-def _write_streamers(config_path, records, updated_usernames=None, always_write=()):
+def _write_streamers(config_path, records, updated_usernames=None, always_write=None):
     if isinstance(updated_usernames, str):
         updated_usernames = {updated_usernames}
     else:
@@ -819,16 +830,22 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
     current = {}
     for item in base["streamers"]:
         current.setdefault(item["username"].lower(), item["settings"])
+    # always_write maps a username to settings whose current value can't be
+    # read, so they're written even when they look unchanged.
+    always_write = always_write or {}
     settings_changes = {}
+    seen = set()
     for record in records:
         key = record["username"].lower()
-        if key not in updated_usernames:
+        if key not in updated_usernames or key in seen:
             continue
+        seen.add(key)
         effective = current.get(key, base["streamer_defaults"])
+        forced = always_write.get(key, ())
         changed = {
             name: value
             for name, value in (record.get("settings") or {}).items()
-            if effective.get(name) != value or name in always_write
+            if effective.get(name) != value or name in forced
         }
         if changed:
             settings_changes[key] = changed
@@ -853,16 +870,22 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
         if index is None:
             break
         removed_key = _streamer_key(streamers.elts[index])
-        encoded = _remove_list_item(encoded, streamers, index)
+        updated, (first, last) = _remove_list_item(encoded, streamers, index)
+        # Only comments on the removed entry's own lines may go.
+        kept = [text for line, text in _comments(encoded) if not first <= line <= last]
+        remaining = [text for _line, text in _comments(updated)]
         try:
-            ast.parse(encoded)
-        except SyntaxError:
-            # e.g. a comment inside the entry's redundant parentheses.
+            ast.parse(updated)
+            for text in kept:
+                remaining.remove(text)
+        except (SyntaxError, ValueError):
+            # e.g. a comma that starts the next entry's line.
             raise ConfigEditError(
                 f"{removed_key} can't be removed from the dashboard because of "
                 "how its entry is written in config.py. Remove it in config.py "
                 "instead."
             ) from None
+        encoded = updated
 
     # Append new entries as plain usernames.
     present = {_streamer_key(node) for node in _streamers_list(encoded).elts}
@@ -1006,7 +1029,17 @@ def _own_lines_span(encoded, start, end, closing, is_last, has_comma):
     return line_start, line_end
 
 
+def _comments(encoded):
+    """(line, text) for every comment in encoded."""
+    return [
+        (token.start[0], token.string)
+        for token in tokenize.tokenize(io.BytesIO(encoded).readline)
+        if token.type == tokenize.COMMENT
+    ]
+
+
 def _remove_list_item(encoded, container, index):
+    """Return (encoded without the entry, (first, last) line of the entry)."""
     encoded_lines = encoded.splitlines(keepends=True)
     elements = container.elts
     is_last = index + 1 == len(elements)
@@ -1030,10 +1063,11 @@ def _remove_list_item(encoded, container, index):
         re.sub(rb"#[^\r\n]*", b"", encoded[end : end + item_end]).count(b")"),
     )
     end += item_end
+    lines = (encoded.count(b"\n", 0, start) + 1, encoded.count(b"\n", 0, end) + 1)
 
     own_lines = _own_lines_span(encoded, start, end, closing, is_last, has_comma)
     if own_lines is not None:
-        return encoded[: own_lines[0]] + encoded[own_lines[1] :]
+        return encoded[: own_lines[0]] + encoded[own_lines[1] :], lines
     if not is_last:
         # The next entry follows on the same line, or this one shares its
         # line with the opening bracket: drop the entry, its comma and the
@@ -1069,7 +1103,7 @@ def _remove_list_item(encoded, container, index):
         start = cut
     elif has_comma:
         end = _next_comma(encoded, end) + 1
-    return encoded[:start] + encoded[end:]
+    return encoded[:start] + encoded[end:], lines
 
 
 def _line_tail(encoded, end):
@@ -1177,7 +1211,8 @@ def _inherited_setting_unknown(tree, name):
     The dashboard then shows the built-in default, which may be wrong.
     """
     miner = _assignment(tree, "MINER_CONFIG")
-    if not isinstance(miner, ast.Dict):
+    if not isinstance(miner, ast.Dict) or None in miner.keys:
+        # Not a literal, or **unpacking may supply streamer_settings.
         return True
     defaults = _dict_item(miner, "streamer_settings")
     if defaults is None or (
@@ -1185,12 +1220,14 @@ def _inherited_setting_unknown(tree, name):
     ):
         return False
     if isinstance(defaults, ast.Dict):
+        if None in defaults.keys:
+            return True
         value = _dict_item(defaults, name)
         return value is not None and not _readable_setting(value)
     if not (
         isinstance(defaults, ast.Call)
         and isinstance(defaults.func, ast.Name)
-        and defaults.func.id == "StreamerSettings"
+        and defaults.func.id in ("StreamerSettings", "dict")
         and not defaults.args
         and not _has_unpacking(defaults)
     ):
@@ -1618,7 +1655,9 @@ def _update_managed_web_config(config_path, payload):
                 break
         else:
             raise ConfigEditError("Streamer is not configured.")
-        _write_streamers(config_path, streamers, username, always_write=unknown)
+        _write_streamers(
+            config_path, streamers, username, always_write={username: unknown}
+        )
     elif action == "update_category":
         values = payload.get("values") or {}
         allowed = {"limit", "sort", "refresh_interval_hours", "drops_enabled"}

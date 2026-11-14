@@ -1078,9 +1078,11 @@ def test_legacy_streamers_migrate_in_one_source_rewrite(tmp_path, monkeypatch):
     calls = []
     write_streamers = config_editor._write_streamers
 
-    def record_write(config_path, migrated_records, updated_usernames=None):
+    def record_write(config_path, migrated_records, updated_usernames=None, **kwargs):
         calls.append((migrated_records, updated_usernames))
-        return write_streamers(config_path, migrated_records, updated_usernames)
+        return write_streamers(
+            config_path, migrated_records, updated_usernames, **kwargs
+        )
 
     monkeypatch.setattr(config_editor, "_write_streamers", record_write)
 
@@ -2599,7 +2601,9 @@ def test_update_to_a_shown_default_is_refused_for_a_variable_setting(tmp_path):
     assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
 
 
-def test_legacy_migration_does_not_refuse_unchanged_variable_settings(tmp_path):
+def test_legacy_migration_refuses_settings_it_cant_write(tmp_path):
+    # The old dashboard applied these settings over config.py at runtime;
+    # dropping them would change what the miner does.
     config = tmp_path / "config.py"
     write_commented_config(
         config,
@@ -2612,9 +2616,11 @@ def test_legacy_migration_does_not_refuse_unchanged_variable_settings(tmp_path):
     )
     before = config.read_bytes()
 
-    migrate_web_config(config)
+    with pytest.raises(ConfigEditError, match="delete web-config.json"):
+        migrate_web_config(config)
 
     assert config.read_bytes() == before
+    assert (tmp_path / "web-config.json").exists()
 
 
 def test_refused_legacy_migration_names_the_overrides_file(tmp_path):
@@ -2686,7 +2692,7 @@ def test_removing_the_last_entry_keeps_the_previous_entrys_comment(
 
 @pytest.mark.parametrize(
     "defaults",
-    ["DEFAULTS", "StreamerSettings(favorite=FAVORITE)", "dict(favorite=True)"],
+    ["DEFAULTS", "StreamerSettings(favorite=FAVORITE)", "dict(favorite=FAVORITE)"],
 )
 def test_update_is_written_when_the_inherited_default_cant_be_read(tmp_path, defaults):
     # The dashboard shows favorite=False for these defaults, though the
@@ -2719,6 +2725,90 @@ def test_update_is_written_when_the_inherited_default_cant_be_read(tmp_path, def
         config.read_text(encoding="utf-8")
     )
     assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
+def test_settings_update_ignores_a_later_duplicate_entry(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "STREAMERS = [\n"
+        '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
+        '    Streamer("one", settings=StreamerSettings(make_predictions=False)),\n'
+        "]\n",
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "ALWAYS"},
+        },
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert (
+        'Streamer("one", settings=StreamerSettings(favorite=True, '
+        "chat=ChatPresence.ALWAYS))"
+    ) in source
+    assert 'Streamer("one", settings=StreamerSettings(make_predictions=False))' in (
+        source
+    )
+
+
+@pytest.mark.parametrize(
+    ("streamers", "value"),
+    [
+        ('STREAMERS = [\n    "a"\n    , "b"\n    # keep, me\n    , "c"\n]\n', "b"),
+        ('STREAMERS = [\n    "a"\n    , "b"\n    , "c"\n]\n', "a"),
+    ],
+)
+def test_removal_that_would_lose_another_comment_or_break_the_list_is_refused(
+    tmp_path, streamers, value
+):
+    config = tmp_path / "config.py"
+    write_commented_config(config, streamers)
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="Remove it in config.py instead"):
+        update_managed_web_config(
+            config, {"action": "remove", "kind": "streamers", "value": value}
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "miner_tail", ["    **BASE,\n", '    "streamer_settings": {**BASE},\n']
+)
+def test_update_is_written_when_unpacking_may_supply_the_defaults(tmp_path, miner_tail):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
+    source = config.read_text(encoding="utf-8")
+    source = source.replace(
+        '    "streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE),\n',
+        miner_tail,
+    )
+    source = source.replace(
+        "MINER_CONFIG = {",
+        'BASE = {"streamer_settings": StreamerSettings(favorite=True)}\n'
+        "MINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    assert miner_tail in source
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in (
+        config.read_text(encoding="utf-8")
+    )
 
 
 def test_import_is_not_added_above_a_future_import(tmp_path):
