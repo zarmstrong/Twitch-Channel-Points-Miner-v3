@@ -144,6 +144,9 @@ var initialLogTailBytes = 128 * 1024;
 // the first real response arrives - cleared on that first response instead
 // of staying glued above the real tail forever.
 var logPlaceholderCleared = false;
+// Set when the server reports file logging is disabled (no log file to tail),
+// so polling stops instead of retrying a 404 forever.
+var logFileDisabled = false;
 // See assets/tail_buffer.js for why this is bounded rather than an
 // ever-growing string.
 var LOG_DISPLAY_MAX_CHARS = 1024 * 1024;
@@ -170,10 +173,16 @@ function getLog() {
         if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
             lastReceivedLogIndex = nextPosition;
         }
+    }).fail(function (xhr) {
+        if (xhr.status === 404 && xhr.getResponseHeader("X-Log-Unavailable") === "disabled") {
+            $("#log-content").text(xhr.responseText);
+            logPlaceholderCleared = true;
+            logFileDisabled = true;
+        }
     }).always(function () {
         // A rollover can briefly replace the active log between polls.
         // Retry transient failures without advancing the byte position.
-        if (autoUpdateLog) {
+        if (autoUpdateLog && !logFileDisabled) {
             setTimeout(getLog, logPollInterval);
         }
     });
