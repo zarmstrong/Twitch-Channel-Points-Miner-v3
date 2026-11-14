@@ -5,6 +5,7 @@
 import argparse
 import hashlib
 import logging
+import math
 import os
 import shutil
 import sys
@@ -246,10 +247,41 @@ def _watch_config(path, miner, initial_config, interval):
             )
 
 
+CONFIG_RELOAD_ENV = "TCPM_CONFIG_RELOAD_SECONDS"
+DEFAULT_CONFIG_RELOAD_SECONDS = 5.0
+# Longer intervals are almost certainly a mistake, and large enough ones make
+# time.sleep() raise OverflowError, silently ending the config watcher.
+MAX_CONFIG_RELOAD_SECONDS = 24 * 60 * 60
+
+
+def _config_reload_interval():
+    """Read TCPM_CONFIG_RELOAD_SECONDS: seconds between config checks.
+
+    Unset or blank means the default. Values below one second are raised to
+    one. Anything that isn't a number up to one day stops startup with a
+    RuntimeError, which cli() prints and the Windows app shows in a dialog
+    (a SystemExit raised on the Windows app's miner thread would be lost).
+    """
+    raw = os.environ.get(CONFIG_RELOAD_ENV, "")
+    if not raw.strip():
+        return DEFAULT_CONFIG_RELOAD_SECONDS
+    try:
+        interval = float(raw)
+    except ValueError:
+        interval = math.nan
+    if not math.isfinite(interval) or interval > MAX_CONFIG_RELOAD_SECONDS:
+        raise RuntimeError(
+            f"{CONFIG_RELOAD_ENV} must be a number of seconds up to "
+            f"{MAX_CONFIG_RELOAD_SECONDS}, got {raw!r}"
+        )
+    return max(interval, 1)
+
+
 def run_config(config, path, on_miner_ready=None):
     from TwitchChannelPointsMiner import TwitchChannelPointsMiner
     from TwitchChannelPointsMiner.classes.Settings import Settings
 
+    interval = _config_reload_interval()
     config.MINE_CONFIG.setdefault("categories", [])
     Settings.config_path = str(path.parent.resolve())
     miner = TwitchChannelPointsMiner(**config.MINER_CONFIG)
@@ -260,7 +292,6 @@ def run_config(config, path, on_miner_ready=None):
         # shell, which can't rely on SIGINT/SIGTERM) reach this miner later
         # to request a graceful shutdown - see TwitchChannelPointsMiner.end().
         on_miner_ready(miner)
-    interval = max(float(os.environ.get("TCPM_CONFIG_RELOAD_SECONDS", "5")), 1)
     watcher = threading.Thread(
         target=_watch_config,
         args=(path, miner, config, interval),
