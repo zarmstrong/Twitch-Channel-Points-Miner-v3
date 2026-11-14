@@ -1,6 +1,8 @@
 import logging
 import socket
+import threading
 import ssl
+import time
 import types
 from unittest.mock import MagicMock, call
 
@@ -17,9 +19,11 @@ from TwitchChannelPointsMiner.constants import IRC_PORT, IRC_TLS_PORT
 def reset_tls_probe_cache():
     Chat._tls_supported = None
     Chat._tls_failure_warned = False
+    Chat._tls_failed_at = None
     yield
     Chat._tls_supported = None
     Chat._tls_failure_warned = False
+    Chat._tls_failed_at = None
 
 
 class FakeSocket:
@@ -41,7 +45,7 @@ def test_irc_tls_available_returns_true_on_successful_handshake(monkeypatch):
     assert Chat._irc_tls_available() is True
 
 
-def test_irc_tls_available_returns_false_and_does_not_cache_failure(monkeypatch):
+def test_irc_tls_available_caches_failure_only_briefly(monkeypatch):
     calls = 0
 
     def failing_connect(address, timeout=None):
@@ -52,8 +56,12 @@ def test_irc_tls_available_returns_false_and_does_not_cache_failure(monkeypatch)
     monkeypatch.setattr(socket, "create_connection", failing_connect)
 
     assert Chat._irc_tls_available() is False
+    # Chats retrying during the same outage reuse the failure.
     assert Chat._irc_tls_available() is False
-    # A failed probe is not cached, so the next connect tries TLS again.
+    assert calls == 1
+    # Once the failure is older than the cache window, TLS is probed again.
+    Chat._tls_failed_at -= Chat.IRC_TLS_FAILURE_CACHE_SECONDS
+    assert Chat._irc_tls_available() is False
     assert calls == 2
     assert Chat._tls_supported is None
 
@@ -77,7 +85,7 @@ def test_irc_tls_available_caches_successful_probe(monkeypatch):
 
 
 def test_client_irc_uses_tls_port_and_wrapped_factory_when_available(monkeypatch):
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: True)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
 
     client = ClientIRC("someuser", "sometoken", "somechannel")
 
@@ -87,7 +95,7 @@ def test_client_irc_uses_tls_port_and_wrapped_factory_when_available(monkeypatch
 
 
 def test_client_irc_uses_plaintext_port_when_explicitly_allowed(monkeypatch):
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     monkeypatch.setenv("TCPM_ALLOW_PLAINTEXT_IRC", "1")
 
     client = ClientIRC("someuser", "sometoken", "somechannel")
@@ -98,7 +106,7 @@ def test_client_irc_uses_plaintext_port_when_explicitly_allowed(monkeypatch):
 
 
 def test_client_irc_refuses_plaintext_when_tls_unavailable(monkeypatch):
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
 
     with pytest.raises(Chat.IRCTLSUnavailable):
@@ -149,7 +157,7 @@ def _subgift(**overrides):
 
 
 def _client_with(monkeypatch, **settings_values):
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     monkeypatch.setenv("TCPM_ALLOW_PLAINTEXT_IRC", "1")
     settings = None
     if settings_values:
@@ -347,13 +355,14 @@ def test_thread_chat_run_passes_settings_to_client(monkeypatch):
             pass
 
     monkeypatch.setattr(Chat, "ClientIRC", FakeClientIRC)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
     sentinel = object()
     thread = ThreadChat("u", "t", "c")
     thread.settings = sentinel
 
     thread.run()
 
-    assert created["kwargs"] == {"settings": sentinel}
+    assert created["kwargs"]["settings"] is sentinel
 
 
 class _StopAfterWaits:
@@ -377,7 +386,7 @@ class _StopAfterWaits:
 
 def test_thread_chat_run_waits_for_tls_without_opt_in(monkeypatch, caplog):
     caplog.set_level(logging.DEBUG)
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
     thread = ThreadChat("u", "t", "c")
     thread._stop_event = _StopAfterWaits(stop_after=4)
@@ -397,7 +406,7 @@ def test_thread_chat_run_waits_for_tls_without_opt_in(monkeypatch, caplog):
 
 
 def test_thread_chat_backoff_is_capped(monkeypatch):
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
     thread = ThreadChat("u", "t", "c")
     thread._stop_event = _StopAfterWaits(stop_after=8)
@@ -423,6 +432,7 @@ def test_thread_chat_joins_once_tls_becomes_available(monkeypatch):
             started.append(self)
 
     monkeypatch.setattr(Chat, "ClientIRC", FlakyClientIRC)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     thread = ThreadChat("u", "t", "c")
     thread._stop_event = _StopAfterWaits(stop_after=99)
 
@@ -434,7 +444,7 @@ def test_thread_chat_joins_once_tls_becomes_available(monkeypatch):
 
 
 def test_thread_chat_stop_ends_the_tls_wait_promptly(monkeypatch):
-    monkeypatch.setattr(Chat, "_irc_tls_available", lambda: False)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
     monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
     thread = ThreadChat("u", "t", "c")
     thread.daemon = True
@@ -470,8 +480,11 @@ def test_tls_probe_failure_warns_once_until_a_success(monkeypatch, caplog):
         ]
 
     assert Chat._irc_tls_available() is False
+    Chat._tls_failed_at -= Chat.IRC_TLS_FAILURE_CACHE_SECONDS
     assert Chat._irc_tls_available() is False
     assert len(handshake_warnings()) == 1
+    # Let the cached failure expire so the next call probes again.
+    Chat._tls_failed_at -= Chat.IRC_TLS_FAILURE_CACHE_SECONDS
     assert Chat._irc_tls_available() is True
     # A success is cached, so force a fresh probe to model a later outage.
     Chat._tls_supported = None
@@ -507,3 +520,102 @@ def test_streamer_rejoins_chat_after_its_thread_ended(monkeypatch):
     assert streamer.irc_chat.ident is not None
     assert streamer.irc_chat.username == "u"
     assert streamer.irc_chat.token == "t"
+
+
+def test_stop_during_client_construction_prevents_the_join(monkeypatch):
+    # stop() arrives while ClientIRC is still being built (e.g. the TLS
+    # probe is in flight), before run() has published chat_irc.
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    constructing = threading.Event()
+    release = threading.Event()
+    started = []
+
+    class SlowClientIRC:
+        def __init__(self, *args, **kwargs):
+            constructing.set()
+            assert release.wait(timeout=5)
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(Chat, "ClientIRC", SlowClientIRC)
+    thread = ThreadChat("u", "t", "c")
+    thread.daemon = True
+    thread.start()
+    assert constructing.wait(timeout=5)
+
+    thread.stop()
+    release.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert started == []
+    assert thread.chat_irc is None
+
+
+def test_client_irc_die_before_start_prevents_the_connect(monkeypatch):
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    client = ClientIRC("someuser", "sometoken", "somechannel")
+    connects = []
+    monkeypatch.setattr(client, "_connect", lambda: connects.append(1))
+
+    client.die()
+    # Run start() in a thread: if die() were ignored it would loop forever.
+    runner = threading.Thread(target=client.start, daemon=True)
+    runner.start()
+    runner.join(timeout=2)
+    returned = not runner.is_alive()
+    if not returned:
+        client.die()
+
+    assert returned
+    assert connects == []
+
+
+def test_client_irc_start_disconnects_when_its_loop_ends(monkeypatch):
+    # die() can run between start() going active and _connect(), before
+    # there is a connection to close; start() must close what it opened.
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    client = ClientIRC("someuser", "sometoken", "somechannel")
+    connection = MagicMock()
+    monkeypatch.setattr(client, "connection", connection)
+    monkeypatch.setattr(client, "_connect", lambda: client.die())
+
+    client.start()
+
+    assert connection.disconnect.call_count == 2
+
+
+def test_stopped_waiter_leaves_without_waiting_for_another_probe(monkeypatch):
+    # One chat's probe is in flight (holding the probe lock); a second chat
+    # that is stopped while waiting for it must exit promptly, without
+    # running a probe of its own.
+    in_probe = threading.Event()
+    release_probe = threading.Event()
+    calls = []
+
+    def slow_connect(address, timeout=None):
+        calls.append(address)
+        in_probe.set()
+        assert release_probe.wait(timeout=10)
+        raise OSError("down")
+
+    monkeypatch.setattr(socket, "create_connection", slow_connect)
+    monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
+    prober = threading.Thread(target=Chat._irc_tls_available, daemon=True)
+    prober.start()
+    assert in_probe.wait(timeout=5)
+
+    waiter = ThreadChat("u", "t", "c")
+    waiter.daemon = True
+    waiter.start()
+    time.sleep(0.3)
+    waiter.stop()
+    waiter.join(timeout=2)
+    stopped_promptly = not waiter.is_alive()
+    release_probe.set()
+    prober.join(timeout=5)
+
+    assert stopped_promptly
+    assert len(calls) == 1
+    assert waiter.chat_irc is None

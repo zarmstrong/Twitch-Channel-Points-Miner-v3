@@ -20,6 +20,11 @@ _tls_supported = None
 # Set after a failed probe has been logged at WARNING, cleared on success, so
 # chats retrying during one outage don't repeat the warning.
 _tls_failure_warned = False
+# When the last failed probe happened (time.monotonic()). Chats retrying
+# within IRC_TLS_FAILURE_CACHE_SECONDS reuse that failure instead of each
+# opening a connection; a success is cached for the process.
+_tls_failed_at = None
+IRC_TLS_FAILURE_CACHE_SECONDS = 25
 ALLOW_PLAINTEXT_IRC_ENV = "TCPM_ALLOW_PLAINTEXT_IRC"
 # Without TLS, a chat waits and probes again: 30 s, doubling up to 15 min.
 IRC_TLS_RETRY_INITIAL_SECONDS = 30
@@ -84,21 +89,36 @@ def _plaintext_irc_allowed():
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
+def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5, stop_event=None):
     """Check whether a TLS handshake to Twitch's IRC endpoint succeeds. A
-    success is cached for the process; a failure is not cached, so the next
-    connect probes again. The chat OAuth token is never sent over plaintext
-    unless TCPM_ALLOW_PLAINTEXT_IRC is set."""
-    global _tls_supported, _tls_failure_warned
-    with _tls_probe_lock:
+    success is cached for the process; a failure only for
+    IRC_TLS_FAILURE_CACHE_SECONDS, so later connects probe again. The chat
+    OAuth token is never sent over plaintext unless TCPM_ALLOW_PLAINTEXT_IRC
+    is set.
+
+    One probe runs at a time. With stop_event, a caller waiting for another
+    chat's probe gives up (returning False) as soon as the event is set."""
+    global _tls_supported, _tls_failure_warned, _tls_failed_at
+    while not _tls_probe_lock.acquire(timeout=0.25):
+        if stop_event is not None and stop_event.is_set():
+            return False
+    try:
         if _tls_supported is True:
             return True
+        if stop_event is not None and stop_event.is_set():
+            return False
+        if (
+            _tls_failed_at is not None
+            and time.monotonic() - _tls_failed_at < IRC_TLS_FAILURE_CACHE_SECONDS
+        ):
+            return False
         try:
             context = _irc_tls_context()
             with socket.create_connection((host, port), timeout=timeout) as sock:
                 with context.wrap_socket(sock, server_hostname=host):
                     _tls_supported = True
         except (OSError, ssl.SSLError) as error:
+            _tls_failed_at = time.monotonic()
             message = f"IRC TLS handshake with {host}:{port} failed ({error})"
             if _tls_failure_warned:
                 logger.debug(message)
@@ -106,8 +126,11 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5):
                 logger.warning(message, extra={"emoji": ":warning:"})
                 _tls_failure_warned = True
             return False
+        _tls_failed_at = None
         _tls_failure_warned = False
         return True
+    finally:
+        _tls_probe_lock.release()
 
 
 class ChatPresence(Enum):
@@ -121,14 +144,20 @@ class ChatPresence(Enum):
 
 
 class ClientIRC(SingleServerIRCBot):
-    def __init__(self, username, token, channel, settings=None):
+    def __init__(self, username, token, channel, settings=None, tls_available=None):
         self.token = token
         self.settings = settings
         self.channel = "#" + channel
         self.__active = False
+        # die() can run before start() (from the thread that stops chat), so
+        # start() must not undo it.
+        self.__stopped = False
+        self.__lifecycle_lock = Lock()
 
+        if tls_available is None:
+            tls_available = _irc_tls_available()
         connect_params = {}
-        if _irc_tls_available():
+        if tls_available:
             port = IRC_TLS_PORT
             context = _irc_tls_context()
             connect_params["connect_factory"] = irc.connection.Factory(
@@ -156,7 +185,10 @@ class ClientIRC(SingleServerIRCBot):
         client.join(self.channel)
 
     def start(self):
-        self.__active = True
+        with self.__lifecycle_lock:
+            if self.__stopped:
+                return
+            self.__active = True
         self._connect()
         while self.__active:
             try:
@@ -171,9 +203,14 @@ class ClientIRC(SingleServerIRCBot):
                     logger.error(
                         f"Exception raised: {e}. Thread is active: {self.__active}"
                     )
+        # die() may have run between the check above and _connect(), before
+        # there was a connection to close.
+        self.connection.disconnect()
 
     def die(self, msg="Bye, cruel world!"):
-        self.__active = False
+        with self.__lifecycle_lock:
+            self.__stopped = True
+            self.__active = False
         self.connection.disconnect(msg)
 
     """
@@ -274,16 +311,25 @@ class ThreadChat(Thread):
         self.settings = None
         # Set by stop(); also wakes run() while it waits to retry TLS.
         self._stop_event = Event()
+        # Orders stop() against run() publishing chat_irc, so a stop during
+        # the TLS probe or ClientIRC construction prevents the join.
+        self._lifecycle_lock = Lock()
 
     def run(self):
         delay = IRC_TLS_RETRY_INITIAL_SECONDS
         warned = False
         while not self._stop_event.is_set():
+            tls_available = _irc_tls_available(stop_event=self._stop_event)
+            if self._stop_event.is_set():
+                return
             try:
-                self.chat_irc = ClientIRC(
-                    self.username, self.token, self.channel, settings=self.settings
+                chat_irc = ClientIRC(
+                    self.username,
+                    self.token,
+                    self.channel,
+                    settings=self.settings,
+                    tls_available=tls_available,
                 )
-                break
             except IRCTLSUnavailable:
                 message = (
                     f"Not joining IRC chat {self.channel} yet: TLS to "
@@ -295,6 +341,12 @@ class ThreadChat(Thread):
                 else:
                     logger.warning(message, extra={"emoji": ":speech_balloon:"})
                     warned = True
+            else:
+                with self._lifecycle_lock:
+                    if self._stop_event.is_set():
+                        return
+                    self.chat_irc = chat_irc
+                break
             if self._stop_event.wait(delay):
                 return
             delay = min(delay * 2, IRC_TLS_RETRY_MAX_SECONDS)
@@ -303,12 +355,14 @@ class ThreadChat(Thread):
         logger.info(
             f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
         )
-        self.chat_irc.start()
+        chat_irc.start()
 
     def stop(self):
-        self._stop_event.set()
-        if self.chat_irc is not None:
+        with self._lifecycle_lock:
+            self._stop_event.set()
+            chat_irc = self.chat_irc
+        if chat_irc is not None:
             logger.info(
                 f"Leave IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
             )
-            self.chat_irc.die()
+            chat_irc.die()
