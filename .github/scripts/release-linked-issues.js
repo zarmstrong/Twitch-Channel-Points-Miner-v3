@@ -81,19 +81,21 @@ async function hasComment(github, owner, repo, issueNumber, marker) {
 async function markPullIssues(github, owner, repo, pull) {
   const issues = uniqueOpenIssues(await linkedIssues(github, owner, repo, pull.number));
   for (const issue of issues) {
+    // The label goes on before the marker comment, so a marker without the
+    // label means a maintainer removed it to keep the issue open: a rerun
+    // must not put it back.
+    if (await hasComment(github, owner, repo, issue.number, AWAITING_MARKER)) continue;
     if (!issue.labels.nodes.some((label) => label.name === AWAITING_LABEL)) {
       await github.rest.issues.addLabels({
         owner, repo, issue_number: issue.number, labels: [AWAITING_LABEL],
       });
     }
-    if (!(await hasComment(github, owner, repo, issue.number, AWAITING_MARKER))) {
-      await github.rest.issues.createComment({
-        owner,
-        repo,
-        issue_number: issue.number,
-        body: `${AWAITING_MARKER}\nThe fix in #${pull.number} was merged and is awaiting release.`,
-      });
-    }
+    await github.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: issue.number,
+      body: `${AWAITING_MARKER}\nThe fix in #${pull.number} was merged and is awaiting release.`,
+    });
   }
 }
 

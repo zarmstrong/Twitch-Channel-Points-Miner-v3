@@ -475,3 +475,53 @@ test('marking never labels a same-numbered local issue for an external reference
     [['label', 2], ['comment', 2]],
   );
 });
+
+test('a marking rerun keeps the opt-out of a maintainer who removed the label', async () => {
+  // Marked once, then the label was removed by hand to keep the issue open.
+  const marker = { body: '<!-- awaiting-release -->\nThe fix in #9 was merged.' };
+  const mutations = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+    comments: [marker],
+  });
+  github.graphql = async () => ({ repository: { pullRequest: {
+    closingIssuesReferences: {
+      nodes: [{ number: 42, state: 'OPEN', labels: { nodes: [] }, repository: { nameWithOwner: 'o/r' } }],
+      pageInfo: { hasNextPage: false },
+    },
+  } } });
+  await markIssuesAwaitingRelease({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc', commits: [{ id: 'abc' }] } },
+    core: { info() {} },
+  });
+  assert.deepEqual(mutations, []);
+
+  // The release that follows leaves the issue open as well.
+  const calls = await closeWith({
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [] } },
+    comments: [marker],
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('marking adds the label and comment to an issue marked for the first time', async () => {
+  const mutations = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+  });
+  github.graphql = async () => ({ repository: { pullRequest: {
+    closingIssuesReferences: {
+      nodes: [{ number: 42, state: 'OPEN', labels: { nodes: [] }, repository: { nameWithOwner: 'o/r' } }],
+      pageInfo: { hasNextPage: false },
+    },
+  } } });
+  await markIssuesAwaitingRelease({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc', commits: [{ id: 'abc' }] } },
+    core: { info() {} },
+  });
+  assert.deepEqual(mutations.map(([kind]) => kind), ['label', 'comment']);
+});
