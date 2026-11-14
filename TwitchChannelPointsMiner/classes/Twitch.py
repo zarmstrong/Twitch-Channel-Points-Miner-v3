@@ -153,6 +153,10 @@ TWITCH_LOGIN_PATTERN = re.compile(r"[a-z0-9_]{1,25}")
 DROPS_DIRECTORY_LIMIT = 100
 # Pages of the Drops directory read per category lookup (see #211).
 DROPS_DIRECTORY_MAX_PAGES = 5
+# Android-login dashboard replies in a row with a null campaign list and no
+# errors before the list counts as withheld and is treated as empty (see
+# __get_drops_dashboard).
+DROPS_DASHBOARD_WITHHELD_LIMIT = 3
 # Outcome of the calling thread's latest drops dashboard request. Thread-local
 # so the campaign sync thread's dashboard calls cannot be mistaken for the
 # category discovery pass's own.
@@ -214,6 +218,8 @@ class Twitch(object):
         "campaign_lookup_unavailable",
         "campaign_details_withheld_logged",
         "campaign_details_withheld_streak",
+        "drops_dashboard_withheld_streak",
+        "drops_dashboard_withheld_lock",
         "unevaluated_category_slugs",
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
@@ -344,6 +350,8 @@ class Twitch(object):
         self.campaign_lookup_unavailable = False
         self.campaign_details_withheld_logged = False
         self.campaign_details_withheld_streak = 0
+        self.drops_dashboard_withheld_streak = 0
+        self.drops_dashboard_withheld_lock = Lock()
         self.unevaluated_category_slugs = set()
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
@@ -8178,6 +8186,15 @@ class Twitch(object):
             self.__log_drop_check("failed to parse inventory response")
             return {}
 
+    def __drops_dashboard_withheld_lock(self):
+        # Defensive getattr: some tests construct Twitch via __new__ and skip
+        # __init__ (mirroring __completed_drop_campaigns_lock).
+        lock = getattr(self, "drops_dashboard_withheld_lock", None)
+        if lock is None:
+            lock = Lock()
+            self.drops_dashboard_withheld_lock = lock
+        return lock
+
     def __get_drops_dashboard(self, status=None, return_raw: bool = False):
         request_failed = False
         try:
@@ -8197,16 +8214,56 @@ class Twitch(object):
         # Android login (#228). The TV login gets that reply every time,
         # because Twitch withholds the list from it, so there it still counts
         # as loaded: treating it as down would keep the dashboard outage
-        # handling on for the whole run.
+        # handling on for the whole run. Android may start getting the same
+        # reply, so those replies are counted in a streak: the first one is
+        # an ERROR, and once the streak reaches DROPS_DASHBOARD_WITHHELD_LIMIT
+        # the list counts as withheld and loaded, with one warning. A reply
+        # with a list resets the streak. Request failures and replies with
+        # errors are not counted.
+        android_withheld = (
+            not request_failed
+            and isinstance(current_user, dict)
+            and current_user.get("dropCampaigns") is None
+            and not response.get("errors")
+            and self.__client_id() == ANDROID_CLIENT_ID
+        )
+        # The sync and discovery threads share the streak. Update it under a
+        # lock and use the value this call wrote, so each count is seen by
+        # exactly one call and the warning is logged once.
+        with self.__drops_dashboard_withheld_lock():
+            if (
+                isinstance(current_user, dict)
+                and current_user.get("dropCampaigns") is not None
+            ):
+                self.drops_dashboard_withheld_streak = 0
+            elif android_withheld:
+                self.drops_dashboard_withheld_streak = (
+                    getattr(self, "drops_dashboard_withheld_streak", 0) + 1
+                )
+            withheld_streak = getattr(self, "drops_dashboard_withheld_streak", 0)
         unavailable = not isinstance(current_user, dict) or (
             current_user.get("dropCampaigns") is None
             and bool(response.get("errors") or self.__client_id() == ANDROID_CLIENT_ID)
         )
+        if android_withheld:
+            unavailable = withheld_streak < DROPS_DASHBOARD_WITHHELD_LIMIT
         if unavailable and not request_failed:
             errors = response.get("errors") if isinstance(response, dict) else None
-            logger.error(
+            message = (
                 "Unable to load drops dashboard: the response carried no "
                 f"campaign data (errors: {errors})"
+            )
+            if android_withheld and withheld_streak > 1:
+                self.__log_drop_check(message, level=logging.DEBUG)
+            else:
+                logger.error(message)
+        if android_withheld and withheld_streak == DROPS_DASHBOARD_WITHHELD_LIMIT:
+            logger.warning(
+                "Twitch has withheld the Drops campaign list from the Android "
+                f"app login for {withheld_streak} refreshes in a row, so it is "
+                "treated as empty. Drop campaigns come from your inventory, the "
+                "channels' listed campaigns and the shared Drops gist instead.",
+                extra={"emoji": ":warning:"},
             )
         _drops_dashboard_state.unavailable = unavailable
         if not isinstance(data, dict):
