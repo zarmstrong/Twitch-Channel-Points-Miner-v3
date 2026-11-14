@@ -7,10 +7,13 @@ import builtins
 import errno
 import hashlib
 import os
+import re
 import shutil
 import stat
 import tempfile
 from pathlib import Path
+
+_LINE_PATTERN = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 CONFIG_VERSION = 12
 STREAMER_SETTINGS_DEFAULTS = (
@@ -252,7 +255,14 @@ def _commented_call_defaults(source, line_offsets, call, names):
         ]
     else:
         call_line_start = line_offsets[call.lineno - 1]
-        indent = source[call_line_start : call_line_start + call.col_offset] + "    "
+        indent = (
+            source[
+                call_line_start : _source_offset(
+                    line_offsets, call.lineno, call.col_offset
+                )
+            ]
+            + "    "
+        )
     return [
         (
             closing_line_start,
@@ -328,19 +338,38 @@ def _enum_list_additions(
     ]
 
 
+class _LineOffsets(list):
+    """Character start offsets per line, plus the text of each line.
+
+    Lines end only at the tokenizer's line breaks (CRLF, CR, LF), not at every
+    character that str.splitlines() treats as a break.
+    """
+
+    __slots__ = ("lines",)
+
+
 def _line_start_offsets(source):
-    offsets = []
+    lines = _LINE_PATTERN.findall(source)
+    offsets = _LineOffsets()
     offset = 0
-    for line in source.splitlines(keepends=True):
+    for line in lines:
         offsets.append(offset)
         offset += len(line)
     if not offsets or offset == len(source):
         offsets.append(offset)
+    offsets.lines = lines
     return offsets
 
 
 def _source_offset(line_offsets, lineno, col_offset):
-    return line_offsets[lineno - 1] + col_offset
+    """Convert an ast (UTF-8 byte) column on a line to a character index."""
+    start = line_offsets[lineno - 1]
+    lines = line_offsets.lines
+    line = lines[lineno - 1] if lineno - 1 < len(lines) else ""
+    if line.isascii():
+        return start + col_offset
+    chars = len(line.encode("utf-8")[:col_offset].decode("utf-8", errors="ignore"))
+    return start + chars
 
 
 def _dict_entry_removal(source, line_offsets, tree, node, name):
@@ -728,10 +757,13 @@ def migrate_config(config_path):
         migrated, old_version, new_version = migrate_config_source(source, path.name)
     if migrated == current_source and not had_bom:
         return False
+    # Dropping the BOM is a re-save, not a migration: the version is unchanged,
+    # so neither create a backup nor check an existing one from an earlier run.
+    bom_only = recovery_backup is None and migrated == current_source
 
     backup = path.with_name(f"{path.name}.v{old_version}.bak")
     reuse_backup = False
-    if recovery_backup is None:
+    if recovery_backup is None and not bom_only:
         if backup.is_symlink():
             raise ConfigMigrationError(f"Refusing to use symlinked backup {backup}")
         if backup.exists():
@@ -749,7 +781,7 @@ def migrate_config(config_path):
             reuse_backup = True
 
     backup_created = False
-    if recovery_backup is None and not reuse_backup:
+    if recovery_backup is None and not reuse_backup and not bom_only:
         sanitized_source = _without_miner_password(current_source, path.name)
         backup.write_text(sanitized_source, encoding="utf-8")
         shutil.copystat(path, backup)

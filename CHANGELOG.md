@@ -1,5 +1,56 @@
 # Changelog
 
+## [3.21.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.20.0...3.21.0) (2026-11-14)
+
+
+### Features
+
+* **auth:** add an opt-in Android app login for full Drops data ([#255](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/255)) ([acf3971](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/acf3971c17e274efe54d5226756883f967b449d4))
+* **chat:** notify on gifted subs and optionally thank the gifter ([#248](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/248)) ([b8f634e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/b8f634ede03d5071c2daf4efb8ea9119a55e31cd))
+* **docker:** include the optional Apprise package in the Docker image ([dd339f9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd339f9717f35114a4cf4847c23c8e0c170c6eb2))
+* **drops:** claim drops as soon as PubSub reports them claimable ([#287](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/287)) ([af2c325](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/af2c325254ba1a81b0d574fcf5d446a0deaf1389))
+* **drops:** let TCPM_DROPS_GIST_URL and TCPM_BADGES_GIST_URL override the gist URLs ([#293](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/293)) ([e3e7d87](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e3e7d8730980fb24a2f4b536e1cf151af80c6fe7))
+* **drops:** read more pages of the Drops directory for category discovery ([#250](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/250)) ([5f76583](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5f76583404123dd681fa181eba79acde5cf461db)), closes [#211](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/211)
+* **notifications:** add an Apprise notifier ([#258](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/258)) ([dd339f9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd339f9717f35114a4cf4847c23c8e0c170c6eb2)), closes [#123](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/123)
+* **notifications:** let the Apprise title name the event ([dd339f9](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dd339f9717f35114a4cf4847c23c8e0c170c6eb2))
+* **supervisor:** add an optional cross-platform supervisor for source checkouts ([#289](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/289)) ([1b30f0e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1b30f0ea039e07b1bbc956951187b3b0d33c3e56))
+
+
+### Bug Fixes
+
+* **auth:** give Docker users workable Android login steps ([#256](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/256)) ([684504e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/684504e24e2ac69d67f64e8f6b2655ea33371123))
+* **auth:** handle malformed Android login inputs and validation responses ([#320](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/320)) ([1d12691](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1d12691badb673472ffb34eae6cee16550794bdc))
+* **auth:** show and color the Android login's messages ([#257](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/257)) ([1d996ae](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1d996aecf19414b10aa670b69ed6d18de6e2540d))
+* **badges:** refetch the Drops gist on every badge catalog sync ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **chat:** keep gift-sub thank-yous within IRC limits and template fallback ([#254](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/254)) ([8dd4d82](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/8dd4d82a755334b9eb1bd0beb501d8091d571813))
+* **chat:** require TLS 1.2 or newer for Twitch IRC ([#249](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/249)) ([1ccc051](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ccc05101f1ee6794ac36db60132adcbb6ae58c3))
+* **config:** keep a reloaded streamer that another source already tracks ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **config:** keep config.py valid when the dashboard adds a setting ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **config:** load configs saved with a UTF-8 BOM and recover from the newest backup ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **config:** show Email's STARTTLS default so saving the form keeps it on ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **config:** strip a current-version BOM without requiring a migration backup ([#323](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/323)) ([a29e244](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a29e244bf7ba5280766fc89f9eb824965cf85e66)), closes [#283](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/283)
+* **dashboard:** accept non-ASCII analytics usernames and passwords ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **drops:** count a null Drops dashboard as unavailable under the Android login ([#259](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/259)) ([4960582](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/4960582d4828376a0e492b3b6ef7892a47347331)), closes [#228](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/228)
+* **drops:** escape dots in the Twitch settings-script URL pattern ([1ccc051](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1ccc05101f1ee6794ac36db60132adcbb6ae58c3))
+* **drops:** keep campaigns and retry soon when a campaign refresh fails ([#276](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/276)) ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **drops:** name the MinerRewardCampaignsRaw query so Twitch runs it ([#297](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/297)) ([092aa67](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/092aa6743632f9d4b783e425e55cccfd9bc30c00)), closes [#296](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/296)
+* **drops:** reject Drops and badge gists with an unsupported version ([#292](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/292)) ([d59e449](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d59e449e54b3b92e6309b71cb5b1750a73d2216a))
+* **drops:** skip inventory drops with a null self while claiming ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **gql:** resend a query as raw text when Twitch rejects its persisted hash ([#288](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/288)) ([5a70f24](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5a70f249776be01c6e7bc9b5e84cb90afd6e7f6f))
+* **pubsub:** keep the OAuth token out of logged LISTEN requests ([#322](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/322)) ([3e77e23](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/3e77e23259fe3f5d396dab91680a19f142bd1ce9)), closes [#321](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/321)
+* **pubsub:** make fallback message timestamps parseable ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* replace deprecated datetime.utcnow() and close leaked test resources ([#290](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/290)) ([47b2342](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/47b2342b2653bda9e7d34b287592e2bf163fe3b8))
+* **runner:** relaunch with the original -m command after a token restart ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+* **security:** resolve CodeQL overlapping-range and error-exposure alerts ([#252](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/252)) ([a151848](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a1518486558ec98eeb4fdb6de72c00ac80be0767))
+* **supervisor:** apply systemd changes when reinstalling jobs ([#295](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/295)) ([62de8d2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/62de8d2e12f5f21623898ce7dd3a8a76c02b09ca))
+* **watch:** retry a missing spade URL instead of aborting minute-watched events ([cdbc9d6](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cdbc9d6e5453edb16497b607b43d8b6a68d2602e))
+
+
+### Documentation
+
+* **agents:** point to the manifest for the current version ([#277](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/277)) ([539ca1b](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/539ca1bf96834f3d3e7cf220e5cbf512422bdcb9))
+* **readme:** move reference material into docs/ and keep the README to getting started ([#291](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/291)) ([f236697](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f236697d9948a0257eba4e1e89d8ab76695b9c5a))
+
 ## [3.20.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.19.6...3.20.0) (2026-11-10)
 
 
