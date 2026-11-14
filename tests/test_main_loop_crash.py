@@ -115,8 +115,49 @@ def test_websocket_check_survives_websockets_retired_mid_loop():
         ),
     ):
         miner._TwitchChannelPointsMiner__check_websockets()
+        _join_reconnection_threads()
 
-    assert reconnected == [first, second]
+    assert sorted(reconnected, key=lambda websocket: websocket.index) == [
+        first,
+        second,
+    ]
+
+
+def _join_reconnection_threads():
+    for thread in threading.enumerate():
+        if thread.name.endswith(" reconnection"):
+            thread.join(timeout=5)
+
+
+def test_websocket_check_does_not_block_the_main_loop_while_reconnecting():
+    websocket = SimpleNamespace(
+        index=0, is_reconnecting=False, elapsed_last_ping=lambda: 11
+    )
+    miner = _miner()
+    miner.ws_pool = SimpleNamespace(ws=[websocket])
+    release = threading.Event()
+    started = threading.Event()
+
+    finished = threading.Event()
+
+    def slow_reconnection(_websocket):
+        started.set()
+        release.wait(5)
+        finished.set()
+
+    with (
+        patch(f"{MODULE}.internet_connection_available", return_value=True),
+        patch(
+            f"{MODULE}.WebSocketsPool.handle_reconnection",
+            side_effect=slow_reconnection,
+        ),
+    ):
+        miner._TwitchChannelPointsMiner__check_websockets()
+        # Returned while the reconnection is still waiting.
+        assert not finished.is_set()
+        assert started.wait(5)
+        release.set()
+        _join_reconnection_threads()
 
 
 def test_mine_stops_workers_and_exits_non_zero_when_run_crashes():
@@ -151,16 +192,78 @@ def test_mine_stops_workers_and_exits_non_zero_when_run_crashes():
     assert logger.error.call_args.kwargs["exc_info"] is True
 
 
-def test_mine_does_not_stop_workers_on_normal_return():
+def test_mine_does_not_stop_workers_when_a_restart_was_requested():
+    # The restart replaces the process, so the workers keep running until then.
     miner = _miner()
     miner.ws_pool = MagicMock()
+    miner.twitch.restart_requested = threading.Event()
+    miner.twitch.restart_requested.set()
+    miner.running = False
 
-    with patch.object(TwitchChannelPointsMiner, "run"):
+    def start_session(*_args, **_kwargs):
+        miner.running = True
+
+    with patch.object(TwitchChannelPointsMiner, "run", side_effect=start_session):
         miner.mine([])
 
     assert miner.running is True
     miner.ws_pool.end.assert_not_called()
     miner.queue_listener.stop.assert_not_called()
+
+
+def test_mine_stops_workers_when_run_returns_without_a_restart():
+    # Twitch can stop the miner without a restart (e.g. the cached login can't
+    # be cleared). The non-daemon workers then kept the process alive.
+    miner = _miner()
+    miner.ws_pool = MagicMock()
+    miner.twitch.restart_requested = threading.Event()
+
+    miner.running = False
+
+    def stop_from_twitch(*_args, **_kwargs):
+        miner.running = True
+        miner.twitch.running = False
+
+    with patch.object(TwitchChannelPointsMiner, "run", side_effect=stop_from_twitch):
+        miner.mine([])
+
+    assert miner.running is False
+    assert miner.drop_badge_catalog_stop_event.is_set()
+    miner.ws_pool.end.assert_called_once()
+
+
+def test_mine_does_not_stop_workers_again_after_end():
+    miner = _miner()
+    miner.ws_pool = MagicMock()
+    miner.twitch.restart_requested = threading.Event()
+
+    miner.running = False
+
+    def end_from_another_thread(*_args, **_kwargs):
+        miner.running = True
+        miner.running = miner.twitch.running = False
+
+    with patch.object(
+        TwitchChannelPointsMiner, "run", side_effect=end_from_another_thread
+    ):
+        miner.mine([])
+
+    miner.ws_pool.end.assert_not_called()
+
+
+def test_mine_called_again_while_running_keeps_the_active_session():
+    # run() refuses a second session and returns; that must not stop the
+    # session that is already running.
+    miner = _miner()
+    miner.ws_pool = MagicMock()
+    miner.twitch.restart_requested = threading.Event()
+    miner.running = True
+
+    with patch.object(TwitchChannelPointsMiner, "run", return_value=None):
+        miner.mine([])
+
+    assert miner.running is True
+    miner.ws_pool.end.assert_not_called()
 
 
 def test_mine_keeps_the_original_error_when_a_worker_was_never_started():
@@ -237,6 +340,87 @@ def test_reconnection_skips_a_websocket_retired_while_sleeping(monkeypatch):
     assert len(pool.ws) == 1
 
 
+def test_reconnection_closes_the_old_socket(monkeypatch):
+    # keep_running = False alone left run_forever() blocked on a half-open
+    # connection, leaking one thread per reconnect.
+    closed = []
+    websocket = SimpleNamespace(
+        index=0,
+        is_reconnecting=False,
+        forced_close=True,
+        topics=[],
+        is_closed=False,
+        keep_running=True,
+        close=lambda: closed.append(True),
+    )
+
+    WebSocketsPool.handle_reconnection(websocket)
+
+    assert closed == [True]
+    assert websocket.is_reconnecting is True
+
+
+def test_reconnection_survives_a_failing_close(monkeypatch):
+    def failing_close():
+        raise OSError("already gone")
+
+    websocket = SimpleNamespace(
+        index=0,
+        is_reconnecting=False,
+        forced_close=True,
+        topics=[],
+        is_closed=False,
+        keep_running=True,
+        close=failing_close,
+    )
+
+    WebSocketsPool.handle_reconnection(websocket)
+
+    assert websocket.is_closed is True
+
+
+def test_reconnection_aborts_the_old_socket_before_closing_it(monkeypatch):
+    # close() waits on the reader's lock; on a half-open connection only
+    # aborting the socket first wakes the reader so close() can finish.
+    calls = []
+    websocket = SimpleNamespace(
+        index=0,
+        is_reconnecting=False,
+        forced_close=True,
+        topics=[],
+        is_closed=False,
+        keep_running=True,
+        sock=SimpleNamespace(abort=lambda: calls.append("abort")),
+        close=lambda: calls.append("close"),
+    )
+
+    WebSocketsPool.handle_reconnection(websocket)
+
+    assert calls == ["abort", "close"]
+
+
+def test_reconnection_survives_a_failing_abort(monkeypatch):
+    closed = []
+
+    def failing_abort():
+        raise OSError("already gone")
+
+    websocket = SimpleNamespace(
+        index=0,
+        is_reconnecting=False,
+        forced_close=True,
+        topics=[],
+        is_closed=False,
+        keep_running=True,
+        sock=SimpleNamespace(abort=failing_abort),
+        close=lambda: closed.append(True),
+    )
+
+    WebSocketsPool.handle_reconnection(websocket)
+
+    assert closed == [True]
+
+
 def test_pool_end_survives_websockets_retired_mid_loop():
     closed = []
 
@@ -306,7 +490,9 @@ def test_pool_end_closes_a_replacement_created_by_an_in_flight_reconnection(
     assert ender_blocked is True
     assert not ender.is_alive()
     assert replacement.forced_close is True
-    assert closed == ["replacement"]
+    # handle_reconnection closes the old socket itself; end() closes the
+    # replacement.
+    assert closed == ["old", "replacement"]
 
 
 def test_reconnection_replay_skips_a_replacement_retired_while_sleeping(monkeypatch):

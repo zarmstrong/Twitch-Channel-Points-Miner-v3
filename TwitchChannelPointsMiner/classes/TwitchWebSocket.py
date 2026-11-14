@@ -3,7 +3,11 @@ import logging
 import time
 from threading import Lock
 
-from websocket import WebSocketApp, WebSocketConnectionClosedException
+from websocket import (
+    WebSocketApp,
+    WebSocketConnectionClosedException,
+    WebSocketTimeoutException,
+)
 
 from TwitchChannelPointsMiner.utils import create_nonce
 
@@ -61,8 +65,10 @@ class TwitchWebSocket(WebSocketApp):
         )
 
     def ping(self):
-        self.send({"type": "PING"})
-        self.last_ping = time.time()
+        # Only a PING that went out counts, so the main loop's "no PING for
+        # 10 minutes" check reconnects a socket whose sends keep failing.
+        if self.send({"type": "PING"}):
+            self.last_ping = time.time()
 
     @staticmethod
     def loggable_request(request):
@@ -73,12 +79,21 @@ class TwitchWebSocket(WebSocketApp):
         return json.dumps(request, separators=(",", ":"))
 
     def send(self, request):
+        """Send a request; return False when the socket can't take it."""
         try:
             request_str = json.dumps(request, separators=(",", ":"))
             logger.debug(f"#{self.index} - Send: {self.loggable_request(request)}")
             super().send(request_str)
+            return True
         except WebSocketConnectionClosedException:
             self.is_closed = True
+        except (WebSocketTimeoutException, OSError) as error:
+            # A timeout or socket error used to escape and silently end the
+            # ping thread. Treat the socket as closed; the reconnect checks
+            # take it from here.
+            logger.warning(f"#{self.index} - WebSocket send failed: {error}")
+            self.is_closed = True
+        return False
 
     def elapsed_last_pong(self):
         return (time.time() - self.last_pong) // 60

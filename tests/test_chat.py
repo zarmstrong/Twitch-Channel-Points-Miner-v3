@@ -794,3 +794,7 @@ def test_streamer_added_back_with_a_new_chat_can_join(monkeypatch):
     fresh.join(timeout=5)
 
     assert fresh.ident is not None
+
+
+def test_thread_chat_is_a_daemon_thread():
+    assert ThreadChat("u", "t", "c").daemon is True

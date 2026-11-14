@@ -327,7 +327,9 @@ class ThreadChat(Thread):
         return None
 
     def __init__(self, username, token, channel):
-        super(ThreadChat, self).__init__()
+        # A daemon thread, so a chat that is still connecting (or wasn't
+        # stopped) can't keep the process alive after the miner has stopped.
+        super(ThreadChat, self).__init__(daemon=True)
 
         self.username = username
         self.token = token
