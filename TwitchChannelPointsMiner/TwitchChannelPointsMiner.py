@@ -1265,9 +1265,12 @@ class TwitchChannelPointsMiner:
                                 f"Failed to load streamer {username}", exc_info=True
                             )
 
-            self.streamers = CopyOnWriteList(
+            # Refill the lists made in __init__ instead of replacing them, so
+            # they stay CopyOnWriteLists for the whole run and anything that
+            # already holds one sees the streamers.
+            self.streamers[:] = [
                 streamer for streamer in loaded_streamers if streamer is not None
-            )
+            ]
 
             # Populate the streamers with default values.
             # 1. Load channel points and auto-claim bonus
@@ -1275,15 +1278,15 @@ class TwitchChannelPointsMiner:
             # 3. DEACTIVATED: Check if the user is a moderator. (was used before the 5th of April 2021 to deactivate predictions)
             invalid_streamers = self.twitch.initialize_streamers_context(self.streamers)
             if invalid_streamers:
-                self.streamers = CopyOnWriteList(
+                self.streamers[:] = [
                     streamer
                     for streamer in self.streamers
                     if streamer.username not in invalid_streamers
-                )
+                ]
 
-            self.original_streamers = CopyOnWriteList(
+            self.original_streamers[:] = [
                 streamer.channel_points for streamer in self.streamers
-            )
+            ]
             if Settings.logger.daily_report is True and self.daily_report_date is None:
                 self.daily_report_streamers = {
                     streamer.username: streamer.channel_points

@@ -130,3 +130,46 @@ def test_websocket_pool_list_is_copy_on_write():
     pool = WebSocketsPool(twitch=None, streamers=[], events_predictions={})
 
     assert isinstance(pool.ws, CopyOnWriteList)
+
+
+def test_miner_streamer_lists_are_copy_on_write(tmp_path, monkeypatch):
+    import importlib
+    import logging
+    import signal
+    import socket
+
+    from TwitchChannelPointsMiner.logger import LoggerSettings
+
+    monkeypatch.chdir(tmp_path)
+    # The constructor waits until twitch.tv resolves; stay off the network.
+    monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.0.0.1")
+    miner_module = importlib.import_module(
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
+    )
+    root_logger = logging.getLogger()
+    existing_handlers = set(root_logger.handlers)
+    existing_level = root_logger.level
+    signals = (signal.SIGINT, signal.SIGSEGV, signal.SIGTERM)
+    existing_signal_handlers = {sign: signal.getsignal(sign) for sign in signals}
+    try:
+        miner = miner_module.TwitchChannelPointsMiner(
+            "someone",
+            update_check=False,
+            logger_settings=LoggerSettings(save=False),
+        )
+        miner.queue_listener.stop()
+        for handler in miner.queue_listener.handlers:
+            handler.close()
+    finally:
+        # The miner configures the root logger and installs signal handlers;
+        # undo both so later tests see the defaults.
+        for handler in set(root_logger.handlers) - existing_handlers:
+            root_logger.removeHandler(handler)
+            handler.close()
+        root_logger.setLevel(existing_level)
+        for sign, handler in existing_signal_handlers.items():
+            signal.signal(sign, handler)
+
+    # run() refills these same objects, so they stay copy-on-write.
+    assert isinstance(miner.streamers, CopyOnWriteList)
+    assert isinstance(miner.original_streamers, CopyOnWriteList)
