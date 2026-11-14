@@ -1296,23 +1296,17 @@ def _miner_config_readable(tree):
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES:
             return False
-        names = []
-        if isinstance(node, ast.alias):
-            if node.name == "*":
-                # A star import can bind any name, MINER_CONFIG included.
-                return False
-            names = [node.asname or node.name]
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            names = node.names
-        elif isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-        ) or (isinstance(node, ast.ExceptHandler) and node.name):
-            names = [node.name]
-        elif isinstance(node, ast.arg):
-            names = [node.arg]
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-            names = [node.name]
-        if "MINER_CONFIG" in names:
+        if isinstance(node, ast.alias) and node.name == "*":
+            # A star import can bind any name, MINER_CONFIG included.
+            return False
+        if not isinstance(node, (ast.Name, ast.Constant)) and any(
+            value == "MINER_CONFIG"
+            or (isinstance(value, list) and "MINER_CONFIG" in value)
+            for _field, value in ast.iter_fields(node)
+        ):
+            # Any other node naming MINER_CONFIG binds or declares it: an
+            # import alias, def, class, argument, except or match capture
+            # (including {**MINER_CONFIG}), global or nonlocal.
             return False
         if not (isinstance(node, ast.Name) and node.id == "MINER_CONFIG"):
             continue
