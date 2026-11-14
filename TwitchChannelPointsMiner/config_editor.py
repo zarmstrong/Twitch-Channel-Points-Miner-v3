@@ -1277,6 +1277,17 @@ def _miner_config_readable(tree):
         return False
     if [key.value for key in miner.keys].count("streamer_settings") > 1:
         return False
+    # MINER_CONFIG = ALIAS = {...} or a walrus inside the dict gives another
+    # name to the dict or its defaults.
+    statement = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign) and node.value is miner
+    )
+    if len(statement.targets) != 1 or any(
+        isinstance(node, ast.NamedExpr) for node in ast.walk(miner)
+    ):
+        return False
     parents = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
@@ -1287,6 +1298,9 @@ def _miner_config_readable(tree):
             return False
         names = []
         if isinstance(node, ast.alias):
+            if node.name == "*":
+                # A star import can bind any name, MINER_CONFIG included.
+                return False
             names = [node.asname or node.name]
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             names = node.names

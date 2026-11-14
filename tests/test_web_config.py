@@ -1,3 +1,4 @@
+import ast
 import errno
 import json
 import math
@@ -2907,6 +2908,118 @@ def test_update_is_written_when_streamer_settings_is_given_twice(tmp_path):
     ).replace("MINER_CONFIG = {", "FAV = True\nMINER_CONFIG = {")
     config.write_text(source, encoding="utf-8")
     assert "favorite=FAV" in source
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
+@pytest.mark.parametrize(
+    ("assignment", "later"),
+    [
+        ("MINER_CONFIG = ALIAS = {", 'ALIAS["streamer_settings"].favorite = True\n'),
+        ("MINER_CONFIG = {", "S.favorite = True\n"),
+    ],
+)
+def test_update_is_written_when_the_defaults_have_another_name(
+    tmp_path, assignment, later
+):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n' + later)
+    source = config.read_text(encoding="utf-8").replace("MINER_CONFIG = {", assignment)
+    source = (
+        source.replace(
+            '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE)',
+            '"streamer_settings": (S := StreamerSettings(favorite=False))',
+        )
+        if "S." in later
+        else source
+    )
+    config.write_text(source, encoding="utf-8")
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
+@pytest.mark.parametrize(
+    ("later", "readable"),
+    [
+        ("", True),
+        ('X = MINER_CONFIG["username"]\n', True),
+        ('X = MINER_CONFIG.get("username", 1)\n', True),
+        ("MINER_CONFIG = {}\n", False),
+        ('MINER_CONFIG["username"] = "x"\n', False),
+        ("X = MINER_CONFIG.get()\n", False),
+        ("X = MINER_CONFIG.copy()\n", False),
+        ("X = MINER_CONFIG[0]\n", False),
+        ("import os as MINER_CONFIG\n", False),
+        ("from os.path import *\n", False),
+        ("def MINER_CONFIG():\n    pass\n", False),
+        ("class MINER_CONFIG:\n    pass\n", False),
+        ("try:\n    pass\nexcept Exception as MINER_CONFIG:\n    pass\n", False),
+        ("match 1:\n    case MINER_CONFIG:\n        pass\n", False),
+        ("def f(MINER_CONFIG):\n    pass\n", False),
+        ("del MINER_CONFIG\n", False),
+        ("for MINER_CONFIG in []:\n    pass\n", False),
+        *(
+            (f"{name}()\n", False)
+            for name in (
+                "globals",
+                "vars",
+                "locals",
+                "exec",
+                "eval",
+                "setattr",
+                "delattr",
+            )
+        ),
+    ],
+)
+def test_miner_config_readability(later, readable):
+    source = 'MINER_CONFIG = {"username": "a", "streamer_settings": None}\n' + later
+    assert config_editor._miner_config_readable(ast.parse(source)) is readable
+
+
+def test_miner_config_bound_to_something_else_is_unreadable():
+    assert (
+        config_editor._miner_config_readable(ast.parse("MINER_CONFIG = dict()\n"))
+        is False
+    )
+
+
+def test_explicit_none_setting_still_inherits_an_unreadable_default(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [Streamer("one", settings=StreamerSettings(favorite=None))]\n',
+    )
+    source = (
+        config.read_text(encoding="utf-8")
+        .replace(
+            '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE)',
+            '"streamer_settings": DEFAULTS',
+        )
+        .replace(
+            "MINER_CONFIG = {",
+            "DEFAULTS = StreamerSettings(favorite=True)\nMINER_CONFIG = {",
+        )
+    )
+    config.write_text(source, encoding="utf-8")
 
     update_managed_web_config(
         config,
