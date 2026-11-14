@@ -4,12 +4,14 @@
 
 import ast
 import errno
+import io
 import json
 import os
 import re
 import stat
 import tempfile
 import threading
+import tokenize
 from pathlib import Path
 
 CONFIG_FILE_MUTEX = threading.Lock()
@@ -90,6 +92,19 @@ NOTIFICATION_REQUIRED = {
     "pushover": {"userkey", "token"},
     "gotify": {"endpoint"},
     "ntfy": {"topic"},
+}
+# Every constructor argument without a default. Enabling a notifier without
+# one would write a call that raises TypeError, so the miner wouldn't start.
+# Unlike NOTIFICATION_REQUIRED, an empty events list counts as given here.
+NOTIFICATION_CONSTRUCTOR_REQUIRED = {
+    "telegram": {"chat_id", "token", "events"},
+    "discord": {"webhook_api", "events"},
+    "webhook": {"endpoint", "method", "events"},
+    "email": {"host", "port", "sender", "recipients", "events"},
+    "matrix": {"username", "password", "homeserver", "room_id", "events"},
+    "pushover": {"userkey", "token", "priority", "sound", "events"},
+    "gotify": {"endpoint", "priority", "events"},
+    "ntfy": {"topic", "events"},
 }
 # Constructor defaults the dashboard must show when a config omits the field.
 # The form renders a missing boolean as unchecked and saves every checkbox,
@@ -206,10 +221,14 @@ def _simple_value(node):
     if isinstance(node, (ast.List, ast.Tuple)):
         return [_simple_value(item) for item in node.elts]
     if isinstance(node, ast.Dict):
-        return {
-            _simple_value(key): _simple_value(value)
-            for key, value in zip(node.keys, node.values)
-        }
+        try:
+            return {
+                _simple_value(key): _simple_value(value)
+                for key, value in zip(node.keys, node.values)
+            }
+        except TypeError:
+            # A key the reader can't hash, e.g. a tuple, read as a list.
+            return None
     if isinstance(node, ast.Attribute):
         return node.attr
     if isinstance(node, ast.Call):
@@ -271,13 +290,17 @@ def _base_web_config(config_path):
         username = _streamer_value(node)
         if username is None:
             continue
+        # Streamer() strips the username, so the dashboard shows it stripped.
+        username = username.strip()
         settings = dict(effective_streamer_defaults)
         parsed = _simple_value(node) if isinstance(node, ast.Call) else {}
-        explicit_settings = parsed.get("settings") or (
-            parsed.get("__args__", [None, {}])[1]
-            if len(parsed.get("__args__", [])) > 1
-            else {}
-        )
+        explicit_settings = parsed.get("settings")
+        if explicit_settings is None and len(parsed.get("__args__", [])) > 1:
+            explicit_settings = parsed["__args__"][1]
+        if not isinstance(explicit_settings, dict):
+            # A variable or other expression (e.g. Streamer("x", SETTINGS)):
+            # the dashboard can't read it, and edits to it are refused.
+            explicit_settings = {}
         settings.update(
             {
                 name: explicit_settings[name]
@@ -428,11 +451,27 @@ def migrate_web_config(config_path):
             if not isinstance(username, str) or STREAMER_RE.fullmatch(username) is None:
                 raise ConfigEditError("Each managed streamer needs a valid username.")
             _validate_streamer_settings(record.get("settings", {}))
-        _write_streamers(
-            config_path,
-            records,
-            {str(record.get("username", "")).lower() for record in records},
-        )
+        try:
+            always_write = {}
+            for record in records:
+                key = _username_key(record["username"])
+                # _write_streamers uses the first record for each username.
+                if key not in always_write:
+                    always_write[key] = _require_editable_settings(
+                        config_path, key, record.get("settings") or {}
+                    )
+            _write_streamers(
+                config_path,
+                records,
+                {_username_key(str(record.get("username", ""))) for record in records},
+                always_write=always_write,
+            )
+        except ConfigEditError as error:
+            raise ConfigEditError(
+                f"Couldn't move the streamers saved in {path.name} into "
+                f"config.py. {error} To discard them instead, delete "
+                f"{path.name}."
+            ) from error
     if "categories" in overrides:
         categories = overrides["categories"]
         if not isinstance(categories, list) or any(
@@ -683,9 +722,29 @@ def _scan_item_tail(segment):
 
 def _insert_config_item(config_path, container, rendered):
     path = Path(config_path)
-    source = path.read_text(encoding="utf-8")
-    lines = source.splitlines(keepends=True)
-    encoded = source.encode("utf-8")
+    encoded = path.read_text(encoding="utf-8").encode("utf-8")
+    updated = _insert_item_bytes(encoded, container, rendered)
+    _require_parses(updated)
+    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+
+
+def _require_parses(encoded):
+    try:
+        # compile, not ast.parse: only the compiler rejects some errors, such
+        # as a __future__ import that no longer comes first.
+        compile(encoded, "config.py", "exec", dont_inherit=True)
+    except (SyntaxError, ValueError) as error:
+        raise ConfigEditError(
+            f"Refusing to save a configuration that would not parse: {error}"
+        ) from error
+
+
+def _insert_item_bytes(encoded, container, rendered, inline=False):
+    """Return encoded with rendered appended to container's items.
+
+    The item goes on its own line. With inline=True, a container written on
+    a single line keeps that layout and gets the item inline instead.
+    """
     encoded_lines = encoded.splitlines(keepends=True)
     closing = (
         _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
@@ -698,27 +757,38 @@ def _insert_config_item(config_path, container, rendered):
         item_end, has_comma = _scan_item_tail(encoded[last_end:closing])
         if not has_comma:
             comma_at = last_end + item_end
-    base_indent = lines[container.lineno - 1][
-        : len(lines[container.lineno - 1]) - len(lines[container.lineno - 1].lstrip())
-    ]
+    if inline and container.lineno == container.end_lineno:
+        separator = b"" if not children else b" " if comma_at is None else b", "
+        if comma_at is not None:
+            # Insert right after the last item (and its own parentheses).
+            closing = comma_at
+        return (
+            encoded[:closing] + separator + rendered.encode("utf-8") + encoded[closing:]
+        )
+    # bytes.splitlines() breaks only on CR and LF, so the line number lines up
+    # with ast's even when the file has form feeds or U+2028 in it.
+    container_line = encoded_lines[container.lineno - 1].decode("utf-8")
+    base_indent = container_line[: len(container_line) - len(container_line.lstrip())]
     indentation = base_indent + "    "
+    newline = _newline(encoded)
     line_start = len(encoded[:closing].rstrip(b" \t"))
     if encoded[:line_start].endswith((b"\n", b"\r")):
         # The closing bracket has its own line: add the item above it.
         closing = line_start
-        insertion = f"{indentation}{rendered},\n".encode("utf-8")
+        insertion = f"{indentation}{rendered},{newline}".encode("utf-8")
     else:
-        insertion = f"\n{indentation}{rendered},\n{base_indent}".encode("utf-8")
+        insertion = f"{newline}{indentation}{rendered},{newline}{base_indent}".encode(
+            "utf-8"
+        )
     updated = encoded[:closing] + insertion + encoded[closing:]
     if comma_at is not None:
         updated = updated[:comma_at] + b"," + updated[comma_at:]
-    try:
-        ast.parse(updated)
-    except SyntaxError as error:
-        raise ConfigEditError(
-            f"Refusing to save a configuration that would not parse: {error}"
-        ) from error
-    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+    return updated
+
+
+def _newline(encoded):
+    """The line break config.py uses, so edits don't mix CRLF and LF."""
+    return "\r\n" if b"\r\n" in encoded else "\n"
 
 
 def _call_keyword(call, name):
@@ -752,59 +822,659 @@ def _write_call_keywords(config_path, find_call, values):
             _insert_config_item(config_path, call, f"{name}={rendered}")
 
 
-def _write_streamers(config_path, records, updated_usernames=None):
+def _write_streamers(config_path, records, updated_usernames=None, always_write=None):
     if isinstance(updated_usernames, str):
-        updated_usernames = {updated_usernames}
+        updated_usernames = {_username_key(updated_usernames)}
     else:
-        updated_usernames = set(updated_usernames or ())
-    if updated_usernames:
-        _ensure_config_import(
-            config_path,
-            "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
+        updated_usernames = {
+            _username_key(username) for username in updated_usernames or ()
+        }
+    # Write only the settings that differ from what the streamer has now, so
+    # values it inherits from the global defaults stay inherited.
+    path = Path(config_path)
+    # Read bytes, so CRLF line breaks are kept.
+    original = path.read_bytes()
+    # The miner uses only one entry for a duplicated username, so edits to
+    # it can't be applied reliably.
+    keys = [
+        key
+        for key in map(_streamer_key, _streamers_list(original).elts)
+        if key is not None
+    ]
+    duplicate = next((key for key in keys if keys.count(key) > 1), None)
+    if duplicate is not None:
+        raise ConfigEditError(
+            f"{duplicate} is listed more than once in STREAMERS in config.py. "
+            "Remove the extra entry in config.py, then try again."
         )
-        _ensure_config_import(
-            config_path,
+    names = [_username_key(record["username"]) for record in records]
+    duplicate = next((name for name in names if names.count(name) > 1), None)
+    if duplicate is not None:
+        raise ConfigEditError(f"{duplicate} can be listed only once.")
+    base = _base_web_config(config_path)
+    # With a duplicated username, the first entry is the one that is edited.
+    current = {}
+    for item in base["streamers"]:
+        current.setdefault(_username_key(item["username"]), item["settings"])
+    # always_write maps a username to settings whose current value can't be
+    # read, so they're written even when they look unchanged.
+    always_write = always_write or {}
+    settings_changes = {}
+    seen = set()
+    for record in records:
+        key = _username_key(record["username"])
+        if key not in updated_usernames or key in seen:
+            continue
+        seen.add(key)
+        effective = current.get(key, base["streamer_defaults"])
+        forced = always_write.get(key, ())
+        changed = {
+            name: value
+            for name, value in (record.get("settings") or {}).items()
+            if effective.get(name) != value or name in forced
+        }
+        if changed:
+            settings_changes[key] = changed
+    encoded = original
+    wanted = [record["username"] for record in records]
+    wanted_keys = [_username_key(username) for username in wanted]
+
+    # Edit STREAMERS in place instead of regenerating it, so comments,
+    # formatting and entries the dashboard doesn't understand survive.
+    # Remove entries that are no longer wanted.
+    while True:
+        streamers = _streamers_list(encoded)
+        index = next(
+            (
+                index
+                for index, node in enumerate(streamers.elts)
+                if _streamer_key(node) is not None
+                and _streamer_key(node) not in wanted_keys
+            ),
+            None,
+        )
+        if index is None:
+            break
+        removed_key = _streamer_key(streamers.elts[index])
+        # Only comments on the removed entry's own lines may go.
+        try:
+            updated, (first, last) = _remove_list_item(encoded, streamers, index)
+            ast.parse(updated)
+            kept = [
+                text for line, text in _comments(encoded) if not first <= line <= last
+            ]
+            remaining = [text for _line, text in _comments(updated)]
+            for text in kept:
+                remaining.remove(text)
+        except (SyntaxError, ValueError, tokenize.TokenError):
+            # e.g. a comma that starts the next entry's line.
+            raise ConfigEditError(
+                f"{removed_key} can't be removed from the dashboard because of "
+                "how its entry is written in config.py. Remove it in config.py "
+                "instead."
+            ) from None
+        encoded = updated
+
+    # Append new entries as plain usernames.
+    present = {_streamer_key(node) for node in _streamers_list(encoded).elts}
+    for username in wanted:
+        if _username_key(username) not in present:
+            # STREAMER_RE limits usernames to [A-Za-z0-9_], so this is a
+            # valid literal in the double quotes Black and the example use.
+            encoded = _insert_item_bytes(
+                encoded, _streamers_list(encoded), f'"{username}"', inline=True
+            )
+            present.add(_username_key(username))
+
+    # Reorder by moving each entry's source text into its new slot.
+    streamers = _streamers_list(encoded)
+    slots = [
+        index
+        for index, node in enumerate(streamers.elts)
+        if _streamer_key(node) is not None
+    ]
+    # Duplicate usernames each keep their own entry: the first wanted
+    # occurrence takes the first remaining slot with that name.
+    slots_by_key = {}
+    for index in slots:
+        slots_by_key.setdefault(_streamer_key(streamers.elts[index]), []).append(index)
+    desired = [slots_by_key[key].pop(0) for key in wanted_keys if slots_by_key.get(key)]
+    if len(desired) == len(slots) and desired != slots:
+        order = list(range(len(streamers.elts)))
+        for slot, source_index in zip(slots, desired):
+            order[slot] = source_index
+        encoded = _reorder_list_items(encoded, streamers, order)
+
+    for key, changed in settings_changes.items():
+        encoded = _set_streamer_settings(encoded, key, changed)
+
+    # Imports go in last: every edit above can still refuse, and a refused
+    # edit must leave config.py untouched.
+    if settings_changes:
+        if any("chat" in changed for changed in settings_changes.values()):
+            encoded = _with_config_import(
+                encoded,
+                "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
+            )
+        encoded = _with_config_import(
+            encoded,
             "from TwitchChannelPointsMiner.classes.entities.Streamer import "
             "Streamer, StreamerSettings",
         )
-    source = Path(config_path).read_text(encoding="utf-8")
-    tree, streamers, _categories = _config_lists(source)
-    existing = {
-        _streamer_value(node).lower(): node
-        for node in streamers.elts
-        if _streamer_value(node) is not None
-    }
-    rendered_nodes = []
-    for record in records:
-        username = record["username"]
-        node = existing.get(username.lower(), ast.Constant(username))
-        if username.lower() in updated_usernames:
-            if isinstance(node, ast.Constant):
-                node = _expression(f"Streamer({username!r})")
-            settings_keyword = _call_keyword(node, "settings")
-            if settings_keyword is None or not isinstance(
-                settings_keyword.value, ast.Call
-            ):
-                settings = _expression("StreamerSettings()")
-                if settings_keyword is None:
-                    node.keywords.append(ast.keyword(arg="settings", value=settings))
-                else:
-                    settings_keyword.value = settings
-            else:
-                settings = settings_keyword.value
-            _set_call_keywords(
-                settings,
-                {
-                    name: (f"ChatPresence.{value}" if name == "chat" else repr(value))
-                    for name, value in record["settings"].items()
-                },
-            )
-        rendered_nodes.append(node)
-    streamers.elts = rendered_nodes
-    ast.fix_missing_locations(streamers)
-    _replace_config_node(
-        config_path, _assignment(ast.parse(source), "STREAMERS"), ast.unparse(streamers)
+
+    if encoded != original:
+        _require_parses(encoded)
+        _replace_config_bytes(path, encoded, stat.S_IMODE(path.stat().st_mode))
+
+
+def _username_key(username):
+    """How Streamer() and the miner compare usernames."""
+    return username.strip().lower()
+
+
+def _streamer_key(node):
+    username = _streamer_value(node)
+    return _username_key(username) if username is not None else None
+
+
+def _streamers_list(encoded):
+    return _config_lists(encoded.decode("utf-8"))[1]
+
+
+def _node_span(encoded_lines, node):
+    return (
+        _byte_offset(encoded_lines, node.lineno, node.col_offset),
+        _byte_offset(encoded_lines, node.end_lineno, node.end_col_offset),
     )
+
+
+_ITEM_LINE_TAIL_RE = re.compile(rb",?")
+
+
+def _next_comma(encoded, position):
+    """The offset of the first comma at or after position outside comments.
+
+    Between an entry and its separating comma there can only be
+    parentheses, whitespace and comments, so no string can hide a comma.
+    """
+    while True:
+        char = encoded[position : position + 1]
+        if char == b",":
+            return position
+        if char == b"#":
+            position += len(_line_tail(encoded, position))
+            continue
+        if not char:
+            raise ConfigEditError("Expected a comma after the entry in config.py.")
+        position += 1
+
+
+def _redundant_paren_start(encoded, boundary, start, parens):
+    """Move start back over an entry's redundant opening parentheses, e.g.
+    the "(" of ("name"); ast positions exclude them.
+
+    boundary is where the previous entry, or the list's opening bracket, ends.
+    Only whitespace, a comma, comments and these parentheses lie between it
+    and start.
+    """
+    if not parens:
+        return start
+    openings = []
+    index = boundary
+    while index < start:
+        char = encoded[index : index + 1]
+        if char == b"#":
+            newline = encoded.find(b"\n", index, start)
+            index = start if newline == -1 else newline
+            continue
+        if char == b"(":
+            openings.append(index)
+        index += 1
+    return openings[-parens] if len(openings) >= parens else start
+
+
+def _own_lines_span(encoded, start, end, closing, is_last, has_comma):
+    """The span to delete for an entry that has its lines to itself.
+
+    That means only indentation before the entry, and after it only its comma,
+    whitespace and its own comment. Returns those whole lines, so comments on
+    other lines (another entry's own-line comment, or the previous entry's
+    trailing comment) are kept. When the list's closing bracket follows the
+    last entry on its line, the entry is cut up to the bracket instead.
+    Returns None for other layouts. start and end include the entry's
+    redundant parentheses.
+    """
+    line_start = encoded.rfind(b"\n", 0, start) + 1
+    if encoded[line_start:start].strip(b" \t"):
+        return None
+    newline = encoded.find(b"\n", end)
+    line_end = len(encoded) if newline == -1 else newline + 1
+    if closing < line_end:
+        if not is_last:
+            return None
+        cut_end = _next_comma(encoded, end) + 1 if has_comma else end
+        return line_start, cut_end
+    tail = encoded[end:line_end]
+    comment = tail.find(b"#")
+    code = tail if comment == -1 else tail[:comment]
+    if not _ITEM_LINE_TAIL_RE.fullmatch(re.sub(rb"\s", b"", code)):
+        return None
+    return line_start, line_end
+
+
+def _comments(encoded):
+    """(line, text) for every comment in encoded."""
+    return [
+        (token.start[0], token.string)
+        for token in tokenize.tokenize(io.BytesIO(encoded).readline)
+        if token.type == tokenize.COMMENT
+    ]
+
+
+def _remove_list_item(encoded, container, index):
+    """Return (encoded without the entry, (first, last) line of the entry)."""
+    encoded_lines = encoded.splitlines(keepends=True)
+    elements = container.elts
+    is_last = index + 1 == len(elements)
+    start, end = _node_span(encoded_lines, elements[index])
+    closing = (
+        _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
+    )
+    segment_end = (
+        closing if is_last else _node_span(encoded_lines, elements[index + 1])[0]
+    )
+    item_end, has_comma = _scan_item_tail(encoded[end:segment_end])
+    boundary = (
+        _node_span(encoded_lines, elements[index - 1])[1]
+        if index
+        else _byte_offset(encoded_lines, container.lineno, container.col_offset) + 1
+    )
+    start = _redundant_paren_start(
+        encoded,
+        boundary,
+        start,
+        re.sub(rb"#[^\r\n]*", b"", encoded[end : end + item_end]).count(b")"),
+    )
+    end += item_end
+    lines = (encoded.count(b"\n", 0, start) + 1, encoded.count(b"\n", 0, end) + 1)
+
+    own_lines = _own_lines_span(encoded, start, end, closing, is_last, has_comma)
+    if own_lines is not None:
+        return encoded[: own_lines[0]] + encoded[own_lines[1] :], lines
+    if not is_last:
+        # The next entry follows on the same line, or this one shares its
+        # line with the opening bracket: drop the entry, its comma and the
+        # spaces after it, but not the line break or anything after it.
+        shares_line = False
+        if index > 0:
+            # Include the previous entry's redundant closing parentheses.
+            previous_end = _node_span(encoded_lines, elements[index - 1])[1]
+            previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
+            shares_line = b"\n" not in encoded[previous_end + previous_item_end : start]
+        comma = _next_comma(encoded, end)
+        if shares_line and b"#" in encoded[end:comma]:
+            # A comment of the line shared with another entry comes before
+            # this entry's comma, so cutting through the comma would drop it.
+            raise ValueError("shared comment before the comma")
+        end = comma + 1
+        while encoded[end : end + 1] in (b" ", b"\t"):
+            end += 1
+        if encoded[end : end + 1] == b"#" and not shares_line:
+            # This entry's own trailing comment. One on a line it shares with
+            # another entry belongs to that line, so it stays.
+            end += len(_line_tail(encoded, end))
+    elif index > 0:
+        # The last entry shares its line with the previous one: drop it from
+        # the end of the previous entry, so that entry's comma state is kept.
+        previous_end = _node_span(encoded_lines, elements[index - 1])[1]
+        previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
+        cut = previous_end + previous_item_end
+        if b"#" in encoded[cut:start]:
+            # The previous entry's comment sits between it and this entry,
+            # e.g. a comma that starts this entry's line: cut from the
+            # comma, or from this entry's line when the comment follows it.
+            comma = _next_comma(encoded, cut)
+            if b"#" in encoded[comma:start]:
+                cut = encoded.rfind(b"\n", 0, start) + 1
+            else:
+                cut = comma
+                line_start = encoded.rfind(b"\n", 0, comma) + 1
+                rest = _line_tail(encoded, end)
+                if not encoded[line_start:comma].strip() and not rest.strip():
+                    # The comma's line held only this entry: drop the line.
+                    cut = line_start
+                    end += len(rest)
+                    end += 2 if encoded[end : end + 2] == b"\r\n" else 1
+        start = cut
+    elif has_comma:
+        end = _next_comma(encoded, end) + 1
+    return encoded[:start] + encoded[end:], lines
+
+
+def _line_tail(encoded, end):
+    """The rest of the line after end, without its line break."""
+    line_end = len(encoded)
+    for newline in (b"\n", b"\r"):
+        position = encoded.find(newline, end)
+        if position != -1:
+            line_end = min(line_end, position)
+    return encoded[end:line_end]
+
+
+def _reorder_list_items(encoded, container, order):
+    encoded_lines = encoded.splitlines(keepends=True)
+    elements = container.elts
+    spans = [_node_span(encoded_lines, node) for node in elements]
+    texts = [encoded[start:end] for start, end in spans]
+    # When every entry ends its own line, a comment after an entry on that
+    # line describes the entry, so it moves with it. Between an entry and
+    # the line end there can only be parentheses, a comma, spaces and a
+    # comment, so the first "#" starts the comment.
+    own_lines = all(
+        index + 1 == len(elements)
+        or elements[index + 1].lineno > elements[index].end_lineno
+        for index in range(len(elements))
+    )
+    closing = (
+        _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
+    )
+    # Stop at the list's closing bracket: code after it on the same line
+    # isn't part of any entry.
+    tails = [_line_tail(encoded, end)[: max(closing - end, 0)] for _start, end in spans]
+    # Each comment keeps the spacing in front of it, so aligned comments
+    # stay aligned.
+    comments = [
+        tail[len(tail[: tail.index(b"#")].rstrip()) :].rstrip() if b"#" in tail else b""
+        for tail in tails
+    ]
+    for slot in reversed(range(len(spans))):
+        start, end = spans[slot]
+        source = order[slot]
+        if source == slot:
+            # An entry that stays put keeps its line byte for byte.
+            continue
+        if own_lines:
+            tail = tails[slot]
+            separator = tail[: tail.index(b"#")].rstrip() if b"#" in tail else tail
+            comment = comments[source]
+            replacement = texts[source] + separator.rstrip() + comment
+            end += len(tail)
+            if comment and end == closing:
+                # The closing bracket follows on this line: move it to its
+                # own line, so the comment doesn't swallow it.
+                line = encoded_lines[container.lineno - 1].decode("utf-8")
+                indent = line[: len(line) - len(line.lstrip())]
+                replacement += f"{_newline(encoded)}{indent}".encode("utf-8")
+        else:
+            replacement = texts[source]
+        encoded = encoded[:start] + replacement + encoded[end:]
+    return encoded
+
+
+def _has_unpacking(call):
+    return any(isinstance(arg, ast.Starred) for arg in call.args) or any(
+        keyword.arg is None for keyword in call.keywords
+    )
+
+
+def _settings_argument(node):
+    """The settings argument of a Streamer(...) entry, or None without one.
+
+    Raises ConfigEditError when the dashboard can't edit it safely. A literal
+    None counts as no settings.
+    """
+    if _has_unpacking(node):
+        # Streamer("x", **OPTIONS) may already carry settings; adding a
+        # settings keyword could repeat it.
+        raise ConfigEditError(
+            f"The entry for {_streamer_value(node)} in config.py uses * or ** "
+            "arguments, so the dashboard can't change its settings safely. "
+            "Edit them in config.py instead."
+        )
+    settings_keyword = _call_keyword(node, "settings")
+    if settings_keyword is not None:
+        settings = settings_keyword.value
+    else:
+        # Streamer(username, settings) also takes settings positionally.
+        settings = node.args[1] if len(node.args) > 1 else None
+    if settings is None or (
+        isinstance(settings, ast.Constant) and settings.value is None
+    ):
+        return settings
+    if not (
+        isinstance(settings, ast.Call)
+        and isinstance(settings.func, ast.Name)
+        and settings.func.id == "StreamerSettings"
+        and not settings.args
+        and not _has_unpacking(settings)
+    ):
+        raise ConfigEditError(
+            f"The settings for {_streamer_value(node)} in config.py aren't "
+            "written as StreamerSettings(...), so the dashboard can't change "
+            "them without losing settings. Edit them in config.py instead."
+        )
+    return settings
+
+
+def _readable_setting(value):
+    """Whether the dashboard shows this StreamerSettings value as written."""
+    if isinstance(value, ast.Constant):
+        return True
+    return (
+        isinstance(value, ast.Attribute)
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "ChatPresence"
+    )
+
+
+_DYNAMIC_NAMES = {"globals", "vars", "locals", "exec", "eval", "setattr", "delattr"}
+
+
+def _miner_config_readable(tree):
+    """Whether MINER_CONFIG is exactly its literal dict when the miner runs.
+
+    That holds when it's bound once, to a dict literal with plain string keys
+    and at most one streamer_settings, and the rest of the file only reads
+    other keys from it (MINER_CONFIG["username"]). Anything else, such as a
+    later change, an alias, or globals() and exec, may change it in ways the
+    dashboard can't follow.
+    """
+    miner = _assignment(tree, "MINER_CONFIG")
+    if not isinstance(miner, ast.Dict) or not all(
+        isinstance(key, ast.Constant) and isinstance(key.value, str)
+        for key in miner.keys
+    ):
+        return False
+    if [key.value for key in miner.keys].count("streamer_settings") > 1:
+        return False
+    # MINER_CONFIG = ALIAS = {...} or a walrus inside the dict gives another
+    # name to the dict or its defaults.
+    statement = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign) and node.value is miner
+    )
+    if len(statement.targets) != 1 or any(
+        isinstance(node, ast.NamedExpr) for node in ast.walk(miner)
+    ):
+        return False
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    bindings = 0
+    for node in ast.walk(tree):
+        if (
+            (isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES)
+            or (isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMES)
+            or (isinstance(node, ast.alias) and node.name in _DYNAMIC_NAMES)
+        ):
+            # globals(), builtins.exec(...), from builtins import exec as run
+            return False
+        if isinstance(node, ast.alias) and node.name == "*":
+            # A star import can bind any name, MINER_CONFIG included.
+            return False
+        if not isinstance(node, (ast.Name, ast.Constant)) and any(
+            value == "MINER_CONFIG"
+            or (isinstance(value, list) and "MINER_CONFIG" in value)
+            for _field, value in ast.iter_fields(node)
+        ):
+            # Any other node naming MINER_CONFIG binds or declares it: an
+            # import alias, def, class, argument, except or match capture
+            # (including {**MINER_CONFIG}), global or nonlocal.
+            return False
+        if not (isinstance(node, ast.Name) and node.id == "MINER_CONFIG"):
+            continue
+        if not isinstance(node.ctx, ast.Load):
+            bindings += 1
+            continue
+        parent = parents.get(node)
+        if (
+            isinstance(parent, ast.Subscript)
+            and parent.value is node
+            and isinstance(parent.ctx, ast.Load)
+        ):
+            key = parent.slice
+        elif (
+            isinstance(parent, ast.Attribute)
+            and parent.attr == "get"
+            and isinstance(parents.get(parent), ast.Call)
+            and parents[parent].func is parent
+            and parents[parent].args
+        ):
+            # MINER_CONFIG.get("username")
+            key = parents[parent].args[0]
+        else:
+            return False
+        if not (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and key.value != "streamer_settings"
+        ):
+            return False
+    return bindings == 1
+
+
+def _inherited_setting_unknown(tree, name):
+    """Whether the global default for a streamer setting can't be read.
+
+    The dashboard then shows the built-in default, which may be wrong.
+    """
+    if not _miner_config_readable(tree):
+        return True
+    defaults = _dict_item(_assignment(tree, "MINER_CONFIG"), "streamer_settings")
+    if defaults is None or (
+        isinstance(defaults, ast.Constant) and defaults.value is None
+    ):
+        return False
+    if isinstance(defaults, ast.Dict):
+        if None in defaults.keys:
+            return True
+        value = _dict_item(defaults, name)
+        return value is not None and not _readable_setting(value)
+    if not (
+        isinstance(defaults, ast.Call)
+        and isinstance(defaults.func, ast.Name)
+        and defaults.func.id in ("StreamerSettings", "dict")
+        and not defaults.args
+        and not _has_unpacking(defaults)
+    ):
+        return True
+    keyword = _call_keyword(defaults, name)
+    return keyword is not None and not _readable_setting(keyword.value)
+
+
+def _require_editable_settings(config_path, username, names):
+    """Refuse a settings update the dashboard can't apply faithfully.
+
+    The dashboard shows defaults for settings it can't read, so a submitted
+    value that looks unchanged may still differ from config.py. names are
+    the settings the dashboard submitted. Returns the names whose inherited
+    value can't be read, which must be written even when they look
+    unchanged.
+    """
+    if not names:
+        return set()
+    encoded = Path(config_path).read_bytes()
+    node = next(
+        (
+            node
+            for node in _streamers_list(encoded).elts
+            if _streamer_key(node) == username
+        ),
+        None,
+    )
+    tree = ast.parse(encoded)
+    if node is None:
+        # A streamer the edit adds inherits every setting.
+        return {name for name in names if _inherited_setting_unknown(tree, name)}
+    settings = _settings_argument(node) if isinstance(node, ast.Call) else None
+    explicit = set()
+    if isinstance(settings, ast.Call):
+        for name in names:
+            keyword = _call_keyword(settings, name)
+            if keyword is None:
+                continue
+            if not _readable_setting(keyword.value):
+                raise ConfigEditError(
+                    f"{name} for {_streamer_value(node)} in config.py isn't a "
+                    "plain value, so the dashboard can't change it safely. "
+                    "Edit it in config.py instead."
+                )
+            if not (
+                isinstance(keyword.value, ast.Constant) and keyword.value.value is None
+            ):
+                explicit.add(name)
+    return {
+        name
+        for name in names
+        if name not in explicit and _inherited_setting_unknown(tree, name)
+    }
+
+
+def _set_streamer_settings(encoded, key, changed):
+    for name, value in changed.items():
+        rendered = f"ChatPresence.{value}" if name == "chat" else repr(value)
+        streamers = _streamers_list(encoded)
+        node = next(node for node in streamers.elts if _streamer_key(node) == key)
+        encoded_lines = encoded.splitlines(keepends=True)
+        if isinstance(node, ast.Constant):
+            start, end = _node_span(encoded_lines, node)
+            # Keep the username literal exactly as written.
+            replacement = (
+                b"Streamer("
+                + encoded[start:end]
+                + f", settings=StreamerSettings({name}={rendered}))".encode("utf-8")
+            )
+            encoded = encoded[:start] + replacement + encoded[end:]
+            continue
+        settings = _settings_argument(node)
+        if isinstance(settings, ast.Constant):
+            # settings=None: replace the None, keyword or positional alike.
+            start, end = _node_span(encoded_lines, settings)
+            encoded = (
+                encoded[:start]
+                + f"StreamerSettings({name}={rendered})".encode("utf-8")
+                + encoded[end:]
+            )
+            continue
+        if settings is None:
+            encoded = _insert_item_bytes(
+                encoded,
+                node,
+                f"settings=StreamerSettings({name}={rendered})",
+                inline=True,
+            )
+            continue
+        keyword = _call_keyword(settings, name)
+        if keyword is not None:
+            start, end = _node_span(encoded_lines, keyword.value)
+            encoded = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
+        else:
+            encoded = _insert_item_bytes(
+                encoded, settings, f"{name}={rendered}", inline=True
+            )
+    return encoded
 
 
 def enable_analytics_dashboard(
@@ -978,19 +1648,22 @@ def _write_notification(config_path, provider, values):
     )
 
 
-def _ensure_config_import(config_path, statement):
-    path = Path(config_path)
-    source = path.read_text(encoding="utf-8")
+def _with_config_import(encoded, statement):
+    source = encoded.decode("utf-8")
     if statement in source:
-        return
+        return encoded
     lines = source.splitlines(keepends=True)
     insertion = 1 if lines and "coding" in lines[0] else 0
-    lines.insert(insertion, statement + "\n")
-    _replace_config_bytes(
-        path,
-        "".join(lines).encode("utf-8"),
-        stat.S_IMODE(path.stat().st_mode),
-    )
+    lines.insert(insertion, statement + _newline(encoded))
+    return "".join(lines).encode("utf-8")
+
+
+def _ensure_config_import(config_path, statement):
+    path = Path(config_path)
+    encoded = path.read_text(encoding="utf-8").encode("utf-8")
+    updated = _with_config_import(encoded, statement)
+    if updated != encoded:
+        _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
 def _validate_streamer_settings(settings):
@@ -1125,6 +1798,7 @@ def _update_managed_web_config(config_path, payload):
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")
         _validate_streamer_settings(settings)
+        unknown = _require_editable_settings(config_path, username, settings)
         streamers = list(current["streamers"])
         for streamer in streamers:
             if streamer["username"].lower() == username:
@@ -1132,7 +1806,9 @@ def _update_managed_web_config(config_path, payload):
                 break
         else:
             raise ConfigEditError("Streamer is not configured.")
-        _write_streamers(config_path, streamers, username)
+        _write_streamers(
+            config_path, streamers, username, always_write={username: unknown}
+        )
     elif action == "update_category":
         values = payload.get("values") or {}
         allowed = {"limit", "sort", "refresh_interval_hours", "drops_enabled"}
@@ -1346,7 +2022,16 @@ def _update_managed_web_config(config_path, payload):
                 for name in schema["secrets"]
                 if isinstance(values.get(name), str) and values[name]
             )
-            missing = sorted(NOTIFICATION_REQUIRED[provider] - available)
+            # An empty list is still an argument the constructor accepts.
+            given = available | {
+                name
+                for name, value in {**state["fields"], **values}.items()
+                if isinstance(value, list)
+            }
+            missing = sorted(
+                (NOTIFICATION_REQUIRED[provider] - available)
+                | (NOTIFICATION_CONSTRUCTOR_REQUIRED[provider] - given)
+            )
             if missing:
                 raise ConfigEditError(f"{provider} requires: {', '.join(missing)}.")
         _write_notification(config_path, provider, values)
