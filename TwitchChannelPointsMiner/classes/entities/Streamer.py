@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from threading import Lock
+from threading import Lock, RLock
 
 from TwitchChannelPointsMiner.classes.Chat import (
     DEFAULT_GIFT_SUB_MESSAGE,
@@ -100,6 +100,13 @@ def is_drop_discovered(streamer):
     """True for any streamer found to farm drops (category, wildcard or badge),
     regardless of which tier the user's priority ranks it under."""
     return bool(discovery_sources(streamer) & DROP_DISCOVERY_SOURCES)
+
+
+# Serializes chat joins and leaves: online/offline changes arrive from both the
+# websocket and the watch worker, and two joins must not both start the same
+# ThreadChat. Module-level, so Streamer's __slots__ and copies are unaffected;
+# it is reentrant because toggle_chat() calls leave_chat().
+_chat_lifecycle_lock = RLock()
 
 
 class StreamerSettings(object):
@@ -441,8 +448,14 @@ class Streamer(object):
             os.replace(temp_fname, fname)
 
     def leave_chat(self):
+        with _chat_lifecycle_lock:
+            self.__leave_chat()
+
+    def __leave_chat(self):
         if self.irc_chat is not None:
             self.irc_chat.stop()
+            if self.__chat_retired():
+                return
 
             # Recreate a new thread to start again
             # raise RuntimeError("threads can only be started once")
@@ -452,13 +465,42 @@ class Streamer(object):
                 self.username,
             )
 
+    def __chat_retired(self):
+        return getattr(self.irc_chat, "retired", False) is True
+
+    def retire_chat(self, timeout=5):
+        """Stop the chat of a streamer that is leaving the miner, and keep
+        online/offline updates that are still in flight from joining it again.
+        A streamer added back later gets a new ThreadChat."""
+        with _chat_lifecycle_lock:
+            irc_chat = self.irc_chat
+            if irc_chat is None:
+                return
+            irc_chat.retired = True
+        if irc_chat.is_alive():
+            irc_chat.stop()
+            irc_chat.join(timeout=timeout)
+
     def __join_chat(self):
-        if self.irc_chat is not None:
+        if self.irc_chat is not None and not self.__chat_retired():
             if self.irc_chat.is_alive() is False:
+                if self.irc_chat.ident is not None:
+                    # This thread already ran and ended (IRC died, or chat
+                    # was stopped while waiting for TLS). A thread can only
+                    # be started once, so start a fresh one.
+                    self.irc_chat = ThreadChat(
+                        self.irc_chat.username,
+                        self.irc_chat.token,
+                        self.username,
+                    )
                 self.irc_chat.settings = self.settings
                 self.irc_chat.start()
 
     def toggle_chat(self):
+        with _chat_lifecycle_lock:
+            self.__toggle_chat()
+
+    def __toggle_chat(self):
         if self.settings.chat == ChatPresence.ALWAYS:
             self.__join_chat()
         elif self.settings.chat != ChatPresence.NEVER:
