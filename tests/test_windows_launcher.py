@@ -1324,6 +1324,11 @@ def test_wait_until_dashboard_ready_ignores_system_proxy_settings(monkeypatch):
         _host, dead_port = probe.getsockname()
     monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead_port}")
     monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead_port}")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    # urlopen() caches its opener, with the proxy settings of its first call,
+    # so an earlier test would otherwise hide the proxy from this one.
+    monkeypatch.setattr(urllib.request, "_opener", None, raising=False)
     server, thread = _start_http_server(_OkHandler)
     try:
         host, port = server.server_address
@@ -1785,6 +1790,58 @@ def test_window_api_submit_username_twice_starts_mining_only_once(tmp_path):
     text = config_path.read_text(encoding="utf-8")
     assert f"'username': {_REAL_USERNAME!r}" in text
     assert "someone_else" not in text
+
+
+def test_window_api_submit_username_can_retry_after_a_failed_start(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n", encoding="utf-8"
+    )
+    attempts = []
+
+    def start_mining():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("can't start new thread")
+
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=config_path,
+        needs_username=True,
+        start_mining=start_mining,
+        logs_dir=None,
+    )
+
+    with pytest.raises(RuntimeError):
+        api.submit_username(_REAL_USERNAME)
+    assert api.submit_username(_REAL_USERNAME) == {"success": True, "message": None}
+    assert len(attempts) == 2
+
+
+def test_window_api_submit_username_after_main_started_mining_does_nothing(tmp_path):
+    # With a configured username, main() starts mining before the shell
+    # exists, so a submit must neither save nor start a second miner.
+    config_path = tmp_path / "config.py"
+    original = f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}}}\n"
+    config_path.write_text(original, encoding="utf-8")
+    started = []
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=config_path,
+        needs_username=False,
+        start_mining=lambda: started.append(True),
+        logs_dir=None,
+    )
+
+    result = api.submit_username("someone_else")
+
+    assert result == {"success": True, "message": None}
+    assert started == []
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_window_api_submit_username_reports_invalid_username_without_starting(tmp_path):
@@ -3508,6 +3565,34 @@ def test_set_autostart_enabled_reports_shortcut_removal_failure(monkeypatch):
     assert shortcut.exists()
 
 
+def test_set_autostart_enabled_false_without_a_run_key_removes_installer_shortcut(
+    monkeypatch,
+):
+    # A profile can lack the Run key entirely; turning autostart off must
+    # still remove the installer's shortcut.
+    monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
+    fake_winreg, store = _fake_winreg_module()
+    monkeypatch.setitem(windows_launcher.sys.modules, "winreg", fake_winreg)
+    shortcut = _create_installer_shortcut()
+
+    success, _message = windows_launcher.set_autostart_enabled(False)
+
+    assert success is True
+    assert not shortcut.exists()
+    assert store == {}
+
+
+def test_set_autostart_enabled_true_creates_a_missing_run_key(monkeypatch):
+    monkeypatch.setattr(windows_launcher.sys, "frozen", True, raising=False)
+    fake_winreg, store = _fake_winreg_module()
+    monkeypatch.setitem(windows_launcher.sys.modules, "winreg", fake_winreg)
+
+    success, _message = windows_launcher.set_autostart_enabled(True)
+
+    assert success is True
+    assert windows_launcher.is_autostart_enabled() is True
+
+
 def _fake_winreg_module():
     """A minimal stand-in for the stdlib `winreg` module (Windows-only, so
     real registry access can't be exercised here) - a plain dict backs a
@@ -3524,9 +3609,12 @@ def _fake_winreg_module():
             return False
 
     def OpenKey(hive, path, *args):
-        if path not in store and not args:
-            # QueryValueEx path: reading a key that was never created.
+        # Like the real OpenKey, opening never creates a missing key.
+        if path not in store:
             raise FileNotFoundError(path)
+        return FakeKeyHandle()
+
+    def CreateKeyEx(hive, path, *args):
         store.setdefault(path, {})
         return FakeKeyHandle()
 
@@ -3551,6 +3639,7 @@ def _fake_winreg_module():
         KEY_SET_VALUE=1,
         REG_SZ=1,
         OpenKey=OpenKey,
+        CreateKeyEx=CreateKeyEx,
         QueryValueEx=QueryValueEx,
         SetValueEx=SetValueEx,
         DeleteValue=DeleteValue,

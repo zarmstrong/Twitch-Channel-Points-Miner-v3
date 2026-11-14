@@ -932,18 +932,31 @@ def set_autostart_enabled(enabled):
         return False, "Windows registry access is unavailable."
 
     try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY_PATH, 0, winreg.KEY_SET_VALUE
-        ) as key:
-            if enabled:
+        if enabled:
+            # CreateKeyEx opens the Run key, or creates it on a profile that
+            # has none yet.
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY_PATH, 0, winreg.KEY_SET_VALUE
+            ) as key:
                 winreg.SetValueEx(
                     key, _AUTOSTART_VALUE_NAME, 0, winreg.REG_SZ, _autostart_command()
                 )
-            else:
-                try:
-                    winreg.DeleteValue(key, _AUTOSTART_VALUE_NAME)
-                except FileNotFoundError:
-                    pass
+        else:
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    _AUTOSTART_KEY_PATH,
+                    0,
+                    winreg.KEY_SET_VALUE,
+                ) as key:
+                    try:
+                        winreg.DeleteValue(key, _AUTOSTART_VALUE_NAME)
+                    except FileNotFoundError:
+                        pass
+            except FileNotFoundError:
+                # No Run key at all, so nothing is registered there; the
+                # installer's shortcut below still has to go.
+                pass
     except OSError as error:
         return False, f"Could not update Windows startup settings: {error}"
     # Only one mechanism may launch the app at login, so the installer's
@@ -988,7 +1001,8 @@ class WindowApi:
         # while the first call is still in flight); only the first call may
         # start mining.
         self._mining_lock = threading.Lock()
-        self._mining_started = False
+        # main() has already started mining when no username was needed.
+        self._mining_started = not needs_username
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
@@ -1022,8 +1036,9 @@ class WindowApi:
             except (ConfigEditError, OSError) as error:
                 return {"success": False, "message": str(error)}
             self._needs_username = False
-            self._mining_started = True
+            # Marked only once it started, so a failed start can be retried.
             self._start_mining()
+            self._mining_started = True
         return {"success": True, "message": None}
 
     def get_dashboard_info(self):
