@@ -2891,6 +2891,46 @@ def test_removing_an_entry_keeps_a_comment_it_shares_with_another(tmp_path, stre
     assert _usernames(config) == ["a", "c", "d"]
 
 
+def test_removal_is_refused_when_a_shared_comment_precedes_the_comma(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = [\n    "a", "b" # ab\n    , "c",\n]\n')
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="Remove it in config.py instead"):
+        update_managed_web_config(
+            config, {"action": "remove", "kind": "streamers", "value": "b"}
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        'X = MINER_CONFIG.get("streamer_settings")\n',
+        "Y = dict(MINER_CONFIG)\n",
+        'print(MINER_CONFIG["username"])\n',
+    ],
+)
+def test_reading_miner_config_later_keeps_inherited_settings_inherited(tmp_path, later):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n' + later)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False, "chat": "NEVER"},
+        },
+    )
+
+    # favorite=False is the readable inherited value, so it isn't written.
+    assert 'Streamer("one", settings=StreamerSettings(chat=ChatPresence.NEVER))' in (
+        config.read_text(encoding="utf-8")
+    )
+
+
 def test_usernames_differing_only_in_spaces_count_as_duplicates(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(

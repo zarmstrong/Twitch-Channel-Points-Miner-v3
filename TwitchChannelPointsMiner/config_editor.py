@@ -892,9 +892,9 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
         if index is None:
             break
         removed_key = _streamer_key(streamers.elts[index])
-        updated, (first, last) = _remove_list_item(encoded, streamers, index)
         # Only comments on the removed entry's own lines may go.
         try:
+            updated, (first, last) = _remove_list_item(encoded, streamers, index)
             ast.parse(updated)
             kept = [
                 text for line, text in _comments(encoded) if not first <= line <= last
@@ -1101,15 +1101,20 @@ def _remove_list_item(encoded, container, index):
         # The next entry follows on the same line, or this one shares its
         # line with the opening bracket: drop the entry, its comma and the
         # spaces after it, but not the line break or anything after it.
-        end = _next_comma(encoded, end) + 1
-        while encoded[end : end + 1] in (b" ", b"\t"):
-            end += 1
         shares_line = False
         if index > 0:
             # Include the previous entry's redundant closing parentheses.
             previous_end = _node_span(encoded_lines, elements[index - 1])[1]
             previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
             shares_line = b"\n" not in encoded[previous_end + previous_item_end : start]
+        comma = _next_comma(encoded, end)
+        if shares_line and b"#" in encoded[end:comma]:
+            # A comment of the line shared with another entry comes before
+            # this entry's comma, so cutting through the comma would drop it.
+            raise ValueError("shared comment before the comma")
+        end = comma + 1
+        while encoded[end : end + 1] in (b" ", b"\t"):
+            end += 1
         if encoded[end : end + 1] == b"#" and not shares_line:
             # This entry's own trailing comment. One on a line it shares with
             # another entry belongs to that line, so it stays.
@@ -1252,6 +1257,18 @@ def _readable_setting(value):
     )
 
 
+_MUTATING_METHODS = {
+    "update",
+    "setdefault",
+    "pop",
+    "popitem",
+    "clear",
+    "__setitem__",
+    "__delitem__",
+    "__ior__",
+}
+
+
 def _miner_config_changed_later(tree):
     """Whether a top-level statement other than its first assignment may
     change MINER_CONFIG, e.g. MINER_CONFIG["streamer_settings"] = ... or
@@ -1274,7 +1291,12 @@ def _miner_config_changed_later(tree):
         ):
             if is_miner(node):
                 return True
-        elif isinstance(node, ast.Call) and is_miner(node.func):
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _MUTATING_METHODS
+            and is_miner(node.func)
+        ):
             return True
         elif isinstance(node, ast.Global) and "MINER_CONFIG" in node.names:
             return True
