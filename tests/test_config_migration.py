@@ -1188,8 +1188,8 @@ ANALYTICS_CONFIG = None
     namespace = {}
     exec(migrated, namespace)
 
-    assert 'emoji=platform.system() != "Windows"' in migrated
-    assert migrated.count("import platform") == 1
+    assert 'emoji=_tcpm_platform.system() != "Windows"' in migrated
+    assert migrated.count("import platform as _tcpm_platform") == 1
     assert namespace["LOGGER"].emoji is expected
 
 
@@ -1210,6 +1210,59 @@ ANALYTICS_CONFIG = None
     namespace = {}
     exec(migrated, namespace)
 
-    assert migrated.count("import platform") == 1
+    assert migrated.count("import platform as _tcpm_platform") == 1
     assert "LoggerSettings(emoji=True" in migrated
     assert namespace["FIRST"].emoji is True
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "from sys import platform",
+        "import sys as platform",
+        'platform = "linux"',
+        "def platform():\n    return None",
+        "class platform:\n    pass",
+    ],
+)
+@pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
+def test_emoji_default_ignores_a_config_name_called_platform(
+    monkeypatch, shadow, system, expected
+):
+    # A config may bind `platform` to something other than the module; the
+    # migrated emoji default must not depend on it.
+    source = f"""\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+{shadow}
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {{"username": "alice", "logger_settings": LOGGER}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    monkeypatch.setattr("platform.system", lambda: system)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["LOGGER"].emoji is expected
+    assert migrated.count("import platform as _tcpm_platform") == 1
+
+
+def test_emoji_default_migration_is_idempotent():
+    source = """\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    once, _, _ = migrate_config_source(source)
+    twice, _, _ = migrate_config_source(once)
+
+    assert twice == once
