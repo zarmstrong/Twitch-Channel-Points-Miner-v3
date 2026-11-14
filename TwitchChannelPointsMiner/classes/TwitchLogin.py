@@ -97,7 +97,11 @@ def parse_android_login(pasted):
         return None
     if BARE_TOKEN_RE.fullmatch(text):
         return text
-    parsed = urlparse(text)
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        # e.g. "https://[" is not a valid URL; urlparse raises for it.
+        return None
     for part in (parsed.fragment, parsed.query):
         token = (parse_qs(part).get("access_token") or [""])[0]
         if BARE_TOKEN_RE.fullmatch(token):
@@ -344,7 +348,15 @@ class TwitchLogin(object):
                 f"Twitch rejected the Android login (HTTP {response.status_code})"
             )
             return False
-        data = response.json() if response.content else {}
+        try:
+            data = response.json() if response.content else {}
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            _android_error(
+                "Twitch sent an unexpected reply while validating the Android login"
+            )
+            return False
         if data.get("client_id") != ANDROID_CLIENT_ID:
             _android_error("That login was not issued to the Twitch Android app")
             return False

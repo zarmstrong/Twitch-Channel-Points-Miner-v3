@@ -346,6 +346,75 @@ def test_paste_without_a_token_is_asked_again(monkeypatch):
     assert login.android_login_flow(read_input=lambda prompt: next(pasted)) is True
 
 
+@pytest.mark.parametrize("pasted", ["https://[", "http://[::1"])
+def test_parse_android_login_returns_none_for_malformed_urls(pasted):
+    assert parse_android_login(pasted) is None
+
+
+def test_malformed_url_is_asked_again_instead_of_aborting(monkeypatch, caplog):
+    login, _ = android_login(monkeypatch, valid_response())
+    pasted = iter(["https://[", REDIRECT])
+
+    with caplog.at_level(logging.ERROR):
+        assert login.android_login_flow(read_input=lambda prompt: next(pasted)) is True
+
+    assert "No access token found in what was pasted" in caplog.text
+    assert TOKEN not in caplog.text
+
+
+def test_malformed_environment_variable_is_treated_as_an_invalid_login(
+    monkeypatch, caplog
+):
+    login, _ = android_login(monkeypatch, valid_response())
+    monkeypatch.setenv(ANDROID_LOGIN_ENV_VAR, "https://[")
+    pasted = iter([REDIRECT])
+
+    with caplog.at_level(logging.ERROR):
+        assert login.android_login_flow(read_input=lambda prompt: next(pasted)) is True
+
+    assert f"{ANDROID_LOGIN_ENV_VAR} does not hold a valid Android login" in caplog.text
+
+
+class RawValidate:
+    """A validate reply whose body is not a JSON object."""
+
+    def __init__(self, parse):
+        self.status_code = 200
+        self.content = b"raw body"
+        self._parse = parse
+
+    def json(self):
+        return self._parse()
+
+
+def _invalid_json():
+    raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+
+@pytest.mark.parametrize(
+    "parse",
+    [_invalid_json, lambda: [], lambda: None],
+    ids=["invalid-json", "json-array", "json-null"],
+)
+def test_unexpected_validate_reply_is_rejected_without_raising(
+    monkeypatch, caplog, parse
+):
+    login, _ = android_login(monkeypatch, RawValidate(parse))
+    pasted = iter([REDIRECT] * 3)
+
+    with caplog.at_level(logging.ERROR):
+        assert login.android_login_flow(read_input=lambda prompt: next(pasted)) is False
+
+    assert login.token is None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(
+        "Twitch sent an unexpected reply while validating the Android login"
+        in r.getMessage()
+        for r in errors
+    )
+    assert TOKEN not in caplog.text
+
+
 def test_android_twitch_uses_its_own_client_cookie_file_and_user_agent(
     tmp_path, monkeypatch
 ):
