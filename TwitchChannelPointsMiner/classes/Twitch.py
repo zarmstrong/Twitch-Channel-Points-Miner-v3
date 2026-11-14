@@ -3381,9 +3381,8 @@ class Twitch(object):
 
         __get_inventory is the only writer, so inventory sync, badge checks
         and category discovery all record the completions they observe while
-        consumers only read. The cache only grows, like
-        completed_drop_campaigns: completing a campaign is permanent, so a
-        partial response that omits an entry must not erase it. The parsing
+        consumers only read. The cache only grows: a partial response that
+        omits an entry must not erase it. The parsing
         runs outside the lock; merging is a union, so concurrent writers
         cannot lose each other's results.
         """
