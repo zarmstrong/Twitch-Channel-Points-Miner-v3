@@ -443,11 +443,17 @@ def migrate_web_config(config_path):
             if not isinstance(username, str) or STREAMER_RE.fullmatch(username) is None:
                 raise ConfigEditError("Each managed streamer needs a valid username.")
             _validate_streamer_settings(record.get("settings", {}))
-        _write_streamers(
-            config_path,
-            records,
-            {str(record.get("username", "")).lower() for record in records},
-        )
+        try:
+            _write_streamers(
+                config_path,
+                records,
+                {str(record.get("username", "")).lower() for record in records},
+            )
+        except ConfigEditError as error:
+            raise ConfigEditError(
+                f"Couldn't move the streamers saved in {path.name} into "
+                f"config.py: {error} Then delete {path.name}."
+            ) from error
     if "categories" in overrides:
         categories = overrides["categories"]
         if not isinstance(categories, list) or any(
@@ -809,7 +815,10 @@ def _write_streamers(config_path, records, updated_usernames=None):
     # Read bytes, so CRLF line breaks are kept.
     original = path.read_bytes()
     base = _base_web_config(config_path)
-    current = {item["username"].lower(): item["settings"] for item in base["streamers"]}
+    # With a duplicated username, the first entry is the one that is edited.
+    current = {}
+    for item in base["streamers"]:
+        current.setdefault(item["username"].lower(), item["settings"])
     settings_changes = {}
     for record in records:
         key = record["username"].lower()

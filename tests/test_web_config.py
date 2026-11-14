@@ -2530,6 +2530,24 @@ def test_duplicate_usernames_keep_their_own_entries_on_other_edits(tmp_path):
     assert _usernames(config) == ["one", "one", "two"]
 
 
+def test_settings_update_to_a_duplicated_username_edits_the_first_entry(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, DUPLICATE_STREAMERS)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in source
+    assert '    "one",\n' in source
+
+
 def test_reordering_duplicate_usernames_keeps_both_entries(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, DUPLICATE_STREAMERS)
@@ -2595,6 +2613,32 @@ def test_legacy_migration_does_not_refuse_unchanged_variable_settings(tmp_path):
     before = config.read_bytes()
 
     migrate_web_config(config)
+
+    assert config.read_bytes() == before
+
+
+def test_refused_legacy_migration_names_the_overrides_file(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings(favorite=True)\n"
+        'STREAMERS = [Streamer("one", settings=ONE_SETTINGS), "two"]\n',
+    )
+    (tmp_path / "web-config.json").write_text(
+        json.dumps(
+            {
+                "streamers": [
+                    {"username": "one", "settings": {"chat": "NEVER"}},
+                    {"username": "two"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="delete web-config.json"):
+        migrate_web_config(config)
 
     assert config.read_bytes() == before
 
