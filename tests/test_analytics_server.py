@@ -347,6 +347,54 @@ def test_trust_proxy_auth_does_not_bypass_a_configured_password():
     assert response.status_code == 401
 
 
+def test_trust_proxy_auth_accepts_traefik_external_host_on_loopback():
+    # Traefik keeps the browser's Host header, while Authelia is the only
+    # authentication layer. The loopback bind must not reject that Host.
+    server = AnalyticsServer(host="127.0.0.1", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get(
+        "/__host_guard_probe__",
+        headers={
+            "Host": "miner.example.com",
+            "X-Forwarded-Host": "miner.example.com",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+def test_trust_proxy_auth_rejects_cross_site_post():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Host": "miner.example.com", "Origin": "https://evil.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Cross-site request rejected."
+
+
+def test_trust_proxy_auth_accepts_same_origin_traefik_post():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={
+            "Host": "miner.example.com",
+            "Origin": "https://miner.example.com",
+            "X-Forwarded-Host": "miner.example.com",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    # No on_restart callback in this test: passing the cross-site and config
+    # gates is what matters, and the endpoint reports restart as unavailable.
+    assert response.status_code == 503
+
+
 def test_static_assets_are_served_without_authentication():
     # CSS/JS/images powering the UI, not account data - a browser resends
     # cached Basic Auth credentials automatically for these, but the

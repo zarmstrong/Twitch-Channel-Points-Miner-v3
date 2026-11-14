@@ -916,6 +916,7 @@ class AnalyticsServer(Thread):
             # are allowed.
             if (
                 self.password is None
+                and not self.trust_proxy_auth
                 and self.host in LOOPBACK_HOSTS
                 and _request_hostname(request.host) not in LOOPBACK_HOSTS
             ):
