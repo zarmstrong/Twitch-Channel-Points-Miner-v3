@@ -552,6 +552,13 @@ def _configure_launcher_logging():
     logger.propagate = False
 
 
+# The dashboard is always on 127.0.0.1. Plain urlopen() honours system proxy
+# settings (HTTP_PROXY, Windows' Internet Options), which would route this
+# local probe through a proxy that cannot reach it, so the check never
+# succeeds behind one. An opener with no proxy handlers bypasses that.
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _wait_until_dashboard_ready(url, timeout=10.0, interval=0.2):
     """Give the analytics server, started on a background thread, a moment
     to bind its port before the shell tries to load it - and confirm it's
@@ -570,7 +577,7 @@ def _wait_until_dashboard_ready(url, timeout=10.0, interval=0.2):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=interval) as response:
+            with _LOCAL_OPENER.open(url, timeout=interval) as response:
                 if response.status == 200:
                     return True
         except (urllib.error.URLError, OSError, ValueError):
@@ -829,9 +836,12 @@ def _shell_prefs_path(config_path):
 
 def _read_shell_prefs(config_path):
     try:
-        return json.loads(_shell_prefs_path(config_path).read_text(encoding="utf-8"))
+        prefs = json.loads(_shell_prefs_path(config_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    # Valid JSON that isn't an object (e.g. "[]") would break every caller's
+    # .get(); treat it the same as an unreadable file.
+    return prefs if isinstance(prefs, dict) else {}
 
 
 def _read_close_behavior(config_path):
@@ -871,12 +881,73 @@ def _autostart_command():
     return f'"{sys.executable}" {_START_MINIMIZED_FLAG}'
 
 
+# FOLDERID_Startup: the per-user Startup folder, the installer's {userstartup}.
+_FOLDERID_STARTUP = "{B97D20BB-F46A-4C97-BA10-5E3608430854}"
+_STARTUP_SHORTCUT_NAME = "Twitch Channel Points Miner.lnk"
+
+
+def _known_startup_folder():
+    """The per-user Startup folder as Windows resolves it, folder
+    redirection included, or None off Windows or if the lookup fails."""
+    if os.name != "nt":
+        return None
+    try:
+        import uuid
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        folder_id = uuid.UUID(_FOLDERID_STARTUP)
+        guid = GUID(
+            folder_id.fields[0],
+            folder_id.fields[1],
+            folder_id.fields[2],
+            (ctypes.c_ubyte * 8)(*folder_id.bytes[8:]),
+        )
+        path = ctypes.c_wchar_p()
+        result = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid), 0, None, ctypes.byref(path)
+        )
+        try:
+            if result != 0 or not path.value:
+                return None
+            return Path(path.value)
+        finally:
+            # The buffer must be freed even when the call fails.
+            ctypes.windll.ole32.CoTaskMemFree(path)
+    except Exception:
+        return None
+
+
+def _startup_shortcut_path():
+    """The Startup-folder shortcut the installer's "start on login" task
+    creates (see windows_installer.iss). The folder comes from Windows, so a
+    redirected Startup folder is found too; the usual place under APPDATA
+    is the fallback. Returns None when neither is known."""
+    folder = _known_startup_folder()
+    if folder is None:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        folder = Path(appdata) / "Microsoft/Windows/Start Menu/Programs/Startup"
+    return folder / _STARTUP_SHORTCUT_NAME
+
+
 def is_autostart_enabled():
     """Whether this exe is currently registered to launch at Windows login,
     via the per-user Run key (no admin rights required, unlike the
-    all-users equivalent)."""
+    all-users equivalent) or the installer's Startup-folder shortcut."""
     if not getattr(sys, "frozen", False):
         return False
+    shortcut = _startup_shortcut_path()
+    if shortcut is not None and shortcut.exists():
+        return True
     try:
         import winreg
     except ImportError:
@@ -905,20 +976,41 @@ def set_autostart_enabled(enabled):
         return False, "Windows registry access is unavailable."
 
     try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY_PATH, 0, winreg.KEY_SET_VALUE
-        ) as key:
-            if enabled:
+        if enabled:
+            # CreateKeyEx opens the Run key, or creates it on a profile that
+            # has none yet.
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY_PATH, 0, winreg.KEY_SET_VALUE
+            ) as key:
                 winreg.SetValueEx(
                     key, _AUTOSTART_VALUE_NAME, 0, winreg.REG_SZ, _autostart_command()
                 )
-            else:
-                try:
-                    winreg.DeleteValue(key, _AUTOSTART_VALUE_NAME)
-                except FileNotFoundError:
-                    pass
+        else:
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    _AUTOSTART_KEY_PATH,
+                    0,
+                    winreg.KEY_SET_VALUE,
+                ) as key:
+                    try:
+                        winreg.DeleteValue(key, _AUTOSTART_VALUE_NAME)
+                    except FileNotFoundError:
+                        pass
+            except FileNotFoundError:
+                # No Run key at all, so nothing is registered there; the
+                # installer's shortcut below still has to go.
+                pass
     except OSError as error:
         return False, f"Could not update Windows startup settings: {error}"
+    # Only one mechanism may launch the app at login, so the installer's
+    # Startup-folder shortcut goes whichever way this toggle is flipped.
+    shortcut = _startup_shortcut_path()
+    if shortcut is not None:
+        try:
+            shortcut.unlink(missing_ok=True)
+        except OSError as error:
+            return False, f"Could not update Windows startup settings: {error}"
     return True, "Saved."
 
 
@@ -949,6 +1041,12 @@ class WindowApi:
         # hide the "minimize to tray" choice when there'd be no tray to
         # minimize to.
         self._tray_available = False
+        # submit_username can be reached twice (e.g. Enter pressed again
+        # while the first call is still in flight); only the first call may
+        # start mining.
+        self._mining_lock = threading.Lock()
+        # main() has already started mining when no username was needed.
+        self._mining_started = not needs_username
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
@@ -966,17 +1064,25 @@ class WindowApi:
         with the bundled template's placeholder, which would just fail
         Twitch login immediately on every first run.
         """
-        try:
-            from TwitchChannelPointsMiner.config_editor import (
-                ConfigEditError,
-                set_miner_username,
-            )
+        # Held for the whole call, and a call after mining started saves
+        # nothing: the running miner already read the first username, so a
+        # second one written now would only take effect on the next start.
+        with self._mining_lock:
+            if self._mining_started:
+                return {"success": True, "message": None}
+            try:
+                from TwitchChannelPointsMiner.config_editor import (
+                    ConfigEditError,
+                    set_miner_username,
+                )
 
-            set_miner_username(self._config_path, username)
-        except (ConfigEditError, OSError) as error:
-            return {"success": False, "message": str(error)}
-        self._needs_username = False
-        self._start_mining()
+                set_miner_username(self._config_path, username)
+            except (ConfigEditError, OSError) as error:
+                return {"success": False, "message": str(error)}
+            self._needs_username = False
+            # Marked only once it started, so a failed start can be retried.
+            self._start_mining()
+            self._mining_started = True
         return {"success": True, "message": None}
 
     def get_dashboard_info(self):
@@ -1502,6 +1608,12 @@ def launch_shell(
             "Shell GUI loop started (renderer=%s).",
             getattr(getattr(webview, "guilib", None), "renderer", "unknown"),
         )
+        if start_minimized and tray_icon is None:
+            # Created hidden on the assumption the tray would bring it back;
+            # with no tray there is no other way to reach the window, so show
+            # it. window.show() is called here, not before start(), because
+            # pywebview only accepts window operations once its GUI loop runs.
+            window.show()
         if not needs_username:
             # Asking about the dashboard before the user has even entered a
             # username would be premature - it can still appear on a later,
