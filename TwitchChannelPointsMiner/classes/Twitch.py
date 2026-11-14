@@ -251,6 +251,7 @@ class Twitch(object):
         "category_drops_override_streamers",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
+        "completed_drop_campaigns_lock",
         "prompt_claim_lock",
         "prompt_claim_pass_lock",
         "prompt_claim_last",
@@ -408,6 +409,7 @@ class Twitch(object):
         self.category_drops_override_streamers = False
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
+        self.completed_drop_campaigns_lock = Lock()
         self.prompt_claim_lock = Lock()
         self.prompt_claim_pass_lock = Lock()
         self.prompt_claim_last = {}
@@ -1717,6 +1719,60 @@ class Twitch(object):
 
         return completed_ids
 
+    def __reopened_campaign_ids_from_inventory(self, inventory: dict) -> set:
+        # A campaign Twitch lists in progress with an unfinished drop has gained
+        # work since it was marked completed, for example a new drop added to a
+        # finished campaign. Completion that Twitch reports itself stays final.
+        completed_ids = self.__completed_campaign_ids_from_inventory(inventory)
+        reopened_ids = set()
+        for campaign in inventory.get("dropCampaignsInProgress", []) or []:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_id = campaign.get("id")
+            if campaign_id in [None, ""]:
+                continue
+            campaign_id = str(campaign_id)
+            if campaign_id in completed_ids:
+                continue
+            for drop in campaign.get("timeBasedDrops", []) or []:
+                if (
+                    isinstance(drop, dict)
+                    and isinstance(drop.get("self"), dict)
+                    and not self.__inventory_drop_is_done(drop)
+                ):
+                    reopened_ids.add(campaign_id)
+                    break
+        return reopened_ids
+
+    def __completed_drop_campaigns_lock(self):
+        # Defensive getattr: some tests construct Twitch via __new__ and skip
+        # __init__ (mirroring __claim_lock).
+        lock = getattr(self, "completed_drop_campaigns_lock", None)
+        if lock is None:
+            lock = Lock()
+            self.completed_drop_campaigns_lock = lock
+        return lock
+
+    def __merge_completed_drop_campaigns(self, inventory: dict) -> set:
+        completed_ids = self.__completed_campaign_ids_from_inventory(inventory)
+        reopened_ids = self.__reopened_campaign_ids_from_inventory(inventory)
+        # Replace the set instead of changing it in place, so a reader that
+        # already holds the old set (the category discovery thread) never sees
+        # it change size mid-iteration.
+        with self.__completed_drop_campaigns_lock():
+            previous_ids = set(self.completed_drop_campaigns)
+            reopened_previously_completed = previous_ids & reopened_ids
+            self.completed_drop_campaigns = (
+                previous_ids - reopened_ids
+            ) | completed_ids
+        if reopened_previously_completed:
+            self.__log_drop_check(
+                "Campaigns reopened after completion, mining them again: "
+                + ", ".join(sorted(reopened_previously_completed)),
+                logging.DEBUG,
+            )
+        return completed_ids
+
     @staticmethod
     def __inventory_drop_is_done(drop: dict) -> bool:
         drop_self = drop.get("self")
@@ -2128,8 +2184,7 @@ class Twitch(object):
             if name_key:
                 names.add(name_key)
 
-        completed_campaign_ids = self.__completed_campaign_ids_from_inventory(inventory)
-        self.completed_drop_campaigns.update(completed_campaign_ids)
+        completed_campaign_ids = self.__merge_completed_drop_campaigns(inventory)
         dashboard_campaigns = self.__get_drops_dashboard(status="OPEN")
         # Snapshot this thread's dashboard outcome for the discovery filters.
         # Stubs that never write the thread-local count as a loaded dashboard.
@@ -2272,7 +2327,7 @@ class Twitch(object):
         # Keep each one authoritative for this session so the external campaign
         # catalog cannot resurrect it; other campaigns of the same game remain
         # eligible through the catalog.
-        for campaign_id in self.completed_drop_campaigns:
+        for campaign_id in tuple(self.completed_drop_campaigns):
             game_slug = self.campaign_game_slugs.get(str(campaign_id))
             if game_slug:
                 _record_twitch_campaign(game_slug, campaign_id)
@@ -8020,9 +8075,7 @@ class Twitch(object):
                 if cache_key:
                     self.awarded_game_event_drops[str(cache_key)] = awarded_drop
             self.__cache_drop_inventory_progress(inventory)
-            self.completed_drop_campaigns.update(
-                self.__completed_campaign_ids_from_inventory(inventory)
-            )
+            self.__merge_completed_drop_campaigns(inventory)
             # Sync and startup inventory reads also observe completions. Keep
             # their evidence even if the next discovery-specific fetch fails.
             self.__record_completed_badge_campaigns(inventory)
