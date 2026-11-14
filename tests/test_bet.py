@@ -101,3 +101,48 @@ def test_filter_conditions(condition, threshold, skipped):
     bet.calculate(balance=1_000)
 
     assert bet.skip() == (skipped, 100)
+
+
+def test_stealth_mode_keeps_amount_when_no_top_bettor():
+    bet = Bet(
+        outcomes(),
+        BetSettings(
+            strategy=Strategy.MOST_VOTED,
+            percentage=10,
+            max_points=500,
+            stealth_mode=True,
+        ),
+    )
+    payload = update_payload()
+    payload[1]["top_predictors"] = []
+    bet.update_outcomes(payload)
+
+    decision = bet.calculate(balance=2_000)
+
+    assert bet.outcomes[1][OutcomeKeys.TOP_POINTS] == 0
+    assert decision["amount"] == 200
+    assert decision["amount"] >= 0
+
+
+def test_stealth_mode_never_goes_negative(monkeypatch):
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Bet.uniform",
+        lambda low, high: high,
+    )
+    bet = Bet(
+        outcomes(),
+        BetSettings(
+            strategy=Strategy.MOST_VOTED,
+            percentage=10,
+            max_points=500,
+            stealth_mode=True,
+        ),
+    )
+    payload = update_payload()
+    payload[1]["top_predictors"] = [{"points": 3}]
+    bet.update_outcomes(payload)
+
+    decision = bet.calculate(balance=2_000)
+
+    assert bet.outcomes[1][OutcomeKeys.TOP_POINTS] == 3
+    assert decision["amount"] == 0
