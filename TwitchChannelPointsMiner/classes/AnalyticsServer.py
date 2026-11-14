@@ -1,3 +1,4 @@
+import errno
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, cli, g, render_template, request
 
@@ -80,6 +82,13 @@ ALLOWED_DASHBOARD_PREF_KEYS = {
 }
 MAX_DASHBOARD_PREF_VALUE_LENGTH = 256
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_ADDRESS_IN_USE_ERRNOS = frozenset(
+    code
+    for code in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", None))
+    if code is not None
+)
+
 
 class TTLResponseCache:
     """Thread-safe TTL cache for expensive dashboard JSON responses.
@@ -146,6 +155,39 @@ def _secret_matches(supplied, expected):
     return secrets.compare_digest(
         str(supplied).encode("utf-8"), str(expected).encode("utf-8")
     )
+
+
+def _request_hostname(host_header):
+    """Hostname from a Host header, lowercased, without port or IPv6 brackets."""
+    try:
+        return (urlsplit(f"//{host_header}").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_cross_site_request():
+    # Browsers attach cached Basic credentials to cross-site form POSTs, e.g.
+    # to /config/notifications/<provider>/test, which takes no body - so a
+    # page on another site could trigger state changes. Reject mutating
+    # requests whose Origin (or, lacking one, Sec-Fetch-Site) says they came
+    # from another site. Requests with neither header (curl, scripts) pass.
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return False
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        try:
+            origin_host = urlsplit(origin).netloc.lower()
+        except ValueError:
+            return True
+        # A reverse proxy that rewrites Host (nginx does by default) usually
+        # passes the browser's host in X-Forwarded-Host. A cross-site form
+        # can't set that header, so matching it is still same-site.
+        allowed = {request.host.lower()}
+        forwarded_host = request.headers.get("X-Forwarded-Host")
+        if forwarded_host:
+            allowed.add(forwarded_host.split(",")[0].strip().lower())
+        return origin_host not in allowed
+    return request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
 
 
 def _is_number(value):
@@ -300,8 +342,10 @@ def read_json(streamer, return_response=True):
     path = Settings.analytics_path
     streamer = streamer if streamer.endswith(".json") else f"{streamer}.json"
 
-    # Check if the file exists before attempting to read it
-    if not os.path.exists(os.path.join(path, streamer)):
+    # Only files returned by streamers_available() may be read. Besides
+    # preventing path traversal (e.g. "..\\..\\x" on Windows), this keeps
+    # non-streamer analytics files out of this endpoint.
+    if streamer not in streamers_available():
         error_message = f"File '{streamer}' not found."
         logger.error(error_message)
         if return_response:
@@ -784,7 +828,7 @@ class AnalyticsServer(Thread):
         self.password = password
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
-        if host not in {"127.0.0.1", "localhost", "::1"} and not password:
+        if host not in LOOPBACK_HOSTS and not password:
             raise ValueError("Analytics exposed beyond localhost requires a password")
 
         def generate_log():
@@ -845,6 +889,35 @@ class AnalyticsServer(Thread):
 
         @self.app.before_request
         def require_authentication():
+            # Without a password, a loopback-only dashboard is only reached as
+            # localhost; any other Host name means DNS rebinding from a web
+            # page. With a password the rebound page can't authenticate, so
+            # other names (e.g. a reverse proxy keeping the original Host)
+            # are allowed.
+            if (
+                self.password is None
+                and self.host in LOOPBACK_HOSTS
+                and _request_hostname(request.host) not in LOOPBACK_HOSTS
+            ):
+                return Response(
+                    json.dumps(
+                        {
+                            "error": (
+                                "Unrecognized Host header. Set an analytics "
+                                "username and password to reach the dashboard "
+                                "under another host name."
+                            )
+                        }
+                    ),
+                    status=403,
+                    mimetype="application/json",
+                )
+            if _is_cross_site_request():
+                return Response(
+                    json.dumps({"error": "Cross-site request rejected."}),
+                    status=403,
+                    mimetype="application/json",
+                )
             if request.endpoint == "static" and (
                 os.path.splitext(request.path)[1].lower() in _STATIC_BYPASS_EXTENSIONS
             ):
@@ -989,16 +1062,28 @@ class AnalyticsServer(Thread):
                 ident=None,
             )
         except OSError as error:
-            logger.error(
-                f"Could not start the analytics dashboard on "
-                f"http://{self.host}:{self.port}/ ({error}). Another program "
-                "(or a previous copy of this app still running in the "
-                "background) is probably already using that port - close it, "
-                "or set a different 'port' under ANALYTICS_CONFIG in your "
-                "config file and restart. Mining will continue without the "
-                "dashboard.",
-                extra={"emoji": ":warning:"},
-            )
+            if (
+                error.errno in _ADDRESS_IN_USE_ERRNOS
+                or getattr(error, "winerror", None) == 10048
+            ):
+                logger.error(
+                    f"Could not start the analytics dashboard on "
+                    f"http://{self.host}:{self.port}/ ({error}). Another program "
+                    "(or a previous copy of this app still running in the "
+                    "background) is probably already using that port - close it, "
+                    "or set a different 'port' under ANALYTICS_CONFIG in your "
+                    "config file and restart. Mining will continue without the "
+                    "dashboard.",
+                    extra={"emoji": ":warning:"},
+                )
+            else:
+                logger.error(
+                    f"Could not start the analytics dashboard on "
+                    f"http://{self.host}:{self.port}/ ({error}). Check 'host' and "
+                    "'port' under ANALYTICS_CONFIG in your config file and restart. "
+                    "Mining will continue without the dashboard.",
+                    extra={"emoji": ":warning:"},
+                )
             return
 
         logger.info(
