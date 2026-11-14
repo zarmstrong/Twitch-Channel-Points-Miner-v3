@@ -387,3 +387,17 @@ def test_login_needs_a_success_status_and_a_string_token(fake_post):
     assert first[0] is False and "rate limited" in first[1]
     assert second[0] is False and "returned no access token" in second[1]
     assert len(post.calls) == 2
+
+
+def test_login_429_with_an_oversized_retry_after_ms_waits_the_maximum(fake_post, clock):
+    limited = _response(429, {"retry_after_ms": 10**400})
+    post = fake_post(limited)
+    matrix = _matrix()
+
+    success, reason = matrix.send("hello", Events.STREAMER_ONLINE)
+
+    assert success is False
+    assert "retried in 60 minutes" in reason
+    clock[0] += 3599
+    assert matrix.send("hello", Events.STREAMER_ONLINE) == (False, reason)
+    assert len(post.calls) == 1

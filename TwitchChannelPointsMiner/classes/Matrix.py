@@ -49,6 +49,9 @@ def _retry_after_seconds(response, body):
     if seconds is None:
         try:
             seconds = float(body.get("retry_after_ms")) / 1000
+        except OverflowError:
+            # An integer too large for a float: wait as long as allowed.
+            return LOGIN_RETRY_MAX_SECONDS
         except (TypeError, ValueError):
             return None
     return seconds if seconds > 0 else None
