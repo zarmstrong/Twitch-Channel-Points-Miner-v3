@@ -37,7 +37,7 @@ The miner runs many threads against the same objects: the main loop in `TwitchCh
 ## Secrets
 
 - Never log tokens, passwords, cookie contents, webhook URLs or full request URLs. Notifier failures go through `format_request_failure()` in `classes/NotificationError.py`, which describes the failure without the URL.
-- Login sessions are pickled to `cookies/<username>.pkl` (`<username>-android.pkl` for the Android login). Treat those files as credentials.
+- Login sessions are saved as JSON in `cookies/<username>.pkl` (`<username>-android.pkl` for the Android login). The `.pkl` name is historical: older pickled files are read with a restricted unpickler only to migrate them to JSON. Treat those files as credentials.
 - Examples and docs use placeholders only.
 
 ## Notifiers
