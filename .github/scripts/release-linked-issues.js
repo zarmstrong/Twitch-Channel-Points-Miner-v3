@@ -179,18 +179,33 @@ async function closeReleasedIssues({ github, context, core, tag }) {
   const pulls = releasePullRequests(commitShas, associations);
   core.info(`Found ${pulls.length} merged PR(s) in ${previous.tag_name}...${tag}`);
 
+  // An issue is closed when it carries the label, or when marking never ran
+  // for it: a push skipped with [skip ci], or one still being marked when the
+  // release was published. A marked issue whose label was removed by hand
+  // keeps its marker comment, so it stays open.
   const candidates = new Map();
+  const unmarked = new Set();
   for (const pull of pulls) {
     const issues = await linkedIssues(github, owner, repo, pull.number);
     for (const issue of issues) {
+      if (candidates.has(issue.number)) continue;
       if (issue.labels.nodes.some((label) => label.name === AWAITING_LABEL)) {
         candidates.set(issue.number, issue);
+      } else if (
+        issue.state === 'OPEN' &&
+        !(await hasComment(github, owner, repo, issue.number, AWAITING_MARKER))
+      ) {
+        candidates.set(issue.number, issue);
+        unmarked.add(issue.number);
       }
     }
   }
 
   for (const issue of candidates.values()) {
-    if (shouldCloseIssue(issue)) {
+    if (unmarked.has(issue.number)) {
+      core.info(`Issue #${issue.number} was never marked ${AWAITING_LABEL}; closing it`);
+    }
+    if (shouldCloseIssue(issue) || unmarked.has(issue.number)) {
       const releaseComment = `Released in ${tag}.`;
       if (!(await hasComment(github, owner, repo, issue.number, releaseComment))) {
         await github.rest.issues.createComment({

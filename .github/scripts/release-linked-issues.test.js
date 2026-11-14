@@ -350,3 +350,83 @@ test('marking skips the compare for a new branch or deleted head', async () => {
     assert.equal(mutations.length, payload.after === 'm1' ? 1 : 0);
   }
 });
+
+function closingGithub({ issue, comments = [], calls }) {
+  const listReleases = () => {};
+  const listPullRequestsAssociatedWithCommit = () => {};
+  const listComments = () => {};
+  return {
+    graphql: async () => ({ repository: { pullRequest: {
+      closingIssuesReferences: { nodes: [issue], pageInfo: { hasNextPage: false } },
+    } } }),
+    paginate: async (method) => {
+      if (method === listReleases) {
+        return [
+          { tag_name: '2', draft: false, published_at: '2026-02-01T00:00:00Z' },
+          { tag_name: '1', draft: false, published_at: '2026-01-01T00:00:00Z' },
+        ];
+      }
+      if (method === listPullRequestsAssociatedWithCommit) {
+        return [{ number: 9, merged_at: '2026-01-15T00:00:00Z', merge_commit_sha: 'abc', labels: [] }];
+      }
+      if (method === listComments) return comments;
+      throw new Error('Unexpected paginated method');
+    },
+    rest: {
+      repos: {
+        listReleases,
+        listPullRequestsAssociatedWithCommit,
+        compareCommitsWithBasehead: async () => ({ data: {
+          status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
+        } }),
+      },
+      issues: {
+        listComments,
+        createComment: async (input) => calls.push(['comment', input]),
+        update: async (input) => calls.push(['update', input]),
+        removeLabel: async (input) => {
+          calls.push(['remove', input]);
+          const error = new Error('Label does not exist');
+          error.status = 404;
+          throw error;
+        },
+      },
+    },
+  };
+}
+
+async function closeWith(options) {
+  const calls = [];
+  await closeReleasedIssues({
+    github: closingGithub({ ...options, calls }),
+    context: { repo: { owner: 'o', repo: 'r' } },
+    core: { info() {} },
+    tag: '2',
+  });
+  return calls;
+}
+
+test('release closes an issue whose marking run never happened', async () => {
+  // A merge pushed with [skip ci], or released before its marking run finished.
+  const calls = await closeWith({
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [] } },
+  });
+  assert.deepEqual(calls.map(([kind]) => kind), ['comment', 'update', 'remove']);
+  assert.equal(calls[0][1].body, 'Released in 2.');
+  assert.equal(calls[1][1].state, 'closed');
+});
+
+test('release leaves open an issue whose label was removed after marking', async () => {
+  const calls = await closeWith({
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [] } },
+    comments: [{ body: '<!-- awaiting-release -->\nThe fix in #9 was merged.' }],
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('release ignores an unlabelled issue that is already closed', async () => {
+  const calls = await closeWith({
+    issue: { number: 42, state: 'CLOSED', labels: { nodes: [] } },
+  });
+  assert.deepEqual(calls, []);
+});
