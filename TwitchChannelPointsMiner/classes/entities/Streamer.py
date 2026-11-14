@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from threading import Lock
+from threading import Lock, RLock
 
 from TwitchChannelPointsMiner.classes.Chat import (
     DEFAULT_GIFT_SUB_MESSAGE,
@@ -100,6 +100,13 @@ def is_drop_discovered(streamer):
     """True for any streamer found to farm drops (category, wildcard or badge),
     regardless of which tier the user's priority ranks it under."""
     return bool(discovery_sources(streamer) & DROP_DISCOVERY_SOURCES)
+
+
+# Serializes chat joins and leaves: online/offline changes arrive from both the
+# websocket and the watch worker, and two joins must not both start the same
+# ThreadChat. Module-level, so Streamer's __slots__ and copies are unaffected;
+# it is reentrant because toggle_chat() calls leave_chat().
+_chat_lifecycle_lock = RLock()
 
 
 class StreamerSettings(object):
@@ -441,6 +448,10 @@ class Streamer(object):
             os.replace(temp_fname, fname)
 
     def leave_chat(self):
+        with _chat_lifecycle_lock:
+            self.__leave_chat()
+
+    def __leave_chat(self):
         if self.irc_chat is not None:
             self.irc_chat.stop()
 
@@ -468,6 +479,10 @@ class Streamer(object):
                 self.irc_chat.start()
 
     def toggle_chat(self):
+        with _chat_lifecycle_lock:
+            self.__toggle_chat()
+
+    def __toggle_chat(self):
         if self.settings.chat == ChatPresence.ALWAYS:
             self.__join_chat()
         elif self.settings.chat != ChatPresence.NEVER:

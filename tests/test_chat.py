@@ -20,10 +20,12 @@ def reset_tls_probe_cache():
     Chat._tls_supported = None
     Chat._tls_failure_warned = False
     Chat._tls_failed_at = None
+    Chat._tls_probe_done = None
     yield
     Chat._tls_supported = None
     Chat._tls_failure_warned = False
     Chat._tls_failed_at = None
+    Chat._tls_probe_done = None
 
 
 class FakeSocket:
@@ -619,3 +621,115 @@ def test_stopped_waiter_leaves_without_waiting_for_another_probe(monkeypatch):
     assert stopped_promptly
     assert len(calls) == 1
     assert waiter.chat_irc is None
+
+
+def test_stopping_the_chat_that_owns_a_blocked_probe_exits_promptly(monkeypatch):
+    # The probe itself is stuck (e.g. a DNS lookup that ignores the socket
+    # timeout). The chat waiting on it must still leave when stopped, and
+    # the stuck probe must not keep the process alive.
+    in_probe = threading.Event()
+    release_probe = threading.Event()
+
+    def stuck_connect(address, timeout=None):
+        in_probe.set()
+        assert release_probe.wait(timeout=10)
+        raise OSError("down")
+
+    monkeypatch.setattr(socket, "create_connection", stuck_connect)
+    monkeypatch.delenv("TCPM_ALLOW_PLAINTEXT_IRC", raising=False)
+    chat = ThreadChat("u", "t", "c")
+    chat.daemon = True
+    chat.start()
+    assert in_probe.wait(timeout=5)
+
+    chat.stop()
+    chat.join(timeout=2)
+    stopped_promptly = not chat.is_alive()
+    probe_threads = [t for t in threading.enumerate() if t.name == "irc-tls-probe"]
+    release_probe.set()
+    for probe in probe_threads:
+        probe.join(timeout=5)
+
+    assert stopped_promptly
+    assert chat.chat_irc is None
+    assert probe_threads and all(t.daemon for t in probe_threads)
+
+
+def test_concurrent_probes_share_one_handshake(monkeypatch):
+    release_probe = threading.Event()
+    calls = []
+
+    def slow_connect(address, timeout=None):
+        calls.append(address)
+        assert release_probe.wait(timeout=10)
+        return FakeSocket()
+
+    monkeypatch.setattr(socket, "create_connection", slow_connect)
+    monkeypatch.setattr(
+        ssl.SSLContext, "wrap_socket", lambda self, sock, server_hostname=None: sock
+    )
+    results = []
+    callers = [
+        threading.Thread(target=lambda: results.append(Chat._irc_tls_available()))
+        for _ in range(3)
+    ]
+    for caller in callers:
+        caller.start()
+    time.sleep(0.3)
+    release_probe.set()
+    for caller in callers:
+        caller.join(timeout=5)
+
+    assert results == [True, True, True]
+    assert len(calls) == 1
+
+
+def test_concurrent_rejoins_start_the_chat_once(monkeypatch):
+    # Online/offline updates arrive from the websocket and the watch worker;
+    # two joins racing on an ended chat must not both start the same
+    # replacement thread ("threads can only be started once").
+    from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+    from TwitchChannelPointsMiner.classes.entities import Streamer as streamer_module
+    from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+
+    release = threading.Event()
+    starts = []
+
+    class SlowStartChat(ThreadChat):
+        def start(self):
+            starts.append(self)
+            # Widen the window between publishing and starting a thread.
+            time.sleep(0.05)
+            super().start()
+
+        def run(self):
+            release.wait(timeout=5)
+
+    monkeypatch.setattr(streamer_module, "ThreadChat", SlowStartChat)
+    streamer = Streamer(
+        "somechannel", settings=StreamerSettings(chat=ChatPresence.ALWAYS)
+    )
+    ended = ThreadChat("u", "t", "somechannel")
+    ended.run = lambda: None
+    ended.start()
+    ended.join(timeout=5)
+    streamer.irc_chat = ended
+
+    errors = []
+
+    def rejoin():
+        try:
+            streamer.toggle_chat()
+        except RuntimeError as error:
+            errors.append(error)
+
+    callers = [threading.Thread(target=rejoin) for _ in range(4)]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=5)
+    release.set()
+    streamer.irc_chat.join(timeout=5)
+
+    assert errors == []
+    assert len(starts) == 1

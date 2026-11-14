@@ -25,6 +25,9 @@ _tls_failure_warned = False
 # opening a connection; a success is cached for the process.
 _tls_failed_at = None
 IRC_TLS_FAILURE_CACHE_SECONDS = 25
+# Set while a probe is running; callers wait on it instead of starting
+# another probe.
+_tls_probe_done = None
 ALLOW_PLAINTEXT_IRC_ENV = "TCPM_ALLOW_PLAINTEXT_IRC"
 # Without TLS, a chat waits and probes again: 30 s, doubling up to 15 min.
 IRC_TLS_RETRY_INITIAL_SECONDS = 30
@@ -89,6 +92,36 @@ def _plaintext_irc_allowed():
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _run_tls_probe(host, port, timeout, done):
+    """Runs one TLS handshake on its own daemon thread and records the result.
+    Callers wait on `done`, so a stopped chat can stop waiting even while the
+    handshake (or the DNS lookup before it) is still blocked."""
+    global _tls_supported, _tls_failure_warned, _tls_failed_at, _tls_probe_done
+    error = None
+    try:
+        context = _irc_tls_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=host):
+                pass
+    except (OSError, ssl.SSLError) as caught:
+        error = caught
+    with _tls_probe_lock:
+        if error is None:
+            _tls_supported = True
+            _tls_failed_at = None
+            _tls_failure_warned = False
+        else:
+            _tls_failed_at = time.monotonic()
+            message = f"IRC TLS handshake with {host}:{port} failed ({error})"
+            if _tls_failure_warned:
+                logger.debug(message)
+            else:
+                logger.warning(message, extra={"emoji": ":warning:"})
+                _tls_failure_warned = True
+        _tls_probe_done = None
+    done.set()
+
+
 def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5, stop_event=None):
     """Check whether a TLS handshake to Twitch's IRC endpoint succeeds. A
     success is cached for the process; a failure only for
@@ -96,13 +129,11 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5, stop_event=None):
     OAuth token is never sent over plaintext unless TCPM_ALLOW_PLAINTEXT_IRC
     is set.
 
-    One probe runs at a time. With stop_event, a caller waiting for another
-    chat's probe gives up (returning False) as soon as the event is set."""
-    global _tls_supported, _tls_failure_warned, _tls_failed_at
-    while not _tls_probe_lock.acquire(timeout=0.25):
-        if stop_event is not None and stop_event.is_set():
-            return False
-    try:
+    At most one probe runs at a time, on a daemon thread; concurrent callers
+    share its result. With stop_event, a caller gives up waiting (returning
+    False) as soon as the event is set."""
+    global _tls_probe_done
+    with _tls_probe_lock:
         if _tls_supported is True:
             return True
         if stop_event is not None and stop_event.is_set():
@@ -112,25 +143,20 @@ def _irc_tls_available(host=IRC, port=IRC_TLS_PORT, timeout=5, stop_event=None):
             and time.monotonic() - _tls_failed_at < IRC_TLS_FAILURE_CACHE_SECONDS
         ):
             return False
-        try:
-            context = _irc_tls_context()
-            with socket.create_connection((host, port), timeout=timeout) as sock:
-                with context.wrap_socket(sock, server_hostname=host):
-                    _tls_supported = True
-        except (OSError, ssl.SSLError) as error:
-            _tls_failed_at = time.monotonic()
-            message = f"IRC TLS handshake with {host}:{port} failed ({error})"
-            if _tls_failure_warned:
-                logger.debug(message)
-            else:
-                logger.warning(message, extra={"emoji": ":warning:"})
-                _tls_failure_warned = True
+        done = _tls_probe_done
+        if done is None:
+            done = _tls_probe_done = Event()
+            Thread(
+                target=_run_tls_probe,
+                args=(host, port, timeout, done),
+                name="irc-tls-probe",
+                daemon=True,
+            ).start()
+    while not done.wait(timeout=0.25):
+        if stop_event is not None and stop_event.is_set():
             return False
-        _tls_failed_at = None
-        _tls_failure_warned = False
-        return True
-    finally:
-        _tls_probe_lock.release()
+    with _tls_probe_lock:
+        return _tls_supported is True
 
 
 class ChatPresence(Enum):
