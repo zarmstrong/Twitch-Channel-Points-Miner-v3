@@ -2192,7 +2192,13 @@ def test_update_streamer_edits_positional_settings_without_duplicating(tmp_path)
         },
     )
 
-    assert "settings=" not in config.read_text(encoding="utf-8").split("STREAMERS")[1]
+    streamers_line = next(
+        line
+        for line in config.read_text(encoding="utf-8").splitlines()
+        if line.startswith("STREAMERS = ")
+    )
+    assert streamers_line.count("StreamerSettings(") == 1
+    assert "settings=" not in streamers_line
     loaded = _load_config(config)
     assert loaded.STREAMERS[0].settings.favorite is True
     assert loaded.STREAMERS[0].settings.chat is ChatPresence.ALWAYS
@@ -2389,6 +2395,72 @@ def test_refused_streamer_edit_does_not_add_imports(tmp_path):
                 "username": "one",
                 "settings": {"chat": "NEVER"},
             },
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "streamers",
+    [
+        'OPTS = {}\nSTREAMERS = [Streamer("one", **OPTS), "two"]\n',
+        'ARGS = ()\nSTREAMERS = [Streamer("one", *ARGS), "two"]\n',
+        'KW = {}\nSTREAMERS = [Streamer("one", settings=StreamerSettings(**KW)), "two"]\n',
+        'STREAMERS = [Streamer("one", settings=StreamerSettings(True)), "two"]\n',
+    ],
+)
+def test_update_streamer_refuses_unpacked_or_positional_arguments(tmp_path, streamers):
+    # Adding a keyword next to ** unpacking can repeat one the unpacked dict
+    # already supplies, which fails when config.py loads.
+    config = tmp_path / "config.py"
+    write_commented_config(config, streamers)
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="config.py instead"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"chat": "NEVER"},
+            },
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_settings_insertion_indents_from_the_right_line_after_a_form_feed(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "# a\x0cform feed and a \u2028 line separator\n"
+        'STREAMERS = [\n    Streamer(\n        "one"\n    ),\n    "two",\n]\n',
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert "        settings=StreamerSettings(chat=ChatPresence.NEVER)," in source
+    assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
+
+
+def test_unremovable_entry_is_refused_with_a_clear_message(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config, 'STREAMERS = [\n    (  # why\n        "one"\n    ),\n    "two",\n]\n'
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Remove it in config.py instead"):
+        update_managed_web_config(
+            config, {"action": "remove", "kind": "streamers", "value": "one"}
         )
 
     assert config.read_text(encoding="utf-8") == before

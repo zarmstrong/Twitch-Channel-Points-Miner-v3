@@ -719,7 +719,6 @@ def _insert_item_bytes(encoded, container, rendered, inline=False):
     The item goes on its own line. With inline=True, a container written on
     a single line keeps that layout and gets the item inline instead.
     """
-    lines = encoded.decode("utf-8").splitlines(keepends=True)
     encoded_lines = encoded.splitlines(keepends=True)
     closing = (
         _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
@@ -740,9 +739,10 @@ def _insert_item_bytes(encoded, container, rendered, inline=False):
         return (
             encoded[:closing] + separator + rendered.encode("utf-8") + encoded[closing:]
         )
-    base_indent = lines[container.lineno - 1][
-        : len(lines[container.lineno - 1]) - len(lines[container.lineno - 1].lstrip())
-    ]
+    # bytes.splitlines() breaks only on CR and LF, so the line number lines up
+    # with ast's even when the file has form feeds or U+2028 in it.
+    container_line = encoded_lines[container.lineno - 1].decode("utf-8")
+    base_indent = container_line[: len(container_line) - len(container_line.lstrip())]
     indentation = base_indent + "    "
     line_start = len(encoded[:closing].rstrip(b" \t"))
     if encoded[:line_start].endswith((b"\n", b"\r")):
@@ -832,7 +832,17 @@ def _write_streamers(config_path, records, updated_usernames=None):
         )
         if index is None:
             break
+        removed_key = _streamer_key(streamers.elts[index])
         encoded = _remove_list_item(encoded, streamers, index)
+        try:
+            ast.parse(encoded)
+        except SyntaxError:
+            # e.g. a comment inside the entry's redundant parentheses.
+            raise ConfigEditError(
+                f"{removed_key} can't be removed from the dashboard because of "
+                "how its entry is written in config.py. Remove it in config.py "
+                "instead."
+            ) from None
 
     # Append new entries as plain usernames.
     present = {_streamer_key(node) for node in _streamers_list(encoded).elts}
@@ -1029,6 +1039,12 @@ def _reorder_list_items(encoded, container, order):
     return encoded
 
 
+def _has_unpacking(call):
+    return any(isinstance(arg, ast.Starred) for arg in call.args) or any(
+        keyword.arg is None for keyword in call.keywords
+    )
+
+
 def _set_streamer_settings(encoded, key, changed):
     for name, value in changed.items():
         rendered = f"ChatPresence.{value}" if name == "chat" else repr(value)
@@ -1045,6 +1061,14 @@ def _set_streamer_settings(encoded, key, changed):
             )
             encoded = encoded[:start] + replacement + encoded[end:]
             continue
+        if _has_unpacking(node):
+            # Streamer("x", **OPTIONS) may already carry settings; adding a
+            # settings keyword could repeat it.
+            raise ConfigEditError(
+                f"The entry for {_streamer_value(node)} in config.py uses * or ** "
+                "arguments, so the dashboard can't change its settings safely. "
+                "Edit them in config.py instead."
+            )
         settings_keyword = _call_keyword(node, "settings")
         if settings_keyword is not None:
             settings = settings_keyword.value
@@ -1063,6 +1087,8 @@ def _set_streamer_settings(encoded, key, changed):
             isinstance(settings, ast.Call)
             and isinstance(settings.func, ast.Name)
             and settings.func.id == "StreamerSettings"
+            and not settings.args
+            and not _has_unpacking(settings)
         ):
             raise ConfigEditError(
                 f"The settings for {_streamer_value(node)} in config.py aren't "
