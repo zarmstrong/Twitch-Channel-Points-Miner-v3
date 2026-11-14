@@ -12,7 +12,7 @@ from TwitchChannelPointsMiner.logger import NotificationHandler
         ("telegram", SimpleNamespace(chat_id=1)),
         ("discord", SimpleNamespace(webhook_api="https://discord.example/hook")),
         ("webhook", SimpleNamespace(endpoint="https://webhook.example/hook")),
-        ("matrix", SimpleNamespace(room_id="room", access_token="token")),
+        ("matrix", SimpleNamespace(room_id="room", password="secret")),
         ("pushover", SimpleNamespace(userkey="user", token="token")),
         ("gotify", SimpleNamespace(endpoint="https://gotify.example/message")),
         ("apprise", SimpleNamespace(urls=["discord://123/abc"])),
