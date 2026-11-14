@@ -48,7 +48,10 @@ async function linkedIssues(github, owner, repo, pullNumber) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
           closingIssuesReferences(first: 100) {
-            nodes { number state labels(first: 100) { nodes { name } } }
+            nodes {
+              number state labels(first: 100) { nodes { name } }
+              repository { nameWithOwner }
+            }
             pageInfo { hasNextPage }
           }
         }
@@ -60,7 +63,12 @@ async function linkedIssues(github, owner, repo, pullNumber) {
   if (references.pageInfo.hasNextPage) {
     throw new Error(`PR #${pullNumber} links more than 100 issues; refusing partial processing`);
   }
-  return references.nodes;
+  // A PR can close issues in other repositories. Every lookup and change here
+  // uses this repository, so another repository's #N must not stand for ours.
+  const current = `${owner}/${repo}`.toLowerCase();
+  return references.nodes.filter(
+    (issue) => issue.repository?.nameWithOwner?.toLowerCase() === current,
+  );
 }
 
 async function hasComment(github, owner, repo, issueNumber, marker) {

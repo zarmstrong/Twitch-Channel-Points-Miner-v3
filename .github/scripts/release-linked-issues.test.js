@@ -42,6 +42,7 @@ function markingGithub({ pulls, mutations, comments = [], compare }) {
     graphql: async () => ({ repository: { pullRequest: {
       closingIssuesReferences: {
         nodes: [{
+          repository: { nameWithOwner: 'o/r' },
           number: 1,
           state: 'OPEN',
           labels: { nodes: [{ name: 'awaiting-release' }] },
@@ -220,6 +221,7 @@ test('release orchestration comments, closes, and tolerates an already removed l
     graphql: async () => ({ repository: { pullRequest: {
       closingIssuesReferences: {
         nodes: [{
+          repository: { nameWithOwner: 'o/r' },
           number: 42,
           state: 'OPEN',
           labels: { nodes: [{ name: 'awaiting-release' }] },
@@ -351,13 +353,16 @@ test('marking skips the compare for a new branch or deleted head', async () => {
   }
 });
 
-function closingGithub({ issue, comments = [], calls }) {
+function closingGithub({ issue, issues, comments = [], calls }) {
   const listReleases = () => {};
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
   return {
     graphql: async () => ({ repository: { pullRequest: {
-      closingIssuesReferences: { nodes: [issue], pageInfo: { hasNextPage: false } },
+      closingIssuesReferences: {
+        nodes: (issues || [issue]).map((node) => ({ repository: { nameWithOwner: 'o/r' }, ...node })),
+        pageInfo: { hasNextPage: false },
+      },
     } } }),
     paginate: async (method) => {
       if (method === listReleases) {
@@ -429,4 +434,44 @@ test('release ignores an unlabelled issue that is already closed', async () => {
     issue: { number: 42, state: 'CLOSED', labels: { nodes: [] } },
   });
   assert.deepEqual(calls, []);
+});
+
+test('release never touches a same-numbered local issue for an external reference', async () => {
+  for (const labels of [[], [{ name: 'awaiting-release' }]]) {
+    const calls = await closeWith({
+      issue: {
+        number: 42,
+        state: 'OPEN',
+        labels: { nodes: labels },
+        repository: { nameWithOwner: 'other/repo' },
+      },
+    });
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('marking never labels a same-numbered local issue for an external reference', async () => {
+  const mutations = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+  });
+  github.graphql = async () => ({ repository: { pullRequest: {
+    closingIssuesReferences: {
+      nodes: [
+        { number: 1, state: 'OPEN', labels: { nodes: [] }, repository: { nameWithOwner: 'other/repo' } },
+        { number: 2, state: 'OPEN', labels: { nodes: [] }, repository: { nameWithOwner: 'O/R' } },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+  } } });
+  await markIssuesAwaitingRelease({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc', commits: [{ id: 'abc' }] } },
+    core: { info() {} },
+  });
+  assert.deepEqual(
+    mutations.map(([kind, input]) => [kind, input.issue_number]),
+    [['label', 2], ['comment', 2]],
+  );
 });
