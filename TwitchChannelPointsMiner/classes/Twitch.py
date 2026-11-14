@@ -219,6 +219,7 @@ class Twitch(object):
         "campaign_details_withheld_logged",
         "campaign_details_withheld_streak",
         "drops_dashboard_withheld_streak",
+        "drops_dashboard_withheld_lock",
         "unevaluated_category_slugs",
         "awarded_game_event_drops",
         "twitchdrops_app_campaigns",
@@ -350,6 +351,7 @@ class Twitch(object):
         self.campaign_details_withheld_logged = False
         self.campaign_details_withheld_streak = 0
         self.drops_dashboard_withheld_streak = 0
+        self.drops_dashboard_withheld_lock = Lock()
         self.unevaluated_category_slugs = set()
         self.awarded_game_event_drops = {}
         self.twitchdrops_app_campaigns = {}
@@ -8184,6 +8186,15 @@ class Twitch(object):
             self.__log_drop_check("failed to parse inventory response")
             return {}
 
+    def __drops_dashboard_withheld_lock(self):
+        # Defensive getattr: some tests construct Twitch via __new__ and skip
+        # __init__ (mirroring __completed_drop_campaigns_lock).
+        lock = getattr(self, "drops_dashboard_withheld_lock", None)
+        if lock is None:
+            lock = Lock()
+            self.drops_dashboard_withheld_lock = lock
+        return lock
+
     def __get_drops_dashboard(self, status=None, return_raw: bool = False):
         request_failed = False
         try:
@@ -8216,16 +8227,20 @@ class Twitch(object):
             and not response.get("errors")
             and self.__client_id() == ANDROID_CLIENT_ID
         )
-        if (
-            isinstance(current_user, dict)
-            and current_user.get("dropCampaigns") is not None
-        ):
-            self.drops_dashboard_withheld_streak = 0
-        elif android_withheld:
-            self.drops_dashboard_withheld_streak = (
-                getattr(self, "drops_dashboard_withheld_streak", 0) + 1
-            )
-        withheld_streak = getattr(self, "drops_dashboard_withheld_streak", 0)
+        # The sync and discovery threads share the streak. Update it under a
+        # lock and use the value this call wrote, so each count is seen by
+        # exactly one call and the warning is logged once.
+        with self.__drops_dashboard_withheld_lock():
+            if (
+                isinstance(current_user, dict)
+                and current_user.get("dropCampaigns") is not None
+            ):
+                self.drops_dashboard_withheld_streak = 0
+            elif android_withheld:
+                self.drops_dashboard_withheld_streak = (
+                    getattr(self, "drops_dashboard_withheld_streak", 0) + 1
+                )
+            withheld_streak = getattr(self, "drops_dashboard_withheld_streak", 0)
         unavailable = not isinstance(current_user, dict) or (
             current_user.get("dropCampaigns") is None
             and bool(response.get("errors") or self.__client_id() == ANDROID_CLIENT_ID)

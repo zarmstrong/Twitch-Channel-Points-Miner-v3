@@ -4531,6 +4531,39 @@ def test_drops_dashboard_android_reply_with_errors_logs_error_every_time(
     assert getattr(twitch, "drops_dashboard_withheld_streak", 0) == 0
 
 
+def test_drops_dashboard_android_withheld_streak_is_updated_under_a_lock(
+    monkeypatch,
+):
+    # The sync and discovery threads share the streak, so each update must
+    # happen under the lock; otherwise two threads can both see the limit and
+    # warn twice, or step past it and never warn.
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    twitch = android_dashboard_twitch([DASHBOARD_NULL_LIST_REPLY] * 3)
+    seen = []
+
+    class RecordingLock:
+        def __enter__(self):
+            seen.append(("enter", twitch.drops_dashboard_withheld_streak))
+
+        def __exit__(self, *exc):
+            seen.append(("exit", twitch.drops_dashboard_withheld_streak))
+
+    twitch.drops_dashboard_withheld_streak = 0
+    twitch.drops_dashboard_withheld_lock = RecordingLock()
+
+    for _ in range(3):
+        twitch._Twitch__get_drops_dashboard(status="OPEN")
+
+    assert seen == [
+        ("enter", 0),
+        ("exit", 1),
+        ("enter", 1),
+        ("exit", 2),
+        ("enter", 2),
+        ("exit", 3),
+    ]
+
+
 def test_live_streams_failure_after_first_page_carries_found_channels(monkeypatch):
     # The category stays unevaluated, but page one's channels are reported on
     # the exception so the caller can still add them this cycle.
