@@ -1257,50 +1257,79 @@ def _readable_setting(value):
     )
 
 
-_MUTATING_METHODS = {
-    "update",
-    "setdefault",
-    "pop",
-    "popitem",
-    "clear",
-    "__setitem__",
-    "__delitem__",
-    "__ior__",
-}
+_DYNAMIC_NAMES = {"globals", "vars", "locals", "exec", "eval", "setattr", "delattr"}
 
 
-def _miner_config_changed_later(tree):
-    """Whether a top-level statement other than its first assignment may
-    change MINER_CONFIG, e.g. MINER_CONFIG["streamer_settings"] = ... or
-    MINER_CONFIG.update(...)."""
+def _miner_config_readable(tree):
+    """Whether MINER_CONFIG is exactly its literal dict when the miner runs.
 
-    def is_miner(node):
-        while isinstance(node, (ast.Subscript, ast.Attribute)):
-            node = node.value
-        return isinstance(node, ast.Name) and node.id == "MINER_CONFIG"
-
-    # Walk the whole module, so changes inside if blocks, loops and
-    # functions count too.
-    assignments = 0
+    That holds when it's bound once, to a dict literal with plain string keys
+    and at most one streamer_settings, and the rest of the file only reads
+    other keys from it (MINER_CONFIG["username"]). Anything else, such as a
+    later change, an alias, or globals() and exec, may change it in ways the
+    dashboard can't follow.
+    """
+    miner = _assignment(tree, "MINER_CONFIG")
+    if not isinstance(miner, ast.Dict) or not all(
+        isinstance(key, ast.Constant) and isinstance(key.value, str)
+        for key in miner.keys
+    ):
+        return False
+    if [key.value for key in miner.keys].count("streamer_settings") > 1:
+        return False
+    parents = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id == "MINER_CONFIG":
-            if not isinstance(node.ctx, ast.Load):
-                assignments += 1
-        elif isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(
-            node.ctx, ast.Load
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    bindings = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES:
+            return False
+        names = []
+        if isinstance(node, ast.alias):
+            names = [node.asname or node.name]
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names = node.names
+        elif isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ) or (isinstance(node, ast.ExceptHandler) and node.name):
+            names = [node.name]
+        elif isinstance(node, ast.arg):
+            names = [node.arg]
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names = [node.name]
+        if "MINER_CONFIG" in names:
+            return False
+        if not (isinstance(node, ast.Name) and node.id == "MINER_CONFIG"):
+            continue
+        if not isinstance(node.ctx, ast.Load):
+            bindings += 1
+            continue
+        parent = parents.get(node)
+        if (
+            isinstance(parent, ast.Subscript)
+            and parent.value is node
+            and isinstance(parent.ctx, ast.Load)
         ):
-            if is_miner(node):
-                return True
+            key = parent.slice
         elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _MUTATING_METHODS
-            and is_miner(node.func)
+            isinstance(parent, ast.Attribute)
+            and parent.attr == "get"
+            and isinstance(parents.get(parent), ast.Call)
+            and parents[parent].func is parent
+            and parents[parent].args
         ):
-            return True
-        elif isinstance(node, ast.Global) and "MINER_CONFIG" in node.names:
-            return True
-    return assignments > 1
+            # MINER_CONFIG.get("username")
+            key = parents[parent].args[0]
+        else:
+            return False
+        if not (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and key.value != "streamer_settings"
+        ):
+            return False
+    return bindings == 1
 
 
 def _inherited_setting_unknown(tree, name):
@@ -1308,13 +1337,9 @@ def _inherited_setting_unknown(tree, name):
 
     The dashboard then shows the built-in default, which may be wrong.
     """
-    miner = _assignment(tree, "MINER_CONFIG")
-    if not isinstance(miner, ast.Dict) or None in miner.keys:
-        # Not a literal, or **unpacking may supply streamer_settings.
+    if not _miner_config_readable(tree):
         return True
-    if _miner_config_changed_later(tree):
-        return True
-    defaults = _dict_item(miner, "streamer_settings")
+    defaults = _dict_item(_assignment(tree, "MINER_CONFIG"), "streamer_settings")
     if defaults is None or (
         isinstance(defaults, ast.Constant) and defaults.value is None
     ):

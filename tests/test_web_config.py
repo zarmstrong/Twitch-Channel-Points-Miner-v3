@@ -2851,6 +2851,11 @@ def test_username_with_spaces_keeps_its_entry(tmp_path, payload, expected):
         'MINER_CONFIG["streamer_settings"] = StreamerSettings(favorite=True)\n',
         "MINER_CONFIG.update(streamer_settings=StreamerSettings(favorite=True))\n",
         'if True:\n    MINER_CONFIG["streamer_settings"] = StreamerSettings(favorite=True)\n',
+        "dict.update(MINER_CONFIG, streamer_settings=StreamerSettings(favorite=True))\n",
+        'D = MINER_CONFIG["streamer_settings"]\nD.favorite = True\n',
+        'D = MINER_CONFIG.get("streamer_settings")\nD.favorite = True\n',
+        'D = dict(MINER_CONFIG)\nD["streamer_settings"].favorite = True\n',
+        'globals()["MINER_CONFIG"]["streamer_settings"] = StreamerSettings(favorite=True)\n',
     ],
 )
 def test_update_is_written_when_miner_config_changes_after_the_dict(tmp_path, later):
@@ -2891,6 +2896,30 @@ def test_removing_an_entry_keeps_a_comment_it_shares_with_another(tmp_path, stre
     assert _usernames(config) == ["a", "c", "d"]
 
 
+def test_update_is_written_when_streamer_settings_is_given_twice(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
+    source = config.read_text(encoding="utf-8")
+    source = source.replace(
+        '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE),',
+        '"streamer_settings": StreamerSettings(favorite=False),\n'
+        '    "streamer_settings": StreamerSettings(favorite=FAV),',
+    ).replace("MINER_CONFIG = {", "FAV = True\nMINER_CONFIG = {")
+    config.write_text(source, encoding="utf-8")
+    assert "favorite=FAV" in source
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
 def test_removal_is_refused_when_a_shared_comment_precedes_the_comma(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = [\n    "a", "b" # ab\n    , "c",\n]\n')
@@ -2907,8 +2936,7 @@ def test_removal_is_refused_when_a_shared_comment_precedes_the_comma(tmp_path):
 @pytest.mark.parametrize(
     "later",
     [
-        'X = MINER_CONFIG.get("streamer_settings")\n',
-        "Y = dict(MINER_CONFIG)\n",
+        'X = MINER_CONFIG.get("username")\n',
         'print(MINER_CONFIG["username"])\n',
     ],
 )
