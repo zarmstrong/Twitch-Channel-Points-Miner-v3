@@ -2,6 +2,7 @@ import errno
 import hashlib
 import inspect
 import os
+import platform
 import stat
 from pathlib import Path
 
@@ -355,9 +356,10 @@ ANALYTICS_CONFIG = None
     settings = namespace["LOGGER"]
     assert settings.save is False
     assert settings.colored is True
+    # emoji is left out so it keeps its platform-dependent runtime default.
     assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} | set(
         LOGGER_NOTIFICATION_SETTINGS
-    ) == set(settings.__slots__)
+    ) | {"emoji"} == set(settings.__slots__)
     assert settings.console_level == namespace["logging"].INFO
     assert settings.console_username is False
     assert settings.time_zone is None
@@ -478,9 +480,10 @@ def test_migration_defaults_cover_runtime_configuration_signatures():
     assert {name for name, _ in BET_SETTINGS_DEFAULTS} == parameters(
         BetSettings.__init__
     )
+    # emoji is left out so it keeps its platform-dependent runtime default.
     assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} | set(
         LOGGER_NOTIFICATION_SETTINGS
-    ) == parameters(LoggerSettings.__init__)
+    ) | {"emoji"} == parameters(LoggerSettings.__init__)
     assert {name for name, _ in MINE_CONFIG_DEFAULTS} == parameters(
         TwitchChannelPointsMiner.mine
     ) - {"streamers"}
@@ -1047,6 +1050,39 @@ def test_migrate_config_accepts_utf8_bom(tmp_path):
     assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
 
 
+@pytest.mark.parametrize(
+    "existing_backup", [None, "# from an earlier migration\n"], ids=["none", "differs"]
+)
+def test_bom_only_change_leaves_backups_alone(tmp_path, existing_backup):
+    config = tmp_path / "config.py"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text("\ufeff" + current, encoding="utf-8")
+    backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
+    if existing_backup is not None:
+        backup.write_text(existing_backup + current, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    assert config.read_text(encoding="utf-8") == current
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        ["config.py"] + ([backup.name] if existing_backup is not None else [])
+    )
+    if existing_backup is not None:
+        assert backup.read_text(encoding="utf-8") == existing_backup + current
+
+
+def test_bom_on_an_old_config_still_migrates_with_a_backup(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text("\ufeff" + CONFIG, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    _, old_version, _ = migrate_config_source(CONFIG)
+    backup = tmp_path / f"config.py.v{old_version}.bak"
+    assert backup.read_text(encoding="utf-8") == CONFIG
+    assert not config.read_text(encoding="utf-8").startswith("\ufeff")
+
+
 def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
     config = tmp_path / "config.py"
     current, _, _ = migrate_config_source(CONFIG)
@@ -1061,3 +1097,205 @@ def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
 
     assert migrate_config(config) is True
     assert "# newest" in config.read_text(encoding="utf-8")
+
+
+def test_migration_uses_utf8_byte_columns_for_non_ascii_before_edit():
+    source = """\
+CONFIG_VERSION = 10
+MINER_CONFIG = {"username": "é", "logger_settings": None}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 10
+    assert new_version == CONFIG_VERSION
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["username"] == "é"
+    assert "logger_settings" in namespace["MINER_CONFIG"]
+
+
+def test_migration_removes_password_after_non_ascii_text_on_same_line():
+    source = f"""\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{"username": "é", "password": "secret"}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == CONFIG_VERSION
+    assert new_version == CONFIG_VERSION
+    assert "password" not in migrated
+    assert namespace["MINER_CONFIG"] == {"username": "é"}
+
+
+def test_migration_counts_non_ascii_comment_on_multiline_dict_line():
+    source = """\
+# café \U0001f600
+CONFIG_VERSION = 9
+MINER_CONFIG = {"username": "é"}
+STREAMERS = []
+MINE_CONFIG = {
+    "drop_pick_stickiness_minutes": 15,  # éé
+}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 9
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINE_CONFIG"]["drop_pick_stickiness_minutes"] == 15
+    assert namespace["MINE_CONFIG"]["category_drops_override_streamers"] is False
+
+
+def test_migration_handles_form_feed_and_line_separator_in_comments():
+    source = '# form\x0cfeed and   separator\nCONFIG_VERSION = 9\n# vertical\x0btab\nMINER_CONFIG = {"username": "alice"}\nSTREAMERS = []\nMINE_CONFIG = {"drop_pick_stickiness_minutes": 15}\nANALYTICS_CONFIG = None\n'
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 9
+    assert new_version == CONFIG_VERSION
+    assert namespace["MINER_CONFIG"]["username"] == "alice"
+
+
+# LoggerSettings computes this default from platform.system() when logger.py
+# is imported, so a migrated config gets it by leaving emoji out.
+RUNTIME_EMOJI_DEFAULT = (
+    inspect.signature(LoggerSettings.__init__).parameters["emoji"].default
+)
+
+
+def test_runtime_emoji_default_depends_on_the_platform():
+    assert RUNTIME_EMOJI_DEFAULT is (platform.system() != "Windows")
+
+
+def test_migration_keeps_platform_dependent_emoji_default():
+    source = """\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert "emoji" not in migrated
+    assert "import platform" not in migrated
+    assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
+
+
+def test_migration_keeps_explicit_emoji_and_existing_platform_import():
+    source = """\
+CONFIG_VERSION = 2
+import platform
+from TwitchChannelPointsMiner.logger import LoggerSettings
+FIRST = LoggerSettings(emoji=True)
+SECOND = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": FIRST}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert migrated.count("import platform") == 1
+    assert "LoggerSettings(emoji=True" in migrated
+    assert namespace["FIRST"].emoji is True
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "from sys import platform",
+        "import sys as platform",
+        'platform = "linux"',
+        "def platform():\n    return None",
+        "class platform:\n    pass",
+        "import sys as _tcpm_platform",
+        "_tcpm_platform = None",
+        "__import__ = None",
+    ],
+)
+def test_emoji_default_ignores_a_config_name_called_platform(shadow):
+    # A config may bind `platform` to something other than the module; the
+    # migrated emoji default must not depend on it.
+    source = f"""\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+{shadow}
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {{"username": "alice", "logger_settings": LOGGER}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert "emoji" not in migrated
+    assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
+
+
+def test_emoji_default_migration_is_idempotent():
+    source = """\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(save=False)
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    once, _, _ = migrate_config_source(source)
+    twice, _, _ = migrate_config_source(once)
+
+    assert twice == once
+
+
+def test_emoji_default_works_when_an_import_follows_logger_settings():
+    # The migration adds imports after the last top-level import, which here
+    # comes after LoggerSettings(...) runs.
+    source = """\
+CONFIG_VERSION = 2
+import logging
+from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
+LOGGER = LoggerSettings(save=False)
+import os
+import platform
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert "emoji" not in migrated
+    assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT

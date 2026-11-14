@@ -70,11 +70,19 @@ class TwitchWebSocket(WebSocketApp):
         if self.send({"type": "PING"}):
             self.last_ping = time.time()
 
+    @staticmethod
+    def loggable_request(request):
+        """Serialize a request for the log with its OAuth token redacted."""
+        data = request.get("data")
+        if isinstance(data, dict) and "auth_token" in data:
+            request = {**request, "data": {**data, "auth_token": "<redacted>"}}
+        return json.dumps(request, separators=(",", ":"))
+
     def send(self, request):
         """Send a request; return False when the socket can't take it."""
         try:
             request_str = json.dumps(request, separators=(",", ":"))
-            logger.debug(f"#{self.index} - Send: {request_str}")
+            logger.debug(f"#{self.index} - Send: {self.loggable_request(request)}")
             super().send(request_str)
             return True
         except WebSocketConnectionClosedException:
