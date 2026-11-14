@@ -83,18 +83,33 @@ def test_minute_watcher_warns_once_per_streamer_without_spade_url(monkeypatch, c
     second = _watch_streamer("second")
     second.stream.spade_url = None
 
-    posted = _run_one_watch_iteration(monkeypatch, [first, second], streams_watched=2)
+    def spade_records():
+        return [
+            record
+            for record in caplog.records
+            if "spade URL not loaded yet" in record.getMessage()
+        ]
+
+    def on_sleep(self, *args, **kwargs):
+        # Stop after two watch cycles: one skip per streamer per cycle.
+        if len(spade_records()) >= 4:
+            self.running = False
+
+    posted = _run_one_watch_iteration(
+        monkeypatch, [first, second], streams_watched=2, on_sleep=on_sleep
+    )
 
     assert posted == []
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.WARNING
-        and "spade URL not loaded yet" in record.getMessage()
-    ]
-    assert len(warnings) == 2
-    assert any("first" in message for message in warnings)
-    assert any("second" in message for message in warnings)
+    levels = {
+        name: [
+            record.levelno for record in spade_records() if name in record.getMessage()
+        ]
+        for name in ("first", "second")
+    }
+    assert levels == {
+        "first": [logging.WARNING, logging.DEBUG],
+        "second": [logging.WARNING, logging.DEBUG],
+    }
 
 
 def test_claim_all_drops_skips_drop_with_null_self(monkeypatch):
