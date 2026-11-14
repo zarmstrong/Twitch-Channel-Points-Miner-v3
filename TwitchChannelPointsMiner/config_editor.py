@@ -286,11 +286,13 @@ def _base_web_config(config_path):
             continue
         settings = dict(effective_streamer_defaults)
         parsed = _simple_value(node) if isinstance(node, ast.Call) else {}
-        explicit_settings = parsed.get("settings") or (
-            parsed.get("__args__", [None, {}])[1]
-            if len(parsed.get("__args__", [])) > 1
-            else {}
-        )
+        explicit_settings = parsed.get("settings")
+        if explicit_settings is None and len(parsed.get("__args__", [])) > 1:
+            explicit_settings = parsed["__args__"][1]
+        if not isinstance(explicit_settings, dict):
+            # A variable or other expression (e.g. Streamer("x", SETTINGS)):
+            # the dashboard can't read it, and edits to it are refused.
+            explicit_settings = {}
         settings.update(
             {
                 name: explicit_settings[name]
@@ -808,17 +810,6 @@ def _write_streamers(config_path, records, updated_usernames=None):
         }
         if changed:
             settings_changes[key] = changed
-    if settings_changes:
-        if any("chat" in changed for changed in settings_changes.values()):
-            _ensure_config_import(
-                config_path,
-                "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
-            )
-        _ensure_config_import(
-            config_path,
-            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
-            "Streamer, StreamerSettings",
-        )
     path = Path(config_path)
     original = path.read_text(encoding="utf-8").encode("utf-8")
     encoded = original
@@ -872,6 +863,20 @@ def _write_streamers(config_path, records, updated_usernames=None):
     for key, changed in settings_changes.items():
         encoded = _set_streamer_settings(encoded, key, changed)
 
+    # Imports go in last: every edit above can still refuse, and a refused
+    # edit must leave config.py untouched.
+    if settings_changes:
+        if any("chat" in changed for changed in settings_changes.values()):
+            encoded = _with_config_import(
+                encoded,
+                "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
+            )
+        encoded = _with_config_import(
+            encoded,
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+            "Streamer, StreamerSettings",
+        )
+
     if encoded != original:
         _require_parses(encoded)
         _replace_config_bytes(path, encoded, stat.S_IMODE(path.stat().st_mode))
@@ -893,29 +898,91 @@ def _node_span(encoded_lines, node):
     )
 
 
+_ITEM_LINE_TAIL_RE = re.compile(rb",?")
+
+
+def _redundant_paren_start(encoded, start, parens):
+    """Move start back over an entry's redundant opening parentheses, e.g.
+    the "(" of ("name"); ast positions exclude them."""
+    position = start
+    while parens:
+        position -= 1
+        char = encoded[position : position + 1]
+        if char == b"(":
+            parens -= 1
+        elif position < 0 or char not in (b" ", b"\t", b"\r", b"\n"):
+            return start
+    return position
+
+
+def _own_lines_span(encoded, start, end, closing, is_last, has_comma):
+    """The span to delete for an entry that has its lines to itself.
+
+    That means only indentation before the entry, and after it only its comma,
+    whitespace and its own comment. Returns those whole lines, so comments on
+    other lines (another entry's own-line comment, or the previous entry's
+    trailing comment) are kept. When the list's closing bracket follows the
+    last entry on its line, the entry is cut up to the bracket instead.
+    Returns None for other layouts. start and end include the entry's
+    redundant parentheses.
+    """
+    line_start = encoded.rfind(b"\n", 0, start) + 1
+    if encoded[line_start:start].strip(b" \t"):
+        return None
+    newline = encoded.find(b"\n", end)
+    line_end = len(encoded) if newline == -1 else newline + 1
+    if closing < line_end:
+        if not is_last:
+            return None
+        cut_end = encoded.index(b",", end) + 1 if has_comma else end
+        return line_start, cut_end
+    tail = encoded[end:line_end]
+    comment = tail.find(b"#")
+    code = tail if comment == -1 else tail[:comment]
+    if not _ITEM_LINE_TAIL_RE.fullmatch(re.sub(rb"\s", b"", code)):
+        return None
+    return line_start, line_end
+
+
 def _remove_list_item(encoded, container, index):
     encoded_lines = encoded.splitlines(keepends=True)
     elements = container.elts
+    is_last = index + 1 == len(elements)
     start, end = _node_span(encoded_lines, elements[index])
-    if index + 1 < len(elements):
-        # Up to the next entry: drops this entry, its comma and the space or
-        # comments that follow it on its line.
-        end = _node_span(encoded_lines, elements[index + 1])[0]
-    else:
-        closing = (
-            _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset)
-            - 1
-        )
-        item_end, has_comma = _scan_item_tail(encoded[end:closing])
-        end += item_end
-        if index > 0:
-            # The last entry: drop it from the end of the previous entry, so
-            # the previous entry's trailing comma state is kept.
-            previous_end = _node_span(encoded_lines, elements[index - 1])[1]
-            previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
-            start = previous_end + previous_item_end
-        elif has_comma:
-            end = encoded.index(b",", end) + 1
+    closing = (
+        _byte_offset(encoded_lines, container.end_lineno, container.end_col_offset) - 1
+    )
+    segment_end = (
+        closing if is_last else _node_span(encoded_lines, elements[index + 1])[0]
+    )
+    item_end, has_comma = _scan_item_tail(encoded[end:segment_end])
+    start = _redundant_paren_start(
+        encoded, start, encoded[end : end + item_end].count(b")")
+    )
+    end += item_end
+
+    own_lines = _own_lines_span(encoded, start, end, closing, is_last, has_comma)
+    if own_lines is not None:
+        return encoded[: own_lines[0]] + encoded[own_lines[1] :]
+    if not is_last:
+        # The next entry follows on the same line, or this one shares its
+        # line with the opening bracket: drop the entry, its comma and the
+        # spaces after it, but not the line break or anything after it.
+        end = encoded.index(b",", end) + 1
+        while encoded[end : end + 1] in (b" ", b"\t"):
+            end += 1
+        if encoded[end : end + 1] == b"#":
+            # This entry's own trailing comment.
+            newline = encoded.find(b"\n", end)
+            end = len(encoded) if newline == -1 else newline
+    elif index > 0:
+        # The last entry shares its line with the previous one: drop it from
+        # the end of the previous entry, so that entry's comma state is kept.
+        previous_end = _node_span(encoded_lines, elements[index - 1])[1]
+        previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
+        start = previous_end + previous_item_end
+    elif has_comma:
+        end = encoded.index(b",", end) + 1
     return encoded[:start] + encoded[end:]
 
 
@@ -1184,19 +1251,22 @@ def _write_notification(config_path, provider, values):
     )
 
 
-def _ensure_config_import(config_path, statement):
-    path = Path(config_path)
-    source = path.read_text(encoding="utf-8")
+def _with_config_import(encoded, statement):
+    source = encoded.decode("utf-8")
     if statement in source:
-        return
+        return encoded
     lines = source.splitlines(keepends=True)
     insertion = 1 if lines and "coding" in lines[0] else 0
     lines.insert(insertion, statement + "\n")
-    _replace_config_bytes(
-        path,
-        "".join(lines).encode("utf-8"),
-        stat.S_IMODE(path.stat().st_mode),
-    )
+    return "".join(lines).encode("utf-8")
+
+
+def _ensure_config_import(config_path, statement):
+    path = Path(config_path)
+    encoded = path.read_text(encoding="utf-8").encode("utf-8")
+    updated = _with_config_import(encoded, statement)
+    if updated != encoded:
+        _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
 def _validate_streamer_settings(settings):

@@ -2242,3 +2242,153 @@ def test_removing_streamers_keeps_the_list_valid(
     )
 
     assert _usernames(config) == expected
+
+
+@pytest.mark.parametrize(
+    "streamers, removed, expected, kept, dropped",
+    [
+        # A comment above the next entry belongs to that entry.
+        (
+            'STREAMERS = [\n    "one",\n    # about two\n    "two",\n]\n',
+            "one",
+            ["two"],
+            ["# about two"],
+            [],
+        ),
+        # The previous entry's trailing comment stays when the last goes.
+        (
+            'STREAMERS = [\n    "one",  # one note\n    "two",\n]\n',
+            "two",
+            ["one"],
+            ["# one note"],
+            [],
+        ),
+        (
+            'STREAMERS = [\n    "one",  # one note\n    "two"\n]\n',
+            "two",
+            ["one"],
+            ["# one note"],
+            [],
+        ),
+        # The closing bracket on the removed entry's line.
+        (
+            'STREAMERS = [\n    "one",  # one note\n    "two"]\n',
+            "two",
+            ["one"],
+            ["# one note"],
+            [],
+        ),
+        # The first entry shares its line with the opening bracket.
+        (
+            'STREAMERS = ["one",  # one note\n    # about two\n    "two",\n]\n',
+            "one",
+            ["two"],
+            ["# about two"],
+            ["# one note"],
+        ),
+        (
+            'STREAMERS = ["one", "two", "three"]  # list note\n',
+            "two",
+            ["one", "three"],
+            ["# list note"],
+            [],
+        ),
+        # A multi-line entry takes its inner comments with it.
+        (
+            'STREAMERS = [\n    Streamer(\n        "one",  # inner\n    ),\n'
+            '    # about two\n    "two",\n]\n',
+            "one",
+            ["two"],
+            ["# about two"],
+            ["# inner"],
+        ),
+        # The removed entry's own trailing comment goes with it.
+        (
+            'STREAMERS = [\n    "one",  # one note\n    "two",  # two note\n]\n',
+            "one",
+            ["two"],
+            ["# two note"],
+            ["# one note"],
+        ),
+    ],
+)
+def test_removing_a_streamer_keeps_other_entries_comments(
+    tmp_path, streamers, removed, expected, kept, dropped
+):
+    config = tmp_path / "config.py"
+    write_commented_config(config, streamers)
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": removed}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert _usernames(config) == expected
+    for comment in kept:
+        assert comment in source
+    for comment in dropped:
+        assert comment not in source
+
+
+def test_positional_settings_variable_can_be_read_but_not_edited(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings(favorite=True)\n"
+        'STREAMERS = [Streamer("one", ONE_SETTINGS), "two"]\n',
+    )
+
+    managed = read_managed_web_config(config)
+    assert [item["username"] for item in managed["streamers"]] == ["one", "two"]
+    update_managed_web_config(
+        config, {"action": "add", "kind": "streamers", "value": "three"}
+    )
+    assert _usernames(config) == ["one", "two", "three"]
+
+    before = config.read_text(encoding="utf-8")
+    with pytest.raises(ConfigEditError, match="Edit them in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"chat": "NEVER"},
+            },
+        )
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_refused_streamer_edit_does_not_add_imports(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings(favorite=True)\n"
+        'STREAMERS = [Streamer("one", settings=ONE_SETTINGS), "two"]\n',
+    )
+    import_line = (
+        "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+        "Streamer, StreamerSettings\n"
+    )
+    source = config.read_text(encoding="utf-8")
+    assert import_line in source
+    config.write_text(
+        source.replace(
+            import_line,
+            "from TwitchChannelPointsMiner.classes."
+            "entities.Streamer import (\n    Streamer,\n    StreamerSettings,\n)\n",
+        ),
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit them in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"chat": "NEVER"},
+            },
+        )
+
+    assert config.read_text(encoding="utf-8") == before
