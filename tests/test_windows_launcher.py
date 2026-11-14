@@ -1776,11 +1776,15 @@ def test_window_api_submit_username_twice_starts_mining_only_once(tmp_path):
     )
 
     first = api.submit_username(_REAL_USERNAME)
-    second = api.submit_username(_REAL_USERNAME)
+    second = api.submit_username("someone_else")
 
     assert first == {"success": True, "message": None}
     assert second == {"success": True, "message": None}
     assert started == [True]
+    # The second call saves nothing: the miner already runs with the first.
+    text = config_path.read_text(encoding="utf-8")
+    assert f"'username': {_REAL_USERNAME!r}" in text
+    assert "someone_else" not in text
 
 
 def test_window_api_submit_username_reports_invalid_username_without_starting(tmp_path):

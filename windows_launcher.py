@@ -1006,20 +1006,24 @@ class WindowApi:
         with the bundled template's placeholder, which would just fail
         Twitch login immediately on every first run.
         """
-        try:
-            from TwitchChannelPointsMiner.config_editor import (
-                ConfigEditError,
-                set_miner_username,
-            )
-
-            set_miner_username(self._config_path, username)
-        except (ConfigEditError, OSError) as error:
-            return {"success": False, "message": str(error)}
-        self._needs_username = False
+        # Held for the whole call, and a call after mining started saves
+        # nothing: the running miner already read the first username, so a
+        # second one written now would only take effect on the next start.
         with self._mining_lock:
-            if not self._mining_started:
-                self._mining_started = True
-                self._start_mining()
+            if self._mining_started:
+                return {"success": True, "message": None}
+            try:
+                from TwitchChannelPointsMiner.config_editor import (
+                    ConfigEditError,
+                    set_miner_username,
+                )
+
+                set_miner_username(self._config_path, username)
+            except (ConfigEditError, OSError) as error:
+                return {"success": False, "message": str(error)}
+            self._needs_username = False
+            self._mining_started = True
+            self._start_mining()
         return {"success": True, "message": None}
 
     def get_dashboard_info(self):
