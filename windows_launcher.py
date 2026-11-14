@@ -881,18 +881,62 @@ def _autostart_command():
     return f'"{sys.executable}" {_START_MINIMIZED_FLAG}'
 
 
+# FOLDERID_Startup: the per-user Startup folder, the installer's {userstartup}.
+_FOLDERID_STARTUP = "{B97D20BB-F46A-4C97-BA10-5E3608430854}"
+_STARTUP_SHORTCUT_NAME = "Twitch Channel Points Miner.lnk"
+
+
+def _known_startup_folder():
+    """The per-user Startup folder as Windows resolves it, folder
+    redirection included, or None off Windows or if the lookup fails."""
+    if os.name != "nt":
+        return None
+    try:
+        import uuid
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        folder_id = uuid.UUID(_FOLDERID_STARTUP)
+        guid = GUID(
+            folder_id.fields[0],
+            folder_id.fields[1],
+            folder_id.fields[2],
+            (ctypes.c_ubyte * 8)(*folder_id.bytes[8:]),
+        )
+        path = ctypes.c_wchar_p()
+        result = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid), 0, None, ctypes.byref(path)
+        )
+        try:
+            if result != 0 or not path.value:
+                return None
+            return Path(path.value)
+        finally:
+            # The buffer must be freed even when the call fails.
+            ctypes.windll.ole32.CoTaskMemFree(path)
+    except Exception:
+        return None
+
+
 def _startup_shortcut_path():
     """The Startup-folder shortcut the installer's "start on login" task
-    creates (see windows_installer.iss). Returns None when APPDATA is
-    unset."""
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return None
-    return (
-        Path(appdata)
-        / "Microsoft/Windows/Start Menu/Programs/Startup"
-        / "Twitch Channel Points Miner.lnk"
-    )
+    creates (see windows_installer.iss). The folder comes from Windows, so a
+    redirected Startup folder is found too; the usual place under APPDATA
+    is the fallback. Returns None when neither is known."""
+    folder = _known_startup_folder()
+    if folder is None:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        folder = Path(appdata) / "Microsoft/Windows/Start Menu/Programs/Startup"
+    return folder / _STARTUP_SHORTCUT_NAME
 
 
 def is_autostart_enabled():

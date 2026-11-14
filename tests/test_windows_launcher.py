@@ -3484,9 +3484,11 @@ def test_main_convert_only_is_exempt_from_the_single_instance_check(
 
 @pytest.fixture(autouse=True)
 def _isolate_startup_folder(monkeypatch, request, tmp_path):
-    # set_autostart_enabled() deletes the installer's Startup-folder shortcut
-    # under %APPDATA%. Point APPDATA at a temp dir for autostart tests so a
-    # developer's real installed shortcut is never touched.
+    # set_autostart_enabled() deletes the installer's Startup-folder shortcut.
+    # Never ask Windows for the real Startup folder, and point APPDATA at a
+    # temp dir for autostart tests, so a developer's real installed shortcut
+    # is never touched.
+    monkeypatch.setattr(windows_launcher, "_known_startup_folder", lambda: None)
     if "autostart" not in request.node.name:
         return
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
@@ -3497,6 +3499,35 @@ def _create_installer_shortcut():
     shortcut.parent.mkdir(parents=True)
     shortcut.write_text("shortcut", encoding="utf-8")
     return shortcut
+
+
+def test_startup_shortcut_path_uses_the_folder_windows_reports(monkeypatch, tmp_path):
+    # A redirected Startup folder is not under APPDATA.
+    redirected = tmp_path / "redirected" / "Startup"
+    monkeypatch.setattr(windows_launcher, "_known_startup_folder", lambda: redirected)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+
+    assert windows_launcher._startup_shortcut_path() == (
+        redirected / "Twitch Channel Points Miner.lnk"
+    )
+
+
+def test_known_startup_folder_is_none_off_windows(monkeypatch):
+    monkeypatch.undo()  # drop the autouse stub to call the real lookup
+    monkeypatch.setattr(windows_launcher.os, "name", "posix")
+
+    assert windows_launcher._known_startup_folder() is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs the Windows shell API")
+def test_known_startup_folder_resolves_on_windows(monkeypatch):
+    # Read-only: asks Windows where the Startup folder is, touching nothing.
+    monkeypatch.undo()  # drop the autouse stub to call the real lookup
+
+    folder = windows_launcher._known_startup_folder()
+
+    assert folder is not None
+    assert folder.name == "Startup"
 
 
 def test_startup_shortcut_path_none_when_appdata_unset(monkeypatch):
