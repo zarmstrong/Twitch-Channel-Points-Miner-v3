@@ -1755,7 +1755,14 @@ class Twitch(object):
 
     def __merge_completed_drop_campaigns(self, inventory: dict) -> set:
         completed_ids = self.__completed_campaign_ids_from_inventory(inventory)
-        reopened_ids = self.__reopened_campaign_ids_from_inventory(inventory)
+        # Reopening relies on completedRewardCampaigns to tell a finished
+        # campaign from one with new work, so only a read that loaded it can
+        # reopen anything.
+        reopened_ids = (
+            self.__reopened_campaign_ids_from_inventory(inventory)
+            if self.drops_inventory_completions_loaded(inventory)
+            else set()
+        )
         # Replace the set instead of changing it in place, so a reader that
         # already holds the old set (the category discovery thread) never sees
         # it change size mid-iteration.
@@ -1765,6 +1772,8 @@ class Twitch(object):
             self.completed_drop_campaigns = (
                 previous_ids - reopened_ids
             ) | completed_ids
+        if reopened_ids:
+            self.__forget_completed_badge_signatures(reopened_ids)
         if reopened_previously_completed:
             self.__log_drop_check(
                 "Campaigns reopened after completion, mining them again: "
@@ -1772,6 +1781,28 @@ class Twitch(object):
                 logging.DEBUG,
             )
         return completed_ids
+
+    def __forget_completed_badge_signatures(self, campaign_ids):
+        # The badge and gist matching keeps its own record of completed
+        # campaigns; without this, the catalog copy of a reopened campaign
+        # would still count as completed. A signature another completed
+        # campaign still has is kept.
+        with _completed_badge_signature_lock(self):
+            signatures_by_id = getattr(
+                self, "completed_badge_campaign_signatures_by_id", None
+            )
+            if not signatures_by_id:
+                return
+            forgotten = {
+                signatures_by_id.pop(campaign_id)
+                for campaign_id in campaign_ids
+                if campaign_id in signatures_by_id
+            }
+            cached = getattr(self, "completed_badge_campaign_signature_cache", None)
+            if forgotten and cached:
+                self.completed_badge_campaign_signature_cache = cached - (
+                    forgotten - set(signatures_by_id.values())
+                )
 
     @staticmethod
     def __inventory_drop_is_done(drop: dict) -> bool:
