@@ -286,6 +286,8 @@ def _base_web_config(config_path):
         username = _streamer_value(node)
         if username is None:
             continue
+        # Streamer() strips the username, so the dashboard shows it stripped.
+        username = username.strip()
         settings = dict(effective_streamer_defaults)
         parsed = _simple_value(node) if isinstance(node, ast.Call) else {}
         explicit_settings = parsed.get("settings")
@@ -448,7 +450,7 @@ def migrate_web_config(config_path):
         try:
             always_write = {}
             for record in records:
-                key = record["username"].lower()
+                key = _username_key(record["username"])
                 # _write_streamers uses the first record for each username.
                 if key not in always_write:
                     always_write[key] = _require_editable_settings(
@@ -457,7 +459,7 @@ def migrate_web_config(config_path):
             _write_streamers(
                 config_path,
                 records,
-                {str(record.get("username", "")).lower() for record in records},
+                {_username_key(str(record.get("username", ""))) for record in records},
                 always_write=always_write,
             )
         except ConfigEditError as error:
@@ -818,9 +820,11 @@ def _write_call_keywords(config_path, find_call, values):
 
 def _write_streamers(config_path, records, updated_usernames=None, always_write=None):
     if isinstance(updated_usernames, str):
-        updated_usernames = {updated_usernames}
+        updated_usernames = {_username_key(updated_usernames)}
     else:
-        updated_usernames = {username.lower() for username in updated_usernames or ()}
+        updated_usernames = {
+            _username_key(username) for username in updated_usernames or ()
+        }
     # Write only the settings that differ from what the streamer has now, so
     # values it inherits from the global defaults stay inherited.
     path = Path(config_path)
@@ -839,7 +843,7 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
             f"{duplicate} is listed more than once in STREAMERS in config.py. "
             "Remove the extra entry in config.py, then try again."
         )
-    names = [record["username"].lower() for record in records]
+    names = [_username_key(record["username"]) for record in records]
     duplicate = next((name for name in names if names.count(name) > 1), None)
     if duplicate is not None:
         raise ConfigEditError(f"{duplicate} can be listed only once.")
@@ -847,14 +851,14 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
     # With a duplicated username, the first entry is the one that is edited.
     current = {}
     for item in base["streamers"]:
-        current.setdefault(item["username"].lower(), item["settings"])
+        current.setdefault(_username_key(item["username"]), item["settings"])
     # always_write maps a username to settings whose current value can't be
     # read, so they're written even when they look unchanged.
     always_write = always_write or {}
     settings_changes = {}
     seen = set()
     for record in records:
-        key = record["username"].lower()
+        key = _username_key(record["username"])
         if key not in updated_usernames or key in seen:
             continue
         seen.add(key)
@@ -869,7 +873,7 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
             settings_changes[key] = changed
     encoded = original
     wanted = [record["username"] for record in records]
-    wanted_keys = [username.lower() for username in wanted]
+    wanted_keys = [_username_key(username) for username in wanted]
 
     # Edit STREAMERS in place instead of regenerating it, so comments,
     # formatting and entries the dashboard doesn't understand survive.
@@ -910,13 +914,13 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
     # Append new entries as plain usernames.
     present = {_streamer_key(node) for node in _streamers_list(encoded).elts}
     for username in wanted:
-        if username.lower() not in present:
+        if _username_key(username) not in present:
             # STREAMER_RE limits usernames to [A-Za-z0-9_], so this is a
             # valid literal in the double quotes Black and the example use.
             encoded = _insert_item_bytes(
                 encoded, _streamers_list(encoded), f'"{username}"', inline=True
             )
-            present.add(username.lower())
+            present.add(_username_key(username))
 
     # Reorder by moving each entry's source text into its new slot.
     streamers = _streamers_list(encoded)
@@ -959,10 +963,14 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
         _replace_config_bytes(path, encoded, stat.S_IMODE(path.stat().st_mode))
 
 
+def _username_key(username):
+    """How Streamer() and the miner compare usernames."""
+    return username.strip().lower()
+
+
 def _streamer_key(node):
     username = _streamer_value(node)
-    # Streamer() and the miner match usernames by lower().strip().
-    return username.strip().lower() if username is not None else None
+    return _username_key(username) if username is not None else None
 
 
 def _streamers_list(encoded):
@@ -1096,8 +1104,12 @@ def _remove_list_item(encoded, container, index):
         end = _next_comma(encoded, end) + 1
         while encoded[end : end + 1] in (b" ", b"\t"):
             end += 1
-        if encoded[end : end + 1] == b"#":
-            # This entry's own trailing comment.
+        shares_line = index > 0 and elements[index - 1].end_lineno == (
+            elements[index].lineno
+        )
+        if encoded[end : end + 1] == b"#" and not shares_line:
+            # This entry's own trailing comment. One on a line it shares with
+            # another entry belongs to that line, so it stays.
             end += len(_line_tail(encoded, end))
     elif index > 0:
         # The last entry shares its line with the previous one: drop it from
@@ -1237,6 +1249,33 @@ def _readable_setting(value):
     )
 
 
+def _miner_config_changed_later(tree):
+    """Whether a top-level statement other than its first assignment may
+    change MINER_CONFIG, e.g. MINER_CONFIG["streamer_settings"] = ... or
+    MINER_CONFIG.update(...)."""
+
+    def is_miner(node):
+        while isinstance(node, (ast.Subscript, ast.Attribute)):
+            node = node.value
+        return isinstance(node, ast.Name) and node.id == "MINER_CONFIG"
+
+    assignments = 0
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id == "MINER_CONFIG":
+                    assignments += 1
+                elif is_miner(target):
+                    return True
+        elif isinstance(statement, (ast.AugAssign, ast.AnnAssign)):
+            if is_miner(statement.target):
+                return True
+        elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            if is_miner(statement.value.func):
+                return True
+    return assignments > 1
+
+
 def _inherited_setting_unknown(tree, name):
     """Whether the global default for a streamer setting can't be read.
 
@@ -1245,6 +1284,8 @@ def _inherited_setting_unknown(tree, name):
     miner = _assignment(tree, "MINER_CONFIG")
     if not isinstance(miner, ast.Dict) or None in miner.keys:
         # Not a literal, or **unpacking may supply streamer_settings.
+        return True
+    if _miner_config_changed_later(tree):
         return True
     defaults = _dict_item(miner, "streamer_settings")
     if defaults is None or (

@@ -2801,6 +2801,91 @@ def test_streamer_edits_are_refused_while_a_username_is_duplicated(tmp_path, pay
     assert config.read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {"action": "add", "kind": "streamers", "value": "three"},
+            'STREAMERS = [Streamer(" one ", settings=StreamerSettings(favorite=True)), '
+            '"two", "three"]\n',
+        ),
+        (
+            {"action": "reorder_streamers", "usernames": ["two", "one"]},
+            'STREAMERS = ["two", '
+            'Streamer(" one ", settings=StreamerSettings(favorite=True))]\n',
+        ),
+        (
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"chat": "NEVER"},
+            },
+            'STREAMERS = [Streamer(" one ", settings=StreamerSettings(favorite=True, '
+            'chat=ChatPresence.NEVER)), "two"]\n',
+        ),
+    ],
+    ids=["add", "reorder", "update"],
+)
+def test_username_with_spaces_keeps_its_entry(tmp_path, payload, expected):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [Streamer(" one ", settings=StreamerSettings(favorite=True)), '
+        '"two"]\n',
+    )
+    assert [
+        item["username"] for item in read_managed_web_config(config)["streamers"]
+    ] == [
+        "one",
+        "two",
+    ]
+
+    update_managed_web_config(config, payload)
+
+    assert expected in config.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        'MINER_CONFIG["streamer_settings"] = StreamerSettings(favorite=True)\n',
+        "MINER_CONFIG.update(streamer_settings=StreamerSettings(favorite=True))\n",
+    ],
+)
+def test_update_is_written_when_miner_config_changes_after_the_dict(tmp_path, later):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n' + later)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in (
+        config.read_text(encoding="utf-8")
+    )
+
+
+def test_removing_an_entry_keeps_a_comment_it_shares_with_another(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [\n    "a", "b",  # ab\n    "c", "d",  # cd\n]\n',
+    )
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": "b"}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert "# ab" in source
+    assert _usernames(config) == ["a", "c", "d"]
+
+
 def test_usernames_differing_only_in_spaces_count_as_duplicates(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(
