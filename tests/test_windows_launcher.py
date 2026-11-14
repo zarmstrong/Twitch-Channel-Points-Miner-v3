@@ -3503,7 +3503,7 @@ def _create_installer_shortcut():
 
 def test_startup_shortcut_path_uses_the_folder_windows_reports(monkeypatch, tmp_path):
     # A redirected Startup folder is not under APPDATA.
-    redirected = tmp_path / "redirected" / "Startup"
+    redirected = tmp_path / "LoginApps"
     monkeypatch.setattr(windows_launcher, "_known_startup_folder", lambda: redirected)
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
 
@@ -3527,7 +3527,8 @@ def test_known_startup_folder_resolves_on_windows(monkeypatch):
     folder = windows_launcher._known_startup_folder()
 
     assert folder is not None
-    assert folder.name == "Startup"
+    # A redirected folder can have any name, so only check it is a real path.
+    assert folder.is_absolute()
 
 
 def test_startup_shortcut_path_none_when_appdata_unset(monkeypatch):
