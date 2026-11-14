@@ -744,6 +744,7 @@ class TwitchChannelPointsMiner:
                 username=self.username,
                 password=password,
                 log_poll_interval=log_poll_interval,
+                logs_file=self.logs_file,
             )
             http_server.daemon = True
             http_server.name = "Analytics Thread"
