@@ -30,6 +30,9 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("gift_sub_thanks", "False"),
     ("gift_sub_message", "None"),
 )
+# emoji is left out on purpose: its runtime default depends on the platform
+# (off on Windows consoles), and an omitted argument keeps that default
+# without the config needing any name that could be shadowed.
 LOGGER_SETTINGS_DEFAULTS = (
     ("save", "True"),
     ("less", "False"),
@@ -40,7 +43,6 @@ LOGGER_SETTINGS_DEFAULTS = (
     ("date_format", '"dd/mm/yy"'),
     ("file_format", '"text"'),
     ("file_level", "logging.DEBUG"),
-    ("emoji", "True"),
     ("colored", "False"),
     ("color_palette", "ColorPalette()"),
     ("auto_clear", "True"),
