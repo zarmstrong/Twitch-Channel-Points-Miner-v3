@@ -2977,6 +2977,8 @@ def test_update_is_written_when_the_defaults_have_another_name(
         ("match []:\n    case [*MINER_CONFIG]:\n        pass\n", False),
         ("def f():\n    global MINER_CONFIG\n", False),
         ('X = "MINER_CONFIG"\n', True),
+        ("import builtins\nbuiltins.exec('')\n", False),
+        ("from builtins import exec as run\n", False),
         ("def f(MINER_CONFIG):\n    pass\n", False),
         ("del MINER_CONFIG\n", False),
         ("for MINER_CONFIG in []:\n    pass\n", False),
@@ -3035,6 +3037,30 @@ def test_explicit_none_setting_still_inherits_an_unreadable_default(tmp_path):
     )
 
     assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
+def test_reading_a_settings_expression_with_tuple_keys_does_not_crash(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "def pick(options):\n    return next(iter(options.values()))\n"
+        'STREAMERS = [Streamer("one", settings=pick({("g", "one"): '
+        'StreamerSettings(favorite=True)})), "two"]\n',
+    )
+
+    managed = read_managed_web_config(config)
+    assert [item["username"] for item in managed["streamers"]] == ["one", "two"]
+    before = config.read_bytes()
+    with pytest.raises(ConfigEditError, match="Edit them in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"favorite": False},
+            },
+        )
+    assert config.read_bytes() == before
 
 
 def test_removal_is_refused_when_a_shared_comment_precedes_the_comma(tmp_path):

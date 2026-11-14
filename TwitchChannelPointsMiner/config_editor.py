@@ -221,10 +221,14 @@ def _simple_value(node):
     if isinstance(node, (ast.List, ast.Tuple)):
         return [_simple_value(item) for item in node.elts]
     if isinstance(node, ast.Dict):
-        return {
-            _simple_value(key): _simple_value(value)
-            for key, value in zip(node.keys, node.values)
-        }
+        try:
+            return {
+                _simple_value(key): _simple_value(value)
+                for key, value in zip(node.keys, node.values)
+            }
+        except TypeError:
+            # A key the reader can't hash, e.g. a tuple, read as a list.
+            return None
     if isinstance(node, ast.Attribute):
         return node.attr
     if isinstance(node, ast.Call):
@@ -1294,7 +1298,12 @@ def _miner_config_readable(tree):
             parents[child] = node
     bindings = 0
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES:
+        if (
+            (isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES)
+            or (isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMES)
+            or (isinstance(node, ast.alias) and node.name in _DYNAMIC_NAMES)
+        ):
+            # globals(), builtins.exec(...), from builtins import exec as run
             return False
         if isinstance(node, ast.alias) and node.name == "*":
             # A star import can bind any name, MINER_CONFIG included.
