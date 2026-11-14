@@ -2504,70 +2504,6 @@ def test_parenthesis_in_a_comment_does_not_block_removal(tmp_path):
     assert 'STREAMERS = [\n    "two",\n]\n' in config.read_text(encoding="utf-8")
 
 
-DUPLICATE_STREAMERS = (
-    "STREAMERS = [\n"
-    '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
-    '    "one",\n'
-    '    "two",\n'
-    "]\n"
-)
-
-
-def test_duplicate_usernames_keep_their_own_entries_on_other_edits(tmp_path):
-    config = tmp_path / "config.py"
-    write_commented_config(config, DUPLICATE_STREAMERS)
-
-    update_managed_web_config(
-        config,
-        {
-            "action": "update_streamer",
-            "username": "two",
-            "settings": {"favorite": True},
-        },
-    )
-
-    source = config.read_text(encoding="utf-8")
-    assert '    Streamer("one", settings=StreamerSettings(favorite=True)),\n' in source
-    assert '    "one",\n' in source
-    assert _usernames(config) == ["one", "one", "two"]
-
-
-def test_settings_update_to_a_duplicated_username_edits_the_first_entry(tmp_path):
-    config = tmp_path / "config.py"
-    write_commented_config(config, DUPLICATE_STREAMERS)
-
-    update_managed_web_config(
-        config,
-        {
-            "action": "update_streamer",
-            "username": "one",
-            "settings": {"favorite": False},
-        },
-    )
-
-    source = config.read_text(encoding="utf-8")
-    assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in source
-    assert '    "one",\n' in source
-
-
-def test_reordering_duplicate_usernames_keeps_both_entries(tmp_path):
-    config = tmp_path / "config.py"
-    write_commented_config(config, DUPLICATE_STREAMERS)
-
-    update_managed_web_config(
-        config,
-        {"action": "reorder_streamers", "usernames": ["two", "one", "one"]},
-    )
-
-    assert (
-        "STREAMERS = [\n"
-        '    "two",\n'
-        '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
-        '    "one",\n'
-        "]\n"
-    ) in config.read_text(encoding="utf-8")
-
-
 def test_update_to_a_shown_default_is_refused_for_a_variable_setting(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(
@@ -2727,35 +2663,6 @@ def test_update_is_written_when_the_inherited_default_cant_be_read(tmp_path, def
     assert _load_config(config).STREAMERS[0].settings.favorite is False
 
 
-def test_settings_update_ignores_a_later_duplicate_entry(tmp_path):
-    config = tmp_path / "config.py"
-    write_commented_config(
-        config,
-        "STREAMERS = [\n"
-        '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
-        '    Streamer("one", settings=StreamerSettings(make_predictions=False)),\n'
-        "]\n",
-    )
-
-    update_managed_web_config(
-        config,
-        {
-            "action": "update_streamer",
-            "username": "one",
-            "settings": {"chat": "ALWAYS"},
-        },
-    )
-
-    source = config.read_text(encoding="utf-8")
-    assert (
-        'Streamer("one", settings=StreamerSettings(favorite=True, '
-        "chat=ChatPresence.ALWAYS))"
-    ) in source
-    assert 'Streamer("one", settings=StreamerSettings(make_predictions=False))' in (
-        source
-    )
-
-
 @pytest.mark.parametrize(
     ("streamers", "value"),
     [
@@ -2862,33 +2769,52 @@ def test_migrated_new_streamer_gets_settings_its_unreadable_defaults_hide(
     assert streamers[1].settings.favorite is False
 
 
-def test_migration_checks_the_first_record_of_a_duplicated_username(tmp_path):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "streamers", "value": "three"},
+        {"action": "remove", "kind": "streamers", "value": "two"},
+        {"action": "reorder_streamers", "usernames": ["two", "one", "one"]},
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    ],
+    ids=["add", "remove", "reorder", "update"],
+)
+def test_streamer_edits_are_refused_while_a_username_is_duplicated(tmp_path, payload):
     config = tmp_path / "config.py"
-    write_commented_config(config, 'STREAMERS = ["one"]\n')
-    source = config.read_text(encoding="utf-8")
-    source = source.replace(
-        '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE)',
-        '"streamer_settings": DEFAULTS',
-    ).replace(
-        "MINER_CONFIG = {",
-        "DEFAULTS = StreamerSettings(favorite=True)\nMINER_CONFIG = {",
+    write_commented_config(
+        config,
+        "STREAMERS = [\n"
+        '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
+        '    "one",\n'
+        '    "two",\n'
+        "]\n",
     )
-    config.write_text(source, encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="listed more than once"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_migration_refuses_a_duplicated_saved_username(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
     (tmp_path / "web-config.json").write_text(
-        json.dumps(
-            {
-                "streamers": [
-                    {"username": "one", "settings": {"favorite": False}},
-                    {"username": "one"},
-                ]
-            }
-        ),
+        json.dumps({"streamers": [{"username": "two"}, {"username": "Two"}]}),
         encoding="utf-8",
     )
+    before = config.read_bytes()
 
-    migrate_web_config(config)
+    with pytest.raises(ConfigEditError, match="listed only once"):
+        migrate_web_config(config)
 
-    assert _load_config(config).STREAMERS[0].settings.favorite is False
+    assert config.read_bytes() == before
+    assert (tmp_path / "web-config.json").exists()
 
 
 def test_import_is_not_added_above_a_future_import(tmp_path):

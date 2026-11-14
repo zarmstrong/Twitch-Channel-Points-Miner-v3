@@ -826,6 +826,23 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
     path = Path(config_path)
     # Read bytes, so CRLF line breaks are kept.
     original = path.read_bytes()
+    # The miner uses only one entry for a duplicated username, so edits to
+    # it can't be applied reliably.
+    keys = [
+        key
+        for key in map(_streamer_key, _streamers_list(original).elts)
+        if key is not None
+    ]
+    duplicate = next((key for key in keys if keys.count(key) > 1), None)
+    if duplicate is not None:
+        raise ConfigEditError(
+            f"{duplicate} is listed more than once in STREAMERS in config.py. "
+            "Remove the extra entry in config.py, then try again."
+        )
+    names = [record["username"].lower() for record in records]
+    duplicate = next((name for name in names if names.count(name) > 1), None)
+    if duplicate is not None:
+        raise ConfigEditError(f"{duplicate} can be listed only once.")
     base = _base_web_config(config_path)
     # With a duplicated username, the first entry is the one that is edited.
     current = {}
