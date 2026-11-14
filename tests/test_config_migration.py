@@ -2,6 +2,7 @@ import errno
 import hashlib
 import inspect
 import os
+import platform
 import stat
 from pathlib import Path
 
@@ -355,9 +356,10 @@ ANALYTICS_CONFIG = None
     settings = namespace["LOGGER"]
     assert settings.save is False
     assert settings.colored is True
+    # emoji is left out so it keeps its platform-dependent runtime default.
     assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} | set(
         LOGGER_NOTIFICATION_SETTINGS
-    ) == set(settings.__slots__)
+    ) | {"emoji"} == set(settings.__slots__)
     assert settings.console_level == namespace["logging"].INFO
     assert settings.console_username is False
     assert settings.time_zone is None
@@ -478,9 +480,10 @@ def test_migration_defaults_cover_runtime_configuration_signatures():
     assert {name for name, _ in BET_SETTINGS_DEFAULTS} == parameters(
         BetSettings.__init__
     )
+    # emoji is left out so it keeps its platform-dependent runtime default.
     assert {name for name, _ in LOGGER_SETTINGS_DEFAULTS} | set(
         LOGGER_NOTIFICATION_SETTINGS
-    ) == parameters(LoggerSettings.__init__)
+    ) | {"emoji"} == parameters(LoggerSettings.__init__)
     assert {name for name, _ in MINE_CONFIG_DEFAULTS} == parameters(
         TwitchChannelPointsMiner.mine
     ) - {"streamers"}
@@ -1169,10 +1172,18 @@ def test_migration_handles_form_feed_and_line_separator_in_comments():
     assert namespace["MINER_CONFIG"]["username"] == "alice"
 
 
-@pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
-def test_migration_keeps_platform_dependent_emoji_default(
-    monkeypatch, system, expected
-):
+# LoggerSettings computes this default from platform.system() when logger.py
+# is imported, so a migrated config gets it by leaving emoji out.
+RUNTIME_EMOJI_DEFAULT = (
+    inspect.signature(LoggerSettings.__init__).parameters["emoji"].default
+)
+
+
+def test_runtime_emoji_default_depends_on_the_platform():
+    assert RUNTIME_EMOJI_DEFAULT is (platform.system() != "Windows")
+
+
+def test_migration_keeps_platform_dependent_emoji_default():
     source = """\
 CONFIG_VERSION = 2
 from TwitchChannelPointsMiner.logger import LoggerSettings
@@ -1184,13 +1195,12 @@ ANALYTICS_CONFIG = None
 """
 
     migrated, _, _ = migrate_config_source(source)
-    monkeypatch.setattr("platform.system", lambda: system)
     namespace = {}
     exec(migrated, namespace)
 
-    assert 'emoji=__import__("platform").system() != "Windows"' in migrated
+    assert "emoji" not in migrated
     assert "import platform" not in migrated
-    assert namespace["LOGGER"].emoji is expected
+    assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
 
 
 def test_migration_keeps_explicit_emoji_and_existing_platform_import():
@@ -1225,12 +1235,10 @@ ANALYTICS_CONFIG = None
         "class platform:\n    pass",
         "import sys as _tcpm_platform",
         "_tcpm_platform = None",
+        "__import__ = None",
     ],
 )
-@pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
-def test_emoji_default_ignores_a_config_name_called_platform(
-    monkeypatch, shadow, system, expected
-):
+def test_emoji_default_ignores_a_config_name_called_platform(shadow):
     # A config may bind `platform` to something other than the module; the
     # migrated emoji default must not depend on it.
     source = f"""\
@@ -1245,11 +1253,11 @@ ANALYTICS_CONFIG = None
 """
 
     migrated, _, _ = migrate_config_source(source)
-    monkeypatch.setattr("platform.system", lambda: system)
     namespace = {}
     exec(migrated, namespace)
 
-    assert namespace["LOGGER"].emoji is expected
+    assert "emoji" not in migrated
+    assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
 
 
 def test_emoji_default_migration_is_idempotent():
@@ -1269,10 +1277,7 @@ ANALYTICS_CONFIG = None
     assert twice == once
 
 
-@pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
-def test_emoji_default_works_when_an_import_follows_logger_settings(
-    monkeypatch, system, expected
-):
+def test_emoji_default_works_when_an_import_follows_logger_settings():
     # The migration adds imports after the last top-level import, which here
     # comes after LoggerSettings(...) runs.
     source = """\
@@ -1281,6 +1286,7 @@ import logging
 from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
 LOGGER = LoggerSettings(save=False)
 import os
+import platform
 MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
 STREAMERS = []
 MINE_CONFIG = {}
@@ -1288,8 +1294,8 @@ ANALYTICS_CONFIG = None
 """
 
     migrated, _, _ = migrate_config_source(source)
-    monkeypatch.setattr("platform.system", lambda: system)
     namespace = {}
     exec(migrated, namespace)
 
-    assert namespace["LOGGER"].emoji is expected
+    assert "emoji" not in migrated
+    assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
