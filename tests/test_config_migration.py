@@ -1188,8 +1188,8 @@ ANALYTICS_CONFIG = None
     namespace = {}
     exec(migrated, namespace)
 
-    assert 'emoji=_tcpm_platform.system() != "Windows"' in migrated
-    assert migrated.count("import platform as _tcpm_platform") == 1
+    assert 'emoji=__import__("platform").system() != "Windows"' in migrated
+    assert "import platform" not in migrated
     assert namespace["LOGGER"].emoji is expected
 
 
@@ -1210,7 +1210,7 @@ ANALYTICS_CONFIG = None
     namespace = {}
     exec(migrated, namespace)
 
-    assert migrated.count("import platform as _tcpm_platform") == 1
+    assert migrated.count("import platform") == 1
     assert "LoggerSettings(emoji=True" in migrated
     assert namespace["FIRST"].emoji is True
 
@@ -1223,6 +1223,8 @@ ANALYTICS_CONFIG = None
         'platform = "linux"',
         "def platform():\n    return None",
         "class platform:\n    pass",
+        "import sys as _tcpm_platform",
+        "_tcpm_platform = None",
     ],
 )
 @pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
@@ -1248,7 +1250,6 @@ ANALYTICS_CONFIG = None
     exec(migrated, namespace)
 
     assert namespace["LOGGER"].emoji is expected
-    assert migrated.count("import platform as _tcpm_platform") == 1
 
 
 def test_emoji_default_migration_is_idempotent():
@@ -1266,3 +1267,29 @@ ANALYTICS_CONFIG = None
     twice, _, _ = migrate_config_source(once)
 
     assert twice == once
+
+
+@pytest.mark.parametrize("system, expected", [("Windows", False), ("Linux", True)])
+def test_emoji_default_works_when_an_import_follows_logger_settings(
+    monkeypatch, system, expected
+):
+    # The migration adds imports after the last top-level import, which here
+    # comes after LoggerSettings(...) runs.
+    source = """\
+CONFIG_VERSION = 2
+import logging
+from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
+LOGGER = LoggerSettings(save=False)
+import os
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    monkeypatch.setattr("platform.system", lambda: system)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert namespace["LOGGER"].emoji is expected

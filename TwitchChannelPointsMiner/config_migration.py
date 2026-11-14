@@ -30,8 +30,6 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("gift_sub_thanks", "False"),
     ("gift_sub_message", "None"),
 )
-PLATFORM_ALIAS = "_tcpm_platform"
-PLATFORM_IMPORT = f"import platform as {PLATFORM_ALIAS}"
 
 LOGGER_SETTINGS_DEFAULTS = (
     ("save", "True"),
@@ -43,10 +41,10 @@ LOGGER_SETTINGS_DEFAULTS = (
     ("date_format", '"dd/mm/yy"'),
     ("file_format", '"text"'),
     ("file_level", "logging.DEBUG"),
-    # The runtime default: emoji stay off on Windows consoles. The module is
-    # imported under a private name (PLATFORM_IMPORT), because a config may
-    # bind `platform` to something else, e.g. `from sys import platform`.
-    ("emoji", '_tcpm_platform.system() != "Windows"'),
+    # The runtime default: emoji stay off on Windows consoles. __import__
+    # needs no import line, so no name in the config can shadow the module
+    # and nothing depends on where the migration puts imports.
+    ("emoji", '__import__("platform").system() != "Windows"'),
     ("colored", "False"),
     ("color_palette", "ColorPalette()"),
     ("auto_clear", "True"),
@@ -588,12 +586,6 @@ def migrate_config_source(source, source_name="config.py"):
                 and "import logging" not in required_imports
             ):
                 required_imports.append("import logging")
-            if (
-                any(item.startswith("emoji=") for item in missing)
-                and not _name_is_defined(tree, PLATFORM_ALIAS)
-                and PLATFORM_IMPORT not in required_imports
-            ):
-                required_imports.append(PLATFORM_IMPORT)
             color_palette_import = (
                 "from TwitchChannelPointsMiner.logger import ColorPalette"
             )
