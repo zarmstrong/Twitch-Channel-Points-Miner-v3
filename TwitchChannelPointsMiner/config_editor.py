@@ -804,7 +804,7 @@ def _write_call_keywords(config_path, find_call, values):
             _insert_config_item(config_path, call, f"{name}={rendered}")
 
 
-def _write_streamers(config_path, records, updated_usernames=None):
+def _write_streamers(config_path, records, updated_usernames=None, always_write=()):
     if isinstance(updated_usernames, str):
         updated_usernames = {updated_usernames}
     else:
@@ -828,7 +828,7 @@ def _write_streamers(config_path, records, updated_usernames=None):
         changed = {
             name: value
             for name, value in (record.get("settings") or {}).items()
-            if effective.get(name) != value
+            if effective.get(name) != value or name in always_write
         }
         if changed:
             settings_changes[key] = changed
@@ -935,6 +935,24 @@ def _node_span(encoded_lines, node):
 _ITEM_LINE_TAIL_RE = re.compile(rb",?")
 
 
+def _next_comma(encoded, position):
+    """The offset of the first comma at or after position outside comments.
+
+    Between an entry and its separating comma there can only be
+    parentheses, whitespace and comments, so no string can hide a comma.
+    """
+    while True:
+        char = encoded[position : position + 1]
+        if char == b",":
+            return position
+        if char == b"#":
+            position += len(_line_tail(encoded, position))
+            continue
+        if not char:
+            raise ConfigEditError("Expected a comma after the entry in config.py.")
+        position += 1
+
+
 def _redundant_paren_start(encoded, boundary, start, parens):
     """Move start back over an entry's redundant opening parentheses, e.g.
     the "(" of ("name"); ast positions exclude them.
@@ -978,7 +996,7 @@ def _own_lines_span(encoded, start, end, closing, is_last, has_comma):
     if closing < line_end:
         if not is_last:
             return None
-        cut_end = encoded.index(b",", end) + 1 if has_comma else end
+        cut_end = _next_comma(encoded, end) + 1 if has_comma else end
         return line_start, cut_end
     tail = encoded[end:line_end]
     comment = tail.find(b"#")
@@ -1020,7 +1038,7 @@ def _remove_list_item(encoded, container, index):
         # The next entry follows on the same line, or this one shares its
         # line with the opening bracket: drop the entry, its comma and the
         # spaces after it, but not the line break or anything after it.
-        end = encoded.index(b",", end) + 1
+        end = _next_comma(encoded, end) + 1
         while encoded[end : end + 1] in (b" ", b"\t"):
             end += 1
         if encoded[end : end + 1] == b"#":
@@ -1031,9 +1049,26 @@ def _remove_list_item(encoded, container, index):
         # the end of the previous entry, so that entry's comma state is kept.
         previous_end = _node_span(encoded_lines, elements[index - 1])[1]
         previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
-        start = previous_end + previous_item_end
+        cut = previous_end + previous_item_end
+        if b"#" in encoded[cut:start]:
+            # The previous entry's comment sits between it and this entry,
+            # e.g. a comma that starts this entry's line: cut from the
+            # comma, or from this entry's line when the comment follows it.
+            comma = _next_comma(encoded, cut)
+            if b"#" in encoded[comma:start]:
+                cut = encoded.rfind(b"\n", 0, start) + 1
+            else:
+                cut = comma
+                line_start = encoded.rfind(b"\n", 0, comma) + 1
+                rest = _line_tail(encoded, end)
+                if not encoded[line_start:comma].strip() and not rest.strip():
+                    # The comma's line held only this entry: drop the line.
+                    cut = line_start
+                    end += len(rest)
+                    end += 2 if encoded[end : end + 2] == b"\r\n" else 1
+        start = cut
     elif has_comma:
-        end = encoded.index(b",", end) + 1
+        end = _next_comma(encoded, end) + 1
     return encoded[:start] + encoded[end:]
 
 
@@ -1136,12 +1171,42 @@ def _readable_setting(value):
     )
 
 
+def _inherited_setting_unknown(tree, name):
+    """Whether the global default for a streamer setting can't be read.
+
+    The dashboard then shows the built-in default, which may be wrong.
+    """
+    miner = _assignment(tree, "MINER_CONFIG")
+    if not isinstance(miner, ast.Dict):
+        return True
+    defaults = _dict_item(miner, "streamer_settings")
+    if defaults is None or (
+        isinstance(defaults, ast.Constant) and defaults.value is None
+    ):
+        return False
+    if isinstance(defaults, ast.Dict):
+        value = _dict_item(defaults, name)
+        return value is not None and not _readable_setting(value)
+    if not (
+        isinstance(defaults, ast.Call)
+        and isinstance(defaults.func, ast.Name)
+        and defaults.func.id == "StreamerSettings"
+        and not defaults.args
+        and not _has_unpacking(defaults)
+    ):
+        return True
+    keyword = _call_keyword(defaults, name)
+    return keyword is not None and not _readable_setting(keyword.value)
+
+
 def _require_editable_settings(config_path, username, names):
     """Refuse a settings update the dashboard can't apply faithfully.
 
     The dashboard shows defaults for settings it can't read, so a submitted
     value that looks unchanged may still differ from config.py. names are
-    the settings the dashboard submitted.
+    the settings the dashboard submitted. Returns the names whose inherited
+    value can't be read, which must be written even when they look
+    unchanged.
     """
     encoded = Path(config_path).read_bytes()
     node = next(
@@ -1152,19 +1217,31 @@ def _require_editable_settings(config_path, username, names):
         ),
         None,
     )
-    if not isinstance(node, ast.Call):
-        return
-    settings = _settings_argument(node)
-    if not isinstance(settings, ast.Call):
-        return
-    for name in names:
-        keyword = _call_keyword(settings, name)
-        if keyword is not None and not _readable_setting(keyword.value):
-            raise ConfigEditError(
-                f"{name} for {_streamer_value(node)} in config.py isn't a plain "
-                "value, so the dashboard can't change it safely. Edit it in "
-                "config.py instead."
-            )
+    if node is None:
+        return set()
+    settings = _settings_argument(node) if isinstance(node, ast.Call) else None
+    explicit = set()
+    if isinstance(settings, ast.Call):
+        for name in names:
+            keyword = _call_keyword(settings, name)
+            if keyword is None:
+                continue
+            if not _readable_setting(keyword.value):
+                raise ConfigEditError(
+                    f"{name} for {_streamer_value(node)} in config.py isn't a "
+                    "plain value, so the dashboard can't change it safely. "
+                    "Edit it in config.py instead."
+                )
+            if not (
+                isinstance(keyword.value, ast.Constant) and keyword.value.value is None
+            ):
+                explicit.add(name)
+    tree = ast.parse(encoded)
+    return {
+        name
+        for name in names
+        if name not in explicit and _inherited_setting_unknown(tree, name)
+    }
 
 
 def _set_streamer_settings(encoded, key, changed):
@@ -1533,7 +1610,7 @@ def _update_managed_web_config(config_path, payload):
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")
         _validate_streamer_settings(settings)
-        _require_editable_settings(config_path, username, settings)
+        unknown = _require_editable_settings(config_path, username, settings)
         streamers = list(current["streamers"])
         for streamer in streamers:
             if streamer["username"].lower() == username:
@@ -1541,7 +1618,7 @@ def _update_managed_web_config(config_path, payload):
                 break
         else:
             raise ConfigEditError("Streamer is not configured.")
-        _write_streamers(config_path, streamers, username)
+        _write_streamers(config_path, streamers, username, always_write=unknown)
     elif action == "update_category":
         values = payload.get("values") or {}
         allowed = {"limit", "sort", "refresh_interval_hours", "drops_enabled"}

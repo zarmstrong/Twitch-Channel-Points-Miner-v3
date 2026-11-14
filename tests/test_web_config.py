@@ -2643,6 +2643,84 @@ def test_refused_legacy_migration_names_the_overrides_file(tmp_path):
     assert config.read_bytes() == before
 
 
+def test_comma_in_a_comment_is_not_taken_for_the_separator(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config, 'STREAMERS = ["one"  # note, EXTRA_STREAMER\n    , "two"]\n'
+    )
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": "one"}
+    )
+
+    assert 'STREAMERS = ["two"]\n' in config.read_text(encoding="utf-8")
+    assert _usernames(config) == ["two"]
+
+
+@pytest.mark.parametrize(
+    ("streamers", "expected"),
+    [
+        (
+            'STREAMERS = [\n    "one"  # one note\n    , "two"\n]\n',
+            'STREAMERS = [\n    "one"  # one note\n]\n',
+        ),
+        (
+            'STREAMERS = [\n    "one"  # one note\n    , "two"]\n',
+            'STREAMERS = [\n    "one"  # one note\n    ]\n',
+        ),
+    ],
+)
+def test_removing_the_last_entry_keeps_the_previous_entrys_comment(
+    tmp_path, streamers, expected
+):
+    config = tmp_path / "config.py"
+    write_commented_config(config, streamers)
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": "two"}
+    )
+
+    assert expected in config.read_text(encoding="utf-8")
+    assert _usernames(config) == ["one"]
+
+
+@pytest.mark.parametrize(
+    "defaults",
+    ["DEFAULTS", "StreamerSettings(favorite=FAVORITE)", "dict(favorite=True)"],
+)
+def test_update_is_written_when_the_inherited_default_cant_be_read(tmp_path, defaults):
+    # The dashboard shows favorite=False for these defaults, though the
+    # miner inherits True, so saving False must still be written.
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
+    source = config.read_text(encoding="utf-8")
+    source = source.replace(
+        '"streamer_settings": StreamerSettings(favorite=False, chat=ChatPresence.ONLINE)',
+        f'"streamer_settings": {defaults}',
+    )
+    source = source.replace(
+        "MINER_CONFIG = {",
+        "FAVORITE = True\nDEFAULTS = StreamerSettings(favorite=FAVORITE)\n"
+        "MINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    assert f'"streamer_settings": {defaults}' in source
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": False},
+        },
+    )
+
+    assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in (
+        config.read_text(encoding="utf-8")
+    )
+    assert _load_config(config).STREAMERS[0].settings.favorite is False
+
+
 def test_import_is_not_added_above_a_future_import(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
