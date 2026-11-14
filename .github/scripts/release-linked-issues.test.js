@@ -35,9 +35,25 @@ test('issue selection is open-only and deduplicated', () => {
   assert.equal(shouldCloseIssue({ state: 'OPEN', labels: { nodes: [] } }), false);
 });
 
-function markingGithub({ pulls, mutations, comments = [], compare }) {
+const BOT = { login: 'github-actions[bot]', type: 'Bot' };
+// Releases 1 and 2; the current cycle starts when 2 was published.
+const RELEASES = [
+  { tag_name: '2', draft: false, published_at: '2026-02-01T00:00:00Z' },
+  { tag_name: '1', draft: false, published_at: '2026-01-01T00:00:00Z' },
+];
+
+function marker(createdAt = '2026-02-10T00:00:00Z', user = BOT) {
+  return {
+    body: '<!-- awaiting-release -->\nThe fix in #9 was merged and is awaiting release.',
+    user,
+    created_at: createdAt,
+  };
+}
+
+function markingGithub({ pulls, mutations, comments = [], compare, releases = RELEASES }) {
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
+  const listReleases = () => {};
   return {
     graphql: async () => ({ repository: { pullRequest: {
       closingIssuesReferences: {
@@ -55,10 +71,12 @@ function markingGithub({ pulls, mutations, comments = [], compare }) {
         return typeof pulls === 'function' ? pulls(args[0].commit_sha) : pulls;
       }
       if (method === listComments) return comments;
+      if (method === listReleases) return releases;
       throw new Error('Unexpected paginated method');
     },
     rest: {
       repos: {
+        listReleases,
         listPullRequestsAssociatedWithCommit,
         compareCommitsWithBasehead: async (input) => {
           if (!compare) throw new Error('Unexpected compare');
@@ -80,7 +98,7 @@ test('marking is idempotent when label and comment already exist', async () => {
     github: markingGithub({
       pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
       mutations,
-      comments: [{ body: '<!-- awaiting-release -->' }],
+      comments: [marker()],
     }),
     context: {
       repo: { owner: 'o', repo: 'r' },
@@ -367,8 +385,8 @@ function closingGithub({ issue, issues, comments = [], calls }) {
     paginate: async (method) => {
       if (method === listReleases) {
         return [
-          { tag_name: '2', draft: false, published_at: '2026-02-01T00:00:00Z' },
-          { tag_name: '1', draft: false, published_at: '2026-01-01T00:00:00Z' },
+          { tag_name: '3', draft: false, published_at: '2026-03-01T00:00:00Z' },
+          ...RELEASES,
         ];
       }
       if (method === listPullRequestsAssociatedWithCommit) {
@@ -400,13 +418,13 @@ function closingGithub({ issue, issues, comments = [], calls }) {
   };
 }
 
-async function closeWith(options) {
+async function closeWith({ tag = '2', ...options }) {
   const calls = [];
   await closeReleasedIssues({
     github: closingGithub({ ...options, calls }),
     context: { repo: { owner: 'o', repo: 'r' } },
     core: { info() {} },
-    tag: '2',
+    tag,
   });
   return calls;
 }
@@ -424,7 +442,7 @@ test('release closes an issue whose marking run never happened', async () => {
 test('release leaves open an issue whose label was removed after marking', async () => {
   const calls = await closeWith({
     issue: { number: 42, state: 'OPEN', labels: { nodes: [] } },
-    comments: [{ body: '<!-- awaiting-release -->\nThe fix in #9 was merged.' }],
+    comments: [marker('2026-01-20T00:00:00Z')],
   });
   assert.deepEqual(calls, []);
 });
@@ -478,12 +496,13 @@ test('marking never labels a same-numbered local issue for an external reference
 
 test('a marking rerun keeps the opt-out of a maintainer who removed the label', async () => {
   // Marked once, then the label was removed by hand to keep the issue open.
-  const marker = { body: '<!-- awaiting-release -->\nThe fix in #9 was merged.' };
+  // Marked after release 2, which marking treats as the latest one.
+  const current = marker('2026-02-10T00:00:00Z');
   const mutations = [];
   const github = markingGithub({
     pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
     mutations,
-    comments: [marker],
+    comments: [current],
   });
   github.graphql = async () => ({ repository: { pullRequest: {
     closingIssuesReferences: {
@@ -498,10 +517,11 @@ test('a marking rerun keeps the opt-out of a maintainer who removed the label', 
   });
   assert.deepEqual(mutations, []);
 
-  // The release that follows leaves the issue open as well.
+  // Release 3, the one that follows, leaves the issue open as well.
   const calls = await closeWith({
     issue: { number: 42, state: 'OPEN', labels: { nodes: [] } },
-    comments: [marker],
+    comments: [current],
+    tag: '3',
   });
   assert.deepEqual(calls, []);
 });
@@ -524,4 +544,61 @@ test('marking adds the label and comment to an issue marked for the first time',
     core: { info() {} },
   });
   assert.deepEqual(mutations.map(([kind]) => kind), ['label', 'comment']);
+});
+
+function issueGraphql(issue) {
+  return async () => ({ repository: { pullRequest: {
+    closingIssuesReferences: {
+      nodes: [{ repository: { nameWithOwner: 'o/r' }, ...issue }],
+      pageInfo: { hasNextPage: false },
+    },
+  } } });
+}
+
+async function markWith(options, issue) {
+  const mutations = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+    ...options,
+  });
+  github.graphql = issueGraphql(issue);
+  await markIssuesAwaitingRelease({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc', commits: [{ id: 'abc' }] } },
+    core: { info() {} },
+  });
+  return mutations.map(([kind]) => kind);
+}
+
+const UNLABELLED = { number: 42, state: 'OPEN', labels: { nodes: [] } };
+
+test('a reopened issue is marked and closed again for its next fix', async () => {
+  // Marked before release 2 shipped it; then reopened and fixed again.
+  const shipped = marker('2026-01-20T00:00:00Z');
+  assert.deepEqual(await markWith({ comments: [shipped] }, UNLABELLED), ['label', 'comment']);
+  // If that marking run was skipped, release 3 still closes it.
+  const calls = await closeWith({ issue: UNLABELLED, comments: [shipped], tag: '3' });
+  assert.deepEqual(calls.map(([kind]) => kind), ['comment', 'update', 'remove']);
+});
+
+test('a marker posted by someone else is not workflow state', async () => {
+  for (const user of [{ login: 'someone', type: 'User' }, { login: 'github-actions[bot]', type: 'User' }]) {
+    const forged = marker('2026-02-10T00:00:00Z', user);
+    assert.deepEqual(await markWith({ comments: [forged] }, UNLABELLED), ['label', 'comment']);
+    const calls = await closeWith({ issue: UNLABELLED, comments: [marker('2026-01-20T00:00:00Z', user)] });
+    assert.deepEqual(calls.map(([kind]) => kind), ['comment', 'update', 'remove']);
+  }
+});
+
+test('a bot comment that only quotes the marker is not workflow state', async () => {
+  const quoted = { ...marker(), body: '> <!-- awaiting-release -->' };
+  assert.deepEqual(await markWith({ comments: [quoted] }, UNLABELLED), ['label', 'comment']);
+});
+
+test('marking with no published release yet trusts any automation marker', async () => {
+  assert.deepEqual(
+    await markWith({ comments: [marker('2025-01-01T00:00:00Z')], releases: [] }, UNLABELLED),
+    [],
+  );
 });

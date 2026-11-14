@@ -2,6 +2,8 @@
 
 const AWAITING_LABEL = 'awaiting-release';
 const AWAITING_MARKER = '<!-- awaiting-release -->';
+// Marker comments are workflow state only when this automation wrote them.
+const AUTOMATION_LOGIN = 'github-actions[bot]';
 const RELEASE_LABELS = new Set(['autorelease: pending', 'autorelease: tagged']);
 
 function isReleasePleasePullRequest(labels) {
@@ -78,13 +80,33 @@ async function hasComment(github, owner, repo, issueNumber, marker) {
   return comments.some((comment) => comment.body && comment.body.includes(marker));
 }
 
-async function markPullIssues(github, owner, repo, pull) {
+function isMarkerComment(comment, since) {
+  return (
+    typeof comment.body === 'string' &&
+    comment.body.startsWith(AWAITING_MARKER) &&
+    comment.user?.login === AUTOMATION_LOGIN &&
+    comment.user?.type === 'Bot' &&
+    (!since || new Date(comment.created_at) > new Date(since))
+  );
+}
+
+// True when automation marked the issue in the current release cycle, i.e.
+// after the release published at `since`. A marker from an earlier cycle
+// belongs to a fix that has already shipped.
+async function hasCurrentMarker(github, owner, repo, issueNumber, since) {
+  const comments = await github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  return comments.some((comment) => isMarkerComment(comment, since));
+}
+
+async function markPullIssues(github, owner, repo, pull, since) {
   const issues = uniqueOpenIssues(await linkedIssues(github, owner, repo, pull.number));
   for (const issue of issues) {
-    // The label goes on before the marker comment, so a marker without the
-    // label means a maintainer removed it to keep the issue open: a rerun
-    // must not put it back.
-    if (await hasComment(github, owner, repo, issue.number, AWAITING_MARKER)) continue;
+    // The label goes on before the marker comment, so a current marker
+    // without the label means a maintainer removed it to keep the issue
+    // open: a rerun must not put it back.
+    if (await hasCurrentMarker(github, owner, repo, issue.number, since)) continue;
     if (!issue.labels.nodes.some((label) => label.name === AWAITING_LABEL)) {
       await github.rest.issues.addLabels({
         owner, repo, issue_number: issue.number, labels: [AWAITING_LABEL],
@@ -136,21 +158,30 @@ async function markIssuesAwaitingRelease({ github, context, core }) {
     core.info('No merged ordinary PR found for the pushed commits');
     return;
   }
+  const latest = (await publishedReleases(github, owner, repo))[0];
+  const since = latest ? latest.published_at : null;
   for (const pull of pulls) {
-    await markPullIssues(github, owner, repo, pull);
+    await markPullIssues(github, owner, repo, pull, since);
   }
 }
 
-async function previousPublishedRelease(github, owner, repo, newTag) {
+// Published releases, newest first.
+async function publishedReleases(github, owner, repo) {
   const releases = await github.paginate(github.rest.repos.listReleases, {
     owner, repo, per_page: 100,
   });
-  const published = releases.filter((release) => !release.draft && release.published_at);
+  return releases
+    .filter((release) => !release.draft && release.published_at)
+    .sort((left, right) => new Date(right.published_at) - new Date(left.published_at));
+}
+
+async function previousPublishedRelease(github, owner, repo, newTag) {
+  const published = await publishedReleases(github, owner, repo);
   const current = published.find((release) => release.tag_name === newTag);
   if (!current) return null;
-  return published
-    .filter((release) => new Date(release.published_at) < new Date(current.published_at))
-    .sort((left, right) => new Date(right.published_at) - new Date(left.published_at))[0] || null;
+  return published.find(
+    (release) => new Date(release.published_at) < new Date(current.published_at),
+  ) || null;
 }
 
 async function commitsBetween(github, owner, repo, previousTag, newTag) {
@@ -190,9 +221,9 @@ async function closeReleasedIssues({ github, context, core, tag }) {
   core.info(`Found ${pulls.length} merged PR(s) in ${previous.tag_name}...${tag}`);
 
   // An issue is closed when it carries the label, or when marking never ran
-  // for it: a push skipped with [skip ci], or one still being marked when the
-  // release was published. A marked issue whose label was removed by hand
-  // keeps its marker comment, so it stays open.
+  // for it in this release cycle: a push skipped with [skip ci], or one still
+  // being marked when the release was published. An issue marked in this
+  // cycle whose label was removed by hand stays open.
   const candidates = new Map();
   const unmarked = new Set();
   for (const pull of pulls) {
@@ -203,7 +234,9 @@ async function closeReleasedIssues({ github, context, core, tag }) {
         candidates.set(issue.number, issue);
       } else if (
         issue.state === 'OPEN' &&
-        !(await hasComment(github, owner, repo, issue.number, AWAITING_MARKER))
+        !(await hasCurrentMarker(
+          github, owner, repo, issue.number, previous.published_at,
+        ))
       ) {
         candidates.set(issue.number, issue);
         unmarked.add(issue.number);
