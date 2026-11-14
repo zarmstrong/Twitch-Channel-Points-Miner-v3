@@ -811,6 +811,9 @@
             var input = document.getElementById('setup-username-input');
             var button = document.getElementById('setup-submit-button');
             var status = document.getElementById('setup-status');
+            // The Enter key handler bypasses the disabled button, so guard here
+            // too: a submit already in flight must not start mining again.
+            if (button.disabled) return;
             var username = input.value.trim();
             if (!username) {
                 status.textContent = 'Enter a username first.';

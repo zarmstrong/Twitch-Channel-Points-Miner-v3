@@ -552,6 +552,13 @@ def _configure_launcher_logging():
     logger.propagate = False
 
 
+# The dashboard is always on 127.0.0.1. Plain urlopen() honours system proxy
+# settings (HTTP_PROXY, Windows' Internet Options), which would route this
+# local probe through a proxy that cannot reach it, so the check never
+# succeeds behind one. An opener with no proxy handlers bypasses that.
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _wait_until_dashboard_ready(url, timeout=10.0, interval=0.2):
     """Give the analytics server, started on a background thread, a moment
     to bind its port before the shell tries to load it - and confirm it's
@@ -570,7 +577,7 @@ def _wait_until_dashboard_ready(url, timeout=10.0, interval=0.2):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=interval) as response:
+            with _LOCAL_OPENER.open(url, timeout=interval) as response:
                 if response.status == 200:
                     return True
         except (urllib.error.URLError, OSError, ValueError):
@@ -829,9 +836,12 @@ def _shell_prefs_path(config_path):
 
 def _read_shell_prefs(config_path):
     try:
-        return json.loads(_shell_prefs_path(config_path).read_text(encoding="utf-8"))
+        prefs = json.loads(_shell_prefs_path(config_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    # Valid JSON that isn't an object (e.g. "[]") would break every caller's
+    # .get(); treat it the same as an unreadable file.
+    return prefs if isinstance(prefs, dict) else {}
 
 
 def _read_close_behavior(config_path):
@@ -871,12 +881,29 @@ def _autostart_command():
     return f'"{sys.executable}" {_START_MINIMIZED_FLAG}'
 
 
+def _startup_shortcut_path():
+    """The Startup-folder shortcut the installer's "start on login" task
+    creates (see windows_installer.iss). Returns None when APPDATA is
+    unset."""
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return None
+    return (
+        Path(appdata)
+        / "Microsoft/Windows/Start Menu/Programs/Startup"
+        / "Twitch Channel Points Miner.lnk"
+    )
+
+
 def is_autostart_enabled():
     """Whether this exe is currently registered to launch at Windows login,
     via the per-user Run key (no admin rights required, unlike the
-    all-users equivalent)."""
+    all-users equivalent) or the installer's Startup-folder shortcut."""
     if not getattr(sys, "frozen", False):
         return False
+    shortcut = _startup_shortcut_path()
+    if shortcut is not None and shortcut.exists():
+        return True
     try:
         import winreg
     except ImportError:
@@ -919,6 +946,14 @@ def set_autostart_enabled(enabled):
                     pass
     except OSError as error:
         return False, f"Could not update Windows startup settings: {error}"
+    # Only one mechanism may launch the app at login, so the installer's
+    # Startup-folder shortcut goes whichever way this toggle is flipped.
+    shortcut = _startup_shortcut_path()
+    if shortcut is not None:
+        try:
+            shortcut.unlink(missing_ok=True)
+        except OSError as error:
+            return False, f"Could not update Windows startup settings: {error}"
     return True, "Saved."
 
 
@@ -949,6 +984,11 @@ class WindowApi:
         # hide the "minimize to tray" choice when there'd be no tray to
         # minimize to.
         self._tray_available = False
+        # submit_username can be reached twice (e.g. Enter pressed again
+        # while the first call is still in flight); only the first call may
+        # start mining.
+        self._mining_lock = threading.Lock()
+        self._mining_started = False
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
@@ -976,7 +1016,10 @@ class WindowApi:
         except (ConfigEditError, OSError) as error:
             return {"success": False, "message": str(error)}
         self._needs_username = False
-        self._start_mining()
+        with self._mining_lock:
+            if not self._mining_started:
+                self._mining_started = True
+                self._start_mining()
         return {"success": True, "message": None}
 
     def get_dashboard_info(self):
@@ -1502,6 +1545,12 @@ def launch_shell(
             "Shell GUI loop started (renderer=%s).",
             getattr(getattr(webview, "guilib", None), "renderer", "unknown"),
         )
+        if start_minimized and tray_icon is None:
+            # Created hidden on the assumption the tray would bring it back;
+            # with no tray there is no other way to reach the window, so show
+            # it. window.show() is called here, not before start(), because
+            # pywebview only accepts window operations once its GUI loop runs.
+            window.show()
         if not needs_username:
             # Asking about the dashboard before the user has even entered a
             # username would be premature - it can still appear on a later,

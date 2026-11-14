@@ -52,6 +52,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 ; window on every sign-in - see windows_launcher.py's _START_MINIMIZED_FLAG.
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--start-minimized"; WorkingDir: "{app}"; Tasks: startuponlogin
 
+[Registry]
+; The in-app Settings tab registers start-on-login under this HKCU Run value
+; (windows_launcher.py's _AUTOSTART_VALUE_NAME). Declaring it here, with
+; uninsdeletevalue, makes uninstall remove it too; ValueType none means the
+; installer itself never writes the value.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "TwitchChannelPointsMiner"; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 Filename: "https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3#configuration-file"; Description: "Open the configuration guide"; Flags: shellexec postinstall skipifsilent unchecked
