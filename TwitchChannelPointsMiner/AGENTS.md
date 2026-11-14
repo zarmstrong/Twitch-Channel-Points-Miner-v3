@@ -6,12 +6,15 @@ Read the root [AGENTS.md](../AGENTS.md) first. This file covers what is easy to 
 
 The miner runs many threads against the same objects: the main loop in `TwitchChannelPointsMiner.run()`, the minute watcher (`Twitch.send_minute_watched_events()`), campaign sync, the Drop badge catalog, category discovery, one thread per PubSub websocket plus its ping thread, one IRC thread per joined chat, the config watcher in `runner.py`, and the analytics server.
 
-- `miner.streamers`, `miner.original_streamers` and `WebSocketsPool.ws` are shared by reference. Retirement and config reloads change them under `config_reload_lock` (an `RLock`). Other threads read them without that lock, so iterate a snapshot (`list(self.streamers)`) and re-check that an item is still present before acting on it.
+- `miner.streamers`, `miner.original_streamers` and `WebSocketsPool.ws` are shared by reference. They are `CopyOnWriteList`s (`classes/CopyOnWriteList.py`): each write swaps in a new tuple, so a loop over one keeps the version it started with. Retirement and config reloads change them under `config_reload_lock` (an `RLock`). Other threads read them without that lock.
+  - Take `snapshot()` or `list(...)` once before indexing by position, and re-check that an item is still present before acting on it.
+  - Change them in place (`[:] =`, `append`, item assignment). Never rebind the attribute: the websocket pool and each websocket hold the same list.
+  - They don't support `+`, `copy.deepcopy` or pickling. Use `list(...)` first.
 - `streamers` and `original_streamers` are parallel lists. Read them as pairs only while holding `config_reload_lock`.
 - Locks and fields that tests may not set up are read with `getattr(self, "name", default)`, and some locks are created lazily, because many tests build `Twitch` with `object.__new__` and skip `__init__`. Follow that pattern when you add state that other code reads.
 - Every new attribute on a class with `__slots__` needs a slot entry.
 - Results that must not leak between threads, such as the latest Drops dashboard outcome, are thread-local (`_drops_dashboard_state` in `classes/Twitch.py`).
-- Prefer replacing a shared container with a new one over mutating it in place when other threads iterate it.
+- For other shared containers that threads iterate, replace the container with a new one instead of mutating it in place.
 
 ## Configuration files
 
