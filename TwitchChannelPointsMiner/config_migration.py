@@ -721,10 +721,13 @@ def migrate_config(config_path):
         migrated, old_version, new_version = migrate_config_source(source, path.name)
     if migrated == current_source and not had_bom:
         return False
+    # Dropping the BOM is a re-save, not a migration: the version is unchanged,
+    # so neither create a backup nor check an existing one from an earlier run.
+    bom_only = recovery_backup is None and migrated == current_source
 
     backup = path.with_name(f"{path.name}.v{old_version}.bak")
     reuse_backup = False
-    if recovery_backup is None:
+    if recovery_backup is None and not bom_only:
         if backup.is_symlink():
             raise ConfigMigrationError(f"Refusing to use symlinked backup {backup}")
         if backup.exists():
@@ -742,7 +745,7 @@ def migrate_config(config_path):
             reuse_backup = True
 
     backup_created = False
-    if recovery_backup is None and not reuse_backup:
+    if recovery_backup is None and not reuse_backup and not bom_only:
         sanitized_source = _without_miner_password(current_source, path.name)
         backup.write_text(sanitized_source, encoding="utf-8")
         shutil.copystat(path, backup)
