@@ -3085,12 +3085,10 @@ class TwitchChannelPointsMiner:
                 streamer.irc_chat is not None
                 and streamer.settings.chat != ChatPresence.NEVER
             ):
-                # leave_chat() swaps in a fresh, unstarted ThreadChat, so keep
-                # the running one to wait for.
-                irc_chat = streamer.irc_chat
-                streamer.leave_chat()
-                if irc_chat.is_alive() is True:
-                    irc_chat.join(timeout=10)
+                # Retire rather than leave: leave_chat() swaps in a fresh
+                # ThreadChat, which an online/offline update still in flight
+                # could start after shutdown has passed this streamer.
+                streamer.retire_chat(timeout=10)
 
         self.running = self.twitch.running = False
         self.drop_badge_catalog_stop_event.set()
