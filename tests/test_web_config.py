@@ -2801,6 +2801,28 @@ def test_streamer_edits_are_refused_while_a_username_is_duplicated(tmp_path, pay
     assert config.read_bytes() == before
 
 
+def test_usernames_differing_only_in_spaces_count_as_duplicates(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [Streamer("one", settings=StreamerSettings(favorite=True)), '
+        '" One ", "two"]\n',
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="listed more than once"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"favorite": False},
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
 def test_migration_refuses_a_duplicated_saved_username(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
@@ -2815,6 +2837,46 @@ def test_migration_refuses_a_duplicated_saved_username(tmp_path):
 
     assert config.read_bytes() == before
     assert (tmp_path / "web-config.json").exists()
+
+
+@pytest.mark.parametrize(
+    "entry", ['Streamer("one", ONE_SETTINGS)', 'Streamer("one", **OPTIONS)']
+)
+def test_legacy_record_without_settings_migrates_past_unreadable_ones(tmp_path, entry):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings()\nOPTIONS = {}\n"
+        f'STREAMERS = [{entry}, "two"]\n',
+    )
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"streamers": [{"username": "two"}, {"username": "one"}]}),
+        encoding="utf-8",
+    )
+
+    migrate_web_config(config)
+
+    assert _usernames(config) == ["two", "one"]
+    assert entry in config.read_text(encoding="utf-8")
+
+
+def test_removal_is_refused_when_the_file_cant_be_tokenized(tmp_path, monkeypatch):
+    import tokenize
+
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
+    before = config.read_bytes()
+
+    def fail(_encoded):
+        raise tokenize.TokenError("boom", (1, 0))
+
+    monkeypatch.setattr(config_editor, "_comments", fail)
+    with pytest.raises(ConfigEditError, match="Remove it in config.py instead"):
+        update_managed_web_config(
+            config, {"action": "remove", "kind": "streamers", "value": "one"}
+        )
+
+    assert config.read_bytes() == before
 
 
 def test_import_is_not_added_above_a_future_import(tmp_path):

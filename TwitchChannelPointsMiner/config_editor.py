@@ -961,7 +961,8 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
 
 def _streamer_key(node):
     username = _streamer_value(node)
-    return username.lower() if username is not None else None
+    # Streamer() and the miner match usernames by lower().strip().
+    return username.strip().lower() if username is not None else None
 
 
 def _streamers_list(encoded):
@@ -1276,6 +1277,8 @@ def _require_editable_settings(config_path, username, names):
     value can't be read, which must be written even when they look
     unchanged.
     """
+    if not names:
+        return set()
     encoded = Path(config_path).read_bytes()
     node = next(
         (
