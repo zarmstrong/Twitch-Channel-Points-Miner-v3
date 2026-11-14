@@ -706,8 +706,10 @@ def _insert_config_item(config_path, container, rendered):
 
 def _require_parses(encoded):
     try:
-        ast.parse(encoded)
-    except SyntaxError as error:
+        # compile, not ast.parse: only the compiler rejects some errors, such
+        # as a __future__ import that no longer comes first.
+        compile(encoded, "config.py", "exec", dont_inherit=True)
+    except (SyntaxError, ValueError) as error:
         raise ConfigEditError(
             f"Refusing to save a configuration that would not parse: {error}"
         ) from error
@@ -806,11 +808,6 @@ def _write_streamers(config_path, records, updated_usernames=None):
     path = Path(config_path)
     # Read bytes, so CRLF line breaks are kept.
     original = path.read_bytes()
-    entries = {
-        _streamer_key(node): node
-        for node in _streamers_list(original).elts
-        if _streamer_key(node) is not None
-    }
     base = _base_web_config(config_path)
     current = {item["username"].lower(): item["settings"] for item in base["streamers"]}
     settings_changes = {}
@@ -818,10 +815,6 @@ def _write_streamers(config_path, records, updated_usernames=None):
         key = record["username"].lower()
         if key not in updated_usernames:
             continue
-        if record.get("settings") and isinstance(entries.get(key), ast.Call):
-            # The dashboard shows defaults for settings it can't read, so a
-            # value that looks unchanged may still differ from config.py.
-            _settings_argument(entries[key])
         effective = current.get(key, base["streamer_defaults"])
         changed = {
             name: value
@@ -880,8 +873,12 @@ def _write_streamers(config_path, records, updated_usernames=None):
         for index, node in enumerate(streamers.elts)
         if _streamer_key(node) is not None
     ]
-    slot_by_key = {_streamer_key(streamers.elts[index]): index for index in slots}
-    desired = [slot_by_key[key] for key in wanted_keys if key in slot_by_key]
+    # Duplicate usernames each keep their own entry: the first wanted
+    # occurrence takes the first remaining slot with that name.
+    slots_by_key = {}
+    for index in slots:
+        slots_by_key.setdefault(_streamer_key(streamers.elts[index]), []).append(index)
+    desired = [slots_by_key[key].pop(0) for key in wanted_keys if slots_by_key.get(key)]
     if len(desired) == len(slots) and desired != slots:
         order = list(range(len(streamers.elts)))
         for slot, source_index in zip(slots, desired):
@@ -1000,7 +997,10 @@ def _remove_list_item(encoded, container, index):
         else _byte_offset(encoded_lines, container.lineno, container.col_offset) + 1
     )
     start = _redundant_paren_start(
-        encoded, boundary, start, encoded[end : end + item_end].count(b")")
+        encoded,
+        boundary,
+        start,
+        re.sub(rb"#[^\r\n]*", b"", encoded[end : end + item_end]).count(b")"),
     )
     end += item_end
 
@@ -1114,6 +1114,48 @@ def _settings_argument(node):
             "them without losing settings. Edit them in config.py instead."
         )
     return settings
+
+
+def _readable_setting(value):
+    """Whether the dashboard shows this StreamerSettings value as written."""
+    if isinstance(value, ast.Constant):
+        return True
+    return (
+        isinstance(value, ast.Attribute)
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "ChatPresence"
+    )
+
+
+def _require_editable_settings(config_path, username, names):
+    """Refuse a settings update the dashboard can't apply faithfully.
+
+    The dashboard shows defaults for settings it can't read, so a submitted
+    value that looks unchanged may still differ from config.py. names are
+    the settings the dashboard submitted.
+    """
+    encoded = Path(config_path).read_bytes()
+    node = next(
+        (
+            node
+            for node in _streamers_list(encoded).elts
+            if _streamer_key(node) == username
+        ),
+        None,
+    )
+    if not isinstance(node, ast.Call):
+        return
+    settings = _settings_argument(node)
+    if not isinstance(settings, ast.Call):
+        return
+    for name in names:
+        keyword = _call_keyword(settings, name)
+        if keyword is not None and not _readable_setting(keyword.value):
+            raise ConfigEditError(
+                f"{name} for {_streamer_value(node)} in config.py isn't a plain "
+                "value, so the dashboard can't change it safely. Edit it in "
+                "config.py instead."
+            )
 
 
 def _set_streamer_settings(encoded, key, changed):
@@ -1482,6 +1524,7 @@ def _update_managed_web_config(config_path, payload):
         username = str(payload.get("username", "")).lower().strip()
         settings = payload.get("settings")
         _validate_streamer_settings(settings)
+        _require_editable_settings(config_path, username, settings)
         streamers = list(current["streamers"])
         for streamer in streamers:
             if streamer["username"].lower() == username:

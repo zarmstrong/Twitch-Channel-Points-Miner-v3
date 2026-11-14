@@ -2473,17 +2473,149 @@ def test_entry_with_a_comment_after_its_redundant_parenthesis_can_be_removed(
     assert _usernames(config) == ["two"]
 
 
-def test_unremovable_entry_is_refused_with_a_clear_message(tmp_path, monkeypatch):
+def test_unremovable_entry_is_refused_with_a_clear_message(tmp_path):
     config = tmp_path / "config.py"
-    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
-    before = config.read_bytes()
-    monkeypatch.setattr(
-        config_editor, "_remove_list_item", lambda *_args: b"STREAMERS = [\n"
+    write_commented_config(
+        config, 'STREAMERS = [\n    "one"\n    , "two"\n    , "three"\n]\n'
     )
+    before = config.read_bytes()
 
     with pytest.raises(ConfigEditError, match="Remove it in config.py instead"):
         update_managed_web_config(
             config, {"action": "remove", "kind": "streamers", "value": "one"}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_parenthesis_in_a_comment_does_not_block_removal(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'STREAMERS = [\n    (\n        "one"  # note (x) )\n    ),\n    "two",\n]\n',
+    )
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": "one"}
+    )
+
+    assert 'STREAMERS = [\n    "two",\n]\n' in config.read_text(encoding="utf-8")
+
+
+DUPLICATE_STREAMERS = (
+    "STREAMERS = [\n"
+    '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
+    '    "one",\n'
+    '    "two",\n'
+    "]\n"
+)
+
+
+def test_duplicate_usernames_keep_their_own_entries_on_other_edits(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, DUPLICATE_STREAMERS)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "two",
+            "settings": {"favorite": True},
+        },
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert '    Streamer("one", settings=StreamerSettings(favorite=True)),\n' in source
+    assert '    "one",\n' in source
+    assert _usernames(config) == ["one", "one", "two"]
+
+
+def test_reordering_duplicate_usernames_keeps_both_entries(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, DUPLICATE_STREAMERS)
+
+    update_managed_web_config(
+        config,
+        {"action": "reorder_streamers", "usernames": ["two", "one", "one"]},
+    )
+
+    assert (
+        "STREAMERS = [\n"
+        '    "two",\n'
+        '    Streamer("one", settings=StreamerSettings(favorite=True)),\n'
+        '    "one",\n'
+        "]\n"
+    ) in config.read_text(encoding="utf-8")
+
+
+def test_update_to_a_shown_default_is_refused_for_a_variable_setting(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "FAV = True\n"
+        'STREAMERS = [Streamer("one", settings=StreamerSettings(favorite=FAV)), "two"]\n',
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="Edit it in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"favorite": False},
+            },
+        )
+    assert config.read_bytes() == before
+
+    # Other settings of the same streamer can still be changed.
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    )
+    assert "favorite=FAV" in config.read_text(encoding="utf-8")
+    assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
+
+
+def test_legacy_migration_does_not_refuse_unchanged_variable_settings(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings(favorite=True)\n"
+        'STREAMERS = [Streamer("one", settings=ONE_SETTINGS), "two"]\n',
+    )
+    shown = read_managed_web_config(config)["streamers"]
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"streamers": shown}), encoding="utf-8"
+    )
+    before = config.read_bytes()
+
+    migrate_web_config(config)
+
+    assert config.read_bytes() == before
+
+
+def test_import_is_not_added_above_a_future_import(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
+    source = config.read_text(encoding="utf-8").replace(
+        "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n", ""
+    )
+    config.write_text("from __future__ import annotations\n" + source, encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="would not parse"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"chat": "NEVER"},
+            },
         )
 
     assert config.read_bytes() == before
