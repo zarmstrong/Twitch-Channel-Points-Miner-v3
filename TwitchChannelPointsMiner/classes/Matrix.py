@@ -1,5 +1,7 @@
 import math
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from textwrap import dedent
 from urllib.parse import quote
 
@@ -23,14 +25,33 @@ def _describe_delay(seconds):
     return f"{math.ceil(seconds / 60)} minutes"
 
 
-def _retry_after_seconds(response):
-    """The Retry-After header of a 429, in seconds, or None."""
+def _retry_after_seconds(response, body):
+    """How long a 429 asks to wait, in seconds, or None.
+
+    Reads the Retry-After header, as seconds or an HTTP date, then the
+    retry_after_ms field Matrix puts in the error body.
+    """
     headers = getattr(response, "headers", None) or {}
-    try:
-        value = float(headers.get("Retry-After"))
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
+    value = headers.get("Retry-After")
+    seconds = None
+    if value is not None:
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            try:
+                when = parsedate_to_datetime(str(value))
+            except (TypeError, ValueError, IndexError):
+                when = None
+            if when is not None:
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    if seconds is None:
+        try:
+            seconds = float(body.get("retry_after_ms")) / 1000
+        except (TypeError, ValueError):
+            return None
+    return seconds if seconds > 0 else None
 
 
 class Matrix(object):
@@ -96,18 +117,18 @@ class Matrix(object):
         if not isinstance(body, dict):
             body = {}
 
+        status = response.status_code
         access_token = body.get("access_token")
-        if access_token:
+        if 200 <= status < 300 and isinstance(access_token, str) and access_token:
             self.access_token = access_token
             # The wait itself is reset only once a message gets through, so a
             # token the homeserver keeps rejecting still backs off.
             self.login_retry_at = None
             self.login_failure = None
             return None
-        status = response.status_code
         if status == 429:
             return self._login_failed(
-                "Matrix login was rate limited.", _retry_after_seconds(response)
+                "Matrix login was rate limited.", _retry_after_seconds(response, body)
             )
         if status in (401, 403):
             return self._login_failed(

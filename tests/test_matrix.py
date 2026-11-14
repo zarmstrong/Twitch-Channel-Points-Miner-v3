@@ -354,3 +354,36 @@ def _event_record():
     )
     record.event = Events.STREAMER_ONLINE
     return record
+
+
+def test_login_429_reads_a_retry_after_date_or_the_body(fake_post, clock):
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+
+    dated = _response(429, {})
+    dated.headers = {
+        "Retry-After": format_datetime(
+            datetime.now(timezone.utc) + timedelta(minutes=5), usegmt=True
+        )
+    }
+    in_body = _response(429, {"errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 600000})
+    fake_post(dated, in_body)
+
+    first = _matrix().send("hello", Events.STREAMER_ONLINE)[1]
+    second = _matrix().send("hello", Events.STREAMER_ONLINE)[1]
+
+    assert "retried in 5 minutes" in first
+    assert "retried in 10 minutes" in second
+
+
+def test_login_needs_a_success_status_and_a_string_token(fake_post):
+    limited = _response(429, {"access_token": "tok"})
+    numeric = _response(200, {"access_token": 12345})
+    post = fake_post(limited, numeric)
+
+    first = _matrix().send("hello", Events.STREAMER_ONLINE)
+    second = _matrix().send("hello", Events.STREAMER_ONLINE)
+
+    assert first[0] is False and "rate limited" in first[1]
+    assert second[0] is False and "returned no access token" in second[1]
+    assert len(post.calls) == 2
