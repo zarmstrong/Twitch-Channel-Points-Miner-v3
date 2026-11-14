@@ -1047,6 +1047,39 @@ def test_migrate_config_accepts_utf8_bom(tmp_path):
     assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
 
 
+@pytest.mark.parametrize(
+    "existing_backup", [None, "# from an earlier migration\n"], ids=["none", "differs"]
+)
+def test_bom_only_change_leaves_backups_alone(tmp_path, existing_backup):
+    config = tmp_path / "config.py"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text("\ufeff" + current, encoding="utf-8")
+    backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
+    if existing_backup is not None:
+        backup.write_text(existing_backup + current, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    assert config.read_text(encoding="utf-8") == current
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        ["config.py"] + ([backup.name] if existing_backup is not None else [])
+    )
+    if existing_backup is not None:
+        assert backup.read_text(encoding="utf-8") == existing_backup + current
+
+
+def test_bom_on_an_old_config_still_migrates_with_a_backup(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text("\ufeff" + CONFIG, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    _, old_version, _ = migrate_config_source(CONFIG)
+    backup = tmp_path / f"config.py.v{old_version}.bak"
+    assert backup.read_text(encoding="utf-8") == CONFIG
+    assert not config.read_text(encoding="utf-8").startswith("\ufeff")
+
+
 def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
     config = tmp_path / "config.py"
     current, _, _ = migrate_config_source(CONFIG)

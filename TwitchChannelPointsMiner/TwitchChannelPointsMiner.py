@@ -23,6 +23,7 @@ from TwitchChannelPointsMiner.classes.entities.Campaign import (
     CampaignChannelScope,
     campaign_channel_scope,
 )
+from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
@@ -67,7 +68,6 @@ from TwitchChannelPointsMiner.utils import (
     set_default_settings,
 )
 from TwitchChannelPointsMiner.WatchStreakCache import WatchStreakCache
-from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 
 # Suppress:
 #   - chardet.charsetprober - [feed]
@@ -2235,9 +2235,7 @@ class TwitchChannelPointsMiner:
             # seconds), and the watch thread would classify a flagless
             # badge-only streamer as a configured one and could watch it.
             self.ws_pool.remove_streamer_topics(streamer)
-            if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
-                streamer.irc_chat.stop()
-                streamer.irc_chat.join(timeout=5)
+            streamer.retire_chat()
             removed.append(streamer.username)
 
         self._record_daily_report_retirements(retained)
@@ -2330,9 +2328,7 @@ class TwitchChannelPointsMiner:
             # seconds), and the watch thread would classify a flagless
             # category-only streamer as a configured one and could watch it.
             self.ws_pool.remove_streamer_topics(streamer)
-            if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
-                streamer.irc_chat.stop()
-                streamer.irc_chat.join(timeout=5)
+            streamer.retire_chat()
             removed.append(streamer.username)
 
         self._record_daily_report_retirements(retained)
@@ -2928,9 +2924,7 @@ class TwitchChannelPointsMiner:
                     retained_baselines.append(baseline)
                     continue
                 self.ws_pool.remove_streamer_topics(streamer)
-                if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
-                    streamer.irc_chat.stop()
-                    streamer.irc_chat.join(timeout=5)
+                streamer.retire_chat()
                 logger.info(
                     f"Removed {streamer.username} from the reloaded configuration",
                     extra={"emoji": ":heavy_minus_sign:"},
@@ -3091,12 +3085,10 @@ class TwitchChannelPointsMiner:
                 streamer.irc_chat is not None
                 and streamer.settings.chat != ChatPresence.NEVER
             ):
-                # leave_chat() swaps in a fresh, unstarted ThreadChat, so keep
-                # the running one to wait for.
-                irc_chat = streamer.irc_chat
-                streamer.leave_chat()
-                if irc_chat.is_alive() is True:
-                    irc_chat.join(timeout=10)
+                # Retire rather than leave: leave_chat() swaps in a fresh
+                # ThreadChat, which an online/offline update still in flight
+                # could start after shutdown has passed this streamer.
+                streamer.retire_chat(timeout=10)
 
         self.running = self.twitch.running = False
         self.drop_badge_catalog_stop_event.set()

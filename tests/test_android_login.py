@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from colorama import Fore
+from requests import Response
 
 from TwitchChannelPointsMiner.classes import TwitchLogin as twitch_login_module
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
@@ -97,6 +98,30 @@ def test_parse_android_login_rejects_text_without_a_token(pasted):
     assert parse_android_login(pasted) is None
 
 
+@pytest.mark.parametrize("pasted", ["https://[", f"https://[#access_token={TOKEN}"])
+def test_parse_android_login_rejects_malformed_urls(pasted):
+    assert parse_android_login(pasted) is None
+
+
+@pytest.mark.parametrize("recover", [True, False], ids=["retry", "exhausted"])
+def test_malformed_url_uses_the_existing_prompt_retry(monkeypatch, caplog, recover):
+    login, calls = android_login(monkeypatch, valid_response())
+    malformed = f"https://[#access_token={TOKEN}"
+    attempts = twitch_login_module.ANDROID_LOGIN_ATTEMPTS
+    pasted = [malformed, REDIRECT] if recover else [malformed] * attempts
+    read_input = MagicMock(side_effect=pasted)
+
+    with caplog.at_level(logging.DEBUG):
+        assert login.android_login_flow(read_input=read_input) is recover
+
+    assert read_input.call_count == (2 if recover else attempts)
+    assert len(calls) == (1 if recover else 0)
+    assert login.token == (TOKEN if recover else None)
+    assert "No access token found in what was pasted" in caplog.text
+    assert TOKEN not in caplog.text
+    assert malformed not in caplog.text
+
+
 def test_pasted_redirect_url_logs_in_without_logging_the_token(monkeypatch, caplog):
     login, calls = android_login(monkeypatch, valid_response())
 
@@ -124,6 +149,88 @@ def test_environment_variable_logs_in_without_a_prompt(monkeypatch):
         raise AssertionError("prompted although the environment had a login")
 
     assert login.android_login_flow(read_input=no_prompt) is True
+
+
+@pytest.mark.parametrize(
+    "console_available", [True, False], ids=["prompt", "no-console"]
+)
+def test_malformed_environment_url_falls_back_to_the_prompt(
+    monkeypatch, caplog, console_available
+):
+    login, calls = android_login(monkeypatch, valid_response())
+    malformed = f"https://[#access_token={TOKEN}"
+    monkeypatch.setenv(ANDROID_LOGIN_ENV_VAR, malformed)
+
+    def read_input(prompt):
+        if not console_available:
+            raise EOFError
+        return REDIRECT
+
+    with caplog.at_level(logging.DEBUG):
+        assert login.android_login_flow(read_input=read_input) is console_available
+
+    assert len(calls) == (1 if console_available else 0)
+    assert login.token == (TOKEN if console_available else None)
+    assert f"{ANDROID_LOGIN_ENV_VAR} does not hold a valid Android login" in caplog.text
+    if not console_available:
+        assert "No console to paste into" in caplog.text
+    assert TOKEN not in caplog.text
+    assert malformed not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(f"response-body-marker {TOKEN}".encode(), id="invalid-json"),
+        pytest.param(b"[]", id="empty-array"),
+        pytest.param(b'["response-body-marker"]', id="array"),
+        pytest.param(b"null", id="null"),
+        pytest.param(b'"response-body-marker"', id="string"),
+        pytest.param(b"0", id="zero"),
+        pytest.param(b"42", id="number"),
+        pytest.param(b"false", id="false"),
+        pytest.param(b"true", id="true"),
+        pytest.param(b"", id="empty-body"),
+    ],
+)
+@pytest.mark.parametrize("recover", [True, False], ids=["retry", "exhausted"])
+def test_invalid_validation_response_retries_without_setting_login_state(
+    monkeypatch, caplog, body, recover
+):
+    response = Response()
+    response.status_code = 200
+    response._content = body
+    login, _ = android_login(monkeypatch, response)
+    attempts = twitch_login_module.ANDROID_LOGIN_ATTEMPTS
+    responses = [response, valid_response()] if recover else [response] * attempts
+    get = MagicMock(side_effect=responses)
+    monkeypatch.setattr(twitch_login_module.requests, "get", get)
+
+    def read_input(prompt):
+        # Rejection must leave the login untouched before the next attempt.
+        assert login.token is None
+        assert "Authorization" not in login.session.headers
+        assert login.user_id is None
+        assert login.login_check_result is False
+        return REDIRECT
+
+    read = MagicMock(side_effect=read_input)
+    with caplog.at_level(logging.DEBUG):
+        assert login.android_login_flow(read_input=read) is recover
+
+    assert read.call_count == get.call_count == (2 if recover else attempts)
+    assert login.token == (TOKEN if recover else None)
+    assert login.user_id == ("42" if recover else None)
+    assert login.login_check_result is recover
+    if recover:
+        assert login.session.headers["Authorization"] == f"Bearer {TOKEN}"
+    else:
+        assert "Authorization" not in login.session.headers
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == (1 if recover else attempts)
+    assert all(record.default_color == ANDROID_LOGIN_ERROR_COLOR for record in errors)
+    assert TOKEN not in caplog.text
+    assert "response-body-marker" not in caplog.text
 
 
 @pytest.mark.parametrize(

@@ -146,6 +146,9 @@ run.py
 chromedriver*
 
 # Folders
+# config/ holds the live config.py (passwords, tokens, webhook URLs) and its
+# migration backups; config.example.py at the repository root stays tracked.
+config/*
 cookies/*
 logs/*
 screenshots/*
