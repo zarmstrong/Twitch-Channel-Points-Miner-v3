@@ -2135,10 +2135,9 @@ class Twitch(object):
         self.campaign_lookup_unavailable = getattr(
             _drops_dashboard_state, "unavailable", False
         )
-        raw_query_campaigns, _ = self.__get_reward_campaigns_raw_query()
         helix_campaigns, _ = self.__get_open_drop_campaigns_from_helix()
         campaigns_by_id = {}
-        for campaign in dashboard_campaigns + raw_query_campaigns + helix_campaigns:
+        for campaign in dashboard_campaigns + helix_campaigns:
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
@@ -6973,12 +6972,11 @@ class Twitch(object):
         dashboard_campaigns, dashboard_response = self.__get_drops_dashboard(
             return_raw=True
         )
-        raw_query_campaigns, raw_query_debug = self.__get_reward_campaigns_raw_query()
         helix_campaigns, helix_pages = self.__get_open_drop_campaigns_from_helix(
             return_raw=True
         )
         campaigns_by_id = {}
-        for campaign in dashboard_campaigns + raw_query_campaigns + helix_campaigns:
+        for campaign in dashboard_campaigns + helix_campaigns:
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
@@ -6998,7 +6996,6 @@ class Twitch(object):
         self.__log_drop_check_json(
             "graphql ViewerDropsDashboard raw response", dashboard_response
         )
-        self.__log_drop_check_json("graphql raw query debug", raw_query_debug)
         self.__log_drop_check_json("helix open campaigns raw pages", helix_pages)
         self.__log_drop_check_json("helix open campaigns extracted", helix_campaigns)
         self.__log_drop_check_json(
@@ -7800,129 +7797,6 @@ class Twitch(object):
                 level=logging.DEBUG,
             )
             return [], False, False
-
-    def __get_reward_campaigns_raw_query(self):
-        query_variants = [
-            {
-                "name": "root_rewardCampaignsAvailableToUser_object",
-                "query": (
-                    "query{"
-                    "rewardCampaignsAvailableToUser{"
-                    "id name status startsAt endsAt game{id slug displayName name}"
-                    "}"
-                    "}"
-                ),
-                "path": ["data", "rewardCampaignsAvailableToUser"],
-                "is_connection": False,
-            },
-        ]
-
-        campaigns_by_id = {}
-        debug = {"variants": []}
-
-        for variant in query_variants:
-            cursor = None
-            pages = 0
-            variant_errors = []
-            variant_count = 0
-
-            while pages < 20:
-                pages += 1
-                payload = {
-                    "operationName": "MinerRewardCampaignsRaw",
-                    "query": variant["query"],
-                    "variables": (
-                        {"first": 100, "after": cursor}
-                        if variant["is_connection"] is True
-                        else {}
-                    ),
-                }
-
-                try:
-                    response = self.gql.post_gql_request_raw(
-                        payload["operationName"], payload
-                    )
-                except RetryError as error:
-                    variant_errors.append(str(error))
-                    break
-                if not isinstance(response, dict):
-                    break
-
-                if response.get("errors"):
-                    variant_errors.extend(response.get("errors") or [])
-                    break
-
-                node = response
-                for key in variant["path"]:
-                    if not isinstance(node, dict):
-                        node = None
-                        break
-                    node = node.get(key)
-
-                if node in [None, {}]:
-                    break
-
-                if variant["is_connection"] is True and isinstance(node, dict):
-                    edges = node.get("edges", []) or []
-                    for edge in edges:
-                        campaign = edge.get("node") if isinstance(edge, dict) else None
-                        if not isinstance(campaign, dict):
-                            continue
-                        campaign_id = campaign.get("id")
-                        if campaign_id in [None, ""]:
-                            continue
-                        campaigns_by_id[str(campaign_id)] = campaign
-                        variant_count += 1
-
-                    page_info = (
-                        node.get("pageInfo", {}) if isinstance(node, dict) else {}
-                    )
-                    has_next = (
-                        page_info.get("hasNextPage") is True
-                        if isinstance(page_info, dict)
-                        else False
-                    )
-                    cursor = (
-                        page_info.get("endCursor")
-                        if isinstance(page_info, dict)
-                        else None
-                    )
-                    if has_next is not True or cursor in [None, ""]:
-                        break
-                elif isinstance(node, list):
-                    for campaign in node:
-                        if not isinstance(campaign, dict):
-                            continue
-                        campaign_id = campaign.get("id")
-                        if campaign_id in [None, ""]:
-                            continue
-                        campaigns_by_id[str(campaign_id)] = campaign
-                        variant_count += 1
-                    break
-                elif isinstance(node, dict):
-                    campaign_id = node.get("id")
-                    if campaign_id not in [None, ""]:
-                        campaigns_by_id[str(campaign_id)] = node
-                        variant_count += 1
-                    break
-                else:
-                    break
-
-            debug["variants"].append(
-                {
-                    "name": variant["name"],
-                    "pages": pages,
-                    "captured": variant_count,
-                    "errors": variant_errors,
-                }
-            )
-
-        campaigns = list(campaigns_by_id.values())
-        for campaign in campaigns:
-            if isinstance(campaign, dict):
-                campaign["_is_reward_campaign"] = True
-        debug["total_unique"] = len(campaigns)
-        return campaigns, debug
 
     @staticmethod
     def __normalize_completed_reward_campaigns(inventory, error_paths):
