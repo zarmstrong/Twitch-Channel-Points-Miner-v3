@@ -1,3 +1,4 @@
+import math
 import time
 from textwrap import dedent
 from urllib.parse import quote
@@ -15,10 +16,11 @@ LOGIN_RETRY_MAX_SECONDS = 3600
 
 
 def _describe_delay(seconds):
-    seconds = int(round(seconds))
+    # Rounded up, so the message never promises a retry sooner than it comes.
+    seconds = math.ceil(seconds)
     if seconds < 120:
         return f"{seconds} seconds"
-    return f"{round(seconds / 60)} minutes"
+    return f"{math.ceil(seconds / 60)} minutes"
 
 
 def _retry_after_seconds(response):
@@ -97,8 +99,9 @@ class Matrix(object):
         access_token = body.get("access_token")
         if access_token:
             self.access_token = access_token
+            # The wait itself is reset only once a message gets through, so a
+            # token the homeserver keeps rejecting still backs off.
             self.login_retry_at = None
-            self.login_retry_delay = None
             self.login_failure = None
             return None
         status = response.status_code
@@ -154,11 +157,16 @@ class Matrix(object):
                 )
                 if response.status_code == 401:
                     # The token expired or was revoked. Log in again and
-                    # resend this message once.
+                    # resend this message once; if the new token is rejected
+                    # too, wait before logging in again.
                     self.access_token = None
                     if attempt == 0:
                         continue
+                    return False, self._login_failed(
+                        "Matrix rejected the new access token (HTTP 401)."
+                    )
                 response.raise_for_status()
+                self.login_retry_delay = None
                 return True, None
             except requests.RequestException as error:
                 return False, format_request_failure("Matrix", error)

@@ -230,9 +230,35 @@ def test_message_401_with_the_new_token_too_is_a_failure(fake_post):
     success, reason = matrix.send("first", Events.STREAMER_ONLINE)
 
     assert success is False
-    assert "rejected the configured credentials" in reason
+    assert "rejected the new access token" in reason
+    assert "retried in 60 seconds" in reason
     assert matrix.access_token is None
     assert len(post.calls) == 4
+
+    # The next notification waits instead of logging in again at once.
+    assert matrix.send("second", Events.STREAMER_ONLINE) == (False, reason)
+    assert len(post.calls) == 4
+
+
+def test_a_token_that_keeps_getting_rejected_backs_off_further(fake_post, clock):
+    login = _response(200, {"access_token": "tok"})
+    rejected = _response(401, {})
+    post = fake_post(*[login, rejected] * 4)
+    matrix = _matrix()
+
+    reasons = []
+    for _ in range(2):
+        reasons.append(matrix.send("hello", Events.STREAMER_ONLINE)[1])
+        clock[0] = matrix.login_retry_at
+
+    assert "retried in 60 seconds" in reasons[0]
+    assert "retried in 2 minutes" in reasons[1]
+    assert len(post.calls) == 8
+
+
+def test_describe_delay_rounds_up():
+    assert matrix_module._describe_delay(59.2) == "60 seconds"
+    assert matrix_module._describe_delay(150) == "3 minutes"
 
 
 def test_login_backoff_doubles_up_to_an_hour_and_resets_after_success(fake_post, clock):
