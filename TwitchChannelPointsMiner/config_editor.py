@@ -1104,9 +1104,12 @@ def _remove_list_item(encoded, container, index):
         end = _next_comma(encoded, end) + 1
         while encoded[end : end + 1] in (b" ", b"\t"):
             end += 1
-        shares_line = index > 0 and elements[index - 1].end_lineno == (
-            elements[index].lineno
-        )
+        shares_line = False
+        if index > 0:
+            # Include the previous entry's redundant closing parentheses.
+            previous_end = _node_span(encoded_lines, elements[index - 1])[1]
+            previous_item_end, _ = _scan_item_tail(encoded[previous_end:start])
+            shares_line = b"\n" not in encoded[previous_end + previous_item_end : start]
         if encoded[end : end + 1] == b"#" and not shares_line:
             # This entry's own trailing comment. One on a line it shares with
             # another entry belongs to that line, so it stays.
@@ -1259,20 +1262,22 @@ def _miner_config_changed_later(tree):
             node = node.value
         return isinstance(node, ast.Name) and node.id == "MINER_CONFIG"
 
+    # Walk the whole module, so changes inside if blocks, loops and
+    # functions count too.
     assignments = 0
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign):
-            for target in statement.targets:
-                if isinstance(target, ast.Name) and target.id == "MINER_CONFIG":
-                    assignments += 1
-                elif is_miner(target):
-                    return True
-        elif isinstance(statement, (ast.AugAssign, ast.AnnAssign)):
-            if is_miner(statement.target):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "MINER_CONFIG":
+            if not isinstance(node.ctx, ast.Load):
+                assignments += 1
+        elif isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(
+            node.ctx, ast.Load
+        ):
+            if is_miner(node):
                 return True
-        elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
-            if is_miner(statement.value.func):
-                return True
+        elif isinstance(node, ast.Call) and is_miner(node.func):
+            return True
+        elif isinstance(node, ast.Global) and "MINER_CONFIG" in node.names:
+            return True
     return assignments > 1
 
 

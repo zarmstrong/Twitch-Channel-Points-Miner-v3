@@ -2850,6 +2850,7 @@ def test_username_with_spaces_keeps_its_entry(tmp_path, payload, expected):
     [
         'MINER_CONFIG["streamer_settings"] = StreamerSettings(favorite=True)\n',
         "MINER_CONFIG.update(streamer_settings=StreamerSettings(favorite=True))\n",
+        'if True:\n    MINER_CONFIG["streamer_settings"] = StreamerSettings(favorite=True)\n',
     ],
 )
 def test_update_is_written_when_miner_config_changes_after_the_dict(tmp_path, later):
@@ -2870,12 +2871,16 @@ def test_update_is_written_when_miner_config_changes_after_the_dict(tmp_path, la
     )
 
 
-def test_removing_an_entry_keeps_a_comment_it_shares_with_another(tmp_path):
-    config = tmp_path / "config.py"
-    write_commented_config(
-        config,
+@pytest.mark.parametrize(
+    "streamers",
+    [
         'STREAMERS = [\n    "a", "b",  # ab\n    "c", "d",  # cd\n]\n',
-    )
+        'STREAMERS = [\n    (\n        "a"\n    ), "b",  # ab\n    "c", "d",\n]\n',
+    ],
+)
+def test_removing_an_entry_keeps_a_comment_it_shares_with_another(tmp_path, streamers):
+    config = tmp_path / "config.py"
+    write_commented_config(config, streamers)
 
     update_managed_web_config(
         config, {"action": "remove", "kind": "streamers", "value": "b"}
