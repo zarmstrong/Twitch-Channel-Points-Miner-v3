@@ -744,17 +744,25 @@ def _insert_item_bytes(encoded, container, rendered, inline=False):
     container_line = encoded_lines[container.lineno - 1].decode("utf-8")
     base_indent = container_line[: len(container_line) - len(container_line.lstrip())]
     indentation = base_indent + "    "
+    newline = _newline(encoded)
     line_start = len(encoded[:closing].rstrip(b" \t"))
     if encoded[:line_start].endswith((b"\n", b"\r")):
         # The closing bracket has its own line: add the item above it.
         closing = line_start
-        insertion = f"{indentation}{rendered},\n".encode("utf-8")
+        insertion = f"{indentation}{rendered},{newline}".encode("utf-8")
     else:
-        insertion = f"\n{indentation}{rendered},\n{base_indent}".encode("utf-8")
+        insertion = f"{newline}{indentation}{rendered},{newline}{base_indent}".encode(
+            "utf-8"
+        )
     updated = encoded[:closing] + insertion + encoded[closing:]
     if comma_at is not None:
         updated = updated[:comma_at] + b"," + updated[comma_at:]
     return updated
+
+
+def _newline(encoded):
+    """The line break config.py uses, so edits don't mix CRLF and LF."""
+    return "\r\n" if b"\r\n" in encoded else "\n"
 
 
 def _call_keyword(call, name):
@@ -795,6 +803,14 @@ def _write_streamers(config_path, records, updated_usernames=None):
         updated_usernames = {username.lower() for username in updated_usernames or ()}
     # Write only the settings that differ from what the streamer has now, so
     # values it inherits from the global defaults stay inherited.
+    path = Path(config_path)
+    # Read bytes, so CRLF line breaks are kept.
+    original = path.read_bytes()
+    entries = {
+        _streamer_key(node): node
+        for node in _streamers_list(original).elts
+        if _streamer_key(node) is not None
+    }
     base = _base_web_config(config_path)
     current = {item["username"].lower(): item["settings"] for item in base["streamers"]}
     settings_changes = {}
@@ -802,6 +818,10 @@ def _write_streamers(config_path, records, updated_usernames=None):
         key = record["username"].lower()
         if key not in updated_usernames:
             continue
+        if record.get("settings") and isinstance(entries.get(key), ast.Call):
+            # The dashboard shows defaults for settings it can't read, so a
+            # value that looks unchanged may still differ from config.py.
+            _settings_argument(entries[key])
         effective = current.get(key, base["streamer_defaults"])
         changed = {
             name: value
@@ -810,8 +830,6 @@ def _write_streamers(config_path, records, updated_usernames=None):
         }
         if changed:
             settings_changes[key] = changed
-    path = Path(config_path)
-    original = path.read_text(encoding="utf-8").encode("utf-8")
     encoded = original
     wanted = [record["username"] for record in records]
     wanted_keys = [username.lower() for username in wanted]
@@ -911,18 +929,28 @@ def _node_span(encoded_lines, node):
 _ITEM_LINE_TAIL_RE = re.compile(rb",?")
 
 
-def _redundant_paren_start(encoded, start, parens):
+def _redundant_paren_start(encoded, boundary, start, parens):
     """Move start back over an entry's redundant opening parentheses, e.g.
-    the "(" of ("name"); ast positions exclude them."""
-    position = start
-    while parens:
-        position -= 1
-        char = encoded[position : position + 1]
+    the "(" of ("name"); ast positions exclude them.
+
+    boundary is where the previous entry, or the list's opening bracket, ends.
+    Only whitespace, a comma, comments and these parentheses lie between it
+    and start.
+    """
+    if not parens:
+        return start
+    openings = []
+    index = boundary
+    while index < start:
+        char = encoded[index : index + 1]
+        if char == b"#":
+            newline = encoded.find(b"\n", index, start)
+            index = start if newline == -1 else newline
+            continue
         if char == b"(":
-            parens -= 1
-        elif position < 0 or char not in (b" ", b"\t", b"\r", b"\n"):
-            return start
-    return position
+            openings.append(index)
+        index += 1
+    return openings[-parens] if len(openings) >= parens else start
 
 
 def _own_lines_span(encoded, start, end, closing, is_last, has_comma):
@@ -966,8 +994,13 @@ def _remove_list_item(encoded, container, index):
         closing if is_last else _node_span(encoded_lines, elements[index + 1])[0]
     )
     item_end, has_comma = _scan_item_tail(encoded[end:segment_end])
+    boundary = (
+        _node_span(encoded_lines, elements[index - 1])[1]
+        if index
+        else _byte_offset(encoded_lines, container.lineno, container.col_offset) + 1
+    )
     start = _redundant_paren_start(
-        encoded, start, encoded[end : end + item_end].count(b")")
+        encoded, boundary, start, encoded[end : end + item_end].count(b")")
     )
     end += item_end
 
@@ -983,8 +1016,7 @@ def _remove_list_item(encoded, container, index):
             end += 1
         if encoded[end : end + 1] == b"#":
             # This entry's own trailing comment.
-            newline = encoded.find(b"\n", end)
-            end = len(encoded) if newline == -1 else newline
+            end += len(_line_tail(encoded, end))
     elif index > 0:
         # The last entry shares its line with the previous one: drop it from
         # the end of the previous entry, so that entry's comma state is kept.
@@ -1045,6 +1077,45 @@ def _has_unpacking(call):
     )
 
 
+def _settings_argument(node):
+    """The settings argument of a Streamer(...) entry, or None without one.
+
+    Raises ConfigEditError when the dashboard can't edit it safely. A literal
+    None counts as no settings.
+    """
+    if _has_unpacking(node):
+        # Streamer("x", **OPTIONS) may already carry settings; adding a
+        # settings keyword could repeat it.
+        raise ConfigEditError(
+            f"The entry for {_streamer_value(node)} in config.py uses * or ** "
+            "arguments, so the dashboard can't change its settings safely. "
+            "Edit them in config.py instead."
+        )
+    settings_keyword = _call_keyword(node, "settings")
+    if settings_keyword is not None:
+        settings = settings_keyword.value
+    else:
+        # Streamer(username, settings) also takes settings positionally.
+        settings = node.args[1] if len(node.args) > 1 else None
+    if settings is None or (
+        isinstance(settings, ast.Constant) and settings.value is None
+    ):
+        return settings
+    if not (
+        isinstance(settings, ast.Call)
+        and isinstance(settings.func, ast.Name)
+        and settings.func.id == "StreamerSettings"
+        and not settings.args
+        and not _has_unpacking(settings)
+    ):
+        raise ConfigEditError(
+            f"The settings for {_streamer_value(node)} in config.py aren't "
+            "written as StreamerSettings(...), so the dashboard can't change "
+            "them without losing settings. Edit them in config.py instead."
+        )
+    return settings
+
+
 def _set_streamer_settings(encoded, key, changed):
     for name, value in changed.items():
         rendered = f"ChatPresence.{value}" if name == "chat" else repr(value)
@@ -1061,20 +1132,16 @@ def _set_streamer_settings(encoded, key, changed):
             )
             encoded = encoded[:start] + replacement + encoded[end:]
             continue
-        if _has_unpacking(node):
-            # Streamer("x", **OPTIONS) may already carry settings; adding a
-            # settings keyword could repeat it.
-            raise ConfigEditError(
-                f"The entry for {_streamer_value(node)} in config.py uses * or ** "
-                "arguments, so the dashboard can't change its settings safely. "
-                "Edit them in config.py instead."
+        settings = _settings_argument(node)
+        if isinstance(settings, ast.Constant):
+            # settings=None: replace the None, keyword or positional alike.
+            start, end = _node_span(encoded_lines, settings)
+            encoded = (
+                encoded[:start]
+                + f"StreamerSettings({name}={rendered})".encode("utf-8")
+                + encoded[end:]
             )
-        settings_keyword = _call_keyword(node, "settings")
-        if settings_keyword is not None:
-            settings = settings_keyword.value
-        else:
-            # Streamer(username, settings) also takes settings positionally.
-            settings = node.args[1] if len(node.args) > 1 else None
+            continue
         if settings is None:
             encoded = _insert_item_bytes(
                 encoded,
@@ -1083,18 +1150,6 @@ def _set_streamer_settings(encoded, key, changed):
                 inline=True,
             )
             continue
-        if not (
-            isinstance(settings, ast.Call)
-            and isinstance(settings.func, ast.Name)
-            and settings.func.id == "StreamerSettings"
-            and not settings.args
-            and not _has_unpacking(settings)
-        ):
-            raise ConfigEditError(
-                f"The settings for {_streamer_value(node)} in config.py aren't "
-                "written as StreamerSettings(...), so the dashboard can't change "
-                "them without losing settings. Edit them in config.py instead."
-            )
         keyword = _call_keyword(settings, name)
         if keyword is not None:
             start, end = _node_span(encoded_lines, keyword.value)
@@ -1283,7 +1338,7 @@ def _with_config_import(encoded, statement):
         return encoded
     lines = source.splitlines(keepends=True)
     insertion = 1 if lines and "coding" in lines[0] else 0
-    lines.insert(insertion, statement + "\n")
+    lines.insert(insertion, statement + _newline(encoded))
     return "".join(lines).encode("utf-8")
 
 

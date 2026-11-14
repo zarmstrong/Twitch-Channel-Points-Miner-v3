@@ -2451,16 +2451,140 @@ def test_settings_insertion_indents_from_the_right_line_after_a_form_feed(tmp_pa
     assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
 
 
-def test_unremovable_entry_is_refused_with_a_clear_message(tmp_path):
+def test_entry_with_a_comment_after_its_redundant_parenthesis_can_be_removed(
+    tmp_path,
+):
     config = tmp_path / "config.py"
     write_commented_config(
-        config, 'STREAMERS = [\n    (  # why\n        "one"\n    ),\n    "two",\n]\n'
+        config,
+        "STREAMERS = [\n"
+        "    # keep me\n"
+        '    (  # why\n        "one"\n    ),\n'
+        '    "two",  # two\n'
+        "]\n",
     )
-    before = config.read_text(encoding="utf-8")
+
+    update_managed_web_config(
+        config, {"action": "remove", "kind": "streamers", "value": "one"}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert 'STREAMERS = [\n    # keep me\n    "two",  # two\n]\n' in source
+    assert _usernames(config) == ["two"]
+
+
+def test_unremovable_entry_is_refused_with_a_clear_message(tmp_path, monkeypatch):
+    config = tmp_path / "config.py"
+    write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
+    before = config.read_bytes()
+    monkeypatch.setattr(
+        config_editor, "_remove_list_item", lambda *_args: b"STREAMERS = [\n"
+    )
 
     with pytest.raises(ConfigEditError, match="Remove it in config.py instead"):
         update_managed_web_config(
             config, {"action": "remove", "kind": "streamers", "value": "one"}
         )
 
-    assert config.read_text(encoding="utf-8") == before
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "entry", ['Streamer("one", settings=ONE_SETTINGS)', 'Streamer("one", ONE_SETTINGS)']
+)
+def test_update_to_a_shown_default_is_refused_for_unreadable_settings(tmp_path, entry):
+    # The dashboard shows favorite=False for ONE_SETTINGS, but config.py says
+    # True, so saving False would otherwise look like a no-op.
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "ONE_SETTINGS = StreamerSettings(favorite=True)\n"
+        f'STREAMERS = [{entry}, "two"]\n',
+    )
+    shown = next(
+        item["settings"]
+        for item in read_managed_web_config(config)["streamers"]
+        if item["username"] == "one"
+    )
+    assert shown["favorite"] is False
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="Edit them in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"favorite": False},
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        (
+            'Streamer("one", settings=None)',
+            'Streamer("one", settings=StreamerSettings(chat=ChatPresence.NEVER))',
+        ),
+        (
+            'Streamer("one", None)',
+            'Streamer("one", StreamerSettings(chat=ChatPresence.NEVER))',
+        ),
+    ],
+)
+def test_settings_none_is_replaced_by_the_changed_settings(tmp_path, entry, expected):
+    config = tmp_path / "config.py"
+    write_commented_config(config, f'STREAMERS = [{entry}, "two"]\n')
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    )
+
+    assert f'STREAMERS = [{expected}, "two"]\n' in config.read_text(encoding="utf-8")
+    assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "streamers", "value": "three"},
+        {"action": "remove", "kind": "streamers", "value": "one"},
+        {"action": "reorder_streamers", "usernames": ["two", "one"]},
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    ],
+    ids=["add", "remove", "reorder", "update"],
+)
+def test_streamer_edits_keep_crlf_line_breaks(tmp_path, payload):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        "STREAMERS = [\n"
+        '    "one",  # one\n'
+        "    # about two\n"
+        '    Streamer(\n        "two"\n    ),\n'
+        "]\n",
+    )
+    source = config.read_text(encoding="utf-8")
+    source = source.replace(
+        "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n", ""
+    )
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    update_managed_web_config(config, payload)
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
