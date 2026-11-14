@@ -1047,6 +1047,35 @@ def test_migrate_config_accepts_utf8_bom(tmp_path):
     assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
 
 
+def test_migrate_config_removes_bom_without_touching_mismatched_backup(tmp_path):
+    config = tmp_path / "config.py"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text("﻿" + current, encoding="utf-8")
+    backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
+    backup_source = "# different backup\n" + current
+    backup.write_text(backup_source, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    source = config.read_text(encoding="utf-8")
+    assert not source.startswith("﻿")
+    assert source == current
+    assert backup.read_text(encoding="utf-8") == backup_source
+    assert migrate_config(config) is False
+
+
+def test_migrate_config_removes_bom_without_creating_backup(tmp_path):
+    config = tmp_path / "config.py"
+    current, _, _ = migrate_config_source(CONFIG)
+    config.write_text("﻿" + current, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    assert config.read_text(encoding="utf-8") == current
+    assert not list(tmp_path.glob("config.py.v*.bak"))
+    assert migrate_config(config) is False
+
+
 def test_migrate_config_recovers_from_highest_numbered_backup(tmp_path):
     config = tmp_path / "config.py"
     current, _, _ = migrate_config_source(CONFIG)
