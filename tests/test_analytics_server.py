@@ -1,9 +1,13 @@
 import base64
+import errno
+import logging
 import os
 import re
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     AnalyticsServer,
@@ -1082,3 +1086,207 @@ def test_non_ascii_dashboard_credentials_authenticate():
     assert client.get(page, headers=basic("pässwörd")).status_code == 200
     assert client.get(page, headers=basic("wrong")).status_code == 401
     assert client.get(page, headers=basic("pässwort")).status_code == 401
+
+
+@pytest.mark.parametrize("host_header", ["evil.example", "evil.example:5000"])
+def test_loopback_dashboard_rejects_foreign_host_header(host_header):
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get(
+        "/streamers", base_url=f"http://{host_header}"
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"].startswith("Unrecognized Host header.")
+
+
+def test_loopback_dashboard_with_password_accepts_other_host_names():
+    # Behind a reverse proxy that keeps the original Host. DNS rebinding gains
+    # nothing here, because the rebound page can't supply the password.
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get(
+        server.app.static_url_path + "/style.css",
+        base_url="http://miner.example:443",
+    )
+    response.close()
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "base_url", ["http://localhost:5000", "http://127.0.0.1:5000", "http://[::1]:5000"]
+)
+def test_loopback_dashboard_accepts_loopback_host_headers(
+    base_url, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().get("/streamers", base_url=base_url)
+
+    assert response.status_code == 200
+
+
+def test_exposed_dashboard_does_not_apply_host_check():
+    server = AnalyticsServer(host="0.0.0.0", username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get(
+        server.app.static_url_path + "/style.css",
+        base_url="http://dashboard.example:5000",
+    )
+    response.close()
+
+    assert response.status_code == 200
+
+
+def test_cross_site_post_with_foreign_origin_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post(
+        "/dashboard_prefs",
+        json={"key": "dark-mode", "value": "false"},
+        headers={"Origin": "https://evil.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "Cross-site request rejected."}
+
+
+def test_cross_site_post_with_null_origin_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post(
+        "/dashboard_prefs",
+        json={"key": "dark-mode", "value": "false"},
+        headers={"Origin": "null"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_same_origin_post_passes_cross_site_guard(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post(
+        "/dashboard_prefs",
+        json={"key": "dark-mode", "value": "false"},
+        headers={"Origin": "http://localhost"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_post_through_host_rewriting_proxy_passes_cross_site_guard(
+    monkeypatch, tmp_path
+):
+    # nginx's default rewrites Host to the upstream address and passes the
+    # browser's host in X-Forwarded-Host.
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    same_site = client.post(
+        "/dashboard_prefs",
+        json={"key": "dark-mode", "value": "false"},
+        headers={
+            "Origin": "https://miner.example",
+            "X-Forwarded-Host": "miner.example",
+        },
+    )
+    cross_site = client.post(
+        "/dashboard_prefs",
+        json={"key": "dark-mode", "value": "false"},
+        headers={
+            "Origin": "https://evil.example",
+            "X-Forwarded-Host": "miner.example",
+        },
+    )
+
+    assert same_site.status_code == 200
+    assert cross_site.status_code == 403
+
+
+def test_post_with_cross_site_fetch_metadata_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post(
+        "/dashboard_prefs",
+        json={"key": "dark-mode", "value": "false"},
+        headers={"Sec-Fetch-Site": "cross-site"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_post_without_origin_headers_passes_cross_site_guard(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post(
+        "/dashboard_prefs", json={"key": "dark-mode", "value": "false"}
+    )
+
+    assert response.status_code == 200
+
+
+def test_json_endpoint_rejects_path_traversal_outside_analytics_path(
+    monkeypatch, tmp_path
+):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    (analytics / "example.json").write_text(
+        '{"series": [{"x": 10, "y": 100}]}', encoding="utf-8"
+    )
+    (tmp_path / "secret.json").write_text(
+        '{"series": [{"x": 10, "y": 999}]}', encoding="utf-8"
+    )
+    monkeypatch.setattr(Settings, "analytics_path", str(analytics), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    traversal = client.get("/json/..%5Csecret")
+    real = client.get("/json/example")
+
+    assert traversal.status_code == 404
+    assert real.status_code == 200
+
+
+def test_run_reports_port_conflict_as_another_program(monkeypatch, caplog):
+    import waitress.server
+
+    def fail_bind(*_args, **_kwargs):
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(waitress.server, "create_server", fail_bind)
+    server = AnalyticsServer(password=None)
+
+    with caplog.at_level(logging.ERROR):
+        server.run()
+
+    assert "Another program" in caplog.text
+
+
+def test_run_reports_other_bind_failures_without_blaming_another_program(
+    monkeypatch, caplog
+):
+    import waitress.server
+
+    def fail_bind(*_args, **_kwargs):
+        raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+
+    monkeypatch.setattr(waitress.server, "create_server", fail_bind)
+    server = AnalyticsServer(password=None)
+
+    with caplog.at_level(logging.ERROR):
+        server.run()
+
+    assert "Could not start the analytics dashboard" in caplog.text
+    assert "Check 'host' and 'port'" in caplog.text
+    assert "Another program" not in caplog.text

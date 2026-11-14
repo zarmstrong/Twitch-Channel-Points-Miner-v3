@@ -166,13 +166,33 @@ def set_default_settings(settings, defaults):
     return 0 if char == "A" else 1"""
 
 
-def internet_connection_available(host="8.8.8.8", port=53, timeout=3):
-    try:
-        socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
-        return True
-    except socket.error:
-        return False
+# Twitch first, since that is what the miner needs, then public DNS servers
+# in case only the Twitch host is unreachable.
+INTERNET_PROBE_TARGETS = (
+    ("gql.twitch.tv", 443),
+    ("8.8.8.8", 53),
+    ("1.1.1.1", 53),
+)
+
+
+def internet_connection_available(host=None, port=None, timeout=3):
+    """Return True when any probe target accepts a TCP connection.
+
+    Uses a per-connection timeout, so the process-wide socket default is
+    left alone. Passing host (and port) probes only that target.
+    """
+    targets = (
+        ((host, port if port is not None else 53),)
+        if host is not None
+        else INTERNET_PROBE_TARGETS
+    )
+    for target in targets:
+        try:
+            with socket.create_connection(target, timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def percentage(a, b):
