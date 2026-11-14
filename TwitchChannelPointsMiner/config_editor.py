@@ -1181,16 +1181,22 @@ def _reorder_list_items(encoded, container, order):
     # Stop at the list's closing bracket: code after it on the same line
     # isn't part of any entry.
     tails = [_line_tail(encoded, end)[: max(closing - end, 0)] for _start, end in spans]
+    # Each comment keeps the spacing in front of it, so aligned comments
+    # stay aligned.
     comments = [
-        tail[tail.index(b"#") :].rstrip() if b"#" in tail else b"" for tail in tails
+        tail[len(tail[: tail.index(b"#")].rstrip()) :].rstrip() if b"#" in tail else b""
+        for tail in tails
     ]
     for slot in reversed(range(len(spans))):
         start, end = spans[slot]
         source = order[slot]
+        if source == slot:
+            # An entry that stays put keeps its line byte for byte.
+            continue
         if own_lines:
             tail = tails[slot]
             separator = tail[: tail.index(b"#")].rstrip() if b"#" in tail else tail
-            comment = b"  " + comments[source] if comments[source] else b""
+            comment = comments[source]
             replacement = texts[source] + separator.rstrip() + comment
             end += len(tail)
             if comment and end == closing:

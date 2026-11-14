@@ -2737,6 +2737,32 @@ def test_reorder_leaves_code_after_the_closing_bracket_alone(tmp_path):
     assert _load_config(config).LABEL == "#label"
 
 
+def test_reorder_leaves_entries_that_stay_put_and_comment_spacing_alone(tmp_path):
+    config = tmp_path / "config.py"
+    write_commented_config(
+        config,
+        'EXTRA_STREAMER = "extra"\n'
+        "STREAMERS = [\n"
+        '    "one",           # first\n'
+        "    EXTRA_STREAMER,      # keep spacing   \n"
+        '    "two",           # second\n'
+        "]\n",
+    )
+
+    update_managed_web_config(
+        config, {"action": "reorder_streamers", "usernames": ["two", "one"]}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert (
+        "STREAMERS = [\n"
+        '    "two",           # second\n'
+        "    EXTRA_STREAMER,      # keep spacing   \n"
+        '    "one",           # first\n'
+        "]\n"
+    ) in source
+
+
 def test_migrated_new_streamer_gets_settings_its_unreadable_defaults_hide(
     tmp_path,
 ):
