@@ -91,8 +91,8 @@ function isMarkerComment(comment, since) {
 }
 
 // True when automation marked the issue in the current release cycle, i.e.
-// after the release published at `since`. A marker from an earlier cycle
-// belongs to a fix that has already shipped.
+// after `since`, the commit time of the last release's tag. A marker from an
+// earlier cycle belongs to a fix that has already shipped.
 async function hasCurrentMarker(github, owner, repo, issueNumber, since) {
   const comments = await github.paginate(github.rest.issues.listComments, {
     owner, repo, issue_number: issueNumber, per_page: 100,
@@ -107,6 +107,11 @@ async function markPullIssues(github, owner, repo, pull, since) {
     // without the label means a maintainer removed it to keep the issue
     // open: a rerun must not put it back.
     if (await hasCurrentMarker(github, owner, repo, issue.number, since)) continue;
+    // A release may have closed the issue since it was listed above.
+    const { data: current } = await github.rest.issues.get({
+      owner, repo, issue_number: issue.number,
+    });
+    if (current.state !== 'open') continue;
     if (!issue.labels.nodes.some((label) => label.name === AWAITING_LABEL)) {
       await github.rest.issues.addLabels({
         owner, repo, issue_number: issue.number, labels: [AWAITING_LABEL],
@@ -123,7 +128,8 @@ async function markPullIssues(github, owner, repo, pull, since) {
 
 async function pushedCommitShas(github, owner, repo, payload) {
   // The payload's commit list can be truncated, so include the pushed head and
-  // every commit in before...after. A force push diverges; keep the payload's.
+  // every commit in before...after. After a force push the comparison diverges
+  // or fails (the old head may be gone); keep the payload's commits then.
   const isSha = (sha) => Boolean(sha) && !/^0+$/.test(sha);
   const shas = new Set((payload.commits || []).map((commit) => commit.id));
   if (isSha(payload.after)) {
@@ -134,7 +140,8 @@ async function pushedCommitShas(github, owner, repo, payload) {
           shas.add(sha);
         }
       } catch (error) {
-        if (!/have diverged/.test(error.message)) throw error;
+        const comparable = error.status === 404 || error.status === 422;
+        if (!comparable && !/have diverged/.test(error.message)) throw error;
       }
     }
   }
@@ -159,7 +166,7 @@ async function markIssuesAwaitingRelease({ github, context, core }) {
     return;
   }
   const latest = (await publishedReleases(github, owner, repo))[0];
-  const since = latest ? latest.published_at : null;
+  const since = latest ? await releaseCutoff(github, owner, repo, latest) : null;
   for (const pull of pulls) {
     await markPullIssues(github, owner, repo, pull, since);
   }
@@ -173,6 +180,16 @@ async function publishedReleases(github, owner, repo) {
   return releases
     .filter((release) => !release.draft && release.published_at)
     .sort((left, right) => new Date(right.published_at) - new Date(left.published_at));
+}
+
+// The start of the release cycle that follows `release`: the commit time of
+// its tag. Release Please pushes the tag before it publishes the release, so
+// a fix merged in between belongs to the next cycle, not this one.
+async function releaseCutoff(github, owner, repo, release) {
+  const { data } = await github.rest.repos.getCommit({
+    owner, repo, ref: release.tag_name,
+  });
+  return data.commit.committer.date;
 }
 
 async function previousPublishedRelease(github, owner, repo, newTag) {
@@ -209,6 +226,7 @@ async function closeReleasedIssues({ github, context, core, tag }) {
   const previous = await previousPublishedRelease(github, owner, repo, tag);
   if (!previous) throw new Error(`Cannot determine a previous published release before ${tag}`);
 
+  const since = await releaseCutoff(github, owner, repo, previous);
   const commitShas = await commitsBetween(github, owner, repo, previous.tag_name, tag);
   const associations = {};
   for (const sha of commitShas) {
@@ -234,9 +252,7 @@ async function closeReleasedIssues({ github, context, core, tag }) {
         candidates.set(issue.number, issue);
       } else if (
         issue.state === 'OPEN' &&
-        !(await hasCurrentMarker(
-          github, owner, repo, issue.number, previous.published_at,
-        ))
+        !(await hasCurrentMarker(github, owner, repo, issue.number, since))
       ) {
         candidates.set(issue.number, issue);
         unmarked.add(issue.number);

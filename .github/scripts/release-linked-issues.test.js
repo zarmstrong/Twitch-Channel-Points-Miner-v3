@@ -36,11 +36,22 @@ test('issue selection is open-only and deduplicated', () => {
 });
 
 const BOT = { login: 'github-actions[bot]', type: 'Bot' };
-// Releases 1 and 2; the current cycle starts when 2 was published.
+// Releases 1 and 2; the current cycle starts when 2 was tagged.
 const RELEASES = [
   { tag_name: '2', draft: false, published_at: '2026-02-01T00:00:00Z' },
   { tag_name: '1', draft: false, published_at: '2026-01-01T00:00:00Z' },
 ];
+// Each tag is committed a day before its release is published.
+const TAG_DATES = {
+  1: '2025-12-31T00:00:00Z',
+  2: '2026-01-31T00:00:00Z',
+  3: '2026-02-28T00:00:00Z',
+};
+
+async function getTagCommit({ ref }) {
+  if (!TAG_DATES[ref]) throw new Error(`Unexpected commit ${ref}`);
+  return { data: { commit: { committer: { date: TAG_DATES[ref] } } } };
+}
 
 function marker(createdAt = '2026-02-10T00:00:00Z', user = BOT) {
   return {
@@ -50,7 +61,9 @@ function marker(createdAt = '2026-02-10T00:00:00Z', user = BOT) {
   };
 }
 
-function markingGithub({ pulls, mutations, comments = [], compare, releases = RELEASES }) {
+function markingGithub({
+  pulls, mutations, comments = [], compare, releases = RELEASES, issueState = 'open',
+}) {
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
   const listReleases = () => {};
@@ -78,6 +91,7 @@ function markingGithub({ pulls, mutations, comments = [], compare, releases = RE
       repos: {
         listReleases,
         listPullRequestsAssociatedWithCommit,
+        getCommit: getTagCommit,
         compareCommitsWithBasehead: async (input) => {
           if (!compare) throw new Error('Unexpected compare');
           return compare(input);
@@ -85,6 +99,7 @@ function markingGithub({ pulls, mutations, comments = [], compare, releases = RE
       },
       issues: {
         listComments,
+        get: async () => ({ data: { state: issueState } }),
         addLabels: async (input) => mutations.push(['label', input]),
         createComment: async (input) => mutations.push(['comment', input]),
       },
@@ -269,6 +284,7 @@ test('release orchestration comments, closes, and tolerates an already removed l
       repos: {
         listReleases,
         listPullRequestsAssociatedWithCommit,
+        getCommit: getTagCommit,
         compareCommitsWithBasehead: async () => ({ data: {
           status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
         } }),
@@ -399,6 +415,7 @@ function closingGithub({ issue, issues, comments = [], calls }) {
       repos: {
         listReleases,
         listPullRequestsAssociatedWithCommit,
+        getCommit: getTagCommit,
         compareCommitsWithBasehead: async () => ({ data: {
           status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
         } }),
@@ -601,4 +618,57 @@ test('marking with no published release yet trusts any automation marker', async
     await markWith({ comments: [marker('2025-01-01T00:00:00Z')], releases: [] }, UNLABELLED),
     [],
   );
+});
+
+test('marking falls back to the payload when the old head cannot be compared', async () => {
+  // A force push can leave `before` unknown (404) or unrelated (422).
+  for (const status of [404, 422]) {
+    const mutations = [];
+    await markIssuesAwaitingRelease({
+      github: markingGithub({
+        pulls: pullFor,
+        mutations,
+        compare: async () => {
+          const error = new Error('No common ancestor');
+          error.status = status;
+          throw error;
+        },
+      }),
+      context: {
+        repo: { owner: 'o', repo: 'r' },
+        payload: { before: 'b0', after: 'm1', commits: [{ id: 'm1' }] },
+      },
+      core: { info() {} },
+    });
+    assert.equal(mutations.filter(([kind]) => kind === 'comment').length, 1);
+  }
+});
+
+test('marking still fails on other comparison errors', async () => {
+  const error = new Error('Server error');
+  error.status = 500;
+  await assert.rejects(
+    markIssuesAwaitingRelease({
+      github: markingGithub({ pulls: pullFor, mutations: [], compare: async () => { throw error; } }),
+      context: {
+        repo: { owner: 'o', repo: 'r' },
+        payload: { before: 'b0', after: 'm1', commits: [{ id: 'm1' }] },
+      },
+      core: { info() {} },
+    }),
+    /Server error/,
+  );
+});
+
+test('a fix merged between a release tag and its publication keeps its opt-out', async () => {
+  // Release 2 was tagged on 01-31 and published on 02-01; the fix was merged
+  // and marked in between, so it belongs to release 3's cycle.
+  const between = marker('2026-01-31T12:00:00Z');
+  assert.deepEqual(await markWith({ comments: [between] }, UNLABELLED), []);
+  const calls = await closeWith({ issue: UNLABELLED, comments: [between], tag: '3' });
+  assert.deepEqual(calls, []);
+});
+
+test('marking leaves alone an issue a release closed after it was listed', async () => {
+  assert.deepEqual(await markWith({ issueState: 'closed' }, UNLABELLED), []);
 });
