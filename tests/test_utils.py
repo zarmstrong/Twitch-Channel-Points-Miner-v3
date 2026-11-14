@@ -357,6 +357,90 @@ def test_split_message_lines_cap_leaves_no_trailing_spaces_before_the_notice(
     assert pieces[-1] == "abc" + separator + "[1 more part not sent]"
 
 
+class _FakeConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _fake_create_connection(outcomes, calls):
+    def create_connection(address, timeout=None):
+        calls.append(address)
+        outcome = outcomes[len(calls) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _FakeConnection()
+
+    return create_connection
+
+
+def test_internet_connection_available_stops_at_first_reachable_target(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        utils.socket,
+        "create_connection",
+        _fake_create_connection([None], calls),
+    )
+
+    assert utils.internet_connection_available() is True
+    assert calls == [utils.INTERNET_PROBE_TARGETS[0]]
+
+
+def test_internet_connection_available_falls_back_to_next_target(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        utils.socket,
+        "create_connection",
+        _fake_create_connection([OSError("blocked"), None], calls),
+    )
+
+    assert utils.internet_connection_available() is True
+    assert calls == list(utils.INTERNET_PROBE_TARGETS[:2])
+
+
+def test_internet_connection_available_false_when_every_target_fails(monkeypatch):
+    calls = []
+    failures = [OSError("blocked")] * len(utils.INTERNET_PROBE_TARGETS)
+    monkeypatch.setattr(
+        utils.socket,
+        "create_connection",
+        _fake_create_connection(failures, calls),
+    )
+
+    assert utils.internet_connection_available() is False
+    assert calls == list(utils.INTERNET_PROBE_TARGETS)
+
+
+def test_internet_connection_available_probes_only_explicit_target(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        utils.socket,
+        "create_connection",
+        _fake_create_connection([None], calls),
+    )
+
+    assert utils.internet_connection_available(host="10.0.0.1", port=80) is True
+    assert calls == [("10.0.0.1", 80)]
+
+
+def test_internet_connection_available_leaves_socket_default_timeout_alone(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        utils.socket,
+        "create_connection",
+        _fake_create_connection([None], calls),
+    )
+    before = utils.socket.getdefaulttimeout()
+
+    utils.internet_connection_available(timeout=1)
+
+    assert utils.socket.getdefaulttimeout() == before
+
+
 def test_remove_emoji_strips_emoji_and_keeps_full_block_and_ascii():
     # Boundaries of the class: U+2588 and everything below U+200D stay.
     text = "a" + chr(0x2588) + chr(0x200D) + chr(0x2589) + chr(0x1F600) + "z"
