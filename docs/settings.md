@@ -185,4 +185,6 @@ Allowed values for `chat` are:
 - `ONLINE` Participate in IRC chat while the streamer is online (leave when offline)
 - `OFFLINE` Participate in IRC chat while the streamer is offline (leave when online)
 
+The miner connects to Twitch IRC over TLS on port 6697. If the TLS handshake fails, it doesn't join that chat yet: it retries TLS after 30 seconds, doubling the wait up to 15 minutes, and joins as soon as a handshake succeeds. It never falls back to plaintext port 6667 on its own, because that sends your chat OAuth token unencrypted. On a network that blocks port 6697, set the environment variable `TCPM_ALLOW_PLAINTEXT_IRC=1` to allow plaintext IRC.
+
 Gifted subs are only seen in chats the miner has joined, so `chat` must not be `NEVER` and the gift must arrive while the miner is in that chat. Check the channel's chat rules before turning on `gift_sub_thanks`: emote-only, followers-only or subscriber-only modes and bot rules can block or ban automated messages.

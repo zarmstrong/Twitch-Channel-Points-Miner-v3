@@ -1538,7 +1538,8 @@ class Twitch(object):
         game_campaigns = [
             campaign
             for campaign in self.discovered_open_drop_campaigns or []
-            if self.__slugify(
+            if not self.__is_known_reward_campaign(campaign)
+            and self.__slugify(
                 (campaign.get("game") or {}).get("displayName")
                 or (campaign.get("game") or {}).get("name")
                 or ""
@@ -6990,6 +6991,14 @@ class Twitch(object):
                 continue
             campaign_id = campaign.get("id")
             if campaign_id not in [None, ""]:
+                existing = campaigns_by_id.get(str(campaign_id))
+                if existing is not None:
+                    # Helix records carry no earn-mechanism field; keep the
+                    # reward tag an earlier source set for the same id.
+                    campaign.setdefault(
+                        "_is_reward_campaign",
+                        existing.get("_is_reward_campaign", False),
+                    )
                 campaigns_by_id[str(campaign_id)] = campaign
 
         all_campaigns = list(campaigns_by_id.values())
@@ -7040,7 +7049,7 @@ class Twitch(object):
             campaign_name = campaign.get("name") or "Unknown Campaign"
             campaign_id = campaign.get("id") or "n/a"
             status = campaign.get("status") or "IN_PROGRESS"
-            end_at = campaign.get("endAt") or "n/a"
+            end_at = campaign.get("endAt") or campaign.get("endsAt") or "n/a"
 
             logger.debug(
                 (
@@ -7484,9 +7493,12 @@ class Twitch(object):
         require_twitch_allowlist = channel_query_answered and is_category_tier(streamer)
         campaign_ids = set()
         possible_campaigns = [(campaign, "gist") for campaign in fallback_campaigns]
+        # Purchase-gated reward campaigns are never watch campaigns, and a
+        # game-less one would otherwise match every game below.
         possible_campaigns.extend(
             (campaign, "dashboard")
             for campaign in self.discovered_open_drop_campaigns or []
+            if not self.__is_known_reward_campaign(campaign)
         )
         possible_campaigns.extend(
             (campaign, "authoritative") for campaign in authoritative_campaigns
@@ -7813,7 +7825,7 @@ class Twitch(object):
             {
                 "name": "root_rewardCampaignsAvailableToUser_object",
                 "query": (
-                    "query{"
+                    "query MinerRewardCampaignsRaw{"
                     "rewardCampaignsAvailableToUser{"
                     "id name status startsAt endsAt game{id slug displayName name}"
                     "}"
@@ -8143,6 +8155,17 @@ class Twitch(object):
             return campaigns, response
 
         return campaigns
+
+    def __is_known_reward_campaign(self, campaign) -> bool:
+        """Whether a campaign is known to be subscription/gift/cheer-gated."""
+        if not isinstance(campaign, dict):
+            return False
+        if campaign.get("_is_reward_campaign") is True:
+            return True
+        campaign_id = str(campaign.get("id") or "")
+        return campaign_id != "" and campaign_id in (
+            getattr(self, "reward_campaign_ids", None) or set()
+        )
 
     def __is_open_drop_campaign(self, campaign: dict) -> bool:
         status = str(campaign.get("status") or "").upper()
