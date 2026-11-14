@@ -1994,3 +1994,96 @@ def test_insert_config_item_refuses_to_write_unparseable_config(tmp_path, monkey
         config_editor._set_dict_items(config, "VALUES", {"c": "3"})
 
     assert config.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "provider, module_name",
+    [
+        ("telegram", "Telegram"),
+        ("discord", "Discord"),
+        ("webhook", "Webhook"),
+        ("email", "Email"),
+        ("matrix", "Matrix"),
+        ("pushover", "Pushover"),
+        ("gotify", "Gotify"),
+        ("ntfy", "Ntfy"),
+    ],
+)
+def test_notification_constructor_required_matches_signatures(provider, module_name):
+    import importlib
+    import inspect
+
+    module = importlib.import_module(f"TwitchChannelPointsMiner.classes.{module_name}")
+    parameters = inspect.signature(getattr(module, module_name)).parameters
+    required = {
+        name
+        for name, parameter in parameters.items()
+        if parameter.default is inspect.Parameter.empty
+    }
+
+    assert config_editor.NOTIFICATION_CONSTRUCTOR_REQUIRED[provider] == required
+
+
+@pytest.mark.parametrize(
+    "provider, values, missing",
+    [
+        (
+            "webhook",
+            {"endpoint": "https://hooks.example/x", "events": ["DROP_CLAIM"]},
+            "method",
+        ),
+        (
+            "pushover",
+            {"userkey": "u", "token": "t", "events": ["DROP_CLAIM"], "priority": 0},
+            "sound",
+        ),
+        (
+            "gotify",
+            {"endpoint": "https://gotify.example", "events": ["DROP_CLAIM"]},
+            "priority",
+        ),
+        ("ntfy", {"topic": "miner-alerts"}, "events"),
+    ],
+)
+def test_enabling_notification_requires_constructor_arguments(
+    tmp_path, provider, values, missing
+):
+    config = tmp_path / "config.py"
+    write_config(config)
+    original = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match=f"{provider} requires: {missing}"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": provider,
+                "values": {"enabled": True, **values},
+            },
+        )
+
+    assert config.read_text(encoding="utf-8") == original
+
+
+def test_enabled_webhook_saved_from_dashboard_loads(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "webhook",
+            "values": {
+                "enabled": True,
+                "endpoint": "https://hooks.example/x",
+                "method": "POST",
+                "events": [],
+            },
+        },
+    )
+
+    webhook = _load_config(config).MINER_CONFIG["logger_settings"].webhook
+    assert webhook.endpoint == "https://hooks.example/x"
+    assert webhook.method == "POST"
+    assert webhook.events == []
