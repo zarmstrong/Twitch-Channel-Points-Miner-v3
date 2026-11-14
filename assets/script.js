@@ -89,12 +89,12 @@ var options = {
             w
         }) => {
             return (`<div class="apexcharts-active">
-                <div class="apexcharts-tooltip-title">${w.globals.seriesNames[seriesIndex]}</div>
+                <div class="apexcharts-tooltip-title">${escapeHtml(String(w.globals.seriesNames[seriesIndex] ?? ''))}</div>
                 <div class="apexcharts-tooltip-series-group apexcharts-active" style="order: 1; display: flex; padding-bottom: 0px !important;">
                     <div class="apexcharts-tooltip-text">
                         <div class="apexcharts-tooltip-y-group">
-                            <span class="apexcharts-tooltip-text-label"><b>Points</b>: ${series[seriesIndex][dataPointIndex]}</span><br>
-                            <span class="apexcharts-tooltip-text-label"><b>Reason</b>: ${w.globals.seriesZ[seriesIndex][dataPointIndex] ? w.globals.seriesZ[seriesIndex][dataPointIndex] : ''}</span>
+                            <span class="apexcharts-tooltip-text-label"><b>Points</b>: ${escapeHtml(String(series[seriesIndex][dataPointIndex] ?? ''))}</span><br>
+                            <span class="apexcharts-tooltip-text-label"><b>Reason</b>: ${w.globals.seriesZ[seriesIndex][dataPointIndex] ? escapeHtml(String(w.globals.seriesZ[seriesIndex][dataPointIndex])) : ''}</span>
                         </div>
                     </div>
                 </div>
