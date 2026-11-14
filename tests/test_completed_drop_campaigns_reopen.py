@@ -184,3 +184,55 @@ def test_inventory_read_reopens_campaign_and_forgets_its_badge_signature():
     assert twitch.completed_badge_campaign_signatures_or_cached(inventory) == {
         twitch.completed_badge_campaign_signatures_by_id["campaign-2"]
     }
+
+
+def test_reopened_campaign_forgets_a_signature_recorded_without_its_id():
+    # A completion read while Twitch errored on the campaign ID leaves a
+    # signature with no ID; the reopened campaign's own fields still find it.
+    nameless = completed_record("campaign-1", "Cape")
+    del nameless["id"]
+    del nameless["campaign"]["id"]
+    reopened = in_progress_campaign(
+        "campaign-1", [drop("d1", claimed=True), drop("d2", minutes=3)]
+    )
+    reopened.update(
+        name="Cape", endAt="2099-01-01T00:00:00Z", game={"displayName": "Minecraft"}
+    )
+    twitch = inventory_twitch(
+        [
+            {"completedRewardCampaigns": [nameless], "dropCampaignsInProgress": []},
+            {"completedRewardCampaigns": [], "dropCampaignsInProgress": [reopened]},
+        ]
+    )
+    twitch.completed_drop_campaigns = {"campaign-1"}
+
+    twitch._Twitch__get_inventory()
+    assert len(twitch.completed_badge_campaign_signature_cache) == 1
+    assert twitch.completed_badge_campaign_signatures_by_id == {}
+
+    twitch._Twitch__get_inventory()
+
+    assert twitch.completed_drop_campaigns == set()
+    assert twitch.completed_badge_campaign_signature_cache == set()
+
+
+def test_inventory_read_updates_completions_under_one_lock(monkeypatch):
+    # Another read must not run between this read's merge and its signature
+    # recording, or it could restore a signature this read forgot.
+    twitch = inventory_twitch(
+        [{"completedRewardCampaigns": [], "dropCampaignsInProgress": []}]
+    )
+    held = []
+    record = Twitch._Twitch__record_completed_badge_campaigns
+
+    def checking_record(self, inventory):
+        held.append(self.inventory_completions_lock.locked())
+        return record(self, inventory)
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__record_completed_badge_campaigns", checking_record
+    )
+
+    twitch._Twitch__get_inventory()
+
+    assert held == [True]
