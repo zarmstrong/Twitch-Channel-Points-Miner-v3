@@ -92,8 +92,12 @@ async function markPullIssues(github, owner, repo, pull) {
 async function markIssuesAwaitingRelease({ github, context, core }) {
   // Runs on push to the default branch, so the merged PR comes from its merge commit.
   const { owner, repo } = context.repo;
-  const commitShas = (context.payload.commits || []).map((commit) => commit.id);
-  if (!commitShas.length && context.payload.after) commitShas.push(context.payload.after);
+  // The payload's commit list can be truncated, so always include the pushed head.
+  const shas = new Set((context.payload.commits || []).map((commit) => commit.id));
+  if (context.payload.after && !/^0+$/.test(context.payload.after)) {
+    shas.add(context.payload.after);
+  }
+  const commitShas = [...shas];
 
   const associations = {};
   for (const sha of commitShas) {

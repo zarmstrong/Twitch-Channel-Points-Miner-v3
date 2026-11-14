@@ -100,6 +100,23 @@ test('marking finds the merged PR from the pushed merge commit', async () => {
   assert.match(mutations[0][1].body, /The fix in #9 was merged/);
 });
 
+test('marking includes the pushed head when the commit list is truncated', async () => {
+  const mutations = [];
+  await markIssuesAwaitingRelease({
+    github: markingGithub({
+      pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+      mutations,
+    }),
+    context: {
+      repo: { owner: 'o', repo: 'r' },
+      payload: { after: 'abc', commits: [{ id: 'older' }] },
+    },
+    core: { info() {} },
+  });
+  assert.equal(mutations.length, 1);
+  assert.match(mutations[0][1].body, /The fix in #9 was merged/);
+});
+
 test('marking skips direct pushes and Release Please merges', async () => {
   for (const pulls of [
     [],
