@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.21.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.21.0...3.21.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **analytics:** add Subresource Integrity hashes to the dashboard's CDN scripts and stylesheets ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** blame another program only when the dashboard port is actually in use ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** escape series names and reasons in the chart tooltip ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** harden the dashboard against DNS rebinding, cross-site requests and path traversal ([#303](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/303)) ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **chat:** keep a removed streamer's chat from rejoining, including after the miner stops ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** let a stopped chat leave promptly while the TLS probe or IRC client setup is still running ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** never send the IRC token over plaintext unless TCPM_ALLOW_PLAINTEXT_IRC is set ([#302](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/302)) ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911)), closes [#264](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/264)
+* **chat:** rejoin a chat whose thread ended instead of raising "threads can only be started once" ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** retry IRC TLS with backoff and join once a handshake succeeds instead of skipping the chat ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **config:** require every constructor argument when enabling a notifier from the dashboard ([#304](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/304)) ([7809377](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7809377851f5b2a0e2e84b91250c8e0e20c2f624))
+* **config:** use byte columns and real line breaks when migrating config.py ([#317](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/317)) ([df59189](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/df59189cef4bcd018ef9cf59b90f5a483b913698))
+
 ## [3.21.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.20.0...3.21.0) (2026-11-14)
 
 
