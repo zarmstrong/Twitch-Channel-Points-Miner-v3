@@ -65,6 +65,13 @@ class _FakePost:
         return [call for call in self.calls if call[0] == LOGIN_URL]
 
 
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(matrix_module.time, "monotonic", lambda: now[0])
+    return now
+
+
 @pytest.fixture
 def fake_post(monkeypatch):
     def install(*results):
@@ -104,7 +111,7 @@ def test_first_send_logs_in_and_later_sends_reuse_the_token(fake_post):
     assert post.calls[2][1]["headers"] == {"Authorization": "Bearer tok-1"}
 
 
-def test_login_network_error_is_reported_and_retried_on_next_send(fake_post):
+def test_login_network_error_is_reported_and_retried_after_a_wait(fake_post, clock):
     post = fake_post(
         requests.ConnectionError("dns failure"),
         _response(200, {"access_token": "tok-2"}),
@@ -115,7 +122,13 @@ def test_login_network_error_is_reported_and_retried_on_next_send(fake_post):
     success, reason = matrix.send("hello", Events.STREAMER_ONLINE)
     assert success is False
     assert "Could not connect to Matrix" in reason
+    assert "retried in 60 seconds" in reason
 
+    # Within the wait the next send returns the same reason without a request.
+    assert matrix.send("hello", Events.STREAMER_ONLINE) == (False, reason)
+    assert len(post.calls) == 1
+
+    clock[0] += 60
     assert matrix.send("hello", Events.STREAMER_ONLINE) == (True, None)
     assert len(post.login_calls()) == 2
 
@@ -165,7 +178,7 @@ def test_login_other_status_reports_http_code(fake_post):
 
     assert success is False
     assert "HTTP 503" in reason
-    assert "retried with the next notification" in reason
+    assert "retried in 60 seconds" in reason
 
 
 def test_login_non_json_body_without_token_is_not_a_crash(fake_post):
@@ -174,7 +187,8 @@ def test_login_non_json_body_without_token_is_not_a_crash(fake_post):
     success, reason = _matrix().send("hello", Events.STREAMER_ONLINE)
 
     assert success is False
-    assert "HTTP 200" in reason
+    assert "returned no access token (HTTP 200)" in reason
+    assert "homeserver address" in reason
 
 
 def test_event_not_enabled_makes_no_request(fake_post):
@@ -186,7 +200,7 @@ def test_event_not_enabled_makes_no_request(fake_post):
     assert post.calls == []
 
 
-def test_message_401_clears_token_so_next_send_logs_in_again(fake_post):
+def test_message_401_logs_in_again_and_resends_the_message(fake_post):
     post = fake_post(
         _response(200, {"access_token": "old"}),
         _response(401, {}),
@@ -195,14 +209,81 @@ def test_message_401_clears_token_so_next_send_logs_in_again(fake_post):
     )
     matrix = _matrix()
 
+    assert matrix.send("first", Events.STREAMER_ONLINE) == (True, None)
+
+    assert len(post.login_calls()) == 2
+    assert post.calls[1][1]["headers"] == {"Authorization": "Bearer old"}
+    assert post.calls[-1][1]["headers"] == {"Authorization": "Bearer new"}
+    assert post.calls[-1][1]["json"]["body"] == "first"
+    assert matrix.access_token == "new"
+
+
+def test_message_401_with_the_new_token_too_is_a_failure(fake_post):
+    post = fake_post(
+        _response(200, {"access_token": "old"}),
+        _response(401, {}),
+        _response(200, {"access_token": "new"}),
+        _response(401, {}),
+    )
+    matrix = _matrix()
+
     success, reason = matrix.send("first", Events.STREAMER_ONLINE)
+
     assert success is False
     assert "rejected the configured credentials" in reason
     assert matrix.access_token is None
+    assert len(post.calls) == 4
 
-    assert matrix.send("second", Events.STREAMER_ONLINE) == (True, None)
-    assert len(post.login_calls()) == 2
-    assert post.calls[-1][1]["headers"] == {"Authorization": "Bearer new"}
+
+def test_login_backoff_doubles_up_to_an_hour_and_resets_after_success(fake_post, clock):
+    failures = [_response(403, {}) for _ in range(8)]
+    post = fake_post(
+        *failures, _response(200, {"access_token": "tok"}), _response(200, {})
+    )
+    matrix = _matrix()
+
+    delays = []
+    for _ in range(8):
+        success, reason = matrix.send("hello", Events.STREAMER_ONLINE)
+        assert success is False
+        assert "username and password" in reason
+        delays.append(matrix.login_retry_at - clock[0])
+        clock[0] = matrix.login_retry_at
+
+    assert delays == [60, 120, 240, 480, 960, 1920, 3600, 3600]
+    assert "retried in 60 minutes" in reason
+    assert len(post.login_calls()) == 8
+
+    assert matrix.send("hello", Events.STREAMER_ONLINE) == (True, None)
+    assert matrix.login_retry_at is None
+    assert matrix.login_retry_delay is None
+
+
+def test_login_429_waits_for_retry_after(fake_post, clock):
+    limited = _response(429, {"errcode": "M_LIMIT_EXCEEDED"})
+    limited.headers = {"Retry-After": "300"}
+    post = fake_post(limited, _response(200, {"access_token": "tok"}))
+    matrix = _matrix()
+
+    success, reason = matrix.send("hello", Events.STREAMER_ONLINE)
+
+    assert success is False
+    assert "rate limited" in reason
+    assert "retried in 5 minutes" in reason
+    clock[0] += 299
+    assert matrix.send("hello", Events.STREAMER_ONLINE)[0] is False
+    assert len(post.calls) == 1
+
+
+def test_repr_hides_the_password_and_token(fake_post):
+    matrix = _matrix()
+    matrix.access_token = "tok-secret"
+
+    text = repr(matrix)
+
+    assert "secret" not in text
+    assert "tok-secret" not in text
+    assert HOMESERVER in text
 
 
 def test_configured_matrix_without_token_logs_failure_warning(caplog, fake_post):
@@ -226,6 +307,9 @@ def test_matrix_placeholder_check(fake_post):
     assert placeholder(_matrix()) is False
     assert placeholder(_matrix_with(room_id="...", password="secret")) is True
     assert placeholder(_matrix_with(room_id="!room:x", password="...")) is True
+    # The template the config migration writes.
+    assert placeholder(_matrix_with(room_id="ROOM", password="PASSWORD")) is True
+    assert placeholder(_matrix_with(room_id="!room:x", password="PASSWORD")) is True
 
 
 def _matrix_with(room_id, password):
