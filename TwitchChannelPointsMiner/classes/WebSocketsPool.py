@@ -8,6 +8,7 @@ from threading import Lock, RLock, Thread, Timer
 
 from dateutil import parser
 
+from TwitchChannelPointsMiner.classes.CopyOnWriteList import CopyOnWriteList
 from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoal
 from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPrediction
 from TwitchChannelPointsMiner.classes.entities.Message import Message
@@ -28,7 +29,8 @@ class WebSocketsPool:
     __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
 
     def __init__(self, twitch, streamers, events_predictions):
-        self.ws = []
+        # Read without topic_lock by the main loop's checks; see CopyOnWriteList.
+        self.ws = CopyOnWriteList()
         self.twitch = twitch
         self.streamers = streamers
         self.events_predictions = events_predictions
