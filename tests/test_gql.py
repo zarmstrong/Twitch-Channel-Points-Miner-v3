@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from threading import Barrier, BrokenBarrierError, Event, Thread
+from threading import Condition, Event, Lock, Thread
 
 import pytest
 import requests
@@ -4684,33 +4684,50 @@ def test_drops_dashboard_withheld_streak_is_android_only(
 def test_drops_dashboard_android_concurrent_calls_warn_once_without_losing_counts(
     monkeypatch, caplog
 ):
-    # Two threads reach the limit together. Each read of the streak waits
-    # for the other thread to read it too, so without the lock both read 2,
-    # both write 3 and both warn. With the lock the second thread can't read
-    # until the first is done, so the wait times out and the counts are 3, 4.
+    # Two threads reach the limit together. The first read of the streak
+    # holds its thread until the other thread either reads the streak too
+    # (no lock: both read 2, both write 3 and both warn) or reaches the lock
+    # (it then reads only after the first thread is done: 3, then 4). Not
+    # seeing either within the timeout fails the test.
     monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
-    rendezvous = Barrier(2, timeout=0.5)
+    arrivals = Condition()
+    seen = {"reads": 0, "lock_entries": 0}
 
-    class RendezvousTwitch(Twitch):
+    def arrive(kind):
+        with arrivals:
+            seen[kind] += 1
+            arrivals.notify_all()
+            return seen[kind]
+
+    class SignallingLock:
+        def __init__(self):
+            self.lock = Lock()
+
+        def __enter__(self):
+            arrive("lock_entries")
+            self.lock.acquire()
+
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    class SignallingTwitch(Twitch):
         @property
         def drops_dashboard_withheld_streak(self):
             value = self._streak
-            # Only the first read in each thread waits; once the barrier
-            # passes or times out it stays broken.
-            if not rendezvous.broken:
-                try:
-                    rendezvous.wait()
-                except BrokenBarrierError:
-                    pass
-                else:
-                    rendezvous.abort()
+            if arrive("reads") == 1:
+                with arrivals:
+                    if not arrivals.wait_for(
+                        lambda: seen["reads"] > 1 or seen["lock_entries"] > 1,
+                        timeout=5,
+                    ):
+                        raise AssertionError("the second call never arrived")
             return value
 
         @drops_dashboard_withheld_streak.setter
         def drops_dashboard_withheld_streak(self, value):
             self._streak = value
 
-    twitch = RendezvousTwitch.__new__(RendezvousTwitch)
+    twitch = SignallingTwitch.__new__(SignallingTwitch)
     twitch.campaign_lookup_unavailable = False
     twitch.unevaluated_category_slugs = set()
     twitch.gql = SimpleNamespace(
@@ -4720,6 +4737,7 @@ def test_drops_dashboard_android_concurrent_calls_warn_once_without_losing_count
     )
     twitch.twitch_login = SimpleNamespace(client_id=ANDROID_CLIENT_ID)
     twitch.log_drop_checks = False
+    twitch.drops_dashboard_withheld_lock = SignallingLock()
     twitch._streak = 2
     failures = []
 
@@ -4730,7 +4748,8 @@ def test_drops_dashboard_android_concurrent_calls_warn_once_without_losing_count
             failures.append(error)
 
     with caplog.at_level(logging.DEBUG):
-        threads = [Thread(target=call) for _ in range(2)]
+        # Daemon threads, so a deadlock can't keep the test run alive.
+        threads = [Thread(target=call, daemon=True) for _ in range(2)]
         for thread in threads:
             thread.start()
         for thread in threads:
