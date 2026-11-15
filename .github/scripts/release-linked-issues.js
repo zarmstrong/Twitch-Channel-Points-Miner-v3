@@ -168,8 +168,23 @@ async function markIssuesAwaitingRelease({ github, context, core }) {
   const latest = (await publishedReleases(github, owner, repo))[0];
   const since = latest ? await releaseCutoff(github, owner, repo, latest) : null;
   for (const pull of pulls) {
+    // A rerun of an old push can come after the release that shipped it.
+    // Its marker then predates `since`, so without this check an issue kept
+    // open by removing the label would be marked again.
+    if (latest && (await releaseContains(github, owner, repo, latest.tag_name, pull.merge_commit_sha))) {
+      core.info(`PR #${pull.number} already shipped in ${latest.tag_name}; not marking its issues`);
+      continue;
+    }
     await markPullIssues(github, owner, repo, pull, since);
   }
+}
+
+// True when `sha` is part of the history of `tag`.
+async function releaseContains(github, owner, repo, tag, sha) {
+  const { data } = await github.rest.repos.compareCommitsWithBasehead({
+    owner, repo, basehead: `${sha}...${tag}`, per_page: 1, page: 1,
+  });
+  return data.status === 'ahead' || data.status === 'identical';
 }
 
 // Published releases, newest first.

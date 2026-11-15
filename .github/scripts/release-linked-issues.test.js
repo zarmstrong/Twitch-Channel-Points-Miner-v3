@@ -63,7 +63,9 @@ function marker(createdAt = '2026-02-10T00:00:00Z', user = BOT) {
 
 function markingGithub({
   pulls, mutations, comments = [], compare, releases = RELEASES, issueState = 'open',
+  released = [],
 }) {
+  const tags = new Set(releases.map((release) => release.tag_name));
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
   const listReleases = () => {};
@@ -93,6 +95,11 @@ function markingGithub({
         listPullRequestsAssociatedWithCommit,
         getCommit: getTagCommit,
         compareCommitsWithBasehead: async (input) => {
+          // `sha...tag` asks whether a release already contains a commit.
+          const [base, head] = input.basehead.split('...');
+          if (tags.has(head)) {
+            return { data: { status: released.includes(base) ? 'ahead' : 'behind' } };
+          }
           if (!compare) throw new Error('Unexpected compare');
           return compare(input);
         },
@@ -671,4 +678,37 @@ test('a fix merged between a release tag and its publication keeps its opt-out',
 
 test('marking leaves alone an issue a release closed after it was listed', async () => {
   assert.deepEqual(await markWith({ issueState: 'closed' }, UNLABELLED), []);
+});
+
+test('a rerun after the release that shipped the fix keeps the opt-out', async () => {
+  // Marked before release 2, label removed by hand, then release 2 shipped
+  // the fix and the original push was rerun.
+  const shipped = marker('2026-01-20T00:00:00Z');
+  assert.deepEqual(await markWith({ comments: [shipped], released: ['abc'] }, UNLABELLED), []);
+  // A fix the latest release doesn't contain is still marked.
+  assert.deepEqual(await markWith({ comments: [shipped] }, UNLABELLED), ['label', 'comment']);
+});
+
+test('marking checks whether the latest release contains the merge commit', async () => {
+  const compared = [];
+  const mutations = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-01-01', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+    released: ['abc'],
+  });
+  const compareCommits = github.rest.repos.compareCommitsWithBasehead;
+  github.rest.repos.compareCommitsWithBasehead = async (input) => {
+    compared.push(input.basehead);
+    return compareCommits(input);
+  };
+  const info = [];
+  await markIssuesAwaitingRelease({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc', commits: [{ id: 'abc' }] } },
+    core: { info: (message) => info.push(message) },
+  });
+  assert.deepEqual(compared, ['abc...2']);
+  assert.deepEqual(mutations, []);
+  assert.match(info.at(-1), /PR #9 already shipped in 2/);
 });
