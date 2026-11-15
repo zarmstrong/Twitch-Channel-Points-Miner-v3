@@ -409,8 +409,11 @@ test('marking skips the compare for a new branch or deleted head', async () => {
   }
 });
 
-function closingGithub({ issue, issues, comments = [], calls, released = SHIPPED }) {
+function closingGithub({
+  issue, issues, comments = [], events = [], calls, released = SHIPPED,
+}) {
   const tags = new Set(['1', '2', '3']);
+  const listEvents = () => {};
   const listReleases = () => {};
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
@@ -432,6 +435,7 @@ function closingGithub({ issue, issues, comments = [], calls, released = SHIPPED
         return [{ number: 9, merged_at: '2026-01-15T00:00:00Z', merge_commit_sha: 'abc', labels: [] }];
       }
       if (method === listComments) return comments;
+      if (method === listEvents) return events;
       throw new Error('Unexpected paginated method');
     },
     rest: {
@@ -446,6 +450,7 @@ function closingGithub({ issue, issues, comments = [], calls, released = SHIPPED
       pulls: { get: getPull },
       issues: {
         listComments,
+        listEvents,
         createComment: async (input) => calls.push(['comment', input]),
         update: async (input) => calls.push(['update', input]),
         removeLabel: async (input) => {
@@ -749,4 +754,36 @@ test('a marker that names no PR falls back to the tag time', async () => {
     await markWith({ comments: [unnamed('2026-01-20T00:00:00Z')] }, UNLABELLED),
     ['label', 'comment'],
   );
+});
+
+function released(tag, createdAt, user = BOT) {
+  return { body: `Released in ${tag}.`, user, created_at: createdAt };
+}
+
+test('a rerun of release closing leaves open an issue reopened after it was closed', async () => {
+  // Release 2 closed the never-marked issue, then a maintainer reopened it.
+  const calls = await closeWith({
+    issue: UNLABELLED,
+    comments: [released('2', '2026-02-01T00:05:00Z')],
+    events: [
+      { event: 'closed', created_at: '2026-02-01T00:05:01Z' },
+      { event: 'reopened', created_at: '2026-02-03T00:00:00Z' },
+    ],
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('a rerun of release closing retries a close that failed after its comment', async () => {
+  const comments = [released('2', '2026-02-01T00:05:00Z')];
+  // An earlier reopen, before this release's comment, doesn't count.
+  const events = [{ event: 'reopened', created_at: '2026-01-10T00:00:00Z' }];
+  const calls = await closeWith({ issue: UNLABELLED, comments, events });
+  assert.deepEqual(calls.map(([kind]) => kind), ['update', 'remove']);
+  // Only automation's release comment counts.
+  const forged = await closeWith({
+    issue: UNLABELLED,
+    comments: [released('2', '2026-02-01T00:05:00Z', { login: 'someone', type: 'User' })],
+    events: [{ event: 'reopened', created_at: '2026-02-03T00:00:00Z' }],
+  });
+  assert.deepEqual(forged.map(([kind]) => kind), ['update', 'remove']);
 });

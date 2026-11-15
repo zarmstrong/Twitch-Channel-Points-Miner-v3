@@ -82,12 +82,35 @@ async function hasComment(github, owner, repo, issueNumber, marker) {
   return comments.some((comment) => comment.body && comment.body.includes(marker));
 }
 
+function isAutomation(user) {
+  return user?.login === AUTOMATION_LOGIN && user?.type === 'Bot';
+}
+
 function isMarkerComment(comment) {
   return (
     typeof comment.body === 'string' &&
     comment.body.startsWith(AWAITING_MARKER) &&
-    comment.user?.login === AUTOMATION_LOGIN &&
-    comment.user?.type === 'Bot'
+    isAutomation(comment.user)
+  );
+}
+
+// True when this release already closed the issue and someone reopened it
+// afterwards, so a rerun of release closing must leave it open. When closing
+// failed after the release comment was posted, there is no reopen to find
+// and the rerun closes it.
+async function reopenedAfterRelease(github, owner, repo, issueNumber, releaseComment) {
+  const comments = await github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  const released = comments.find(
+    (comment) => comment.body === releaseComment && isAutomation(comment.user),
+  );
+  if (!released) return false;
+  const events = await github.paginate(github.rest.issues.listEvents, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  return events.some(
+    (event) => event.event === 'reopened' && new Date(event.created_at) >= new Date(released.created_at),
   );
 }
 
@@ -291,7 +314,8 @@ async function closeReleasedIssues({ github, context, core, tag }) {
   // An issue is closed when it carries the label, or when marking never ran
   // for it in this release cycle: a push skipped with [skip ci], or one still
   // being marked when the release was published. An issue marked in this
-  // cycle whose label was removed by hand stays open.
+  // cycle whose label was removed by hand stays open, and so does one that
+  // was reopened after this release closed it.
   const candidates = new Map();
   const unmarked = new Set();
   for (const pull of pulls) {
@@ -302,7 +326,8 @@ async function closeReleasedIssues({ github, context, core, tag }) {
         candidates.set(issue.number, issue);
       } else if (
         issue.state === 'OPEN' &&
-        !(await hasCurrentMarker(github, owner, repo, issue.number, cycle))
+        !(await hasCurrentMarker(github, owner, repo, issue.number, cycle)) &&
+        !(await reopenedAfterRelease(github, owner, repo, issue.number, `Released in ${tag}.`))
       ) {
         candidates.set(issue.number, issue);
         unmarked.add(issue.number);
