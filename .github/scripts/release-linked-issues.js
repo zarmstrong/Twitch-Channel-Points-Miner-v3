@@ -5,6 +5,8 @@ const AWAITING_MARKER = '<!-- awaiting-release -->';
 // Marker comments are workflow state only when this automation wrote them.
 const AUTOMATION_LOGIN = 'github-actions[bot]';
 const RELEASE_LABELS = new Set(['autorelease: pending', 'autorelease: tagged']);
+// Marker comments name the PR whose merge marked the issue.
+const MARKER_PULL = /^The fix in #(\d+) was merged/m;
 
 function isReleasePleasePullRequest(labels) {
   return labels.some((label) => RELEASE_LABELS.has(label));
@@ -80,33 +82,66 @@ async function hasComment(github, owner, repo, issueNumber, marker) {
   return comments.some((comment) => comment.body && comment.body.includes(marker));
 }
 
-function isMarkerComment(comment, since) {
+function isMarkerComment(comment) {
   return (
     typeof comment.body === 'string' &&
     comment.body.startsWith(AWAITING_MARKER) &&
     comment.user?.login === AUTOMATION_LOGIN &&
-    comment.user?.type === 'Bot' &&
-    (!since || new Date(comment.created_at) > new Date(since))
+    comment.user?.type === 'Bot'
   );
 }
 
-// True when automation marked the issue in the current release cycle, i.e.
-// after `since`, the commit time of the last release's tag. A marker from an
-// earlier cycle belongs to a fix that has already shipped.
-async function hasCurrentMarker(github, owner, repo, issueNumber, since) {
+// A release cycle follows the release `tag`. `since` is the commit time of
+// that tag, and `pulls` caches merge commits by PR number.
+async function releaseCycle(github, owner, repo, release) {
+  if (!release) return null;
+  return {
+    tag: release.tag_name,
+    since: await releaseCutoff(github, owner, repo, release),
+    pulls: new Map(),
+  };
+}
+
+// A marker belongs to the current cycle when the release the cycle follows
+// doesn't contain the fix it names. Timing can't tell: a marking run can
+// finish after the tag for a fix merged before it. A marker that names no
+// merged PR falls back to being posted after the tag's commit.
+async function isCurrentMarker(github, owner, repo, comment, cycle) {
+  if (!cycle) return true;
+  const match = MARKER_PULL.exec(comment.body);
+  if (match) {
+    const number = Number(match[1]);
+    if (!cycle.pulls.has(number)) {
+      const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+      cycle.pulls.set(number, pull.merged_at ? pull.merge_commit_sha : null);
+    }
+    const sha = cycle.pulls.get(number);
+    if (sha) return !(await releaseContains(github, owner, repo, cycle.tag, sha));
+  }
+  return new Date(comment.created_at) > new Date(cycle.since);
+}
+
+// True when automation marked the issue in the current release cycle. A
+// marker from an earlier cycle belongs to a fix that has already shipped.
+async function hasCurrentMarker(github, owner, repo, issueNumber, cycle) {
   const comments = await github.paginate(github.rest.issues.listComments, {
     owner, repo, issue_number: issueNumber, per_page: 100,
   });
-  return comments.some((comment) => isMarkerComment(comment, since));
+  for (const comment of comments) {
+    if (isMarkerComment(comment) && (await isCurrentMarker(github, owner, repo, comment, cycle))) {
+      return true;
+    }
+  }
+  return false;
 }
 
-async function markPullIssues(github, owner, repo, pull, since) {
+async function markPullIssues(github, owner, repo, pull, cycle) {
   const issues = uniqueOpenIssues(await linkedIssues(github, owner, repo, pull.number));
   for (const issue of issues) {
     // The label goes on before the marker comment, so a current marker
     // without the label means a maintainer removed it to keep the issue
     // open: a rerun must not put it back.
-    if (await hasCurrentMarker(github, owner, repo, issue.number, since)) continue;
+    if (await hasCurrentMarker(github, owner, repo, issue.number, cycle)) continue;
     // A release may have closed the issue since it was listed above.
     const { data: current } = await github.rest.issues.get({
       owner, repo, issue_number: issue.number,
@@ -166,16 +201,16 @@ async function markIssuesAwaitingRelease({ github, context, core }) {
     return;
   }
   const latest = (await publishedReleases(github, owner, repo))[0];
-  const since = latest ? await releaseCutoff(github, owner, repo, latest) : null;
+  const cycle = await releaseCycle(github, owner, repo, latest);
   for (const pull of pulls) {
     // A rerun of an old push can come after the release that shipped it.
-    // Its marker then predates `since`, so without this check an issue kept
-    // open by removing the label would be marked again.
+    // Its marker then belongs to an earlier cycle, so without this check an
+    // issue kept open by removing the label would be marked again.
     if (latest && (await releaseContains(github, owner, repo, latest.tag_name, pull.merge_commit_sha))) {
       core.info(`PR #${pull.number} already shipped in ${latest.tag_name}; not marking its issues`);
       continue;
     }
-    await markPullIssues(github, owner, repo, pull, since);
+    await markPullIssues(github, owner, repo, pull, cycle);
   }
 }
 
@@ -241,7 +276,7 @@ async function closeReleasedIssues({ github, context, core, tag }) {
   const previous = await previousPublishedRelease(github, owner, repo, tag);
   if (!previous) throw new Error(`Cannot determine a previous published release before ${tag}`);
 
-  const since = await releaseCutoff(github, owner, repo, previous);
+  const cycle = await releaseCycle(github, owner, repo, previous);
   const commitShas = await commitsBetween(github, owner, repo, previous.tag_name, tag);
   const associations = {};
   for (const sha of commitShas) {
@@ -267,7 +302,7 @@ async function closeReleasedIssues({ github, context, core, tag }) {
         candidates.set(issue.number, issue);
       } else if (
         issue.state === 'OPEN' &&
-        !(await hasCurrentMarker(github, owner, repo, issue.number, since))
+        !(await hasCurrentMarker(github, owner, repo, issue.number, cycle))
       ) {
         candidates.set(issue.number, issue);
         unmarked.add(issue.number);

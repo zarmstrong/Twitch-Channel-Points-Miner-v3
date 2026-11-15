@@ -53,17 +53,34 @@ async function getTagCommit({ ref }) {
   return { data: { commit: { committer: { date: TAG_DATES[ref] } } } };
 }
 
-function marker(createdAt = '2026-02-10T00:00:00Z', user = BOT) {
+// Merge commits by PR number. #9 is the fix being marked or released; #5 is
+// an earlier fix that release 2 shipped.
+const PULL_SHAS = { 5: 'old', 9: 'abc' };
+const SHIPPED = ['old'];
+
+async function getPull({ pull_number: number }) {
+  if (!PULL_SHAS[number]) throw new Error(`Unexpected PR ${number}`);
+  return { data: { number, merged_at: '2026-01-15T00:00:00Z', merge_commit_sha: PULL_SHAS[number] } };
+}
+
+function marker(createdAt = '2026-02-10T00:00:00Z', user = BOT, pull = 9) {
   return {
-    body: '<!-- awaiting-release -->\nThe fix in #9 was merged and is awaiting release.',
+    body: `<!-- awaiting-release -->\nThe fix in #${pull} was merged and is awaiting release.`,
     user,
     created_at: createdAt,
   };
 }
 
+// Answers `sha...tag`, which asks whether a release contains a commit.
+function containment(basehead, tags, released) {
+  const [base, head] = basehead.split('...');
+  if (!tags.has(head) || tags.has(base)) return null;
+  return { data: { status: released.includes(base) ? 'ahead' : 'behind' } };
+}
+
 function markingGithub({
   pulls, mutations, comments = [], compare, releases = RELEASES, issueState = 'open',
-  released = [],
+  released = SHIPPED,
 }) {
   const tags = new Set(releases.map((release) => release.tag_name));
   const listPullRequestsAssociatedWithCommit = () => {};
@@ -95,15 +112,13 @@ function markingGithub({
         listPullRequestsAssociatedWithCommit,
         getCommit: getTagCommit,
         compareCommitsWithBasehead: async (input) => {
-          // `sha...tag` asks whether a release already contains a commit.
-          const [base, head] = input.basehead.split('...');
-          if (tags.has(head)) {
-            return { data: { status: released.includes(base) ? 'ahead' : 'behind' } };
-          }
+          const contained = containment(input.basehead, tags, released);
+          if (contained) return contained;
           if (!compare) throw new Error('Unexpected compare');
           return compare(input);
         },
       },
+      pulls: { get: getPull },
       issues: {
         listComments,
         get: async () => ({ data: { state: issueState } }),
@@ -394,7 +409,8 @@ test('marking skips the compare for a new branch or deleted head', async () => {
   }
 });
 
-function closingGithub({ issue, issues, comments = [], calls }) {
+function closingGithub({ issue, issues, comments = [], calls, released = SHIPPED }) {
+  const tags = new Set(['1', '2', '3']);
   const listReleases = () => {};
   const listPullRequestsAssociatedWithCommit = () => {};
   const listComments = () => {};
@@ -423,10 +439,11 @@ function closingGithub({ issue, issues, comments = [], calls }) {
         listReleases,
         listPullRequestsAssociatedWithCommit,
         getCommit: getTagCommit,
-        compareCommitsWithBasehead: async () => ({ data: {
+        compareCommitsWithBasehead: async ({ basehead }) => containment(basehead, tags, released) || { data: {
           status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
-        } }),
+        } },
       },
+      pulls: { get: getPull },
       issues: {
         listComments,
         createComment: async (input) => calls.push(['comment', input]),
@@ -598,8 +615,8 @@ async function markWith(options, issue) {
 const UNLABELLED = { number: 42, state: 'OPEN', labels: { nodes: [] } };
 
 test('a reopened issue is marked and closed again for its next fix', async () => {
-  // Marked before release 2 shipped it; then reopened and fixed again.
-  const shipped = marker('2026-01-20T00:00:00Z');
+  // Marked for #5, which release 2 shipped; then reopened and fixed again.
+  const shipped = marker('2026-01-20T00:00:00Z', BOT, 5);
   assert.deepEqual(await markWith({ comments: [shipped] }, UNLABELLED), ['label', 'comment']);
   // If that marking run was skipped, release 3 still closes it.
   const calls = await closeWith({ issue: UNLABELLED, comments: [shipped], tag: '3' });
@@ -685,8 +702,10 @@ test('a rerun after the release that shipped the fix keeps the opt-out', async (
   // the fix and the original push was rerun.
   const shipped = marker('2026-01-20T00:00:00Z');
   assert.deepEqual(await markWith({ comments: [shipped], released: ['abc'] }, UNLABELLED), []);
-  // A fix the latest release doesn't contain is still marked.
-  assert.deepEqual(await markWith({ comments: [shipped] }, UNLABELLED), ['label', 'comment']);
+  // A new fix for the reopened issue, which the latest release doesn't
+  // contain, is still marked.
+  const earlier = marker('2026-01-20T00:00:00Z', BOT, 5);
+  assert.deepEqual(await markWith({ comments: [earlier] }, UNLABELLED), ['label', 'comment']);
 });
 
 test('marking checks whether the latest release contains the merge commit', async () => {
@@ -711,4 +730,23 @@ test('marking checks whether the latest release contains the merge commit', asyn
   assert.deepEqual(compared, ['abc...2']);
   assert.deepEqual(mutations, []);
   assert.match(info.at(-1), /PR #9 already shipped in 2/);
+});
+
+test('a marker posted after a tag for a fix that release shipped is not current', async () => {
+  // #5 merged before release 2 was tagged, but its marking run only finished
+  // between the tag (01-31) and publication (02-01). Release 2 closed the
+  // issue; it was reopened and #9 fixes it again.
+  const late = marker('2026-01-31T12:00:00Z', BOT, 5);
+  assert.deepEqual(await markWith({ comments: [late] }, UNLABELLED), ['label', 'comment']);
+  const calls = await closeWith({ issue: UNLABELLED, comments: [late], tag: '3' });
+  assert.deepEqual(calls.map(([kind]) => kind), ['comment', 'update', 'remove']);
+});
+
+test('a marker that names no PR falls back to the tag time', async () => {
+  const unnamed = (createdAt) => ({ ...marker(createdAt), body: '<!-- awaiting-release -->\nAwaiting release.' });
+  assert.deepEqual(await markWith({ comments: [unnamed('2026-02-10T00:00:00Z')] }, UNLABELLED), []);
+  assert.deepEqual(
+    await markWith({ comments: [unnamed('2026-01-20T00:00:00Z')] }, UNLABELLED),
+    ['label', 'comment'],
+  );
 });
