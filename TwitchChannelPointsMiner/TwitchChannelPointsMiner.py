@@ -18,6 +18,7 @@ from pathlib import Path
 
 from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
+from TwitchChannelPointsMiner.classes.CopyOnWriteList import CopyOnWriteList
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import DropBadgeCatalog
 from TwitchChannelPointsMiner.classes.entities.Campaign import (
     CampaignChannelScope,
@@ -584,7 +585,9 @@ class TwitchChannelPointsMiner:
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]
 
-        self.streamers: list[Streamer] = []
+        # Shared by reference with worker threads that read them without a
+        # lock while retirement and reloads change them; see CopyOnWriteList.
+        self.streamers: CopyOnWriteList = CopyOnWriteList()
         self.events_predictions = {}
         self.minute_watcher_thread = None
         self.sync_campaigns_thread = None
@@ -593,7 +596,7 @@ class TwitchChannelPointsMiner:
         self.session_id = str(uuid.uuid4())
         self.running = False
         self.start_datetime = None
-        self.original_streamers = []
+        self.original_streamers = CopyOnWriteList()
         self.original_drop_progress = None
         # Reentrant: end() can run as a signal handler on the main thread while
         # that thread already holds it (e.g. mid category refresh).
@@ -1262,7 +1265,10 @@ class TwitchChannelPointsMiner:
                                 f"Failed to load streamer {username}", exc_info=True
                             )
 
-            self.streamers = [
+            # Refill the lists made in __init__ instead of replacing them, so
+            # they stay CopyOnWriteLists for the whole run and anything that
+            # already holds one sees the streamers.
+            self.streamers[:] = [
                 streamer for streamer in loaded_streamers if streamer is not None
             ]
 
@@ -1272,13 +1278,13 @@ class TwitchChannelPointsMiner:
             # 3. DEACTIVATED: Check if the user is a moderator. (was used before the 5th of April 2021 to deactivate predictions)
             invalid_streamers = self.twitch.initialize_streamers_context(self.streamers)
             if invalid_streamers:
-                self.streamers = [
+                self.streamers[:] = [
                     streamer
                     for streamer in self.streamers
                     if streamer.username not in invalid_streamers
                 ]
 
-            self.original_streamers = [
+            self.original_streamers[:] = [
                 streamer.channel_points for streamer in self.streamers
             ]
             if Settings.logger.daily_report is True and self.daily_report_date is None:
