@@ -18,11 +18,13 @@ from pathlib import Path
 
 from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence, ThreadChat
+from TwitchChannelPointsMiner.classes.CopyOnWriteList import CopyOnWriteList
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import DropBadgeCatalog
 from TwitchChannelPointsMiner.classes.entities.Campaign import (
     CampaignChannelScope,
     campaign_channel_scope,
 )
+from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
@@ -67,7 +69,6 @@ from TwitchChannelPointsMiner.utils import (
     set_default_settings,
 )
 from TwitchChannelPointsMiner.WatchStreakCache import WatchStreakCache
-from TwitchChannelPointsMiner.classes.entities.Drop import utc_now
 
 # Suppress:
 #   - chardet.charsetprober - [feed]
@@ -584,7 +585,9 @@ class TwitchChannelPointsMiner:
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]
 
-        self.streamers: list[Streamer] = []
+        # Shared by reference with worker threads that read them without a
+        # lock while retirement and reloads change them; see CopyOnWriteList.
+        self.streamers: CopyOnWriteList = CopyOnWriteList()
         self.events_predictions = {}
         self.minute_watcher_thread = None
         self.sync_campaigns_thread = None
@@ -593,7 +596,7 @@ class TwitchChannelPointsMiner:
         self.session_id = str(uuid.uuid4())
         self.running = False
         self.start_datetime = None
-        self.original_streamers = []
+        self.original_streamers = CopyOnWriteList()
         self.original_drop_progress = None
         # Reentrant: end() can run as a signal handler on the main thread while
         # that thread already holds it (e.g. mid category refresh).
@@ -744,6 +747,7 @@ class TwitchChannelPointsMiner:
                 username=self.username,
                 password=password,
                 log_poll_interval=log_poll_interval,
+                logs_file=self.logs_file,
             )
             http_server.daemon = True
             http_server.name = "Analytics Thread"
@@ -783,6 +787,9 @@ class TwitchChannelPointsMiner:
         wildcard_category_streamer_limit: int = 1,
         wildcard_category_pin_active: bool = True,
     ):
+        # run() refuses to start a second session on a running instance;
+        # that refusal must not stop the session that is already running.
+        already_running = self.running
         try:
             self.run(
                 streamers=streamers,
@@ -839,6 +846,20 @@ class TwitchChannelPointsMiner:
                 # Flush the alert above even if stopping a worker failed.
                 self.queue_listener.stop()
                 _exit_after_crash()
+        else:
+            # run() also returns when Twitch stops the miner without asking
+            # for a restart (e.g. the cached login can't be cleared). Stop the
+            # workers then, or the non-daemon workers keep the process alive
+            # with nothing running, and it never exits for a restart policy
+            # to act on. A requested restart replaces the process, and end()
+            # has already stopped them.
+            restart_requested = getattr(self.twitch, "restart_requested", None)
+            if (
+                not already_running
+                and self.running
+                and not (restart_requested is not None and restart_requested.is_set())
+            ):
+                self.__stop_workers()
 
     def run(
         self,
@@ -1244,7 +1265,10 @@ class TwitchChannelPointsMiner:
                                 f"Failed to load streamer {username}", exc_info=True
                             )
 
-            self.streamers = [
+            # Refill the lists made in __init__ instead of replacing them, so
+            # they stay CopyOnWriteLists for the whole run and anything that
+            # already holds one sees the streamers.
+            self.streamers[:] = [
                 streamer for streamer in loaded_streamers if streamer is not None
             ]
 
@@ -1254,13 +1278,13 @@ class TwitchChannelPointsMiner:
             # 3. DEACTIVATED: Check if the user is a moderator. (was used before the 5th of April 2021 to deactivate predictions)
             invalid_streamers = self.twitch.initialize_streamers_context(self.streamers)
             if invalid_streamers:
-                self.streamers = [
+                self.streamers[:] = [
                     streamer
                     for streamer in self.streamers
                     if streamer.username not in invalid_streamers
                 ]
 
-            self.original_streamers = [
+            self.original_streamers[:] = [
                 streamer.channel_points for streamer in self.streamers
             ]
             if Settings.logger.daily_report is True and self.daily_report_date is None:
@@ -1507,7 +1531,15 @@ class TwitchChannelPointsMiner:
                 logger.info(
                     f"#{websocket.index} - The last PING was sent more than 10 minutes ago. Reconnecting to the WebSocket..."
                 )
-                WebSocketsPool.handle_reconnection(websocket)
+                # Reconnecting waits at least 30 seconds, and longer while
+                # offline; on this thread it would hold up the daily report,
+                # the category refresh and restart requests.
+                threading.Thread(
+                    target=WebSocketsPool.handle_reconnection,
+                    args=(websocket,),
+                    name=f"WebSocket #{websocket.index} reconnection",
+                    daemon=True,
+                ).start()
 
     def __refresh_channel_points_context(self):
         for streamer in list(self.streamers):
@@ -2235,9 +2267,7 @@ class TwitchChannelPointsMiner:
             # seconds), and the watch thread would classify a flagless
             # badge-only streamer as a configured one and could watch it.
             self.ws_pool.remove_streamer_topics(streamer)
-            if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
-                streamer.irc_chat.stop()
-                streamer.irc_chat.join(timeout=5)
+            streamer.retire_chat()
             removed.append(streamer.username)
 
         self._record_daily_report_retirements(retained)
@@ -2330,9 +2360,7 @@ class TwitchChannelPointsMiner:
             # seconds), and the watch thread would classify a flagless
             # category-only streamer as a configured one and could watch it.
             self.ws_pool.remove_streamer_topics(streamer)
-            if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
-                streamer.irc_chat.stop()
-                streamer.irc_chat.join(timeout=5)
+            streamer.retire_chat()
             removed.append(streamer.username)
 
         self._record_daily_report_retirements(retained)
@@ -2928,9 +2956,7 @@ class TwitchChannelPointsMiner:
                     retained_baselines.append(baseline)
                     continue
                 self.ws_pool.remove_streamer_topics(streamer)
-                if streamer.irc_chat is not None and streamer.irc_chat.is_alive():
-                    streamer.irc_chat.stop()
-                    streamer.irc_chat.join(timeout=5)
+                streamer.retire_chat()
                 logger.info(
                     f"Removed {streamer.username} from the reloaded configuration",
                     extra={"emoji": ":heavy_minus_sign:"},
@@ -3091,12 +3117,10 @@ class TwitchChannelPointsMiner:
                 streamer.irc_chat is not None
                 and streamer.settings.chat != ChatPresence.NEVER
             ):
-                # leave_chat() swaps in a fresh, unstarted ThreadChat, so keep
-                # the running one to wait for.
-                irc_chat = streamer.irc_chat
-                streamer.leave_chat()
-                if irc_chat.is_alive() is True:
-                    irc_chat.join(timeout=10)
+                # Retire rather than leave: leave_chat() swaps in a fresh
+                # ThreadChat, which an online/offline update still in flight
+                # could start after shutdown has passed this streamer.
+                streamer.retire_chat(timeout=10)
 
         self.running = self.twitch.running = False
         self.drop_badge_catalog_stop_event.set()

@@ -461,8 +461,10 @@ class NotificationHandler(logging.Handler):
         "discord": lambda notifier: notifier.webhook_api
         == "https://discord.com/api/webhooks/0123456789/0a1B2c3D4e5F6g7H8i9J",
         "webhook": lambda notifier: notifier.endpoint == "https://example.com/webhook",
-        "matrix": lambda notifier: notifier.room_id == "..."
-        or not notifier.access_token,
+        # "..." is config.example.py's placeholder; "ROOM" and "PASSWORD"
+        # come from the template the config migration writes.
+        "matrix": lambda notifier: notifier.room_id in ("...", "ROOM")
+        or notifier.password in ("...", "PASSWORD"),
         "pushover": lambda notifier: notifier.userkey == "YOUR-ACCOUNT-TOKEN"
         or notifier.token == "YOUR-APPLICATION-TOKEN",
         "gotify": lambda notifier: notifier.endpoint
