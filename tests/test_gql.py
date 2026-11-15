@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from threading import Event
+from threading import Barrier, BrokenBarrierError, Event, Thread
 
 import pytest
 import requests
@@ -34,7 +34,7 @@ from TwitchChannelPointsMiner.classes.gql.data.response.PlaybackAccessToken impo
     PlaybackAccessTokenResponse,
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch, _drops_dashboard_state
-from TwitchChannelPointsMiner.constants import ANDROID_CLIENT_ID
+from TwitchChannelPointsMiner.constants import ANDROID_CLIENT_ID, CLIENT_ID
 from TwitchChannelPointsMiner.utils import AttemptStrategy
 
 
@@ -4423,16 +4423,20 @@ DASHBOARD_ERROR_REPLY = {
 }
 
 
-def android_dashboard_twitch(replies):
+def android_dashboard_twitch(replies, client_id=ANDROID_CLIENT_ID):
+    # An exception in replies is raised by that request instead.
     replies = iter(replies)
+
+    def get_viewer_drops_dashboard():
+        reply = next(replies)
+        if isinstance(reply, BaseException):
+            raise reply
+        return SimpleNamespace(raw_response=reply)
+
     twitch = twitch_with_gql(
-        SimpleNamespace(
-            get_viewer_drops_dashboard=lambda: SimpleNamespace(
-                raw_response=next(replies)
-            )
-        )
+        SimpleNamespace(get_viewer_drops_dashboard=get_viewer_drops_dashboard)
     )
-    twitch.twitch_login = SimpleNamespace(client_id=ANDROID_CLIENT_ID)
+    twitch.twitch_login = SimpleNamespace(client_id=client_id)
     twitch.log_drop_checks = False
     return twitch
 
@@ -4562,6 +4566,180 @@ def test_drops_dashboard_android_withheld_streak_is_updated_under_a_lock(
         ("enter", 2),
         ("exit", 3),
     ]
+
+
+def dashboard_null_list_errors(records):
+    return [
+        r
+        for r in records
+        if r.levelno == logging.ERROR and "carried no campaign data" in r.getMessage()
+    ]
+
+
+def dashboard_withheld_warnings(records):
+    return [
+        r
+        for r in records
+        if r.levelno == logging.WARNING
+        and "withheld the Drops campaign list" in r.getMessage()
+    ]
+
+
+def test_drops_dashboard_android_streak_ignores_failures_and_malformed_viewers(
+    monkeypatch, caplog
+):
+    # Request failures, replies with errors and replies without a usable
+    # viewer neither extend nor reset the streak, and keep logging as before.
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    replies = [
+        DASHBOARD_NULL_LIST_REPLY,
+        RetryError("ViewerDropsDashboard", []),
+        DASHBOARD_NULL_LIST_REPLY,
+        DASHBOARD_ERROR_REPLY,
+        {"data": {"currentUser": None}},
+        {"data": {"currentUser": ["not", "a", "viewer"]}},
+        DASHBOARD_NULL_LIST_REPLY,
+        DASHBOARD_NULL_LIST_REPLY,
+    ]
+    twitch = android_dashboard_twitch(replies)
+    calls = []
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in replies:
+            caplog.clear()
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+            calls.append(
+                (
+                    twitch.drops_dashboard_withheld_streak,
+                    _drops_dashboard_state.unavailable,
+                    len(dashboard_null_list_errors(caplog.records)),
+                    len(dashboard_withheld_warnings(caplog.records)),
+                )
+            )
+            if len(calls) == 2:
+                # The request failure logs its own error instead.
+                assert [r.levelno for r in caplog.records] == [logging.ERROR]
+                assert "carried no campaign data" not in caplog.records[0].getMessage()
+
+    # (streak, unavailable, null-list errors, withheld warnings) per call.
+    assert calls == [
+        (1, True, 1, 0),
+        (1, True, 0, 0),
+        (2, True, 0, 0),
+        (2, True, 1, 0),
+        (2, True, 1, 0),
+        (2, True, 1, 0),
+        (3, False, 0, 1),
+        (4, False, 0, 0),
+    ]
+
+
+def test_drops_dashboard_android_warns_again_after_a_reset_streak_reaches_limit(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    replies = [DASHBOARD_NULL_LIST_REPLY] * 3
+    replies += [DASHBOARD_LIST_REPLY]
+    replies += [DASHBOARD_NULL_LIST_REPLY] * 3
+    twitch = android_dashboard_twitch(replies)
+    unavailable = []
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in replies:
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+            unavailable.append(_drops_dashboard_state.unavailable)
+
+    assert len(dashboard_null_list_errors(caplog.records)) == 2
+    assert len(dashboard_withheld_warnings(caplog.records)) == 2
+    assert unavailable == [True, True, False, False, True, True, False]
+
+
+@pytest.mark.parametrize(
+    "client_id",
+    [CLIENT_ID, "kimne78kx3ncx6brgo4mv6wki5h1ko"],
+    ids=["tv", "browser"],
+)
+def test_drops_dashboard_withheld_streak_is_android_only(
+    monkeypatch, caplog, client_id
+):
+    # Other logins keep master's handling: a null list without errors is
+    # loaded and silent, and a reply with errors is unavailable and an ERROR.
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", True, raising=False)
+    replies = [DASHBOARD_NULL_LIST_REPLY] * 3
+    replies += [DASHBOARD_ERROR_REPLY, DASHBOARD_NULL_LIST_REPLY]
+    twitch = android_dashboard_twitch(replies, client_id=client_id)
+    unavailable = []
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in replies:
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+            unavailable.append(_drops_dashboard_state.unavailable)
+
+    assert len(dashboard_null_list_errors(caplog.records)) == 1
+    assert dashboard_withheld_warnings(caplog.records) == []
+    assert unavailable == [False, False, False, True, False]
+    assert getattr(twitch, "drops_dashboard_withheld_streak", 0) == 0
+
+
+def test_drops_dashboard_android_concurrent_calls_warn_once_without_losing_counts(
+    monkeypatch, caplog
+):
+    # Two threads reach the limit together. Each read of the streak waits
+    # for the other thread to read it too, so without the lock both read 2,
+    # both write 3 and both warn. With the lock the second thread can't read
+    # until the first is done, so the wait times out and the counts are 3, 4.
+    monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
+    rendezvous = Barrier(2, timeout=0.5)
+
+    class RendezvousTwitch(Twitch):
+        @property
+        def drops_dashboard_withheld_streak(self):
+            value = self._streak
+            # Only the first read in each thread waits; once the barrier
+            # passes or times out it stays broken.
+            if not rendezvous.broken:
+                try:
+                    rendezvous.wait()
+                except BrokenBarrierError:
+                    pass
+                else:
+                    rendezvous.abort()
+            return value
+
+        @drops_dashboard_withheld_streak.setter
+        def drops_dashboard_withheld_streak(self, value):
+            self._streak = value
+
+    twitch = RendezvousTwitch.__new__(RendezvousTwitch)
+    twitch.campaign_lookup_unavailable = False
+    twitch.unevaluated_category_slugs = set()
+    twitch.gql = SimpleNamespace(
+        get_viewer_drops_dashboard=lambda: SimpleNamespace(
+            raw_response=DASHBOARD_NULL_LIST_REPLY
+        )
+    )
+    twitch.twitch_login = SimpleNamespace(client_id=ANDROID_CLIENT_ID)
+    twitch.log_drop_checks = False
+    twitch._streak = 2
+    failures = []
+
+    def call():
+        try:
+            twitch._Twitch__get_drops_dashboard(status="OPEN")
+        except BaseException as error:  # surfaced by the assert below
+            failures.append(error)
+
+    with caplog.at_level(logging.DEBUG):
+        threads = [Thread(target=call) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert twitch._streak == 4
+    assert len(dashboard_withheld_warnings(caplog.records)) == 1
 
 
 def test_live_streams_failure_after_first_page_carries_found_channels(monkeypatch):
