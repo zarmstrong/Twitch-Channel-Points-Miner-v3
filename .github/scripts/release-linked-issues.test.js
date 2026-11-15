@@ -779,11 +779,27 @@ test('a rerun of release closing retries a close that failed after its comment',
   const events = [{ event: 'reopened', created_at: '2026-01-10T00:00:00Z' }];
   const calls = await closeWith({ issue: UNLABELLED, comments, events });
   assert.deepEqual(calls.map(([kind]) => kind), ['update', 'remove']);
-  // Only automation's release comment counts.
-  const forged = await closeWith({
+});
+
+test('only automation\'s own release comment counts', async () => {
+  // A user quoting the release text neither stands in for automation's
+  // comment nor marks the issue as closed by this release.
+  const quoted = released('2', '2026-02-01T00:05:00Z', { login: 'someone', type: 'User' });
+  const calls = await closeWith({
     issue: UNLABELLED,
-    comments: [released('2', '2026-02-01T00:05:00Z', { login: 'someone', type: 'User' })],
+    comments: [quoted],
     events: [{ event: 'reopened', created_at: '2026-02-03T00:00:00Z' }],
   });
-  assert.deepEqual(forged.map(([kind]) => kind), ['update', 'remove']);
+  assert.deepEqual(calls.map(([kind]) => kind), ['comment', 'update', 'remove']);
+  assert.equal(calls[0][1].body, 'Released in 2.');
+});
+
+test('a rerun of an earlier release keeps a reopened issue marked for a later fix', async () => {
+  // Release 2 closed the issue; it was reopened and a later fix labelled it.
+  const calls = await closeWith({
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [{ name: 'awaiting-release' }] } },
+    comments: [released('2', '2026-02-01T00:05:00Z')],
+    events: [{ event: 'reopened', created_at: '2026-02-03T00:00:00Z' }],
+  });
+  assert.deepEqual(calls, []);
 });

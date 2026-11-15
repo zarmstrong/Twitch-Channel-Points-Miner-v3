@@ -75,11 +75,12 @@ async function linkedIssues(github, owner, repo, pullNumber) {
   );
 }
 
-async function hasComment(github, owner, repo, issueNumber, marker) {
+// The comment automation posted with exactly this body, if any.
+async function automationComment(github, owner, repo, issueNumber, body) {
   const comments = await github.paginate(github.rest.issues.listComments, {
     owner, repo, issue_number: issueNumber, per_page: 100,
   });
-  return comments.some((comment) => comment.body && comment.body.includes(marker));
+  return comments.find((comment) => comment.body === body && isAutomation(comment.user));
 }
 
 function isAutomation(user) {
@@ -99,12 +100,7 @@ function isMarkerComment(comment) {
 // failed after the release comment was posted, there is no reopen to find
 // and the rerun closes it.
 async function reopenedAfterRelease(github, owner, repo, issueNumber, releaseComment) {
-  const comments = await github.paginate(github.rest.issues.listComments, {
-    owner, repo, issue_number: issueNumber, per_page: 100,
-  });
-  const released = comments.find(
-    (comment) => comment.body === releaseComment && isAutomation(comment.user),
-  );
+  const released = await automationComment(github, owner, repo, issueNumber, releaseComment);
   if (!released) return false;
   const events = await github.paginate(github.rest.issues.listEvents, {
     owner, repo, issue_number: issueNumber, per_page: 100,
@@ -314,20 +310,30 @@ async function closeReleasedIssues({ github, context, core, tag }) {
   // An issue is closed when it carries the label, or when marking never ran
   // for it in this release cycle: a push skipped with [skip ci], or one still
   // being marked when the release was published. An issue marked in this
-  // cycle whose label was removed by hand stays open, and so does one that
-  // was reopened after this release closed it.
+  // cycle whose label was removed by hand stays open. An issue this release
+  // already closed that was reopened afterwards is left alone entirely, label
+  // included, since a later fix may have marked it again.
+  const releaseComment = `Released in ${tag}.`;
   const candidates = new Map();
   const unmarked = new Set();
+  const seen = new Set();
   for (const pull of pulls) {
     const issues = await linkedIssues(github, owner, repo, pull.number);
     for (const issue of issues) {
-      if (candidates.has(issue.number)) continue;
+      if (seen.has(issue.number)) continue;
+      seen.add(issue.number);
+      if (
+        issue.state === 'OPEN' &&
+        (await reopenedAfterRelease(github, owner, repo, issue.number, releaseComment))
+      ) {
+        core.info(`Issue #${issue.number} was reopened after ${tag} closed it; leaving it open`);
+        continue;
+      }
       if (issue.labels.nodes.some((label) => label.name === AWAITING_LABEL)) {
         candidates.set(issue.number, issue);
       } else if (
         issue.state === 'OPEN' &&
-        !(await hasCurrentMarker(github, owner, repo, issue.number, cycle)) &&
-        !(await reopenedAfterRelease(github, owner, repo, issue.number, `Released in ${tag}.`))
+        !(await hasCurrentMarker(github, owner, repo, issue.number, cycle))
       ) {
         candidates.set(issue.number, issue);
         unmarked.add(issue.number);
@@ -340,8 +346,7 @@ async function closeReleasedIssues({ github, context, core, tag }) {
       core.info(`Issue #${issue.number} was never marked ${AWAITING_LABEL}; closing it`);
     }
     if (shouldCloseIssue(issue) || unmarked.has(issue.number)) {
-      const releaseComment = `Released in ${tag}.`;
-      if (!(await hasComment(github, owner, repo, issue.number, releaseComment))) {
+      if (!(await automationComment(github, owner, repo, issue.number, releaseComment))) {
         await github.rest.issues.createComment({
           owner, repo, issue_number: issue.number, body: releaseComment,
         });
