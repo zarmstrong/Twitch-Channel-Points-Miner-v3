@@ -188,12 +188,15 @@ def _sync_campaigns_harness(monkeypatch, dashboards, details, passes):
         post_gql_request_batch_raw=post_gql_request_batch_raw,
     )
     monkeypatch.setattr(twitch_module.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(Twitch, "claim_all_drops_from_inventory", lambda self: None)
     monkeypatch.setattr(
         Twitch, "_Twitch__save_drop_snapshot_from_dict", lambda self, *a, **k: None
     )
 
     def fake_sync(self, campaigns):
+        # Model a successful full read; intervening passes use the light path.
+        self.drop_full_inventory_loaded = True
         synced.append(sorted(campaign.id for campaign in campaigns))
         return campaigns
 
@@ -211,6 +214,9 @@ def _sync_campaigns_harness(monkeypatch, dashboards, details, passes):
 
     monkeypatch.setattr(Twitch, "_Twitch__chuncked_sleep", fake_sleep)
     twitch.sync_campaigns([])
+    # Full reads follow refreshes. If an unexpected refresh throws before
+    # the progress step, the next tick instead initializes it via full_retry.
+    assert len(synced) == len(refreshes)
     return refreshes, synced
 
 

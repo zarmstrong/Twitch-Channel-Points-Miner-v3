@@ -861,6 +861,33 @@ class Parser:
                 campaigns_available=progress_campaigns is not None,
             )
 
+    def parse_drop_current_session_response(self, response: Any):
+        response = expect_dict(response)
+        if response.get("errors"):
+            # GraphQL may null data entirely, or return partial session data.
+            # Both are failures; retain the errors without parsing the session.
+            errors, _, _ = self.parse_base_response({**response, "data": {}}, False)
+            return Drops.DropCurrentSessionResponse(errors=errors)
+        _, _, data = self.parse_base_response(response, False)
+        with JsonParentContext("data"):
+            user = parse_expected_value(data, "currentUser", expect_dict)
+            with JsonParentContext("currentUser"):
+                session = parse_expected_value(
+                    user, "dropCurrentSession", optional_parser(expect_dict)
+                )
+                if session is None:
+                    return Drops.DropCurrentSessionResponse()
+                return Drops.DropCurrentSessionResponse(
+                    has_session=True,
+                    drop_id=parse_value(session, "dropID", optional_parser(expect_str)),
+                    current_minutes_watched=parse_value(
+                        session, "currentMinutesWatched", optional_parser(expect_int)
+                    ),
+                    required_minutes_watched=parse_value(
+                        session, "requiredMinutesWatched", optional_parser(expect_int)
+                    ),
+                )
+
     def parse_inventory_response(self, response: Any):
         """
         Parses responses to Inventory requests.

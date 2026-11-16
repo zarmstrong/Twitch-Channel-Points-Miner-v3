@@ -129,13 +129,20 @@ class Drop(object):
         if isinstance(current_subs, int) and not isinstance(current_subs, bool):
             self.current_subs = current_subs
 
-        updated_percentage = percentage(
-            progress["currentMinutesWatched"], self.minutes_required
+        self.update_minutes(progress["currentMinutesWatched"])
+        self.drop_instance_id = progress["dropInstanceID"]
+        self.is_claimed = progress["isClaimed"]
+        self.is_claimable = (
+            self.is_claimed is False and self.drop_instance_id is not None
         )
+
+    def update_minutes(self, current_minutes):
+        """Update watch progress without changing inventory-only claim state."""
+        updated_percentage = percentage(current_minutes, self.minutes_required)
         quarter = round((updated_percentage / 25), 4).is_integer()
         self.is_printable = (
             # The new currentMinutesWatched are GT than previous
-            progress["currentMinutesWatched"] > self.current_minutes_watched
+            current_minutes > self.current_minutes_watched
             and (
                 # The drop is printable when we have a new updated values and:
                 #  - also the percentage It's different and  quarter is True (self.current_minutes_watched != 0 for skip boostrap phase)
@@ -145,19 +152,11 @@ class Drop(object):
                     and quarter is True
                     and self.current_minutes_watched != 0
                 )
-                or (
-                    progress["currentMinutesWatched"] == 1
-                    and self.current_minutes_watched == 0
-                )
+                or (current_minutes == 1 and self.current_minutes_watched == 0)
             )
         )
 
-        self.current_minutes_watched = progress["currentMinutesWatched"]
-        self.drop_instance_id = progress["dropInstanceID"]
-        self.is_claimed = progress["isClaimed"]
-        self.is_claimable = (
-            self.is_claimed is False and self.drop_instance_id is not None
-        )
+        self.current_minutes_watched = current_minutes
         self.percentage_progress = updated_percentage
 
     def needs_subscription(self) -> bool:

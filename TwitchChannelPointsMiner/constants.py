@@ -160,6 +160,16 @@ class GQLOperations:
             "}"
         ),
     }
+    DropCurrentSessionContext = {
+        "operationName": "DropCurrentSessionContext",
+        "variables": {"channelID": "", "channelLogin": ""},
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b",
+            }
+        },
+    }
     Inventory = {
         "operationName": "Inventory",
         "variables": {"fetchRewardCampaigns": True},

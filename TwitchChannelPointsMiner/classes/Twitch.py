@@ -55,6 +55,7 @@ from TwitchChannelPointsMiner.classes.Exceptions import (
     WrongCookiesException,
 )
 from TwitchChannelPointsMiner.classes.gql.Errors import (
+    GQLError,
     RetryError,
     is_persisted_query_not_found,
 )
@@ -103,6 +104,15 @@ logger = logging.getLogger(__name__)
 JsonType = Dict[str, Any]
 CHANNEL_POINTS_MAX_CONCURRENCY = 3
 DROP_INVENTORY_FRESHNESS_SECONDS = 180
+DROP_FULL_INVENTORY_SYNC_SECONDS = 15 * 60
+DROP_SESSION_BREAKER_SECONDS = 60 * 60
+# How long a pending claim survives Inventory reads that do not list its drop.
+DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS = 5 * 60
+# How long a light pass's minutes stay comparable with a late Inventory reply.
+DROP_LIGHT_PATCH_MEMORY_SECONDS = 10 * 60
+# Two PubSub progress messages this close together can arrive out of order.
+DROP_PROGRESS_EVENT_REORDER_SECONDS = 60
+_drop_progress_lock_init = Lock()
 # How often a continuing gist stand-down is reported again at full level.
 GIST_STAND_DOWN_REMINDER_SECONDS = 3600
 # Minimum time between warnings about unrecognizable completed campaigns.
@@ -161,6 +171,7 @@ DROPS_DASHBOARD_WITHHELD_LIMIT = 3
 # so the campaign sync thread's dashboard calls cannot be mistaken for the
 # category discovery pass's own.
 _drops_dashboard_state = local()
+_drop_inventory_state = local()
 # Consecutive failed campaign queries after which a provisional wildcard
 # channel is ruled out until a query succeeds, so category refreshes stop
 # re-seeding it as eligible after every failure.
@@ -205,6 +216,20 @@ class Twitch(object):
         "last_watch_status_logged_at",
         "drop_report_state",
         "drop_inventory_progress",
+        "drop_inventory_cache_lock",
+        "drop_progress_events",
+        "drop_progress_events_lock",
+        "drop_complete_last_full",
+        "drop_light_applied_minutes",
+        "drop_light_applied_clear_ids",
+        "drop_claims_pending",
+        "drop_claims_pending_lock",
+        "drop_claims_pending_generation",
+        "drop_full_inventory_loaded",
+        "drop_session_failures",
+        "drop_session_disabled_until",
+        "drop_progress_escalations",
+        "drop_light_patched",
         "drop_inventory_progress_updated_at",
         "drop_inventory_minutes_by_drop_id",
         "drop_inventory_finished_ids",
@@ -730,84 +755,111 @@ class Twitch(object):
         return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")
 
     def __cache_drop_inventory_progress(self, inventory: dict):
-        progress_by_game = {}
-        finished_ids = set()
-        accepted_claims = getattr(self, "accepted_drop_claims", None) or {}
-        for campaign in inventory.get("dropCampaignsInProgress", []) or []:
-            if not isinstance(campaign, dict):
-                continue
-            game = campaign.get("game") or {}
-            game_name = (game.get("displayName") or game.get("name") or "").strip()
-            game_slug = self.__slugify(game_name)
-            if game_slug == "":
-                continue
-
-            campaign_id = str(campaign.get("id") or "")
-            campaign_name = str(campaign.get("name") or "Unknown campaign")
-            # The allow-listed channels, or None when any channel counts. A
-            # record without allow data takes the campaign's last known
-            # scope; failing that, it is still the account's own progress,
-            # so it counts for every channel, as before, rather than holding
-            # no pick at all.
-            scope, channel_logins = self.__known_campaign_scope(campaign_id, campaign)
-            allowed_channels = (
-                tuple(sorted(channel_logins))
-                if scope is CampaignChannelScope.RESTRICTED
-                else None
+        with self.__drop_state_lock("drop_inventory_cache_lock"):
+            progress_by_game = {}
+            finished_ids = set()
+            accepted_claims = getattr(self, "accepted_drop_claims", None) or {}
+            # A read that started before a claim was accepted can land after
+            # it, still listing the drop as incomplete and without the new
+            # instance; the drop ID keeps it out of the caches regardless.
+            accepted_ids = getattr(self, "accepted_drop_ids", None) or ()
+            # Minutes a light pass published after this Inventory request was
+            # sent are newer than the reply; the reply must not move them back.
+            read_started = getattr(_drop_inventory_state, "started", None)
+            light_patched = (
+                {
+                    drop_id: patched_minutes
+                    for drop_id, (patched_minutes, stamp) in (
+                        getattr(self, "drop_light_patched", None) or {}
+                    ).items()
+                    if stamp > read_started
+                }
+                if read_started is not None
+                else {}
             )
-            for drop in campaign.get("timeBasedDrops", []) or []:
-                if not isinstance(drop, dict):
+            for campaign in inventory.get("dropCampaignsInProgress", []) or []:
+                if not isinstance(campaign, dict):
                     continue
-                drop_self = drop.get("self")
-                if not isinstance(drop_self, dict):
+                game = campaign.get("game") or {}
+                game_name = (game.get("displayName") or game.get("name") or "").strip()
+                game_slug = self.__slugify(game_name)
+                if game_slug == "":
                     continue
-                required_minutes = drop.get("requiredMinutesWatched") or 0
-                current_minutes = drop_self.get("currentMinutesWatched") or 0
-                instance_id = drop_self.get("dropInstanceID")
-                # An accepted claim counts as claimed; the inventory is lagging.
-                claimed = (
-                    drop_self.get("isClaimed") is True or instance_id in accepted_claims
+
+                campaign_id = str(campaign.get("id") or "")
+                campaign_name = str(campaign.get("name") or "Unknown campaign")
+                # The allow-listed channels, or None when any channel counts. A
+                # record without allow data takes the campaign's last known
+                # scope; failing that, it is still the account's own progress,
+                # so it counts for every channel, as before, rather than holding
+                # no pick at all.
+                scope, channel_logins = self.__known_campaign_scope(
+                    campaign_id, campaign
                 )
-                # A fully watched drop counts as finished only once it can be
-                # claimed: until Twitch issues its instance, it may still need
-                # watching.
-                if drop.get("id") and (
-                    claimed or (instance_id and 0 < required_minutes <= current_minutes)
-                ):
-                    finished_ids.add(str(drop["id"]))
-                if claimed or drop_self.get("hasPreconditionsMet") is False:
-                    continue
-
-                if required_minutes <= 0 or current_minutes >= required_minutes:
-                    continue
-                # Watching alone cannot earn it until the account subscribes.
-                if drop_sub_requirement_unmet(drop):
-                    continue
-
-                progress_by_game.setdefault(game_slug, []).append(
-                    (
-                        campaign_id,
-                        campaign_name,
-                        str(drop.get("id") or ""),
-                        str(drop.get("name") or "Unknown drop"),
-                        current_minutes,
-                        required_minutes,
-                        allowed_channels,
+                allowed_channels = (
+                    tuple(sorted(channel_logins))
+                    if scope is CampaignChannelScope.RESTRICTED
+                    else None
+                )
+                for drop in campaign.get("timeBasedDrops", []) or []:
+                    if not isinstance(drop, dict):
+                        continue
+                    drop_self = drop.get("self")
+                    if not isinstance(drop_self, dict):
+                        continue
+                    required_minutes = drop.get("requiredMinutesWatched") or 0
+                    current_minutes = drop_self.get("currentMinutesWatched") or 0
+                    newer_minutes = light_patched.get(str(drop.get("id") or ""))
+                    if newer_minutes is not None and newer_minutes > current_minutes:
+                        current_minutes = newer_minutes
+                    instance_id = drop_self.get("dropInstanceID")
+                    # An accepted claim counts as claimed; the inventory is lagging.
+                    claimed = (
+                        drop_self.get("isClaimed") is True
+                        or instance_id in accepted_claims
+                        or str(drop.get("id") or "") in accepted_ids
                     )
-                )
+                    # A fully watched drop counts as finished only once it can be
+                    # claimed: until Twitch issues its instance, it may still need
+                    # watching.
+                    if drop.get("id") and (
+                        claimed
+                        or (instance_id and 0 < required_minutes <= current_minutes)
+                    ):
+                        finished_ids.add(str(drop["id"]))
+                    if claimed or drop_self.get("hasPreconditionsMet") is False:
+                        continue
 
-        self.drop_inventory_progress = {
-            game_slug: tuple(sorted(progress))
-            for game_slug, progress in progress_by_game.items()
-        }
-        self.drop_inventory_minutes_by_drop_id = {
-            drop_id: current
-            for progress in progress_by_game.values()
-            for (_, _, drop_id, _, current, _, _) in progress
-            if drop_id
-        }
-        self.drop_inventory_finished_ids = frozenset(finished_ids)
-        self.drop_inventory_progress_updated_at = time.time()
+                    if required_minutes <= 0 or current_minutes >= required_minutes:
+                        continue
+                    # Watching alone cannot earn it until the account subscribes.
+                    if drop_sub_requirement_unmet(drop):
+                        continue
+
+                    progress_by_game.setdefault(game_slug, []).append(
+                        (
+                            campaign_id,
+                            campaign_name,
+                            str(drop.get("id") or ""),
+                            str(drop.get("name") or "Unknown drop"),
+                            current_minutes,
+                            required_minutes,
+                            allowed_channels,
+                        )
+                    )
+
+            self.drop_inventory_progress = {
+                game_slug: tuple(sorted(progress))
+                for game_slug, progress in progress_by_game.items()
+            }
+            self.drop_inventory_minutes_by_drop_id = {
+                drop_id: current
+                for progress in progress_by_game.values()
+                for (_, _, drop_id, _, current, _, _) in progress
+                if drop_id
+            }
+            self.drop_inventory_finished_ids = frozenset(finished_ids)
+            self.drop_inventory_progress_updated_at = time.time()
 
     def __with_inventory_drop_progress(self, campaign: dict) -> dict:
         """Return the campaign with the account's inventory progress applied.
@@ -8113,6 +8165,9 @@ class Twitch(object):
             inventory.pop(key, None)
 
     def __get_inventory(self):
+        _drop_inventory_state.inventory = None
+        _drop_inventory_state.started = time.monotonic()
+        _drop_inventory_state.error_paths = frozenset()
         try:
             inventory_response = self.gql.get_inventory()
             inventory = getattr(inventory_response, "inventory", None)
@@ -8178,6 +8233,8 @@ class Twitch(object):
                     f" completed_campaigns={len(completed_campaigns)}",
                     level=logging.DEBUG,
                 )
+            _drop_inventory_state.inventory = inventory
+            _drop_inventory_state.error_paths = frozenset(error_paths)
             return inventory
         except RetryError as error:
             logger.error(f"Unable to load drops inventory: {error}")
@@ -8764,13 +8821,45 @@ class Twitch(object):
         self.__log_drop_check("sync cycle: checking inventory for drop progress")
         # We need the inventory only for get the real updated value/progress
         # Get data from inventory and sync current status with streamers.campaigns
+        # Per-call, per-thread evidence: another inventory reader must not
+        # change whether this sync's nullable progress field loaded.
+        _drop_inventory_state.inventory = None
+        pending_generation = self.__pending_drop_claims_generation()
         inventory = self.__get_inventory()
         campaigns_in_progress = (
             inventory.get("dropCampaignsInProgress")
             if isinstance(inventory, dict)
             else None
         )
+        error_paths = (
+            getattr(_drop_inventory_state, "error_paths", ())
+            if getattr(_drop_inventory_state, "inventory", None) is inventory
+            else ()
+        )
+        progress_path = ("currentUser", "inventory", "dropCampaignsInProgress")
+        progress_errored = any(
+            progress_path[: len(path)] == path
+            or path[: len(progress_path)] == progress_path
+            or path[:1] == ("dropCampaignsInProgress",)
+            for path in error_paths
+        )
+        self.drop_full_inventory_loaded = (
+            isinstance(inventory, dict)
+            and bool(inventory)
+            and (
+                isinstance(campaigns_in_progress, list)
+                or (
+                    "dropCampaignsInProgress" in inventory
+                    and campaigns_in_progress is None
+                    and not progress_errored
+                )
+            )
+        )
+        # Null says nothing about a pending drop's continued existence.
         if isinstance(campaigns_in_progress, list):
+            self.__reconcile_pending_drop_claims(
+                campaigns_in_progress, read_generation=pending_generation
+            )
             self.__reconcile_unlinked_claims(campaigns_in_progress)
         if campaigns_in_progress not in [None, {}]:
             campaigns_by_id = {campaign.id: campaign for campaign in campaigns}
@@ -9189,15 +9278,32 @@ class Twitch(object):
         # until the next sync, or longer when Twitch is slow to confirm the
         # claim; stop applying it to channel checks so a just-finished
         # campaign does not look earnable.
-        minutes_by_drop_id = (
-            getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
-        )
-        if str(drop.id or "") in minutes_by_drop_id:
-            self.drop_inventory_minutes_by_drop_id = {
-                drop_id: minutes
-                for drop_id, minutes in minutes_by_drop_id.items()
-                if drop_id != str(drop.id or "")
-            }
+        with self.__drop_state_lock("drop_inventory_cache_lock"):
+            minutes_by_drop_id = (
+                getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
+            )
+            forgotten = str(drop.id or "")
+            if forgotten in minutes_by_drop_id:
+                self.drop_inventory_minutes_by_drop_id = {
+                    drop_id: minutes
+                    for drop_id, minutes in minutes_by_drop_id.items()
+                    if drop_id != forgotten
+                }
+            # The progress tuple goes too: light passes keep this cache fresh
+            # for up to the full-read interval, so a leftover tuple would make
+            # the accepted drop look incomplete to channel picks and the
+            # stall check until then.
+            progress = getattr(self, "drop_inventory_progress", None) or {}
+            if forgotten and any(
+                row[2] == forgotten for rows in progress.values() for row in rows
+            ):
+                remaining = {
+                    game: tuple(row for row in rows if row[2] != forgotten)
+                    for game, rows in progress.items()
+                }
+                self.drop_inventory_progress = {
+                    game: rows for game, rows in remaining.items() if rows
+                }
 
     def __mark_drop_accepted(self, drop):
         # Twitch accepted the claim (even one it will not deliver until the
@@ -9208,6 +9314,8 @@ class Twitch(object):
             self.accepted_drop_ids = frozenset(
                 getattr(self, "accepted_drop_ids", None) or ()
             ) | {str(drop.id)}
+        if drop.id:
+            self.__update_pending_drop_claim(str(drop.id), clear=True)
         self.__forget_inventory_minutes(drop)
 
     def __finished_drop_ids(self):
@@ -9465,7 +9573,7 @@ class Twitch(object):
         # Held across the request so a concurrent pass sees the accepted claim
         # instead of claiming and notifying a second time.
         with self.__claim_lock():
-            return self.__claim_drop(
+            result = self.__claim_drop(
                 drop,
                 campaign=campaign,
                 streamer_username=streamer_username,
@@ -9473,6 +9581,11 @@ class Twitch(object):
                 category_name_override=category_name_override,
                 campaign_link=campaign_link,
             )
+            if getattr(drop, "id", None):
+                self.__update_pending_drop_claim(
+                    str(drop.id), drop.drop_instance_id, clear=result is True
+                )
+            return result
 
     def __claim_drop(
         self,
@@ -9792,6 +9905,521 @@ class Twitch(object):
         finally:
             self.prompt_claim_pass_lock.release()
 
+    def __drop_state_lock(self, name):
+        lock = getattr(self, name, None)
+        if lock is None:
+            # Websocket, inventory and claim workers can all be first to arrive.
+            with _drop_progress_lock_init:
+                lock = getattr(self, name, None)
+                if lock is None:
+                    lock = Lock()
+                    setattr(self, name, lock)
+        return lock
+
+    @staticmethod
+    def __valid_drop_minutes(value, positive=False):
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= (1 if positive else 0)
+        )
+
+    def record_drop_progress_event(self, data):
+        """Keep the newest valid PubSub progress without raising into the socket."""
+        try:
+            if not isinstance(data, dict):
+                return
+            drop_id = data.get("drop_id")
+            minutes = data.get("current_progress_min")
+            if not isinstance(drop_id, str) or not drop_id.strip():
+                return
+            if not self.__valid_drop_minutes(minutes):
+                return
+            required = data.get("required_progress_min")
+            if not self.__valid_drop_minutes(required, positive=True):
+                required = None
+            now = time.monotonic()
+            with self.__drop_state_lock("drop_progress_events_lock"):
+                events = {
+                    key: event
+                    for key, event in getattr(self, "drop_progress_events", {}).items()
+                    if now - event[4] <= 10 * 60
+                }
+                previous = events.get(drop_id)
+                if (
+                    previous is not None
+                    and now - previous[4] <= DROP_PROGRESS_EVENT_REORDER_SECONDS
+                    and previous[1] > minutes
+                ):
+                    # An older message delivered late: keep the newer minutes.
+                    minutes = previous[1]
+                    required = required or previous[2]
+                events[drop_id] = (
+                    drop_id,
+                    minutes,
+                    required,
+                    data.get("channel_id"),
+                    now,
+                )
+                self.drop_progress_events = events
+        except Exception:
+            # Invalid external payloads must never stop the websocket thread.
+            return
+
+    def __recent_drop_progress_events(self, now, previous_step):
+        cutoff = min(previous_step, now - 90)
+        with self.__drop_state_lock("drop_progress_events_lock"):
+            return [
+                event
+                for event in getattr(self, "drop_progress_events", {}).values()
+                if event[4] >= cutoff
+            ]
+
+    def __pending_drop_claims_alive(self, now):
+        # Caller holds the pending-claims lock; publish new containers only.
+        accepted = getattr(self, "accepted_drop_ids", ()) or ()
+        self.drop_complete_last_full = {
+            drop_id: stamp
+            for drop_id, stamp in getattr(self, "drop_complete_last_full", {}).items()
+            if now - stamp <= 24 * 60 * 60
+        }
+        pending = {}
+        for drop_id, entry in getattr(self, "drop_claims_pending", {}).items():
+            if now - entry["since"] > 24 * 60 * 60:
+                self.__log_drop_check(
+                    f"expired pending claim for drop {drop_id}", level=logging.DEBUG
+                )
+            elif drop_id not in accepted:
+                pending[drop_id] = entry
+        return pending
+
+    def __publish_pending_drop_claims(self, pending):
+        # Caller holds the pending lock. Claim workers enqueue invalidations;
+        # only the sync thread writes the light notification history itself.
+        cleared = getattr(self, "drop_claims_pending", {}).keys() - pending.keys()
+        self.drop_light_applied_clear_ids = (
+            getattr(self, "drop_light_applied_clear_ids", frozenset()) | cleared
+        )
+        self.drop_claims_pending = pending
+
+    def __prune_light_drop_minutes(self, now):
+        with self.__drop_state_lock("drop_claims_pending_lock"):
+            cleared = getattr(self, "drop_light_applied_clear_ids", frozenset())
+            self.drop_light_applied_clear_ids = frozenset()
+        # Values are (highest applied minutes, last report monotonic time).
+        self.drop_light_applied_minutes = {
+            drop_id: record
+            for drop_id, record in getattr(
+                self, "drop_light_applied_minutes", {}
+            ).items()
+            if drop_id not in cleared and now - record[1] <= 24 * 60 * 60
+        }
+
+    def __update_pending_drop_claim(self, drop_id, instance_id=None, clear=False):
+        now = time.monotonic()
+        with self.__drop_state_lock("drop_claims_pending_lock"):
+            pending = self.__pending_drop_claims_alive(now)
+            if clear or drop_id in (getattr(self, "accepted_drop_ids", ()) or ()):
+                pending.pop(drop_id, None)
+            else:
+                old = pending.get(drop_id, {})
+                # Each write gets a new generation so a full pass can tell an
+                # entry written while its Inventory request was in flight.
+                generation = getattr(self, "drop_claims_pending_generation", 0) + 1
+                self.drop_claims_pending_generation = generation
+                pending[drop_id] = {
+                    "instance_id": old.get("instance_id") or instance_id,
+                    "since": old.get("since", now),
+                    "last_full": old.get(
+                        "last_full",
+                        getattr(self, "drop_complete_last_full", {}).get(drop_id),
+                    ),
+                    "generation": generation,
+                }
+            self.__publish_pending_drop_claims(pending)
+
+    def __pending_drop_claims_generation(self):
+        with self.__drop_state_lock("drop_claims_pending_lock"):
+            return getattr(self, "drop_claims_pending_generation", 0)
+
+    def __reconcile_pending_drop_claims(
+        self, campaigns_in_progress, read_generation=None
+    ):
+        """Clear pending entries this inventory shows as claimed or gone.
+
+        read_generation is the tracker generation captured before the
+        Inventory request was sent. An entry written after it (for example
+        a PubSub claim worker's failed claim, recorded from a newer read)
+        is newer than this response and is kept whatever the response says.
+
+        An entry that holds a claim ID survives reads that do not list its
+        drop for DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS, so one short or
+        partial reply cannot stop the claim retries.
+        """
+        now = time.monotonic()
+        listed = {}
+        for campaign in campaigns_in_progress:
+            if not isinstance(campaign, dict):
+                continue
+            for drop in campaign.get("timeBasedDrops", []) or []:
+                if isinstance(drop, dict) and drop.get("id"):
+                    listed[str(drop["id"])] = drop
+        claimed_ids = {
+            drop_id
+            for drop_id, drop in listed.items()
+            if isinstance(drop.get("self"), dict)
+            and drop["self"].get("isClaimed") is True
+        }
+        with self.__drop_state_lock("drop_claims_pending_lock"):
+            accepted = getattr(self, "accepted_drop_ids", ()) or ()
+            pending = {}
+            for drop_id, entry in self.__pending_drop_claims_alive(now).items():
+                newer = (
+                    read_generation is not None
+                    and entry.get("generation", 0) > read_generation
+                )
+                if newer:
+                    pending[drop_id] = entry
+                elif drop_id in listed:
+                    if drop_id not in claimed_ids:
+                        pending[drop_id] = {**entry, "missing_since": None}
+                elif entry.get("instance_id"):
+                    missing_since = entry.get("missing_since")
+                    if missing_since is None:
+                        missing_since = now
+                    if now - missing_since < DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS:
+                        pending[drop_id] = {**entry, "missing_since": missing_since}
+            for drop_id, drop in listed.items():
+                edge = drop.get("self") or {}
+                if not isinstance(edge, dict):
+                    continue
+                current = edge.get("currentMinutesWatched")
+                required = drop.get("requiredMinutesWatched")
+                if (
+                    drop_id not in accepted
+                    and edge.get("isClaimed") is not True
+                    and not edge.get("dropInstanceID")
+                    and self.__valid_drop_minutes(current)
+                    and self.__valid_drop_minutes(required, positive=True)
+                    and current >= required
+                    and drop_id not in pending
+                ):
+                    stamps = getattr(self, "drop_complete_last_full", {})
+                    stamp = stamps.get(drop_id, now)
+                    self.drop_complete_last_full = {**stamps, drop_id: stamp}
+                    pending[drop_id] = {
+                        "instance_id": None,
+                        "since": now,
+                        "last_full": stamp,
+                        # Seeded from this read, so a later read may clear it.
+                        "generation": read_generation or 0,
+                    }
+            self.__publish_pending_drop_claims(pending)
+
+    def __pending_drop_progress_reason(self, campaigns, now):
+        with self.__drop_state_lock("drop_claims_pending_lock"):
+            pending = self.__pending_drop_claims_alive(now)
+            self.__publish_pending_drop_claims(pending)
+            if any(entry["instance_id"] for entry in pending.values()):
+                return "pending_claim"
+            if any(
+                drop.is_claimable is True
+                and str(drop.id) not in self.__finished_drop_ids()
+                for campaign in campaigns
+                for drop in campaign.drops
+            ):
+                return "pending_claim"
+            if any(
+                entry["last_full"] is None
+                or now - entry["last_full"] >= PROMPT_CLAIM_DEBOUNCE_SECONDS
+                for entry in pending.values()
+            ):
+                return "drop_complete"
+        return None
+
+    def __mark_pending_drop_full_pass(self, now):
+        with self.__drop_state_lock("drop_claims_pending_lock"):
+            pending = self.__pending_drop_claims_alive(now)
+            stamps = dict(getattr(self, "drop_complete_last_full", {}))
+            for drop_id, entry in pending.items():
+                last_full = entry["last_full"]
+                if not entry["instance_id"] and (
+                    last_full is None
+                    or now - last_full >= PROMPT_CLAIM_DEBOUNCE_SECONDS
+                ):
+                    stamps[drop_id] = now
+                    pending[drop_id] = {**entry, "last_full": now}
+            self.drop_complete_last_full = stamps
+            self.__publish_pending_drop_claims(pending)
+
+    def __drop_progress_escalation_due(self, reason, drop_id, now):
+        attempts = getattr(self, "drop_progress_escalations", {})
+        key = (reason, drop_id)
+        last = attempts.get(key)
+        if last is not None and now - last < DROP_FULL_INVENTORY_SYNC_SECONDS:
+            return False
+        self.drop_progress_escalations = {
+            **{
+                key: stamp
+                for key, stamp in attempts.items()
+                if now - stamp < DROP_FULL_INVENTORY_SYNC_SECONDS
+            },
+            key: now,
+        }
+        return True
+
+    def __patch_light_drop_progress(
+        self, updates, refresh_timestamp=True, cache_only=None
+    ):
+        """Serialize the entire cache read/build/publish with inventory writers.
+
+        updates maps IDs to (minutes, required, locked). Return IDs whose
+        eligibility needs a full inventory rebuild, leaving their caches alone.
+        cache_only maps IDs with no local Drop to their reported minutes; those
+        only update tuples the inventory already cached, using the cached
+        requirement, and never add cache membership or escalate.
+        """
+        with self.__drop_state_lock("drop_inventory_cache_lock"):
+            progress = getattr(self, "drop_inventory_progress", {}) or {}
+            minutes = getattr(self, "drop_inventory_minutes_by_drop_id", {}) or {}
+            cached_rows = {row[2]: row for rows in progress.values() for row in rows}
+            eligibility_changed = {
+                drop_id
+                for drop_id, (current, required, locked) in updates.items()
+                if locked or (current < required and drop_id not in cached_rows)
+            }
+            finished_ids = self.__finished_drop_ids()
+            patches = {
+                drop_id: (current, required)
+                for drop_id, (current, required, _) in updates.items()
+                if drop_id not in eligibility_changed and drop_id not in finished_ids
+            }
+            for drop_id, current in (cache_only or {}).items():
+                if drop_id in cached_rows and drop_id not in finished_ids:
+                    patches.setdefault(drop_id, (current, cached_rows[drop_id][5]))
+            # A light report can be older than minutes another thread's
+            # inventory read just published; never move the caches backwards.
+            patches = {
+                drop_id: (
+                    max(
+                        current,
+                        (
+                            cached_rows[drop_id][4]
+                            if drop_id in cached_rows
+                            else minutes.get(drop_id, current)
+                        ),
+                    ),
+                    required,
+                )
+                for drop_id, (current, required) in patches.items()
+            }
+            patched_progress = {
+                game: tuple(
+                    (
+                        (*row[:4], patches[row[2]][0], *row[5:])
+                        if row[2] in patches
+                        else row
+                    )
+                    for row in rows
+                    if row[2] not in patches or patches[row[2]][0] < row[5]
+                )
+                for game, rows in progress.items()
+            }
+            # Like a full rebuild, a game with no incomplete drop has no key:
+            # readers treat a present key as "this game has progress".
+            # Finished and accepted drops never stay in a publication this
+            # pass marks fresh, whichever writer put them there.
+            patched_progress = {
+                game: tuple(row for row in rows if row[2] not in finished_ids)
+                for game, rows in patched_progress.items()
+            }
+            self.drop_inventory_progress = {
+                game: rows for game, rows in patched_progress.items() if rows
+            }
+            self.drop_inventory_minutes_by_drop_id = {
+                drop_id: patches[drop_id][0] if drop_id in patches else current
+                for drop_id, current in minutes.items()
+                if drop_id not in finished_ids
+                and (
+                    drop_id not in patches or patches[drop_id][0] < patches[drop_id][1]
+                )
+            }
+            patched_at = time.monotonic()
+            self.drop_light_patched = {
+                **{
+                    drop_id: record
+                    for drop_id, record in (
+                        getattr(self, "drop_light_patched", None) or {}
+                    ).items()
+                    if patched_at - record[1] <= DROP_LIGHT_PATCH_MEMORY_SECONDS
+                    and drop_id not in finished_ids
+                },
+                **{
+                    drop_id: (current, patched_at)
+                    for drop_id, (current, _) in patches.items()
+                },
+            }
+            if refresh_timestamp:
+                self.drop_inventory_progress_updated_at = time.time()
+        return eligibility_changed
+
+    def __light_drop_progress(self, campaigns, streamers, events, now):
+        reports = [(event[0], event[1], event[2]) for event in events]
+        request_failed = False
+        disabled_until = getattr(self, "drop_session_disabled_until", 0)
+        if disabled_until and now >= disabled_until:
+            self.drop_session_disabled_until = 0
+            self.drop_session_failures = 0
+        covered_channels = tuple(event[3] for event in events if event[3])
+        # One stable snapshot; a PubSub event covers only its own channel.
+        watched = [
+            streamer
+            for streamer in list(streamers)
+            if streamer.is_online
+            and streamer.is_watching
+            and streamer.channel_id
+            and streamer.channel_id not in covered_channels
+        ]
+        if watched and now < disabled_until:
+            request_failed = True
+        else:
+            sent_request = False
+            try:
+                for streamer in watched:
+                    if streamer not in streamers:
+                        continue
+                    sent_request = True
+                    session = self.gql.get_drop_current_session(streamer.channel_id)
+                    if session.errors:
+                        raise ValueError("current drop session returned errors")
+                    if session.has_session:
+                        reports.append(
+                            (
+                                session.drop_id,
+                                session.current_minutes_watched,
+                                session.required_minutes_watched,
+                            )
+                        )
+            except (GQLError, ValueError, TypeError, KeyError, AttributeError):
+                failures = getattr(self, "drop_session_failures", 0) + 1
+                self.drop_session_failures = failures
+                if failures >= 3:
+                    self.drop_session_disabled_until = (
+                        now + DROP_SESSION_BREAKER_SECONDS
+                    )
+                    logger.warning(
+                        "Drop session progress is unavailable; falling back to full "
+                        "inventory reads for 60 minutes",
+                        extra={"emoji": ":warning:"},
+                    )
+                request_failed = True
+            if sent_request and not request_failed:
+                self.drop_session_failures = 0
+
+        self.__prune_light_drop_minutes(now)
+        applied_minutes = dict(getattr(self, "drop_light_applied_minutes", {}))
+        drops_by_id = {}
+        for campaign in campaigns:
+            for drop in campaign.drops:
+                drop.is_printable = False
+                drops_by_id.setdefault(drop.id, []).append(drop)
+        finished_ids = self.__finished_drop_ids()
+        # One report per drop per pass, keeping the highest valid minutes: a
+        # PubSub event and a session reply for the same drop would otherwise
+        # set and then clear a milestone's is_printable within one pass.
+        combined = {}
+        for drop_id, current, required in reports:
+            if not isinstance(drop_id, str) or not drop_id.strip():
+                continue
+            if not self.__valid_drop_minutes(current) or drop_id in finished_ids:
+                continue
+            if not self.__valid_drop_minutes(required, positive=True):
+                required = None
+            previous = combined.get(drop_id)
+            if previous is not None:
+                current = max(current, previous[0])
+                required = required or previous[1]
+            combined[drop_id] = (current, required)
+        updates = {}
+        cache_only = {}
+        reason = None
+        for drop_id, (current, required) in combined.items():
+            drops = drops_by_id.get(drop_id, [])
+            if not drops:
+                # No local Drop, but the inventory may still cache this drop;
+                # keep its minutes moving so the stall check stays honest.
+                cache_only[drop_id] = current
+                if required is not None and current >= required:
+                    self.__update_pending_drop_claim(drop_id)
+                if self.__drop_progress_escalation_due("unknown_drop", drop_id, now):
+                    reason = "unknown_drop"
+                continue
+            previous_applied = applied_minutes.get(drop_id, (-1, now))[0]
+            applied = False
+            for drop in drops:
+                if current < drop.current_minutes_watched:
+                    continue
+                drop.update_minutes(current)
+                if current <= previous_applied:
+                    drop.is_printable = False
+                applied = True
+                if current >= drop.minutes_required and drop.minutes_required > 0:
+                    self.__update_pending_drop_claim(drop_id, drop.drop_instance_id)
+                previous = updates.get(drop_id, (current, 0, False))
+                updates[drop_id] = (
+                    current,
+                    max(drop.minutes_required, previous[1]),
+                    drop.has_preconditions_met is False or previous[2],
+                )
+            if applied:
+                applied_minutes[drop_id] = (max(current, previous_applied), now)
+        self.drop_light_applied_minutes = applied_minutes
+        eligibility_changed = self.__patch_light_drop_progress(
+            updates, refresh_timestamp=not request_failed, cache_only=cache_only
+        )
+        for drop_id in eligibility_changed:
+            if self.__drop_progress_escalation_due("eligibility_changed", drop_id, now):
+                reason = reason or "eligibility_changed"
+        if request_failed:
+            return "light_unavailable"
+        return reason or self.__pending_drop_progress_reason(campaigns, now)
+
+    def __sync_drop_progress(
+        self, campaigns, streamers, campaign_refresh, last_full_success, previous_step
+    ):
+        now = time.monotonic()
+        reason = None
+        if campaign_refresh:
+            reason = "campaign_refresh"
+        elif not getattr(self, "drop_full_inventory_loaded", False):
+            reason = "full_retry"
+        else:
+            reason = self.__pending_drop_progress_reason(campaigns, now)
+            if reason is None and (
+                last_full_success is None
+                or now - last_full_success >= DROP_FULL_INVENTORY_SYNC_SECONDS
+            ):
+                reason = "interval"
+        if reason is None:
+            events = self.__recent_drop_progress_events(now, previous_step)
+            reason = self.__light_drop_progress(campaigns, streamers, events, now)
+        if reason is not None:
+            self.__log_drop_check(
+                f"sync cycle: full inventory pass (reason={reason})",
+                level=logging.DEBUG,
+            )
+            self.drop_full_inventory_loaded = False
+            # Preserve the attempt even when reconciliation clears the entry.
+            self.__mark_pending_drop_full_pass(now)
+            campaigns = self.__sync_campaigns(campaigns)
+            self.__mark_pending_drop_full_pass(now)
+            self.__prune_light_drop_minutes(now)
+            if getattr(self, "drop_full_inventory_loaded", False):
+                last_full_success = time.monotonic()
+        else:
+            self.__remove_ineligible_badge_drops(campaigns)
+        return campaigns, last_full_success, now
+
     def sync_campaigns(self, streamers, chunk_size=3):
         # Full dashboard refresh every 15 minutes. A failed refresh keeps the
         # previous campaigns and is retried after CAMPAIGNS_RETRY_SECONDS
@@ -9800,9 +10428,12 @@ class Twitch(object):
         CAMPAIGNS_RETRY_SECONDS = 5 * 60
         next_campaigns_refresh = 0
         campaigns = []
+        last_full_success = None
+        previous_progress_step = time.monotonic()
         while self.running:
             try:
-                if time.time() >= next_campaigns_refresh:
+                campaign_refresh = time.time() >= next_campaigns_refresh
+                if campaign_refresh:
                     # Stays at the retry delay unless the refresh completes.
                     next_campaigns_refresh = time.time() + CAMPAIGNS_RETRY_SECONDS
 
@@ -9917,7 +10548,15 @@ class Twitch(object):
                         next_campaigns_refresh = time.time() + CAMPAIGNS_REFRESH_SECONDS
 
                 # Divide et impera :)
-                campaigns = self.__sync_campaigns(campaigns)
+                campaigns, last_full_success, previous_progress_step = (
+                    self.__sync_drop_progress(
+                        campaigns,
+                        streamers,
+                        campaign_refresh,
+                        last_full_success,
+                        previous_progress_step,
+                    )
+                )
 
                 # Check if user It's currently streaming the same game present in campaigns_details
                 for streamer in list(streamers):
