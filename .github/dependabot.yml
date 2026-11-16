@@ -1,6 +1,25 @@
 version: 2
 updates:
+  # Workflow actions: weekly version updates, titled "ci(deps): ..." so
+  # Release Please keeps them out of the changelog.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  # Python packages: security updates only. Routine version bumps are done by
+  # hand, so a limit of 0 turns version update PRs off. Security update PRs
+  # ignore this limit and use the commit-message settings below, so a fix to
+  # a runtime requirement is titled "fix(deps): ..." and reaches the changelog.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: "fix"
+      prefix-development: "chore"
+      include: "scope"
