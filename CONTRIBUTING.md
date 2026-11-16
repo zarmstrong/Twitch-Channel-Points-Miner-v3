@@ -89,7 +89,8 @@ Link issues from an ordinary pull request description with `Fixes #N`,
 `Closes #N`, or `Resolves #N`. Repository settings leave linked issues open
 when the pull request merges. Automation then adds the `awaiting-release` label
 and closes the issue only after a release containing that pull request is
-published.
+published. To keep a linked issue open through that release, remove its
+`awaiting-release` label after automation adds it.
 
 Before submitting code changes, run the checks described in the
 [testing guide](tests/README.md). Add or update tests whenever practical:
