@@ -1420,3 +1420,96 @@ def test_older_inventory_keeps_a_claim_failure_recorded_during_its_request(
     assert "drop-9" in loop.history[1]["pending"]
     assert loop.reads == [0, 1, 2]
     assert "reason=pending_claim" in caplog.text
+
+
+def test_inventory_reply_sent_before_a_light_patch_keeps_the_newer_minutes(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock["now"])
+    state = module._drop_inventory_state
+    cache = twitch._Twitch__cache_drop_inventory_progress
+    cache({"dropCampaignsInProgress": [progress_campaign(5)]})
+
+    # Another thread sends Inventory, then a light pass publishes 7.
+    monkeypatch.setattr(state, "started", clock["now"], raising=False)
+    clock["now"] += 1
+    twitch._Twitch__patch_light_drop_progress({"drop-1": (7, 100, False)})
+    clock["now"] += 1
+    cache({"dropCampaignsInProgress": [progress_campaign(5)]})
+    assert twitch.drop_inventory_minutes_by_drop_id["drop-1"] == 7
+    assert twitch.drop_inventory_progress["example-game"][0][4] == 7
+
+    # A read sent after the patch is the newer evidence, even when lower.
+    monkeypatch.setattr(state, "started", clock["now"], raising=False)
+    clock["now"] += 1
+    cache({"dropCampaignsInProgress": [progress_campaign(6)]})
+    assert twitch.drop_inventory_minutes_by_drop_id["drop-1"] == 6
+
+    # A drop the light pass completed is not re-added by an older reply.
+    monkeypatch.setattr(state, "started", clock["now"], raising=False)
+    clock["now"] += 1
+    twitch._Twitch__patch_light_drop_progress({"drop-1": (100, 100, False)})
+    cache({"dropCampaignsInProgress": [progress_campaign(99)]})
+    assert twitch.drop_inventory_progress == {}
+    assert twitch.drop_inventory_minutes_by_drop_id == {}
+
+
+def test_pending_claim_survives_reads_that_omit_its_drop_for_the_grace_period(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock["now"])
+    grace = module.DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS
+
+    def read(campaigns):
+        twitch._Twitch__reconcile_pending_drop_claims(
+            campaigns,
+            read_generation=twitch._Twitch__pending_drop_claims_generation(),
+        )
+
+    twitch._Twitch__update_pending_drop_claim("drop-1", "instance-1")
+    twitch._Twitch__update_pending_drop_claim("no-claim-id")
+    read([])
+    # Only an entry with a claim ID to retry is worth keeping.
+    assert set(twitch.drop_claims_pending) == {"drop-1"}
+    clock["now"] += grace - 1
+    read([])
+    assert "drop-1" in twitch.drop_claims_pending
+
+    # Listed again: the grace period starts over.
+    read([progress_campaign(100, instance="instance-1")])
+    assert twitch.drop_claims_pending["drop-1"]["missing_since"] is None
+    clock["now"] += grace
+    read([])
+    assert "drop-1" in twitch.drop_claims_pending
+    clock["now"] += grace
+    read([])
+    assert twitch.drop_claims_pending == {}
+
+
+def test_late_pubsub_progress_message_keeps_the_newer_minutes(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock["now"])
+
+    def record(minutes):
+        twitch.record_drop_progress_event(
+            {
+                "drop_id": "drop-1",
+                "current_progress_min": minutes,
+                "required_progress_min": 100,
+                "channel_id": "177128531",
+            }
+        )
+        return twitch.drop_progress_events["drop-1"]
+
+    assert record(10)[1] == 10
+    clock["now"] += 1
+    # The message for minute 9, delivered after the one for minute 10.
+    assert record(9)[1:] == (10, 100, "177128531", clock["now"])
+    # Lower minutes long after are a real report, not a reordered one.
+    clock["now"] += module.DROP_PROGRESS_EVENT_REORDER_SECONDS + 1
+    assert record(3)[1] == 3

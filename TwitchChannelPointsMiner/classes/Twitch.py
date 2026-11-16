@@ -106,6 +106,12 @@ CHANNEL_POINTS_MAX_CONCURRENCY = 3
 DROP_INVENTORY_FRESHNESS_SECONDS = 180
 DROP_FULL_INVENTORY_SYNC_SECONDS = 15 * 60
 DROP_SESSION_BREAKER_SECONDS = 60 * 60
+# How long a pending claim survives Inventory reads that do not list its drop.
+DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS = 5 * 60
+# How long a light pass's minutes stay comparable with a late Inventory reply.
+DROP_LIGHT_PATCH_MEMORY_SECONDS = 10 * 60
+# Two PubSub progress messages this close together can arrive out of order.
+DROP_PROGRESS_EVENT_REORDER_SECONDS = 60
 _drop_progress_lock_init = Lock()
 # How often a continuing gist stand-down is reported again at full level.
 GIST_STAND_DOWN_REMINDER_SECONDS = 3600
@@ -223,6 +229,7 @@ class Twitch(object):
         "drop_session_failures",
         "drop_session_disabled_until",
         "drop_progress_escalations",
+        "drop_light_patched",
         "drop_inventory_progress_updated_at",
         "drop_inventory_minutes_by_drop_id",
         "drop_inventory_finished_ids",
@@ -756,6 +763,20 @@ class Twitch(object):
             # it, still listing the drop as incomplete and without the new
             # instance; the drop ID keeps it out of the caches regardless.
             accepted_ids = getattr(self, "accepted_drop_ids", None) or ()
+            # Minutes a light pass published after this Inventory request was
+            # sent are newer than the reply; the reply must not move them back.
+            read_started = getattr(_drop_inventory_state, "started", None)
+            light_patched = (
+                {
+                    drop_id: patched_minutes
+                    for drop_id, (patched_minutes, stamp) in (
+                        getattr(self, "drop_light_patched", None) or {}
+                    ).items()
+                    if stamp > read_started
+                }
+                if read_started is not None
+                else {}
+            )
             for campaign in inventory.get("dropCampaignsInProgress", []) or []:
                 if not isinstance(campaign, dict):
                     continue
@@ -788,6 +809,9 @@ class Twitch(object):
                         continue
                     required_minutes = drop.get("requiredMinutesWatched") or 0
                     current_minutes = drop_self.get("currentMinutesWatched") or 0
+                    newer_minutes = light_patched.get(str(drop.get("id") or ""))
+                    if newer_minutes is not None and newer_minutes > current_minutes:
+                        current_minutes = newer_minutes
                     instance_id = drop_self.get("dropInstanceID")
                     # An accepted claim counts as claimed; the inventory is lagging.
                     claimed = (
@@ -8142,6 +8166,7 @@ class Twitch(object):
 
     def __get_inventory(self):
         _drop_inventory_state.inventory = None
+        _drop_inventory_state.started = time.monotonic()
         _drop_inventory_state.error_paths = frozenset()
         try:
             inventory_response = self.gql.get_inventory()
@@ -9920,8 +9945,15 @@ class Twitch(object):
                     for key, event in getattr(self, "drop_progress_events", {}).items()
                     if now - event[4] <= 10 * 60
                 }
-                if drop_id in events and events[drop_id][4] > now:
-                    return
+                previous = events.get(drop_id)
+                if (
+                    previous is not None
+                    and now - previous[4] <= DROP_PROGRESS_EVENT_REORDER_SECONDS
+                    and previous[1] > minutes
+                ):
+                    # An older message delivered late: keep the newer minutes.
+                    minutes = previous[1]
+                    required = required or previous[2]
                 events[drop_id] = (
                     drop_id,
                     minutes,
@@ -10019,6 +10051,10 @@ class Twitch(object):
         Inventory request was sent. An entry written after it (for example
         a PubSub claim worker's failed claim, recorded from a newer read)
         is newer than this response and is kept whatever the response says.
+
+        An entry that holds a claim ID survives reads that do not list its
+        drop for DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS, so one short or
+        partial reply cannot stop the claim retries.
         """
         now = time.monotonic()
         listed = {}
@@ -10036,15 +10072,23 @@ class Twitch(object):
         }
         with self.__drop_state_lock("drop_claims_pending_lock"):
             accepted = getattr(self, "accepted_drop_ids", ()) or ()
-            pending = {
-                drop_id: entry
-                for drop_id, entry in self.__pending_drop_claims_alive(now).items()
-                if (drop_id in listed and drop_id not in claimed_ids)
-                or (
+            pending = {}
+            for drop_id, entry in self.__pending_drop_claims_alive(now).items():
+                newer = (
                     read_generation is not None
                     and entry.get("generation", 0) > read_generation
                 )
-            }
+                if newer:
+                    pending[drop_id] = entry
+                elif drop_id in listed:
+                    if drop_id not in claimed_ids:
+                        pending[drop_id] = {**entry, "missing_since": None}
+                elif entry.get("instance_id"):
+                    missing_since = entry.get("missing_since")
+                    if missing_since is None:
+                        missing_since = now
+                    if now - missing_since < DROP_PENDING_CLAIM_MISSING_GRACE_SECONDS:
+                        pending[drop_id] = {**entry, "missing_since": missing_since}
             for drop_id, drop in listed.items():
                 edge = drop.get("self") or {}
                 if not isinstance(edge, dict):
@@ -10199,6 +10243,21 @@ class Twitch(object):
                 and (
                     drop_id not in patches or patches[drop_id][0] < patches[drop_id][1]
                 )
+            }
+            patched_at = time.monotonic()
+            self.drop_light_patched = {
+                **{
+                    drop_id: record
+                    for drop_id, record in (
+                        getattr(self, "drop_light_patched", None) or {}
+                    ).items()
+                    if patched_at - record[1] <= DROP_LIGHT_PATCH_MEMORY_SECONDS
+                    and drop_id not in finished_ids
+                },
+                **{
+                    drop_id: (current, patched_at)
+                    for drop_id, (current, _) in patches.items()
+                },
             }
             if refresh_timestamp:
                 self.drop_inventory_progress_updated_at = time.time()
