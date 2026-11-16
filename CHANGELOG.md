@@ -1,5 +1,57 @@
 # Changelog
 
+## [3.21.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.21.0...3.21.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **analytics:** add Subresource Integrity hashes to the dashboard's CDN scripts and stylesheets ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** blame another program only when the dashboard port is actually in use ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** escape series names and reasons in the chart tooltip ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** harden the dashboard against DNS rebinding, cross-site requests and path traversal ([#303](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/303)) ([a09078c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a09078cbe89f0a601b08753ad3f80aaab1f05567))
+* **analytics:** show the logger's actual log file in the dashboard Logs tab ([#316](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/316)) ([2d6a21b](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/2d6a21b9eaca7c6b89640fa529b6b671b6aca769))
+* **bet:** stop stealth mode from computing a negative bet ([#298](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/298)) ([159286a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/159286a4cfa2d6f7c334700acde06495077b9da2))
+* **chat:** keep a removed streamer's chat from rejoining, including after the miner stops ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** let a stopped chat leave promptly while the TLS probe or IRC client setup is still running ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** never send the IRC token over plaintext unless TCPM_ALLOW_PLAINTEXT_IRC is set ([#302](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/302)) ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911)), closes [#264](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/264)
+* **chat:** rejoin a chat whose thread ended instead of raising "threads can only be started once" ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** retry IRC TLS with backoff and join once a handshake succeeds instead of skipping the chat ([a52647f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/a52647f0d10d8380edd964221605ed69176a4911))
+* **chat:** run IRC chat threads as daemons, so a chat that is still connecting can't keep the process alive ([d25ee30](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d25ee30ce7fffcab3a963cbfd876bb22aa24615e))
+* **config:** edit STREAMERS in place so dashboard changes keep comments and settings ([#315](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/315)) ([c470a5c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/c470a5c54055e380823dcd021643fbbac0115500))
+* **config:** keep the platform-dependent emoji default when migrating config.py ([#306](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/306)) ([dadeda0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dadeda0262c458d3739da3a300ab3a0250d4886a))
+* **config:** require every constructor argument when enabling a notifier from the dashboard ([#304](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/304)) ([7809377](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/7809377851f5b2a0e2e84b91250c8e0e20c2f624))
+* **config:** use byte columns and real line breaks when migrating config.py ([#317](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/317)) ([df59189](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/df59189cef4bcd018ef9cf59b90f5a483b913698))
+* **drops:** apply each inventory read's completed campaigns and badge signatures under one lock ([341047d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/341047d478ef01b2df7c2f733199685521b70d68))
+* **drops:** forget a reopened campaign's badge signature so badge and gist discovery mine it again ([341047d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/341047d478ef01b2df7c2f733199685521b70d68))
+* **drops:** mine a completed campaign again when Twitch adds a drop to it ([#311](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/311)) ([341047d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/341047d478ef01b2df7c2f733199685521b70d68))
+* **drops:** reopen a completed campaign only when the inventory loaded its completed reward list ([341047d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/341047d478ef01b2df7c2f733199685521b70d68))
+* **drops:** replace the completed campaign set under a lock so category discovery cannot fail mid-iteration ([341047d](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/341047d478ef01b2df7c2f733199685521b70d68))
+* **drops:** stop repeating the dashboard error when Twitch withholds campaigns from the Android login ([#310](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/310)) ([336f85b](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/336f85b95d837b9e8fd992c5b61411ae0769f460))
+* **drops:** update the Android dashboard withheld streak under a lock so the warning is logged exactly once ([336f85b](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/336f85b95d837b9e8fd992c5b61411ae0769f460))
+* **lifecycle:** stop workers when the miner stops, close stale websockets and reconnect off the main loop ([#318](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/318)) ([d25ee30](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d25ee30ce7fffcab3a963cbfd876bb22aa24615e))
+* **matrix:** accept a login token only from a successful response ([e1ce128](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e1ce128f3d2fdd9e70057082a32addf4af4e532d))
+* **matrix:** back off after a failed login, honouring the homeserver's Retry-After or retry_after_ms ([e1ce128](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e1ce128f3d2fdd9e70057082a32addf4af4e532d))
+* **matrix:** keep the password and access token out of the Matrix repr ([e1ce128](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e1ce128f3d2fdd9e70057082a32addf4af4e532d))
+* **matrix:** log in again and resend the message once when the access token is rejected ([e1ce128](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e1ce128f3d2fdd9e70057082a32addf4af4e532d))
+* **matrix:** log in on the first notification so a failed login is reported and retried ([#305](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/305)) ([e1ce128](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e1ce128f3d2fdd9e70057082a32addf4af4e532d))
+* **matrix:** recognise the migration template's ROOM and PASSWORD placeholders ([e1ce128](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e1ce128f3d2fdd9e70057082a32addf4af4e532d))
+* **runner:** reject invalid TCPM_CONFIG_RELOAD_SECONDS values before startup ([#299](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/299)) ([e9a5173](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/e9a5173e9ea00be88d912ff1677934538c70902f))
+* **utils:** probe several hosts without changing the global socket timeout ([#300](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/300)) ([0eaf967](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/0eaf967909c1d94284841b9ae9763a39121a0d86))
+* **watch:** warn once per streamer while its spade URL is missing ([#319](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/319)) ([2b435ad](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/2b435ad905e4888b017b7b0c1a153a2c26f4ab47))
+* **websocket:** abort a stale websocket before closing it, so a half-open connection can't block the reconnect ([d25ee30](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d25ee30ce7fffcab3a963cbfd876bb22aa24615e))
+* **websocket:** treat send timeouts and socket errors as a closed connection, so a failed PING triggers a reconnect ([d25ee30](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d25ee30ce7fffcab3a963cbfd876bb22aa24615e))
+* **windows:** create a missing Run key when turning autostart on, and remove the installer's shortcut when turning it off without one ([263d574](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/263d574c063e0c45df3c96476514feb3a8f525c5))
+* **windows:** find the installer's shortcut in the Startup folder Windows reports, so a redirected folder works ([263d574](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/263d574c063e0c45df3c96476514feb3a8f525c5))
+* **windows:** prevent a second miner start and reconcile the two autostart methods ([#307](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/307)) ([263d574](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/263d574c063e0c45df3c96476514feb3a8f525c5))
+* **windows:** send the dashboard readiness probe directly, never through a system proxy ([263d574](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/263d574c063e0c45df3c96476514feb3a8f525c5))
+* **windows:** show the window when it starts minimized but the tray icon is unavailable ([263d574](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/263d574c063e0c45df3c96476514feb3a8f525c5))
+* **windows:** treat a shell prefs file that is not a JSON object as empty ([263d574](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/263d574c063e0c45df3c96476514feb3a8f525c5))
+
+
+### Documentation
+
+* **agents:** add CLAUDE.md and scoped agent guidance for the package, tests and workflows ([#314](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/314)) ([8cb80e2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/8cb80e22bb7b0568e1d05843deec92cbab5aaa7c))
+
 ## [3.21.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.20.0...3.21.0) (2026-11-14)
 
 
