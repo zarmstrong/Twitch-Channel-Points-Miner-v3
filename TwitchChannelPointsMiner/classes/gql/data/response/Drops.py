@@ -190,3 +190,19 @@ class DropsPageClaimDropsResponse:
 
     def __repr__(self):
         return f"DropsPageClaimDropsResponse({self.__dict__})"
+
+
+class DropCurrentSessionResponse:
+    def __init__(
+        self,
+        has_session=False,
+        drop_id=None,
+        current_minutes_watched=None,
+        required_minutes_watched=None,
+        errors=None,
+    ):
+        self.has_session = has_session
+        self.drop_id = drop_id
+        self.current_minutes_watched = current_minutes_watched
+        self.required_minutes_watched = required_minutes_watched
+        self.errors = errors or []
