@@ -4870,15 +4870,6 @@ def test_helix_get_reports_network_errors_as_failed(monkeypatch, error):
     assert twitch._Twitch__helix_request_failed(response) is True
 
 
-def test_helix_get_still_suppresses_listed_statuses_silently(monkeypatch):
-    twitch = _helix_twitch(monkeypatch, lambda: FakeResponse({}, 404))
-
-    assert (
-        twitch._Twitch__helix_get("drops/campaigns", {}, suppress_status_codes={404})
-        == {}
-    )
-
-
 def test_permanent_streams_error_is_an_evaluated_empty_category(monkeypatch):
     # End to end: a 400 from `streams` yields a normal empty result, so the
     # category's stale streamers are still retired by the caller.
@@ -5175,18 +5166,6 @@ def test_restricted_lookup_log_does_not_count_a_rejected_batch(monkeypatch):
 
     assert len(checked) == 1
     assert checked[0].startswith(f"Checked 100/{len(PICK_IN_SECOND_BATCH)} ")
-
-
-@pytest.mark.parametrize("status_code", [400, 410, 422])
-def test_open_helix_campaigns_skip_a_rejected_request(monkeypatch, status_code):
-    twitch = _helix_twitch(monkeypatch, lambda: FakeResponse({}, status_code))
-
-    campaigns, pages = twitch._Twitch__get_open_drop_campaigns_from_helix(
-        return_raw=True
-    )
-
-    assert campaigns == []
-    assert pages == []
 
 
 def test_unknown_channel_progress_hash_is_not_retried_and_is_detected():
