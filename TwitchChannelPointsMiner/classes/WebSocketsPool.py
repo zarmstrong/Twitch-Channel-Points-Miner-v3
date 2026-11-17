@@ -340,6 +340,7 @@ class WebSocketsPool:
                     ws.twitch.claim_drops_from_event(message.data)
                 elif message.type == "drop-progress":
                     logger.debug(f"Drop progress: {message.data}")
+                    ws.twitch.record_drop_progress_event(message.data)
                 return
 
             # Resolve the streamer once: the list can shrink or reorder while

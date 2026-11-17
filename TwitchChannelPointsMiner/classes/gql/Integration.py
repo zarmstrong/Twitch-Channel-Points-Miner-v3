@@ -16,6 +16,7 @@ from TwitchChannelPointsMiner.classes.gql.data.response.ChannelPointsContext imp
 )
 from TwitchChannelPointsMiner.classes.gql.data.response.Drops import (
     DropCampaignDetailsResponse,
+    DropCurrentSessionResponse,
     DropsHighlightServiceAvailableDropsResponse,
     DropsPageClaimDropsResponse,
     InventoryResponse,
@@ -121,6 +122,11 @@ class PostRequest(Protocol):
     def __call__(
         self, url: str, json: dict | list, headers: dict[str, str]
     ) -> Response: ...
+
+
+# The light drops-progress check sends one request per watched channel and
+# falls back to a full Inventory read when it fails, so it never retries.
+DROP_SESSION_ATTEMPT_STRATEGY = AttemptStrategy(attempts=1)
 
 
 class GQL:
@@ -333,17 +339,22 @@ class GQL:
             return result.result
 
     def post_gql_request_single(
-        self, operation_name: str, request_json: dict, parse: Callable[[Any], T]
+        self,
+        operation_name: str,
+        request_json: dict,
+        parse: Callable[[Any], T],
+        attempt_strategy: AttemptStrategy | None = None,
     ) -> T:
         """
         Posts the given GQL request. Handles automatic retries according to the `retry_strategy`.
         :param operation_name: The name of the GQL operation.
         :param request_json: The data to send.
         :param parse: The function to use to parse the data.
+        :param attempt_strategy: Overrides the shared strategy for this call only.
         :return: The parsed response, either a single object or a list if the request was a list.
         :raises RetryError: If one or more errors occurred while attempting the request.
         """
-        result = self.attempt_strategy.make_attempts(
+        result = (attempt_strategy or self.attempt_strategy).make_attempts(
             lambda: self.__post_gql_request(request_json, parse),
             validate_response,
             is_recoverable_error,
@@ -609,6 +620,22 @@ class GQL:
             GQLOperations.DropChannelCampaignsProgress["operationName"],
             json_data,
             self.parser.parse_drop_channel_campaigns_progress,
+        )
+
+    def get_drop_current_session(self, channel_id: str) -> DropCurrentSessionResponse:
+        """Get the account's current drop progress for a watched channel.
+
+        One attempt only: the drops sync falls back to a full Inventory read
+        on the same pass when this fails, so retrying here would only send
+        more failing requests and delay that fallback.
+        """
+        json_data = copy.deepcopy(GQLOperations.DropCurrentSessionContext)
+        json_data["variables"] = {"channelID": channel_id, "channelLogin": ""}
+        return self.post_gql_request_single(
+            GQLOperations.DropCurrentSessionContext["operationName"],
+            json_data,
+            self.parser.parse_drop_current_session_response,
+            attempt_strategy=DROP_SESSION_ATTEMPT_STRATEGY,
         )
 
     def get_inventory(self) -> InventoryResponse:
