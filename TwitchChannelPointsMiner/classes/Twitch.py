@@ -2304,9 +2304,8 @@ class Twitch(object):
             _drops_dashboard_state, "unavailable", False
         )
         raw_query_campaigns, _ = self.__get_reward_campaigns_raw_query()
-        helix_campaigns, _ = self.__get_open_drop_campaigns_from_helix()
         campaigns_by_id = {}
-        for campaign in dashboard_campaigns + raw_query_campaigns + helix_campaigns:
+        for campaign in dashboard_campaigns + raw_query_campaigns:
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
@@ -2320,9 +2319,9 @@ class Twitch(object):
                 not existing.get("timeBasedDrops") and campaign.get("timeBasedDrops")
             ):
                 if existing is not None:
-                    # Don't let a later source's record for the same id (e.g.
-                    # helix, with no earn-mechanism field of its own) silently
-                    # drop the reward-campaign tag an earlier source set.
+                    # Don't let a later source's record for the same id
+                    # silently drop the reward-campaign tag an earlier
+                    # source set.
                     campaign.setdefault(
                         "_is_reward_campaign",
                         existing.get("_is_reward_campaign", False),
@@ -4415,7 +4414,6 @@ class Twitch(object):
         self,
         endpoint: str,
         params: Optional[dict] = None,
-        suppress_status_codes: Optional[set] = None,
     ) -> dict:
         try:
             response = requests.get(
@@ -4434,15 +4432,6 @@ class Twitch(object):
             status_code = None
             if hasattr(e, "response") and e.response is not None:
                 status_code = e.response.status_code
-
-            if (
-                suppress_status_codes is not None
-                and status_code in suppress_status_codes
-            ):
-                logger.debug(
-                    f"Skipping unsupported Helix endpoint '{endpoint}' (status: {status_code})"
-                )
-                return {}
 
             logger.error(f"Error with Helix endpoint '{endpoint}': {e}")
             if status_code in HELIX_PERMANENT_STATUS_CODES:
@@ -7163,19 +7152,16 @@ class Twitch(object):
             return_raw=True
         )
         raw_query_campaigns, raw_query_debug = self.__get_reward_campaigns_raw_query()
-        helix_campaigns, helix_pages = self.__get_open_drop_campaigns_from_helix(
-            return_raw=True
-        )
         campaigns_by_id = {}
-        for campaign in dashboard_campaigns + raw_query_campaigns + helix_campaigns:
+        for campaign in dashboard_campaigns + raw_query_campaigns:
             if not isinstance(campaign, dict):
                 continue
             campaign_id = campaign.get("id")
             if campaign_id not in [None, ""]:
                 existing = campaigns_by_id.get(str(campaign_id))
                 if existing is not None:
-                    # Helix records carry no earn-mechanism field; keep the
-                    # reward tag an earlier source set for the same id.
+                    # Keep the reward tag an earlier source set for the
+                    # same id.
                     campaign.setdefault(
                         "_is_reward_campaign",
                         existing.get("_is_reward_campaign", False),
@@ -7196,8 +7182,6 @@ class Twitch(object):
             "graphql ViewerDropsDashboard raw response", dashboard_response
         )
         self.__log_drop_check_json("graphql raw query debug", raw_query_debug)
-        self.__log_drop_check_json("helix open campaigns raw pages", helix_pages)
-        self.__log_drop_check_json("helix open campaigns extracted", helix_campaigns)
         self.__log_drop_check_json(
             "graphql merged all extracted campaigns", all_campaigns
         )
@@ -8484,64 +8468,6 @@ class Twitch(object):
                 continue
 
         return None
-
-    def __get_open_drop_campaigns_from_helix(
-        self, return_raw: bool = False
-    ) -> Tuple[List[dict], List[dict]]:
-        campaigns = []
-        pages = []
-        cursor = None
-        max_pages = 25
-
-        for _ in range(max_pages):
-            params = {"first": 100}
-            if cursor is not None:
-                params["after"] = cursor
-
-            response = self.__helix_get(
-                "drops/campaigns", params, suppress_status_codes={404}
-            )
-            # A rejected request returns an empty stand-in page, not a page
-            # Twitch sent.
-            if (
-                not isinstance(response, dict)
-                or response == {}
-                or "rejected_status" in response
-            ):
-                break
-
-            pages.append(response)
-            page_campaigns = response.get("data", []) or []
-            for campaign in page_campaigns:
-                if isinstance(campaign, dict) and self.__is_open_drop_campaign(
-                    campaign
-                ):
-                    campaigns.append(campaign)
-
-            pagination = (
-                response.get("pagination", {}) if isinstance(response, dict) else {}
-            )
-            next_cursor = (
-                pagination.get("cursor") if isinstance(pagination, dict) else None
-            )
-            if not next_cursor:
-                break
-            cursor = next_cursor
-
-        deduped_campaigns = []
-        seen_ids = set()
-        for campaign in campaigns:
-            campaign_id = str(campaign.get("id") or "")
-            if campaign_id != "":
-                if campaign_id in seen_ids:
-                    continue
-                seen_ids.add(campaign_id)
-            deduped_campaigns.append(campaign)
-
-        if return_raw is True:
-            return deduped_campaigns, pages
-
-        return deduped_campaigns, []
 
     def __get_campaigns_details(
         self,

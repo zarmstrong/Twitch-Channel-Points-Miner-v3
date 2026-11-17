@@ -2770,9 +2770,6 @@ def _account_wide_evaluation(monkeypatch, accepted_drop_ids):
         Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
     )
     monkeypatch.setattr(
-        Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
-    )
-    monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, **kwargs: campaigns,
@@ -2829,11 +2826,6 @@ def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     )
     monkeypatch.setattr(
         Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, **kwargs: campaigns,
     )
@@ -2867,7 +2859,6 @@ def test_finished_campaign_lookup_is_marked_possibly_stale(monkeypatch):
     for name, value in (
         ("_Twitch__get_drops_dashboard", lambda self, status="OPEN": []),
         ("_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])),
-        ("_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])),
         ("_Twitch__awarded_benefits", lambda self, inventory: (set(), set())),
     ):
         monkeypatch.setattr(Twitch, name, value)
@@ -2913,11 +2904,6 @@ def test_completed_campaign_stays_authoritative_by_name_and_leaves_advertised_ca
     )
     monkeypatch.setattr(
         Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, **kwargs: campaigns,
     )
@@ -2950,31 +2936,28 @@ def test_completed_campaign_stays_authoritative_by_name_and_leaves_advertised_ca
 
 
 def test_reward_campaign_tag_survives_initial_merge_with_untagged_source(monkeypatch):
-    # Regression test: the initial dashboard+raw_query+helix merge replaces
-    # an existing campaigns_by_id entry wholesale whenever the incoming one
-    # has timeBasedDrops and the existing one doesn't, with no carry-over of
-    # _is_reward_campaign - silently un-excluding a purchase-gated reward
-    # campaign if a later, untagged source (e.g. helix) reports the same id.
+    # Regression test: the initial campaign merge replaces an existing
+    # campaigns_by_id entry wholesale whenever the incoming one has
+    # timeBasedDrops and the existing one doesn't. Without carrying
+    # _is_reward_campaign over, a later, untagged record of the same id would
+    # silently un-exclude a purchase-gated reward campaign.
     twitch = bare_twitch(monkeypatch)
 
     reward_campaign = campaign_data()
     reward_campaign["timeBasedDrops"] = []
     reward_campaign["_is_reward_campaign"] = True
 
-    helix_campaign = campaign_data()  # Same id, has timeBasedDrops, no tag.
+    untagged_copy = campaign_data()  # Same id, has timeBasedDrops, no tag.
 
     monkeypatch.setattr(
-        Twitch, "_Twitch__get_drops_dashboard", lambda self, status="OPEN": []
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [reward_campaign],
     )
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_reward_campaigns_raw_query",
-        lambda self: ([reward_campaign], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([helix_campaign], []),
+        lambda self: ([untagged_copy], []),
     )
     monkeypatch.setattr(
         Twitch,
@@ -2990,6 +2973,42 @@ def test_reward_campaign_tag_survives_initial_merge_with_untagged_source(monkeyp
     )
 
     assert "campaign-1" in twitch.reward_campaign_ids
+
+
+def test_campaign_discovery_makes_no_helix_request(monkeypatch):
+    # Helix has no drops/campaigns endpoint (#329): every request got a 404.
+    # Campaigns come only from GQL, so neither campaign pass asks Helix.
+    twitch = bare_twitch(monkeypatch)
+    helix_endpoints = []
+
+    def helix_get(self, endpoint, params=None, **kwargs):
+        helix_endpoints.append(endpoint)
+        return {}
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", helix_get)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN", return_raw=False: ([], {}) if return_raw else [],
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], {})
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, **kwargs: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__awarded_benefits", lambda self, inventory: (set(), set())
+    )
+
+    twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {"dropCampaignsInProgress": []}, {"example-game"}
+    )
+    twitch.log_open_drop_campaigns()
+
+    assert helix_endpoints == []
 
 
 def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
@@ -3015,11 +3034,6 @@ def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_reward_campaigns_raw_query",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
         lambda self: ([], []),
     )
     monkeypatch.setattr(
@@ -3086,11 +3100,6 @@ def test_subscription_reward_campaign_is_never_active_incomplete(monkeypatch):
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_reward_campaigns_raw_query",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
         lambda self: ([], []),
     )
     monkeypatch.setattr(
@@ -3164,11 +3173,6 @@ def test_watchable_campaign_survives_alongside_reward_campaign_for_same_game(
     )
     monkeypatch.setattr(
         Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
     )
@@ -3229,9 +3233,6 @@ def test_partial_completed_inventory_does_not_resurrect_category(monkeypatch, wr
         Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
     )
     monkeypatch.setattr(
-        Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
-    )
-    monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, **kwargs: [campaign_data()] if campaigns else [],
@@ -3274,11 +3275,6 @@ def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
         "_Twitch__get_reward_campaigns_raw_query",
         lambda self: ([], []),
     )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([], []),
-    )
 
     def resolve_details(self, campaigns, **kwargs):
         detail_requests.extend(campaigns)
@@ -3312,11 +3308,6 @@ def test_full_completed_inventory_campaign_prevents_fallback_resurrection(monkey
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_reward_campaigns_raw_query",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
         lambda self: ([], []),
     )
 
@@ -3361,11 +3352,6 @@ def test_wrapped_completed_inventory_campaign_prevents_fallback_resurrection(
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_reward_campaigns_raw_query",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
         lambda self: ([], []),
     )
     monkeypatch.setattr(
@@ -4209,11 +4195,6 @@ def _stub_campaign_sources(monkeypatch):
     )
     monkeypatch.setattr(
         Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([], []),
-    )
-    monkeypatch.setattr(
-        Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
     )
@@ -4258,8 +4239,8 @@ def test_campaign_refresh_preserves_allowlist_only_for_unevaluated_games(
         other_campaign["game"] = {"displayName": "Other Game"}
         monkeypatch.setattr(
             Twitch,
-            "_Twitch__get_open_drop_campaigns_from_helix",
-            lambda self: ([other_campaign], []),
+            "_Twitch__get_drops_dashboard",
+            lambda self, **kw: [other_campaign],
         )
 
     deadlines, evaluated_games = (
@@ -4350,13 +4331,10 @@ def test_active_campaign_records_its_campaign_end_for_later_carrying(monkeypatch
     campaign = campaign_data()
     campaign["endAt"] = "2099-06-01T00:00:00Z"
     monkeypatch.setattr(_drops_dashboard_state, "unavailable", False, raising=False)
-    monkeypatch.setattr(Twitch, "_Twitch__get_drops_dashboard", lambda self, **kw: [])
-    _stub_campaign_sources(monkeypatch)
     monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self: ([campaign], []),
+        Twitch, "_Twitch__get_drops_dashboard", lambda self, **kw: [campaign]
     )
+    _stub_campaign_sources(monkeypatch)
 
     twitch._Twitch__active_drop_category_slugs_from_campaigns({}, {"example-game"})
 
@@ -4942,9 +4920,6 @@ def test_category_given_by_twitch_slug_matches_its_games_twitch_campaign(
         Twitch, "_Twitch__get_reward_campaigns_raw_query", lambda self: ([], [])
     )
     monkeypatch.setattr(
-        Twitch, "_Twitch__get_open_drop_campaigns_from_helix", lambda self: ([], [])
-    )
-    monkeypatch.setattr(
         Twitch,
         "_Twitch__get_campaigns_details",
         lambda self, campaigns, campaign_channel_id_by_id=None, **kwargs: campaigns,
@@ -5172,29 +5147,24 @@ def test_drops_description_ignores_reward_campaigns_for_same_game(monkeypatch):
 
 
 def test_open_campaign_log_keeps_reward_tag_over_untagged_duplicate(monkeypatch):
-    # Helix records carry no earn-mechanism tag. A Helix copy of a campaign
-    # the raw reward query already reported must not erase its reward tag,
-    # or both reward filters above would miss it.
+    # A later, untagged record of a campaign an earlier source reported as a
+    # reward campaign must not erase its reward tag, or both reward filters
+    # above would miss it.
     twitch = bare_twitch(monkeypatch)
-    helix_copy = reward_campaign_summary("reward-1", {"displayName": "Example Game"})
-    del helix_copy["_is_reward_campaign"]
+    untagged_copy = reward_campaign_summary("reward-1", {"displayName": "Example Game"})
+    del untagged_copy["_is_reward_campaign"]
     monkeypatch.setattr(
         Twitch,
         "_Twitch__get_drops_dashboard",
-        lambda self, status="OPEN", return_raw=False: ([], {}),
-    )
-    monkeypatch.setattr(
-        Twitch,
-        "_Twitch__get_reward_campaigns_raw_query",
-        lambda self: (
+        lambda self, status="OPEN", return_raw=False: (
             [reward_campaign_summary("reward-1", {"displayName": "Example Game"})],
             {},
         ),
     )
     monkeypatch.setattr(
         Twitch,
-        "_Twitch__get_open_drop_campaigns_from_helix",
-        lambda self, return_raw=False: ([helix_copy], []),
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([untagged_copy], {}),
     )
 
     twitch.log_open_drop_campaigns()
