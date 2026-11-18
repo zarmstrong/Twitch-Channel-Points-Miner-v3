@@ -14,6 +14,10 @@ import tempfile
 from pathlib import Path
 
 _LINE_PATTERN = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+# PEP 263: an encoding declaration is a comment on line 1, or on line 2 when
+# line 1 is blank or a comment too.
+_ENCODING_DECLARATION = re.compile(r"[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
+_BLANK_OR_COMMENT_LINE = re.compile(r"[ \t\f]*(?:#|$)")
 
 CONFIG_VERSION = 12
 STREAMER_SETTINGS_DEFAULTS = (
@@ -146,6 +150,10 @@ class ConfigMigrationError(ValueError):
     pass
 
 
+class GeneratedConfigError(ConfigMigrationError):
+    """The migration's own output doesn't compile; the input was valid."""
+
+
 def _assignment_value(tree, name):
     for node in tree.body:
         targets = node.targets if isinstance(node, ast.Assign) else []
@@ -275,8 +283,9 @@ def _commented_call_defaults(source, line_offsets, call, names):
     ]
 
 
-def _name_is_defined(tree, name):
-    for node in tree.body:
+def _name_is_imported(statements, name):
+    """Whether a top-level import among statements binds name."""
+    for node in statements:
         if isinstance(node, ast.Import):
             if any(
                 (alias.asname or alias.name.split(".")[0]) == name
@@ -289,18 +298,102 @@ def _name_is_defined(tree, name):
     return False
 
 
-def _import_offset(source, line_offsets, tree):
+def module_header_end(source, tree):
+    """Where a statement inserted at the top of a module can go.
+
+    Returns (0-based line, UTF-8 byte column). A shebang only works on line 1,
+    an encoding declaration only on line 1 or 2, the docstring only as the
+    first statement, and `from __future__` imports must come before every
+    other statement, so all of them stay above. The column is not 0 only when
+    the first other statement shares the header's last line (after a `;`).
+    """
+    lines = [line.rstrip("\r\n") for line in _LINE_PATTERN.findall(source)[:2]]
+    header = 0
+    if lines and (lines[0].startswith("#!") or _ENCODING_DECLARATION.match(lines[0])):
+        header = 1
+    if (
+        len(lines) > 1
+        and _BLANK_OR_COMMENT_LINE.match(lines[0])
+        and _ENCODING_DECLARATION.match(lines[1])
+    ):
+        header = 2
+    body = tree.body
+    index = 0
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        index = 1
+    while (
+        index < len(body)
+        and isinstance(body[index], ast.ImportFrom)
+        and body[index].module == "__future__"
+    ):
+        index += 1
+    if index:
+        last = body[index - 1]
+        if index < len(body) and body[index].lineno == last.end_lineno:
+            return last.end_lineno - 1, body[index].col_offset
+        header = max(header, last.end_lineno)
+    return header, 0
+
+
+def _header_offset(source, line_offsets, tree):
+    line, col_offset = module_header_end(source, tree)
+    return _source_offset(line_offsets, line + 1, col_offset)
+
+
+def _first_statement_edited(line_offsets, tree, edits):
+    """Index of the first top-level statement any of edits changes."""
+    offsets = [edit[0] for edit in edits]
+    for index, node in enumerate(tree.body):
+        # A decorated def or class starts at its first decorator.
+        first = (getattr(node, "decorator_list", None) or [node])[0]
+        start = _source_offset(line_offsets, first.lineno, first.col_offset)
+        end = _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
+        if any(start <= offset <= end for offset in offsets):
+            return index
+    return len(tree.body)
+
+
+def _import_offset(source, line_offsets, tree, first_use):
+    """Where missing imports go: below the last top-level import, or else
+    below CONFIG_VERSION, that comes before tree.body[first_use], the first
+    statement that will use them. Failing both, below the module header."""
+    above_first_use = tree.body[:first_use]
     imports = [
-        node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+        node
+        for node in above_first_use
+        if isinstance(node, (ast.Import, ast.ImportFrom))
     ]
     if imports:
         node = imports[-1]
-        return _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
-    version = _assignment_value(tree, "CONFIG_VERSION")
-    if version is not None:
-        return line_offsets[version.end_lineno]
-    first_line_end = source.find("\n") + 1
-    return first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
+        following = _statement_on_same_line(line_offsets, tree, node)
+        if following is not None:
+            return following
+        end = _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
+        # Keep a trailing `;` (`import os;`) with its statement.
+        semicolon = re.match(r"[ \t]*;", source[end:])
+        return end + semicolon.end() if semicolon else end
+    for node in above_first_use:
+        if _assignment_value(ast.Module(body=[node]), "CONFIG_VERSION") is not None:
+            following = _statement_on_same_line(line_offsets, tree, node)
+            if following is not None:
+                return following
+            return line_offsets[node.end_lineno]
+    return _header_offset(source, line_offsets, tree)
+
+
+def _statement_on_same_line(line_offsets, tree, node):
+    """Offset of the statement after node when it follows a `;` on node's
+    last line; inserting below node would put the insertion after it."""
+    index = tree.body.index(node) + 1
+    if index < len(tree.body) and tree.body[index].lineno == node.end_lineno:
+        following = tree.body[index]
+        return _source_offset(line_offsets, following.lineno, following.col_offset)
+    return None
 
 
 def _enum_list_additions(
@@ -311,6 +404,7 @@ def _enum_list_additions(
     enum_name,
     import_statement,
     required_imports,
+    rebound,
 ):
     existing_members = {
         item.attr
@@ -326,11 +420,10 @@ def _enum_list_additions(
         None,
     )
     if prefix is None:
+        if enum_name in rebound:
+            return []
         prefix = enum_name
-        if (
-            not _name_is_defined(tree, enum_name)
-            and import_statement not in required_imports
-        ):
+        if import_statement not in required_imports:
             required_imports.append(import_statement)
     return [
         f"{prefix}.{addition.rsplit('.', 1)[-1]}"
@@ -482,6 +575,19 @@ def _config_version(tree):
     return value.value
 
 
+def _checked_output(migrated, source_name):
+    """Return the migrated source, or raise GeneratedConfigError if it's invalid."""
+    try:
+        # compile, not ast.parse: only the compiler rejects some errors, such
+        # as a __future__ import that no longer comes first.
+        compile(migrated, source_name, "exec", dont_inherit=True)
+    except (SyntaxError, ValueError) as error:
+        raise GeneratedConfigError(
+            f"Migration generated invalid {source_name}: {error}"
+        ) from error
+    return migrated
+
+
 def migrate_config_source(source, source_name="config.py"):
     try:
         tree = ast.parse(source, filename=source_name)
@@ -505,8 +611,10 @@ def migrate_config_source(source, source_name="config.py"):
     )
     if password_removal:
         edits.append(password_removal)
+    # Edits from here on may use the names in required_imports.
+    first_default_edit = len(edits)
     if version == CONFIG_VERSION:
-        migrated = _apply_edits(source, edits)
+        migrated = _checked_output(_apply_edits(source, edits), source_name)
         return migrated, version, version
     config_names = _dict_names(config)
     safe_config = _dict_has_literal_string_keys(config)
@@ -520,25 +628,28 @@ def migrate_config_source(source, source_name="config.py"):
         else []
     )
     required_imports = []
-    if safe_config and "priority" not in config_names:
+    rebound = rebound_names(tree)
+    if safe_config and "priority" not in config_names and "Priority" not in rebound:
         missing_miner_options.append(
             "'priority': [Priority.STREAK, Priority.DROPS, Priority.ORDER, "
             "Priority.FAVORITE]"
         )
-        if not _name_is_defined(tree, "Priority"):
-            required_imports.append(
-                "from TwitchChannelPointsMiner.classes.Settings import Priority"
-            )
-    if safe_config and "streamer_source_priority" not in config_names:
+        required_imports.append(
+            "from TwitchChannelPointsMiner.classes.Settings import Priority"
+        )
+    if (
+        safe_config
+        and "streamer_source_priority" not in config_names
+        and "StreamerSource" not in rebound
+    ):
         missing_miner_options.append(
             "'streamer_source_priority': [StreamerSource.STREAMERS, "
             "StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES, "
             "StreamerSource.BADGES, StreamerSource.WILDCARD_CATEGORIES]"
         )
-        if not _name_is_defined(tree, "StreamerSource"):
-            required_imports.append(
-                "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
-            )
+        required_imports.append(
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+        )
     if missing_miner_options:
         edits.extend(
             _closing_line_insertion(source, line_offsets, config, missing_miner_options)
@@ -569,27 +680,26 @@ def migrate_config_source(source, source_name="config.py"):
             if keyword.arg is not None
         }
         email_import = "from TwitchChannelPointsMiner.classes.Email import Email"
-        if (
-            "email" not in logger_names
-            and not _name_is_defined(tree, "Email")
-            and email_import not in required_imports
-        ):
+        if "email" not in logger_names and email_import not in required_imports:
             required_imports.append(email_import)
-        missing = _missing_call_defaults(
-            logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
-        )
+        missing = [
+            default
+            for default in _missing_call_defaults(
+                logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
+            )
+            if not _uses_any(default.split("=", 1)[1], rebound)
+        ]
         if missing:
-            if (
-                not _name_is_defined(tree, "logging")
-                and "import logging" not in required_imports
+            values = [default.split("=", 1)[1] for default in missing]
+            if _uses_any_of(values, {"logging"}) and (
+                "import logging" not in required_imports
             ):
                 required_imports.append("import logging")
             color_palette_import = (
                 "from TwitchChannelPointsMiner.logger import ColorPalette"
             )
-            if (
-                not _name_is_defined(tree, "ColorPalette")
-                and color_palette_import not in required_imports
+            if _uses_any_of(values, {"ColorPalette"}) and (
+                color_palette_import not in required_imports
             ):
                 required_imports.append(color_palette_import)
             edits.extend(
@@ -614,6 +724,7 @@ def migrate_config_source(source, source_name="config.py"):
             "Priority",
             "from TwitchChannelPointsMiner.classes.Settings import Priority",
             required_imports,
+            rebound,
         )
         if missing:
             edits.extend(
@@ -632,6 +743,7 @@ def migrate_config_source(source, source_name="config.py"):
             "StreamerSource",
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
             required_imports,
+            rebound,
         )
         if missing:
             edits.extend(
@@ -645,7 +757,7 @@ def migrate_config_source(source, source_name="config.py"):
             [
                 f"{name!r}: {value}"
                 for name, value in MINE_CONFIG_DEFAULTS
-                if name not in mine_names
+                if name not in mine_names and not _uses_any(value, rebound)
             ]
             if _dict_has_literal_string_keys(mine_config)
             else []
@@ -653,7 +765,7 @@ def migrate_config_source(source, source_name="config.py"):
         if missing_mine_options:
             if (
                 "category_log_level" not in mine_names
-                and not _name_is_defined(tree, "logging")
+                and "logging" not in rebound
                 and "import logging" not in required_imports
             ):
                 required_imports.append("import logging")
@@ -680,17 +792,31 @@ def migrate_config_source(source, source_name="config.py"):
                 )
             )
 
+    first_use = _first_statement_edited(line_offsets, tree, edits[first_default_edit:])
+    # The missing imports go above the first statement that uses them, so an
+    # import of the same name counts only when it is already above it (one
+    # below would bind the name too late and the config would raise NameError).
+    # A name the config binds some other way is never imported over it.
+    required_imports = [
+        statement
+        for statement in required_imports
+        if statement.split()[-1] not in rebound
+        and not _name_is_imported(tree.body[:first_use], statement.split()[-1])
+    ]
     if required_imports:
-        import_offset = _import_offset(source, line_offsets, tree)
-        prefix = "\n" if import_offset and source[import_offset - 1] != "\n" else ""
+        import_offset = _import_offset(source, line_offsets, tree, first_use)
+        # A line break is only missing after an import's last character; a
+        # header offset is a line start or follows `; `.
+        prefix = (
+            "\n"
+            if import_offset and source[import_offset - 1] not in "\r\n\t ;"
+            else ""
+        )
         edits.append((import_offset, prefix + "\n".join(required_imports) + "\n"))
 
     version_node = _assignment_value(tree, "CONFIG_VERSION")
     if version_node is None:
-        first_line_end = source.find("\n") + 1
-        version_offset = (
-            first_line_end if source.startswith(("# -*- coding:", "# coding:")) else 0
-        )
+        version_offset = _header_offset(source, line_offsets, tree)
         edits.append(
             (version_offset, version_offset, f"CONFIG_VERSION = {CONFIG_VERSION}\n")
         )
@@ -703,13 +829,7 @@ def migrate_config_source(source, source_name="config.py"):
         )
         edits.append((start, end, str(CONFIG_VERSION)))
 
-    migrated = _apply_edits(source, edits)
-    try:
-        ast.parse(migrated, filename=source_name)
-    except SyntaxError as error:
-        raise ConfigMigrationError(
-            f"Migration generated invalid {source_name}: {error}"
-        ) from error
+    migrated = _checked_output(_apply_edits(source, edits), source_name)
     return migrated, version, CONFIG_VERSION
 
 
@@ -735,7 +855,12 @@ def migrate_config(config_path):
     try:
         migrated, old_version, new_version = migrate_config_source(source, path.name)
     except ConfigMigrationError as error:
-        if not isinstance(error.__cause__, SyntaxError):
+        # Recover from a backup only when config.py itself doesn't parse. A
+        # valid file the migration can't handle must stay as it is: recovering
+        # would overwrite it with an older backup's settings.
+        if isinstance(error, GeneratedConfigError) or not isinstance(
+            error.__cause__, SyntaxError
+        ):
             raise
         backups = [
             backup
@@ -827,6 +952,118 @@ def _call_name(node):
     if isinstance(node, ast.Attribute):
         return node.attr
     return None
+
+
+def import_binding(node, alias):
+    """(level, module, imported name, bound name) for one imported alias.
+
+    `import a.b` binds a to the package a, the same as `import a`.
+    """
+    if isinstance(node, ast.ImportFrom):
+        return (node.level, node.module, alias.name, alias.asname or alias.name)
+    if alias.asname:
+        return (0, None, alias.name, alias.asname)
+    root = alias.name.split(".")[0]
+    return (0, None, root, root)
+
+
+# The imports the migration adds for the names its defaults use.
+_MIGRATION_IMPORTS = {
+    "logging": (0, None, "logging", "logging"),
+    "ColorPalette": (
+        0,
+        "TwitchChannelPointsMiner.logger",
+        "ColorPalette",
+        "ColorPalette",
+    ),
+    "Priority": (
+        0,
+        "TwitchChannelPointsMiner.classes.Settings",
+        "Priority",
+        "Priority",
+    ),
+    "StreamerSource": (
+        0,
+        "TwitchChannelPointsMiner.classes.Settings",
+        "StreamerSource",
+        "StreamerSource",
+    ),
+    "Email": (0, "TwitchChannelPointsMiner.classes.Email", "Email", "Email"),
+}
+
+
+def rebound_names(tree, expected=None):
+    """Names the config binds other than with the import that should bind them.
+
+    expected maps a bound name to the import binding (see import_binding) a
+    reference to it relies on; it defaults to the imports the migration adds.
+    For those names only a top-level import with exactly that binding counts
+    as fine; for other names, any plain (unaliased) top-level import does.
+    Every other binding counts: an assignment, an alias, an import of the
+    same name from elsewhere (`from ...entities import Streamer` binds the
+    module), a wildcard import from another module, an import inside a
+    function, a parameter, a loop or `match`
+    target, a type parameter... Such a name may not be that import where a
+    written reference runs, so the migration leaves defaults using it out
+    (the class's own default applies) and the dashboard refuses the edit.
+    """
+    if expected is None:
+        expected = _MIGRATION_IMPORTS
+    top_level = {
+        id(node) for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+    }
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*":
+                    # A wildcard can bind any name (a package's wildcard
+                    # binds its loaded submodules), so only one from the
+                    # expected module is known to bind the expected object.
+                    names.update(
+                        bound
+                        for bound, binding in expected.items()
+                        if binding[:2] != (node.level, node.module)
+                    )
+                    continue
+                binding = import_binding(node, alias)
+                bound = binding[3]
+                if id(node) not in top_level:
+                    names.add(bound)
+                elif bound in expected:
+                    if binding != expected[bound]:
+                        names.add(bound)
+                elif alias.asname is not None:
+                    names.add(bound)
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        elif isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.ExceptHandler,
+                ast.MatchAs,
+                ast.MatchStar,
+            ),
+        ) or type(node).__name__ in ("TypeVar", "ParamSpec", "TypeVarTuple"):
+            if getattr(node, "name", None):
+                names.add(node.name)
+    return names
+
+
+def _uses_any(value, names):
+    """Whether a default's source text starts with one of names."""
+    return re.split(r"[.(]", value, maxsplit=1)[0] in names
+
+
+def _uses_any_of(values, names):
+    return any(_uses_any(value, names) for value in values)
 
 
 def _find_calls(tree, name):
