@@ -7,6 +7,7 @@ from typing import Any, Callable, Protocol, TypeVar
 import requests
 from requests import Response
 
+from TwitchChannelPointsMiner.classes import HttpSession
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.gql.data.Parser import Parser
 from TwitchChannelPointsMiner.classes.gql.data.response.ChannelPointsContext import (
@@ -169,8 +170,8 @@ class GQL:
 
     @staticmethod
     def __default_post_request(url: str, json: dict | list, headers: dict[str, str]):
-        """Post through requests with the timeout used by the legacy GQL client."""
-        return requests.post(url, json=json, headers=headers, timeout=(5, 30))
+        """Post over this thread's pooled session, with the timeout used by the legacy GQL client."""
+        return HttpSession.post(url, json=json, headers=headers, timeout=(5, 30))
 
     @staticmethod
     def __loggable_content(request_json: dict | list, content: str) -> str:

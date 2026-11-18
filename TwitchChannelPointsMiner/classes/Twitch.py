@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 import requests
 from colorama import Fore
 
+from TwitchChannelPointsMiner.classes import HttpSession
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
 from TwitchChannelPointsMiner.classes.DropBadgeCatalog import (
     completed_signature_matches,
@@ -1439,7 +1440,7 @@ class Twitch(object):
 
             headers = {"User-Agent": USER_AGENTS["Linux"]["FIREFOX"]}
 
-            main_page_request = requests.get(
+            main_page_request = HttpSession.get(
                 streamer.streamer_url, headers=headers, timeout=(5, 20)
             )
             response = main_page_request.text
@@ -1454,7 +1455,7 @@ class Twitch(object):
                 return
             settings_url = settings_match.group(1)
 
-            settings_request = requests.get(
+            settings_request = HttpSession.get(
                 settings_url, headers=headers, timeout=(5, 20)
             )
             response = settings_request.text
@@ -4416,7 +4417,7 @@ class Twitch(object):
         params: Optional[dict] = None,
     ) -> dict:
         try:
-            response = requests.get(
+            response = HttpSession.get(
                 f"https://api.twitch.tv/helix/{endpoint}",
                 params=params,
                 headers={
@@ -5818,7 +5819,7 @@ class Twitch(object):
 
     def update_client_version(self):
         try:
-            response = requests.get(URL, timeout=(5, 20))
+            response = HttpSession.get(URL, timeout=(5, 20))
             if response.status_code != 200:
                 logger.debug(
                     f"Error with update_client_version: {response.status_code}"
@@ -6868,7 +6869,7 @@ class Twitch(object):
                         spade_url_warned.discard(streamer.username)
                         for attempt in range(2):
                             try:
-                                response = requests.post(
+                                response = HttpSession.post(
                                     streamer.stream.spade_url,
                                     data=streamer.stream.encode_payload(),
                                     headers={"User-Agent": self.user_agent},
