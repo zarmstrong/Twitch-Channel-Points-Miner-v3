@@ -48,6 +48,11 @@ SUB_PLAN_NAMES = {
     "3000": "Tier 3",
     "Prime": "Prime",
 }
+# The NOTICE texts Twitch sends before closing the connection when it refuses
+# a chat login's token.
+IRC_LOGIN_REFUSED_NOTICES = frozenset(
+    {"Login authentication failed", "Improperly formatted auth"}
+)
 
 
 class _KeepUnknownPlaceholders(dict):
@@ -248,6 +253,12 @@ class ClientIRC(SingleServerIRCBot):
         # start() must not undo it.
         self.__stopped = False
         self.__lifecycle_lock = Lock()
+        # Both are only touched by IRC handlers on this chat's own thread.
+        # True once "Join IRC Chat" was logged at INFO.
+        self.__join_announced = False
+        # True from a refused login until the next confirmed join, so a
+        # refusal is warned once per streak rather than on every reconnect.
+        self.__login_refused = False
 
         if tls_available is None:
             tls_available = _irc_tls_available()
@@ -319,10 +330,38 @@ class ClientIRC(SingleServerIRCBot):
         self.__connect_factory.cancel()
         self.connection.disconnect(msg)
 
-    """
     def on_join(self, connection, event):
-        logger.info(f"Event: {event}", extra={"emoji": ":speech_balloon:"})
-    """
+        # Twitch echoes our own JOIN once it has accepted the login and the
+        # join, so this, not the connect, is when the chat is really joined.
+        source = getattr(event.source, "nick", None) or ""
+        nickname = connection.get_nickname() or self._nickname
+        if source.lower() != nickname.lower():
+            return
+        if (event.target or "").lower() != self.channel.lower():
+            return
+        message = f"Join IRC Chat: {self.channel}"
+        if self.__join_announced and not self.__login_refused:
+            # A rejoin after an ordinary reconnect.
+            logger.debug(message)
+            return
+        self.__join_announced = True
+        self.__login_refused = False
+        logger.info(message, extra={"emoji": ":speech_balloon:"})
+
+    def on_privnotice(self, connection, event):
+        text = (event.arguments[0] if event.arguments else "").strip()
+        if text not in IRC_LOGIN_REFUSED_NOTICES:
+            return
+        message = (
+            f"Twitch refused the chat login for {self.channel}: {text}. "
+            "Mentions and gift-sub events from this chat won't arrive until "
+            "it's accepted; retrying in the background."
+        )
+        if self.__login_refused:
+            logger.debug(message)
+            return
+        self.__login_refused = True
+        logger.warning(message, extra={"emoji": ":warning:"})
 
     # """
     def on_pubmsg(self, connection, event):
@@ -463,9 +502,9 @@ class ThreadChat(Thread):
             delay = min(delay * 2, IRC_TLS_RETRY_MAX_SECONDS)
         else:
             return
-        logger.info(
-            f"Join IRC Chat: {self.channel}", extra={"emoji": ":speech_balloon:"}
-        )
+        # "Join IRC Chat" is logged by ClientIRC.on_join once Twitch confirms
+        # the join; the login can still be refused after this point.
+        logger.debug(f"Connecting to IRC chat {self.channel}")
         chat_irc.start()
 
     def stop(self):
