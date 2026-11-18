@@ -14,6 +14,8 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
   - A matrix job whose checks are required must keep running and skip its steps instead, as the `pytest` job does. A skipped matrix job never reports its expanded checks (`Python 3.11` and so on), so required checks stay pending.
   - A job that needs another job is skipped when that job fails, and a skipped required check counts as passing. Include `!cancelled()` in its `if:` and fail explicitly, as `windows_installer` does.
 - `workflows/release-please.yml` creates releases and publishes the Docker image (through `deploy-docker.yml`) and the Windows files.
+  - The publishing jobs depend on `resolve_release`, not on `release_please`. It runs even when `release_please` failed. After a failed Release Please attempt or a re-run, `scripts/release-resolve.js` publishes a release that already exists for the commit being built (test: `node .github/scripts/release-resolve.test.js`). Re-running the release commit's workflow run publishes a release whose first run stopped early.
+  - The Windows files are added with `gh release upload --clobber`, which never writes the release body.
 - `workflows/deploy-docker.yml` owns the `<!-- docker-image:start -->` / `<!-- docker-image:end -->` block in release notes. A job that runs alongside it must not write back a copy of the release body it read earlier, or the block can disappear.
 - `workflows/mark-issues-awaiting-release.yml` labels issues fixed on `master` until a release ships them.
 

@@ -73,6 +73,7 @@ jobs:
 
       - name: Run release issue automation tests
         run: |
+          node .github/scripts/release-resolve.test.js
           node .github/scripts/release-linked-issues.test.js
           node .github/scripts/release-pull-links.test.js
 
