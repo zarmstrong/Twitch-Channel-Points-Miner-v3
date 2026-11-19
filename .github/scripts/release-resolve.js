@@ -46,19 +46,34 @@ async function notFoundAsNull(request, notFound = [404]) {
 // from a failed upload (state "starter"), so only a finished upload counts.
 const DOCKER_NOTES_MARKER = '<!-- docker-image:start -->';
 
-function publishingFinished(release, tag) {
+function dockerPublished(release) {
+  return String(release.body || '').includes(DOCKER_NOTES_MARKER);
+}
+
+function windowsPublished(release, tag) {
   const assets = new Set((release.assets || [])
     .filter((asset) => asset.state === 'uploaded' && asset.size > 0)
     .map((asset) => asset.name));
-  return String(release.body || '').includes(DOCKER_NOTES_MARKER)
-    && assets.has(`TwitchChannelPointsMiner-Portable-${tag}.zip`)
+  return assets.has(`TwitchChannelPointsMiner-Portable-${tag}.zip`)
     && assets.has(`TwitchChannelPointsMiner-${tag}-Setup.exe`);
+}
+
+function publishingFinished(release, tag) {
+  return dockerPublished(release) && windowsPublished(release, tag);
+}
+
+// Only the missing parts are published again: a Docker image that already
+// published (its notes block is written last, after latest moved) isn't
+// rebuilt over the same version tag when only the Windows files are missing.
+function missingParts(release, tag) {
+  return { docker: !dockerPublished(release), windows: !windowsPublished(release, tag) };
 }
 
 // Release Please reads master's state, not the commit being built, so a run
 // for an earlier commit can create the release of a release PR merged while
 // it ran. If that run then fails, the release commit's own run sees no new
 // release from Release Please; it publishes the release here instead.
+// Returns the parts to publish, or null when there is nothing to do.
 async function findUnpublishedRelease({
   github, context, core, tag, recheck,
 }) {
@@ -66,7 +81,7 @@ async function findUnpublishedRelease({
   const release = await notFoundAsNull(() => github.rest.repos.getReleaseByTag({ owner, repo, tag }));
   if (!release || release.draft) {
     core.info(`No published release ${tag}; nothing to publish.`);
-    return false;
+    return null;
   }
   const commit = await notFoundAsNull(() => github.rest.repos.getCommit({
     owner, repo, ref: `refs/tags/${tag}`,
@@ -74,35 +89,28 @@ async function findUnpublishedRelease({
   if (!commit) {
     // A published release always has its tag, so this needs a person to look.
     core.warning(`Release ${tag} exists but its tag is missing; Docker and Windows files are not published.`);
-    return false;
+    return null;
   }
   const finished = publishingFinished(release, tag);
-  if (commit.sha === context.sha) {
-    if (recheck) {
-      // A re-run or failed attempt publishes this commit's release again.
-      core.notice(`Release ${tag} was created by an earlier Release Please attempt; publishing it now.`);
-      return true;
-    }
-    if (!finished) {
-      core.notice(`Release ${tag} on this commit was created by another run and not fully published; publishing it now.`);
-      return true;
-    }
-    core.info(`Release ${tag} on this commit is already published; nothing to publish.`);
-    return false;
+  if (commit.sha === context.sha && recheck) {
+    // A re-run or failed attempt of the release commit's run: publish what's
+    // missing and close the released issues again.
+    core.notice(`Release ${tag} is this commit's release; publishing whatever it is missing.`);
+    return missingParts(release, tag);
   }
   // The release commit's own run can be replaced while it waits (one
   // pending run per concurrency group), so the run that created the release
   // may be an earlier commit's run that then failed. Any later run publishes
-  // it while it is unfinished. A release whose publishing keeps failing is
+  // it while it is unfinished. A part whose publishing keeps failing is
   // therefore tried again on each push until it succeeds.
   if (!finished) {
-    core.notice(`Release ${tag} on ${commit.sha} has no Docker notes or Windows files yet; publishing it now.`);
-    return true;
+    core.notice(`Release ${tag} on ${commit.sha} is missing its Docker notes or Windows files; publishing them now.`);
+    return missingParts(release, tag);
   }
   // Expected on every push after a release: the manifest still names the
   // latest release, which its own commit's run published.
-  core.info(`Release ${tag} is on another commit than ${context.sha}; nothing to publish.`);
-  return false;
+  core.info(`Release ${tag} is already published; nothing to publish.`);
+  return null;
 }
 
 // `recheck` is true when Release Please failed in any attempt of this job, or
@@ -111,26 +119,34 @@ async function resolveRelease({
   github, context, core, releaseCreated, tagName, recheck, manifestText,
 }) {
   let tag = '';
+  let parts = { docker: false, windows: false };
   if (releaseCreated === 'true' && tagName) {
     // The tag feeds checkout refs, shell environments and gh release upload.
     if (!RELEASE_TAG.test(tagName)) {
       throw new Error(`Release Please reported tag ${JSON.stringify(tagName)}, which is not a bare SemVer version.`);
     }
     tag = tagName;
+    parts = { docker: true, windows: true };
     core.info(`Release Please created ${tag}.`);
   } else {
     if (!recheck) core.info('Release Please created no release.');
     const candidate = manifestTag(manifestText);
     if (!candidate) {
       core.warning('The release manifest has no usable version; nothing to publish.');
-    } else if (await findUnpublishedRelease({
-      github, context, core, tag: candidate, recheck,
-    })) {
-      tag = candidate;
+    } else {
+      const missing = await findUnpublishedRelease({
+        github, context, core, tag: candidate, recheck,
+      });
+      if (missing) {
+        tag = candidate;
+        parts = missing;
+      }
     }
   }
   core.setOutput('release_ready', tag ? 'true' : 'false');
   core.setOutput('tag_name', tag);
+  core.setOutput('publish_docker', parts.docker ? 'true' : 'false');
+  core.setOutput('publish_windows', parts.windows ? 'true' : 'false');
   return tag;
 }
 

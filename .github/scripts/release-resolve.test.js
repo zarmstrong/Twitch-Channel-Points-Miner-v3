@@ -67,6 +67,16 @@ function publishedRelease(tag = '3.21.2') {
   };
 }
 
+// The outputs resolveRelease sets: the tag, and which parts to publish.
+function outputs(tag, { docker = Boolean(tag), windows = Boolean(tag) } = {}) {
+  return {
+    release_ready: tag ? 'true' : 'false',
+    tag_name: tag,
+    publish_docker: docker ? 'true' : 'false',
+    publish_windows: windows ? 'true' : 'false',
+  };
+}
+
 function resolve(github, core, overrides = {}) {
   return resolveRelease({
     github,
@@ -84,7 +94,7 @@ test('a release Release Please reports is used without any lookup', async () => 
   const github = fakeGithub();
   const core = fakeCore();
   assert.equal(await resolve(github, core, { releaseCreated: 'true', tagName: '3.21.2' }), '3.21.2');
-  assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+  assert.deepEqual(core.outputs, outputs('3.21.2'));
   assert.deepEqual(github.calls, []);
 });
 
@@ -93,7 +103,7 @@ test('without a failure or re-run, a published release means nothing to publish'
     const github = fakeGithub({ release: publishedRelease(), commit });
     const core = fakeCore();
     assert.equal(await resolve(github, core, { recheck: false }), '');
-    assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
+    assert.deepEqual(core.outputs, outputs(''));
   }
 });
 
@@ -101,7 +111,7 @@ test('without a failure, an unfinished release on this commit is published', asy
   // Another run's Release Please created it from master's state and failed.
   const core = fakeCore();
   assert.equal(await resolve(fakeGithub(), core, { recheck: false }), '3.21.2');
-  assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+  assert.deepEqual(core.outputs, outputs('3.21.2'));
   assert.equal(core.messages.at(-1)[0], 'notice');
 });
 
@@ -111,27 +121,44 @@ test('without a failure, an unfinished release on another commit is published', 
   const core = fakeCore();
   const github = fakeGithub({ commit: { sha: 'b'.repeat(40) } });
   assert.equal(await resolve(github, core, { recheck: false }), '3.21.2');
-  assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+  assert.deepEqual(core.outputs, outputs('3.21.2'));
   assert.equal(core.messages.at(-1)[0], 'notice');
 });
 
-test('after a failure, a finished release on this commit is published again', async () => {
+test('after a failure, a finished release on this commit is resolved with nothing to rebuild', async () => {
+  // Its released issues are closed again; Docker and Windows already finished.
   const core = fakeCore();
   assert.equal(await resolve(fakeGithub({ release: publishedRelease() }), core), '3.21.2');
+  assert.deepEqual(core.outputs, outputs('3.21.2', { docker: false, windows: false }));
+});
+
+test('only the missing parts of a release are published again', async () => {
+  const finished = publishedRelease();
+  for (const [release, docker, windows] of [
+    [{ ...finished, body: 'notes without the Docker block' }, true, false],
+    [{ ...finished, assets: finished.assets.slice(0, 1) }, false, true],
+    [{ draft: false }, true, true],
+  ]) {
+    for (const [sha, recheck] of [[SHA, true], [SHA, false], ['b'.repeat(40), false], ['b'.repeat(40), true]]) {
+      const core = fakeCore();
+      assert.equal(await resolve(fakeGithub({ release, commit: { sha } }), core, { recheck }), '3.21.2');
+      assert.deepEqual(core.outputs, outputs('3.21.2', { docker, windows }));
+    }
+  }
 });
 
 test('after a failure, a published release on this commit is published', async () => {
   const github = fakeGithub();
   const core = fakeCore();
   assert.equal(await resolve(github, core), '3.21.2');
-  assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+  assert.deepEqual(core.outputs, outputs('3.21.2'));
   assert.deepEqual(github.calls, [
     ['getReleaseByTag', { owner: 'o', repo: 'r', tag: '3.21.2' }],
     ['getCommit', { owner: 'o', repo: 'r', ref: 'refs/tags/3.21.2' }],
   ]);
   assert.deepEqual(core.messages.at(-1), [
     'notice',
-    'Release 3.21.2 was created by an earlier Release Please attempt; publishing it now.',
+    'Release 3.21.2 is this commit\'s release; publishing whatever it is missing.',
   ]);
 });
 
@@ -140,7 +167,7 @@ test('a published release on another commit is not published again', async () =>
   const github = fakeGithub({ release: publishedRelease(), commit: { sha: 'b'.repeat(40) } });
   assert.equal(await resolve(github, core), '');
   assert.equal(core.outputs.release_ready, 'false');
-  assert.match(core.messages.at(-1)[1], /on another commit/);
+  assert.match(core.messages.at(-1)[1], /already published/);
   // Every push after a release lands here, so it is not a warning.
   assert.equal(core.messages.at(-1)[0], 'info');
 });
@@ -152,7 +179,7 @@ test('a missing or draft release means nothing to publish', async () => {
   ]) {
     const core = fakeCore();
     assert.equal(await resolve(github, core), '');
-    assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
+    assert.deepEqual(core.outputs, outputs(''));
     assert.equal(core.messages.at(-1)[0], 'info');
   }
 });
@@ -164,7 +191,7 @@ test('a published release whose tag is missing warns and publishes nothing', asy
   ]) {
     const core = fakeCore();
     assert.equal(await resolve(github, core), '');
-    assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
+    assert.deepEqual(core.outputs, outputs(''));
     assert.equal(core.messages.at(-1)[0], 'warning');
     assert.match(core.messages.at(-1)[1], /tag is missing/);
   }
@@ -239,17 +266,17 @@ test('the repository manifest yields a tag', () => {
 test('an unfinished release on another commit is published', async () => {
   const other = 'b'.repeat(40);
   const finished = publishedRelease();
-  for (const release of [
-    { draft: false },
-    { ...finished, body: 'notes without the Docker block' },
-    { ...finished, assets: finished.assets.slice(0, 1) },
-    { ...finished, assets: finished.assets.slice(1) },
-    { ...finished, assets: [{ ...finished.assets[0], state: 'starter' }, finished.assets[1]] },
-    { ...finished, assets: [finished.assets[0], { ...finished.assets[1], size: 0 }] },
+  for (const [release, docker, windows] of [
+    [{ draft: false }, true, true],
+    [{ ...finished, body: 'notes without the Docker block' }, true, false],
+    [{ ...finished, assets: finished.assets.slice(0, 1) }, false, true],
+    [{ ...finished, assets: finished.assets.slice(1) }, false, true],
+    [{ ...finished, assets: [{ ...finished.assets[0], state: 'starter' }, finished.assets[1]] }, false, true],
+    [{ ...finished, assets: [finished.assets[0], { ...finished.assets[1], size: 0 }] }, false, true],
   ]) {
     const core = fakeCore();
     assert.equal(await resolve(fakeGithub({ release, commit: { sha: other } }), core), '3.21.2');
-    assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+    assert.deepEqual(core.outputs, outputs('3.21.2', { docker, windows }));
     assert.equal(core.messages.at(-1)[0], 'notice');
   }
 });

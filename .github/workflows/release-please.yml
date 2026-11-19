@@ -80,6 +80,8 @@ jobs:
     outputs:
       release_ready: ${{ steps.resolve.outputs.release_ready }}
       tag_name: ${{ steps.resolve.outputs.tag_name }}
+      publish_docker: ${{ steps.resolve.outputs.publish_docker }}
+      publish_windows: ${{ steps.resolve.outputs.publish_windows }}
     steps:
       - name: Checkout release automation
         uses: actions/checkout@v7
@@ -160,7 +162,7 @@ jobs:
   publish_docker:
     name: Publish Docker image
     needs: resolve_release
-    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' }}
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.resolve_release.outputs.publish_docker == 'true' }}
     permissions:
       contents: write
     uses: ./.github/workflows/deploy-docker.yml
@@ -171,7 +173,7 @@ jobs:
   build_windows_exe:
     name: Build Windows executable (${{ matrix.flavor }})
     needs: resolve_release
-    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' }}
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.resolve_release.outputs.publish_windows == 'true' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -228,7 +230,7 @@ jobs:
   publish_windows_exe:
     name: Publish Windows executable
     needs: [resolve_release, build_windows_exe]
-    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.build_windows_exe.result == 'success' }}
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.resolve_release.outputs.publish_windows == 'true' && needs.build_windows_exe.result == 'success' }}
     runs-on: windows-latest
     permissions:
       contents: write
