@@ -346,6 +346,7 @@ class Twitch(object):
         "watch_reward_claim_requested",
         "watch_reward_pending_starts",
         "watch_reward_opening_unevaluated",
+        "watch_reward_finished_rows",
         "accepted_claim_drop_ids",
         "campaign_names",
         "reward_campaign_ids",
@@ -535,6 +536,7 @@ class Twitch(object):
         self.watch_reward_claim_thread = None
         self.watch_reward_claim_requested = False
         self.watch_reward_pending_starts = set()
+        self.watch_reward_finished_rows = frozenset()
         self.watch_reward_opening_unevaluated = False
         self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
@@ -1428,9 +1430,36 @@ class Twitch(object):
                 return benefit.get(key)
         return None
 
+    def __is_watch_reward_drop(self, drop_id) -> bool:
+        """Whether the drop is a group of a stored reward campaign, whichever
+        of its repeats."""
+        group_id = str(drop_id).split("#", 1)[0]
+        return any(
+            drop["_reward_group"]["id"] == group_id
+            for campaign in list(
+                (getattr(self, "watch_reward_campaigns", None) or {}).values()
+            )
+            for drop in campaign.get("timeBasedDrops") or []
+        )
+
     def __drop_variant_entries_from_drop(self, drop):
         variants = []
         benefit_edges = getattr(drop, "benefit_edges", []) or []
+
+        if self.__is_watch_reward_drop(drop.id):
+            # One row, named for the group and its repeat as the minute
+            # watcher names it: the reward's own name is the same for every
+            # repeat, and the sync and the watcher write the same row.
+            edge = benefit_edges[0] if benefit_edges else None
+            benefit = edge.get("benefit", {}) if isinstance(edge, dict) else {}
+            return [
+                {
+                    "name": drop.name,
+                    "benefit": benefit.get("name") or drop.benefit,
+                    "item_art_url": self.__extract_edge_art_url(benefit)
+                    or drop.item_art_url,
+                }
+            ]
 
         if benefit_edges == []:
             variants.append(
@@ -1484,6 +1513,15 @@ class Twitch(object):
         is_expired = (
             getattr(drop, "end_at", None) is not None and utc_now() > drop.end_at
         )
+        if (
+            isinstance(drop_dict.get("_reward_group"), dict)
+            and is_done is not True
+            and drop.start_at > utc_now()
+        ):
+            # A reward group's next repeat, before its window opens: nothing
+            # can be earned on it yet, and a row at 0 minutes would read as
+            # a reward the miner is failing to earn.
+            return
 
         progress_key = self.__drop_tracking_key(
             drop,
@@ -9214,6 +9252,7 @@ class Twitch(object):
             if campaign_id in completed:
                 self.completed_drop_campaigns = set(completed) - {campaign_id}
         self.__publish_watch_reward_progress(campaign_id)
+        self.__finish_earlier_repeat_rows(stored)
         # Said outside the lock: a log line can go out to a notifier.
         for earned, line in news:
             if earned:
@@ -9231,6 +9270,74 @@ class Twitch(object):
                     },
                 )
         return stored
+
+    def __finish_earlier_repeat_rows(self, stored):
+        """Mark the report rows of the repeats before each group's current
+        one as earned.
+
+        A repeat Twitch counts by itself is never claimed, so nothing else
+        writes its last row: the report would keep it at the minutes of the
+        last listing before the count went up, as in progress, for good.
+        Done once per repeat and session, on the first record that shows a
+        later repeat, which is also the first one after a restart."""
+        mutex = getattr(self, "analytics_mutex", None)
+        if mutex is None:
+            return
+        earlier = set()
+        for drop in stored.get("timeBasedDrops") or []:
+            group = drop["_reward_group"]
+            for number in range(group.get("repeat") or 0):
+                earlier.add(repeat_drop_id(group["id"], number))
+        finished = getattr(self, "watch_reward_finished_rows", None) or frozenset()
+        pending = earlier - finished
+        if not pending:
+            return
+        self.watch_reward_finished_rows = frozenset(finished | pending)
+        now_ms = round(time.time() * 1000)
+        now_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+        def finish(row) -> bool:
+            if (
+                not isinstance(row, dict)
+                or str(row.get("drop_id") or "") not in pending
+                or row.get("status") != "in_progress"
+            ):
+                return False
+            row["status"] = "captured"
+            row["failed_to_achieve"] = False
+            row["x"] = now_ms
+            row["datetime"] = now_dt
+            row["current_minutes_watched"] = max(
+                row.get("current_minutes_watched") or 0,
+                row.get("minutes_required") or 0,
+            )
+            row["percentage_progress"] = 100
+            return True
+
+        with mutex:
+            for row in (getattr(self, "drop_report_state", None) or {}).values():
+                finish(row)
+            if Settings.enable_analytics is not True:
+                return
+            analytics_file = os.path.join(
+                Settings.analytics_path, "drops_by_category.json"
+            )
+            if os.path.isfile(analytics_file) is False:
+                return
+            with open(analytics_file, "r", encoding="utf-8") as current:
+                try:
+                    data = json.load(current)
+                except json.JSONDecodeError:
+                    return
+            drops = data.get("drops") if isinstance(data, dict) else None
+            if not isinstance(drops, list):
+                return
+            if not [row for row in drops if finish(row)]:
+                return
+            temp_file = analytics_file + ".temp"
+            with open(temp_file, "w", encoding="utf-8") as temp_handle:
+                json.dump(data, temp_handle, indent=4)
+            os.replace(temp_file, analytics_file)
 
     @staticmethod
     def __watch_reward_progress_news(previous, stored):

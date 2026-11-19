@@ -6,6 +6,7 @@ reports no progress on.
 """
 
 import copy
+import json
 import logging
 import time
 from datetime import timedelta
@@ -3299,3 +3300,155 @@ def test_claimed_repeat_is_not_logged_as_earned_again(caplog):
     )
 
     assert records == []
+
+
+def report_twitch(monkeypatch, tmp_path, analytics=True):
+    """A Twitch that writes report rows, to tmp_path when analytics are on."""
+    twitch = snapshot_twitch()
+    twitch.analytics_mutex = twitch_module.RLock()
+    twitch.drop_report_state = {}
+    twitch.track_drop_item_art = True
+    monkeypatch.setattr(twitch_module.Settings, "enable_analytics", analytics)
+    monkeypatch.setattr(
+        twitch_module.Settings, "analytics_path", str(tmp_path), raising=False
+    )
+    return twitch
+
+
+def save_synced_rows(twitch):
+    """Write the report rows the inventory sync writes for the stored
+    campaign's drops."""
+    for entry in twitch._Twitch__watch_reward_progress_entries():
+        for drop_dict in entry["timeBasedDrops"]:
+            twitch._Twitch__save_drop_snapshot_from_dict(
+                drop_dict,
+                campaign_name_override=entry["name"],
+                category_name_override=entry["game"]["displayName"],
+            )
+
+
+def report_rows(twitch, tmp_path=None):
+    """The report rows by drop ID: this session's, or the saved file's."""
+    if tmp_path is None:
+        rows = twitch.drop_report_state.values()
+    else:
+        rows = json.loads((tmp_path / "drops_by_category.json").read_text())["drops"]
+    return {row["drop_id"]: row for row in rows}
+
+
+def test_synced_row_of_a_repeat_is_named_for_the_repeat(monkeypatch, tmp_path):
+    # Named for its reward ("Chest"), every repeat's row would read the same,
+    # and differ from the name the minute watcher writes the same row under.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=20, window=open_window())))
+    )
+
+    save_synced_rows(twitch)
+
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert row["item_name"] == "Daily Chest (repeat 1 of 6)"
+    assert row["benefit"] == "Chest"
+    assert (row["current_minutes_watched"], row["status"]) == (20, "in_progress")
+
+
+def test_repeat_whose_window_has_not_opened_gets_no_row(monkeypatch, tmp_path):
+    # The first repeat is in and counted; the second cannot be earned before
+    # the window ends. A row for it at 0 minutes reads as a reward the miner
+    # is failing to earn.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    save_synced_rows(twitch)
+
+    assert report_rows(twitch) == {}
+
+
+def test_row_of_a_repeat_twitch_counted_without_a_claim_is_finished(
+    monkeypatch, tmp_path
+):
+    # Nothing claims such a repeat, so nothing else writes its last row: it
+    # stayed at the minutes of the listing before, as in progress, for good.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+    save_synced_rows(twitch)
+    assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "in_progress"
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    for rows in (report_rows(twitch), report_rows(twitch, tmp_path)):
+        row = rows["group-watch#0"]
+        assert row["status"] == "captured"
+        assert (row["current_minutes_watched"], row["percentage_progress"]) == (
+            60,
+            100,
+        )
+        assert row["failed_to_achieve"] is False
+
+
+def test_row_left_in_progress_by_an_earlier_session_is_finished(monkeypatch, tmp_path):
+    # The miner was restarted between the repeat's last listing and the one
+    # that showed it counted: the first record of the new session shows the
+    # next repeat, and the saved row is all that is left of the earlier one.
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps(
+            {
+                "drops": [
+                    {
+                        "drop_id": "group-watch#0",
+                        "category": "Example Game",
+                        "item_name": "Daily Chest (repeat 1 of 6)",
+                        "status": "in_progress",
+                        "current_minutes_watched": 59,
+                        "minutes_required": 60,
+                        "percentage_progress": 98,
+                    },
+                    {
+                        "drop_id": "another-drop",
+                        "category": "Example Game",
+                        "status": "in_progress",
+                        "current_minutes_watched": 5,
+                        "minutes_required": 60,
+                    },
+                ]
+            }
+        )
+    )
+    twitch = report_twitch(monkeypatch, tmp_path)
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    rows = report_rows(twitch, tmp_path)
+    assert rows["group-watch#0"]["status"] == "captured"
+    assert rows["group-watch#0"]["current_minutes_watched"] == 60
+    assert rows["another-drop"]["status"] == "in_progress"
+
+
+def test_finishing_earlier_rows_reads_the_report_file_once_per_repeat(
+    monkeypatch, tmp_path
+):
+    # A record is stored every couple of minutes while a group is watched.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    (tmp_path / "drops_by_category.json").write_text(json.dumps({"drops": []}))
+    opened = []
+    real_open = open
+
+    def counting_open(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(twitch_module, "open", counting_open, raising=False)
+    for _ in range(3):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+        )
+
+    assert len(opened) == 1
