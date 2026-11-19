@@ -12,6 +12,7 @@ from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
 
 
 def make_streamer(username):
@@ -88,6 +89,103 @@ def test_new_broadcast_gets_a_new_pending_session(tmp_path):
     assert new_session.claimed is False
 
 
+def test_short_restart_inherits_the_claimed_logical_stream(tmp_path):
+    start = 2_000_000_000.0
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+
+    cache.ensure("channel", "broadcast-2", started_at=start + 1100)
+
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") == start + 60
+
+
+def test_short_restart_chains_back_to_an_older_claim(tmp_path):
+    start = 2_000_000_000.0
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+    cache.ensure("channel", "broadcast-2", started_at=start + 1100)
+    cache.mark_ended("channel", "broadcast-2", ended_at=start + 1500)
+
+    cache.ensure("channel", "broadcast-3", started_at=start + 1600)
+
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-3") == start + 60
+
+
+def test_long_restart_does_not_inherit_the_previous_claim(tmp_path):
+    start = 2_000_000_000.0
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+
+    cache.ensure(
+        "channel",
+        "broadcast-2",
+        started_at=start + 1000 + WATCH_STREAK_STREAM_GAP_SECONDS,
+    )
+
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") is None
+
+
+def test_short_restart_keeps_an_unclaimed_stream_pending(tmp_path):
+    start = 2_000_000_000.0
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+
+    cache.ensure("channel", "broadcast-2", started_at=start + 1100)
+
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") is None
+
+
+def test_unobserved_restart_does_not_inherit_the_previous_claim(tmp_path):
+    start = 2_000_000_000.0
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+
+    # The miner never saw the first broadcast end. ensure() closes it at the
+    # second broadcast's start, so the zero gap must not prove a continuation.
+    cache.ensure("channel", "broadcast-2", started_at=start + 1000)
+
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") is None
+
+
+def test_short_restart_after_a_claim_does_not_rearm_the_streamer(tmp_path, monkeypatch):
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+
+    current_time = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Streamer.time.time",
+        lambda: current_time[0],
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.WatchStreakCache.time.time",
+        lambda: current_time[0],
+    )
+
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.set_online()
+    streamer.update_history("WATCH_STREAK", earned=450)
+    current_time[0] += 100
+    streamer.set_offline()
+
+    # Restart two minutes after the previous broadcast ended; Twitch still
+    # treats it as the same already-claimed stream.
+    current_time[0] += 120
+    streamer.stream.broadcast_id = "broadcast-2"
+    streamer.set_online()
+
+    assert streamer.stream.watch_streak_missing is False
+    assert cache.get("channel", "broadcast-2").claimed is False
+
+
 def test_streak_confirmed_before_online_transition_is_not_refarmed(
     tmp_path, monkeypatch
 ):
@@ -151,7 +249,7 @@ def test_streak_confirmed_before_previous_broadcast_ended_is_refarmed(
     # A new broadcast begins without the miner seeing a fresh stream-up
     # message, so the stale stream_up timestamp must not make the previous
     # broadcast's confirmation look like it belongs to this one.
-    current_time[0] += 600
+    current_time[0] += WATCH_STREAK_STREAM_GAP_SECONDS + 1
     streamer.stream.broadcast_id = "broadcast-2"
     streamer.set_online()
 

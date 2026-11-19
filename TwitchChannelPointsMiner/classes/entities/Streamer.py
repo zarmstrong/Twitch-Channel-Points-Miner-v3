@@ -322,6 +322,19 @@ class Streamer(object):
                     self.watch_streak_cache.mark_claimed(
                         self.username, self.stream.broadcast_id
                     )
+                elif (
+                    self.watch_streak_cache.claimed_at_for_logical_stream(
+                        self.username,
+                        self.stream.broadcast_id,
+                        started_at=self.online_at,
+                    )
+                    is not None
+                ):
+                    # A broadcast that started less than 30 minutes after the
+                    # previous one ended is the same Twitch stream for streak
+                    # purposes. If that stream was already claimed, do not farm
+                    # this continuation again.
+                    self.stream.watch_streak_missing = False
 
         self.toggle_chat()
 

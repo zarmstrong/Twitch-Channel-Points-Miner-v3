@@ -27,6 +27,10 @@ DROP_ID = "c2542d6d-cd10-4532-919b-3d19f30a768b"
 # CLIENT_VERSION = "32d439b2-bd5b-4e35-b82a-fae10b04da70"  # Android App
 CLIENT_VERSION = "ef928475-9403-42f2-8a34-55784bd08e16"  # Browser
 
+# Twitch counts a broadcast that starts less than 30 minutes after the previous
+# one ended as the same stream for watch-streak purposes.
+WATCH_STREAK_STREAM_GAP_SECONDS = 30 * 60
+
 USER_AGENTS = {
     "Windows": {
         "CHROME": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",

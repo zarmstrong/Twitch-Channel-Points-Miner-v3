@@ -6517,18 +6517,17 @@ class Twitch(object):
             return self.client_version
 
     @staticmethod
-    def _has_pending_watch_streak(streamer, now=None):
+    def _has_pending_watch_streak(streamer):
+        # The streamer state is authoritative here. A short restart that
+        # continues an already-claimed Twitch stream clears
+        # watch_streak_missing in Streamer.set_online(), while a continuation
+        # that was not claimed yet stays pending and can be watched at once.
         settings = getattr(streamer, "settings", None)
         stream = getattr(streamer, "stream", None)
-        if (
-            getattr(settings, "watch_streak", False) is not True
-            or getattr(stream, "watch_streak_missing", False) is not True
-        ):
-            return False
-
-        offline_at = getattr(streamer, "offline_at", 0)
-        timestamp = time.time() if now is None else now
-        return offline_at == 0 or ((timestamp - offline_at) // 60) > 30
+        return (
+            getattr(settings, "watch_streak", False) is True
+            and getattr(stream, "watch_streak_missing", False) is True
+        )
 
     @staticmethod
     def _is_streak_only(streamer):
@@ -6543,12 +6542,12 @@ class Twitch(object):
         streak_only = getattr(getattr(streamer, "settings", None), "streak_only", False)
         return streak_only if type(streak_only) is int else STREAK_ONLY_WATCH_MINUTES
 
-    def _streak_worth_watching(self, streamer, now=None):
+    def _streak_worth_watching(self, streamer):
         # A streamer's pending streak is worth a slot for anyone, but a
         # streak-only channel only needs the first minutes of a broadcast to
         # advance a multi-broadcast streak: stop camping the whole stream
         # until Twitch finally pays out on the last broadcast.
-        if not self._has_pending_watch_streak(streamer, now):
+        if not self._has_pending_watch_streak(streamer):
             return False
         if self._is_streak_only(streamer) is not True:
             return True
@@ -6819,7 +6818,7 @@ class Twitch(object):
                             is False
                             and not self._is_streak_only(streamers_snapshot[i])
                         )
-                        or self._streak_worth_watching(streamers_snapshot[i], now)
+                        or self._streak_worth_watching(streamers_snapshot[i])
                     )
                     and (
                         (
@@ -7113,7 +7112,7 @@ class Twitch(object):
                         elif prior == Priority.STREAK:
                             for index in available_source_indexes:
                                 if self._has_pending_watch_streak(
-                                    streamers_snapshot[index], now
+                                    streamers_snapshot[index]
                                 ):
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
@@ -7476,9 +7475,7 @@ class Twitch(object):
                     # streak (when the user prioritizes streaks) is only a
                     # few minutes of overlap - both may stay watched.
                     if streak_priority and index not in discovered_tiers:
-                        if self._has_pending_watch_streak(
-                            streamers_snapshot[index], now
-                        ):
+                        if self._has_pending_watch_streak(streamers_snapshot[index]):
                             return True
                     kept_key = _drop_campaign_key(kept_index)
                     return kept_key is not None and kept_key == _drop_campaign_key(

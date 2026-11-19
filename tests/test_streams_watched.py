@@ -601,11 +601,21 @@ def test_watch_window_applies_only_to_streak_only_streamers(monkeypatch):
     assert posted == ["https://spade.test/capped-long-streak"]
 
 
-def test_pending_watch_streak_honors_explicit_zero_timestamp():
-    streamer = _watch_streamer("streak", watch_streak=True)
-    streamer.offline_at = -60
+def test_short_restart_streak_is_immediately_eligible(monkeypatch):
+    streamer = _watch_streamer("short-restart", watch_streak=True)
+    streamer.offline_at = 100
 
-    assert Twitch._has_pending_watch_streak(streamer, now=0) is False
+    # A short restart can continue an unclaimed logical stream, so the pending
+    # flag must not wait 30 minutes before the channel can be watched again.
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+        now=160,
+    )
+
+    assert posted == ["https://spade.test/short-restart"]
 
 
 def test_pending_watch_streak_survives_beyond_eleven_minutes():
