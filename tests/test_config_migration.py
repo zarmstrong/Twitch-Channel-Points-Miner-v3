@@ -1784,6 +1784,7 @@ def test_closing_paren_scan_is_linear_on_a_run_of_hashes():
     assert config_migration._CLOSING_PAREN.match(" #" + "#" * 50000 + "\n") is None
     assert time.perf_counter() - started < 1
     # A `)` inside a comment never counts; the one on the next line does.
+    assert config_migration._CLOSING_PAREN.match("  # c )") is None
     match = config_migration._CLOSING_PAREN.match("  # ) ##\n  )")
     assert match is not None and match.end() == len("  # ) ##\n  )")
 
