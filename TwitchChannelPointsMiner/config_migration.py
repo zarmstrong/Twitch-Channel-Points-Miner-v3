@@ -461,22 +461,20 @@ def _import_edit(source, line_offsets, tree, first_use, statements):
     return (import_offset, prefix + "\n".join(statements) + "\n")
 
 
-def _late_import_repair(source, line_offsets, tree):
-    """The edit re-importing names an earlier migration imported too late.
+def _late_imports(tree):
+    """The migration's imports that tree has only below a statement using them,
+    and the index of the first such statement.
 
     Earlier releases added the migration's imports below the last top-level
     import, which could be below the statement they wrote a reference into,
-    and still set the current CONFIG_VERSION, so the config raised NameError
-    on every start (#327). Such an import is added again above the first
-    statement using its name; the later one then changes nothing. A name the
-    config binds some other way is left alone.
+    so the config raised NameError on every start (#327). Such an import is
+    added again above the first statement using its name; the later one then
+    changes nothing. A name the module binds another way up to that use is
+    left alone; a function's own binding can't shadow the module's import.
     """
-    rebound = rebound_names(tree)
     statements = []
     first_use = len(tree.body)
     for name, binding in _MIGRATION_IMPORTS.items():
-        if name in rebound:
-            continue
         imported = next(
             (
                 index
@@ -501,6 +499,9 @@ def _late_import_repair(source, line_offsets, tree):
         )
         if used is None:
             continue
+        above_use = ast.Module(body=tree.body[: used + 1], type_ignores=[])
+        if name in rebound_names(above_use, {name: binding}, module_scope=True):
+            continue
         level, module, imported_name, _ = binding
         statements.append(
             f"import {imported_name}"
@@ -508,9 +509,7 @@ def _late_import_repair(source, line_offsets, tree):
             else f"from {'.' * level}{module} import {imported_name}"
         )
         first_use = min(first_use, used)
-    if not statements:
-        return None
-    return _import_edit(source, line_offsets, tree, first_use, statements)
+    return statements, first_use
 
 
 def _statement_on_same_line(source, line_offsets, tree, node):
@@ -814,9 +813,11 @@ def migrate_config_source(source, source_name="config.py"):
     # Edits from here on may use the names in required_imports.
     first_default_edit = len(edits)
     if version == CONFIG_VERSION:
-        repair = _late_import_repair(source, line_offsets, tree)
-        if repair:
-            edits.append(repair)
+        late_imports, late_use = _late_imports(tree)
+        if late_imports:
+            edits.append(
+                _import_edit(source, line_offsets, tree, late_use, late_imports)
+            )
         migrated = _checked_output(_apply_edits(source, edits), source_name)
         return migrated, version, version
     config_names = _dict_names(config)
@@ -1005,7 +1006,13 @@ def migrate_config_source(source, source_name="config.py"):
                 )
             )
 
-    first_use = _first_statement_edited(line_offsets, tree, edits[first_default_edit:])
+    # An earlier migration's late import is repaired in the same pass, so the
+    # upgraded config starts the first time.
+    late_imports, late_use = _late_imports(tree)
+    first_use = min(
+        _first_statement_edited(line_offsets, tree, edits[first_default_edit:]),
+        late_use,
+    )
     # The missing imports go above the first statement that uses them, so an
     # import of the same name counts only when it is already above it (one
     # below would bind the name too late and the config would raise NameError).
@@ -1015,6 +1022,9 @@ def migrate_config_source(source, source_name="config.py"):
         for statement in required_imports
         if statement.split()[-1] not in rebound
         and not _name_is_imported(tree.body[:first_use], statement.split()[-1])
+    ]
+    required_imports += [
+        statement for statement in late_imports if statement not in required_imports
     ]
     if required_imports:
         edits.append(
@@ -1419,7 +1429,7 @@ def rebound_names(tree, expected=None, module_scope=False):
     # The dashboard passes the module only up to the statement it edits. An
     # exact import directly in that body, below a wildcard, binds the name
     # again before the statement runs, so the wildcard doesn't count for it.
-    # Maps each name to the line of its last exact import.
+    # Maps each name to the position of its last exact import.
     exact_after = {}
     if module_scope:
         for node in tree.body:
@@ -1427,7 +1437,7 @@ def rebound_names(tree, expected=None, module_scope=False):
                 for alias in node.names:
                     binding = import_binding(node, alias) if alias.name != "*" else None
                     if binding and expected.get(binding[3]) == binding:
-                        exact_after[binding[3]] = node.lineno
+                        exact_after[binding[3]] = (node.lineno, node.col_offset)
     names = set()
     for node in nodes:
         if id(node) in declared_only:
@@ -1443,7 +1453,8 @@ def rebound_names(tree, expected=None, module_scope=False):
                         bound
                         for bound, binding in expected.items()
                         if binding[:2] != (node.level, node.module)
-                        and exact_after.get(bound, 0) <= node.lineno
+                        and exact_after.get(bound, (0, 0))
+                        <= (node.lineno, node.col_offset)
                     )
                     continue
                 binding = import_binding(node, alias)

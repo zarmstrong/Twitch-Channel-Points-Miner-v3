@@ -1398,14 +1398,57 @@ def test_migrate_config_repairs_imports_an_earlier_migration_placed_too_late(
     assert migrate_config(config) is False
 
 
-def test_late_import_repair_leaves_a_name_the_config_binds_itself():
+def test_late_import_repair_ignores_a_function_binding_the_name():
+    # R327-19: a function's parameter can't shadow the module's import.
     source = EARLIER_LATE_IMPORT_OUTPUT.replace(
-        "ANALYTICS_CONFIG = None\n", "ANALYTICS_CONFIG = None\nlogging = None\n"
+        "ANALYTICS_CONFIG = None\n",
+        "ANALYTICS_CONFIG = None\n\ndef helper(logging):\n    return logging\n",
     )
 
     migrated, _, _ = migrate_config_source(source)
 
-    assert migrated.count("import logging") == 1
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["LOGGER"].console_level == logging.INFO
+
+
+def test_an_older_config_with_a_late_import_starts_after_one_migration():
+    # R327-20: the repair also runs while upgrading an older schema, so the
+    # first start after the upgrade works.
+    source = EARLIER_LATE_IMPORT_OUTPUT.replace(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n",
+        f"CONFIG_VERSION = {CONFIG_VERSION - 1}\n",
+    )
+
+    migrated, old_version, new_version = migrate_config_source(source)
+
+    assert (old_version, new_version) == (CONFIG_VERSION - 1, CONFIG_VERSION)
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["LOGGER"].console_level == logging.INFO
+    assert migrated.count("import logging") == 2
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+@pytest.mark.parametrize(
+    ("rebinding", "repaired"),
+    [
+        # Bound above the use: the config's own value, left alone.
+        ("from TwitchChannelPointsMiner.logger import LoggerSettings\n", False),
+        # Bound after the use: it can't shadow it, so the import is repaired.
+        ("ANALYTICS_CONFIG = None\n", True),
+    ],
+)
+def test_late_import_repair_leaves_a_name_the_config_binds_above_its_use(
+    rebinding, repaired
+):
+    source = EARLIER_LATE_IMPORT_OUTPUT.replace(
+        rebinding, f"{rebinding}logging = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrated.count("import logging") == (2 if repaired else 1)
     assert migrated.count("import ColorPalette") == 2
 
 

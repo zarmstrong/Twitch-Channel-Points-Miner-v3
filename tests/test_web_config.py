@@ -3396,11 +3396,17 @@ def test_an_existing_import_is_not_added_again(existing):
     assert config_editor._with_config_import(source, SOURCE_IMPORT) == source
 
 
-def test_an_exact_import_below_a_wildcard_binds_the_name_again():
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"from os.path import *\nimport logging\nMINER_CONFIG = {}\n",
+        # R327-21: on the same line, after a `;`, it still runs later.
+        b"from os.path import *; import logging\nMINER_CONFIG = {}\n",
+    ],
+)
+def test_an_exact_import_below_a_wildcard_binds_the_name_again(source):
     # R327-18: the wildcard might bind logging, but the import below it runs
     # later and binds the module before MINER_CONFIG uses it.
-    source = b"from os.path import *\nimport logging\nMINER_CONFIG = {}\n"
-
     assert (
         config_editor._with_config_import(source, "import logging", ("MINER_CONFIG",))
         == source
