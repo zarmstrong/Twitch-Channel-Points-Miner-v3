@@ -75,8 +75,10 @@ jobs:
 
       # A version tag that's already pushed isn't built again: a retry after
       # a later step failed (latest, description, notes) would otherwise
-      # replace the published image with a different build. If the check
-      # itself fails, the image is built, as before.
+      # replace the published image with a different build. When only one
+      # repository has it, it's copied to the other instead. Only a "not
+      # found" answer counts as missing; any other registry error fails the
+      # job, and a later run retries.
       - name: Check whether this version is already pushed
         id: existing
         env:
@@ -85,16 +87,33 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          pushed=true
-          for image in \
-            "${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner" \
-            "${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2"; do
-            if ! docker buildx imagetools inspect "${image}:${RELEASE_TAG}" >/dev/null 2>&1; then
-              pushed=false
-            fi
-          done
+          primary="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner:${RELEASE_TAG}"
+          legacy="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2:${RELEASE_TAG}"
           if [[ "${REBUILD}" == "true" ]]; then
+            echo "Rebuilding ${RELEASE_TAG} as requested"
+            echo "pushed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          image_state() {
+            local output
+            if output="$(docker buildx imagetools inspect "$1" 2>&1)"; then
+              echo pushed
+            elif [[ "${output}" == *": not found"* ]]; then
+              echo missing
+            else
+              echo "::error::Could not check whether $1 is on Docker Hub: ${output%%$'\n'*}" >&2
+              return 1
+            fi
+          }
+          primary_state="$(image_state "${primary}")" || exit 1
+          legacy_state="$(image_state "${legacy}")" || exit 1
+          pushed=true
+          if [[ "${primary_state}" == missing && "${legacy_state}" == missing ]]; then
             pushed=false
+          elif [[ "${primary_state}" == missing ]]; then
+            docker buildx imagetools create --tag "${primary}" "${legacy}" || exit 1
+          elif [[ "${legacy_state}" == missing ]]; then
+            docker buildx imagetools create --tag "${legacy}" "${primary}" || exit 1
           fi
           echo "Version ${RELEASE_TAG} already pushed: ${pushed}"
           echo "pushed=${pushed}" >> "${GITHUB_OUTPUT}"
