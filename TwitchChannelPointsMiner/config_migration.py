@@ -1086,36 +1086,8 @@ def _module_scope_nodes(tree):
     while stack:
         node = stack.pop()
         yield node
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            arguments = node.args
-            children = [*arguments.defaults]
-            children += [default for default in arguments.kw_defaults if default]
-            children += getattr(node, "decorator_list", [])
-            # Annotations run in the module too, unless postponed; counting
-            # them always only refuses more.
-            every_argument = [
-                *arguments.posonlyargs,
-                *arguments.args,
-                *arguments.kwonlyargs,
-                *filter(None, (arguments.vararg, arguments.kwarg)),
-            ]
-            children += [
-                argument.annotation
-                for argument in every_argument
-                if argument.annotation is not None
-            ]
-            if getattr(node, "returns", None) is not None:
-                children.append(node.returns)
-        elif isinstance(node, ast.ClassDef):
-            children = [*node.decorator_list, *node.bases, *node.keywords]
-        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)) or (
-            isinstance(node, ast.GeneratorExp)
-        ):
-            children = [node.generators[0].iter]
-            children += _comprehension_walrus_targets(node)
-        elif type(node).__name__ == "TypeAlias":
-            # The value and type parameters get their own scope.
-            children = [node.name]
+        if isinstance(node, _NESTED_SCOPES) or type(node).__name__ == "TypeAlias":
+            children = _enclosing_scope_parts(node)
         else:
             children = list(ast.iter_child_nodes(node))
         if isinstance(node, _NESTED_SCOPES):
@@ -1127,6 +1099,54 @@ def _module_scope_nodes(tree):
 
 
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _enclosing_scope_parts(node):
+    """The parts of a nested scope that run in, and can bind names of, the
+    scope around it: a function's defaults, decorators and annotations, a
+    class's decorators, bases and keywords, a comprehension's first iterable
+    and its walrus targets, a type alias's name."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        arguments = node.args
+        parts = [*arguments.defaults]
+        parts += [default for default in arguments.kw_defaults if default]
+        parts += getattr(node, "decorator_list", [])
+        # Annotations run there too, unless postponed; counting them always
+        # only refuses more.
+        every_argument = [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            *filter(None, (arguments.vararg, arguments.kwarg)),
+        ]
+        parts += [
+            argument.annotation
+            for argument in every_argument
+            if argument.annotation is not None
+        ]
+        if getattr(node, "returns", None) is not None:
+            parts.append(node.returns)
+        return parts
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases, *node.keywords]
+    if isinstance(node, _COMPREHENSIONS):
+        return [node.generators[0].iter, *_comprehension_walrus_targets(node)]
+    if type(node).__name__ == "TypeAlias":
+        # The value and type parameters get their own scope.
+        return [node.name]
+    return list(ast.iter_child_nodes(node))
+
+
+def _annotation_only_targets(nodes):
+    """ids of the Name targets of annotations without a value (`x: int`),
+    which declare a name without binding it."""
+    return {
+        id(node.target)
+        for node in nodes
+        if isinstance(node, ast.AnnAssign)
+        and node.value is None
+        and isinstance(node.target, ast.Name)
+    }
 
 
 def _comprehension_walrus_targets(comprehension):
@@ -1147,12 +1167,16 @@ def _comprehension_walrus_targets(comprehension):
 
 def _own_scope_nodes(scope):
     """Yield the nodes that run in scope's own namespace. A nested scope is
-    yielded (its name binds here) but not entered."""
+    yielded (its name binds here), and only its parts that run here are
+    entered."""
     stack = list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
         yield node
-        if not isinstance(node, _NESTED_SCOPES):
+        if isinstance(node, _NESTED_SCOPES):
+            # Its defaults, decorators and the like still run here.
+            stack.extend(_enclosing_scope_parts(node))
+        else:
             stack.extend(ast.iter_child_nodes(node))
 
 
@@ -1195,7 +1219,13 @@ def _assigned_globals(scope):
         }
         if not declared:
             continue
-        bound = {name for node in own for name in _names_bound_by(node)}
+        declared_only = _annotation_only_targets(own)
+        bound = {
+            name
+            for node in own
+            if id(node) not in declared_only
+            for name in _names_bound_by(node)
+        }
         # A walrus in a comprehension binds in the enclosing function.
         bound |= {
             target.id
@@ -1242,8 +1272,12 @@ def rebound_names(tree, expected=None, module_scope=False):
             for node in tree.body
             if isinstance(node, (ast.Import, ast.ImportFrom))
         }
+    nodes = list(nodes)
+    declared_only = _annotation_only_targets(nodes)
     names = set()
     for node in nodes:
+        if id(node) in declared_only:
+            continue
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 if alias.name == "*":

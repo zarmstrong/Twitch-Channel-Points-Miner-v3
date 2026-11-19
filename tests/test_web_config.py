@@ -3617,6 +3617,8 @@ def test_an_edit_is_refused_when_the_config_rebinds_the_name(tmp_path, rebinding
         "    logging.info(message)\n",
         "import logging\n\ndef outer():\n    global logging\n"
         "    def inner():\n        logging = 1\n    return inner\n",
+        # An annotation without a value declares the name, binds nothing.
+        "import logging\n\nlogging: object\n",
         # A walrus inside a lambda binds in the lambda.
         "import logging\n\nHELPERS = [lambda: (logging := 1) for _ in ()]\n",
         # A rebinding after MINER_CONFIG runs too late to shadow the edit.
@@ -3665,6 +3667,13 @@ ANNOTATION_WALRUS = pytest.mark.skipif(
         "def helper():\n    global logging\n    def logging():\n        pass\n",
         "def helper():\n    global logging\n    return [(logging := x) for x in ()]\n",
         "def outer():\n    def inner():\n        global logging\n        del logging\n",
+        # A nested def's defaults and decorators run in the enclosing function.
+        "def helper():\n    global logging\n"
+        "    def inner(value=(logging := None)):\n        pass\n",
+        "def helper():\n    global logging\n"
+        "    @(logging := lambda f: f)\n    def inner():\n        pass\n",
+        "def helper():\n    global logging\n"
+        "    class Inner((logging := object)):\n        pass\n",
         # Annotations run when the def runs (without postponed annotations).
         pytest.param(
             "def helper(value: (logging := None)):\n    pass\n",
