@@ -363,6 +363,10 @@ class FakeTwitch:
         )
         self.discovered_open_drop_campaigns = None
         self.unevaluated_category_slugs = set()
+        self.reward_category_retries = []
+
+    def retry_failed_watch_reward_category(self, category_slugs):
+        self.reward_category_retries.append(set(category_slugs))
 
     def get_drops_inventory(self):
         self.inventory_fetch_count += 1
@@ -1336,6 +1340,8 @@ def test_failed_lookup_keeps_streamer_under_resolved_game_slug():
     assert usernames == []
     assert unevaluated == {"bitcraft", "bitcraft-online"}
     assert slugs_by_username == {}
+    # A reward campaign's repeat there is not left to the ordinary refresh.
+    assert twitch.reward_category_retries == [{"bitcraft", "bitcraft-online"}]
 
     _refresh(miner, ["bitcraft"])
 

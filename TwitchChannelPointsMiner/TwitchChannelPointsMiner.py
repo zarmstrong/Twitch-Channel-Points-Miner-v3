@@ -1444,6 +1444,9 @@ class TwitchChannelPointsMiner:
                         refresh_context = time.time()
                         self.__refresh_channel_points_context()
 
+                    next_category_refresh_at = self.__refresh_for_opened_reward_window(
+                        next_category_refresh_at
+                    )
                     if (
                         (categories or self.wildcard_categories)
                         and next_category_refresh_at is not None
@@ -1472,6 +1475,10 @@ class TwitchChannelPointsMiner:
                                     ),
                                 )
                         finally:
+                            # A refresh made for an opened reward window that
+                            # evaluated nothing is made again before the
+                            # ordinary interval.
+                            self.twitch.retry_unevaluated_watch_reward_opening()
                             effective_category_refresh_seconds = (
                                 min(category_refresh_interval_seconds, 5 * 60)
                                 if self.twitch.twitchdrops_app_campaigns
@@ -1503,6 +1510,16 @@ class TwitchChannelPointsMiner:
             # A requested restart leaves through here without stopping the
             # workers, so keep what was recorded since the last pass.
             self.__save_daily_report_state_safely(retire_all=True)
+
+    def __refresh_for_opened_reward_window(self, next_category_refresh_at):
+        """When the next category refresh is due: as scheduled, or now when
+        the window of a reward campaign's repeat has opened since the last
+        pass. The category was left when the repeat before was earned."""
+        if next_category_refresh_at is None:
+            return None
+        if self.twitch.take_opened_watch_reward_start():
+            return min(next_category_refresh_at, time.time())
+        return next_category_refresh_at
 
     def __subscribe_user_drop_events(self):
         # Claim drops as soon as Twitch reports them claimable. Only needed when
@@ -2531,6 +2548,11 @@ class TwitchChannelPointsMiner:
                 unevaluated_category_slugs.update(category_slugs)
                 if error.game_slug:
                     unevaluated_category_slugs.add(error.game_slug)
+                # A reward campaign's repeat is due before its window closes,
+                # which the next ordinary refresh can come after.
+                self.twitch.retry_failed_watch_reward_category(
+                    set(category_slugs) | {error.game_slug}
+                )
                 consequence = (
                     "its tracked streamers are kept until the next refresh"
                     if tracking
@@ -3145,6 +3167,18 @@ class TwitchChannelPointsMiner:
             if self.sync_campaigns_thread.is_alive():
                 logger.warning(
                     "Sync campaigns thread did not stop in time, continuing shutdown anyway"
+                )
+
+        # Started by the two threads above, so looked for after them. A
+        # claim Twitch is still answering would otherwise be cut off by the
+        # exit, or be recorded after the report state is saved for the last
+        # time at the end of this method.
+        reward_claim_thread = getattr(self.twitch, "watch_reward_claim_thread", None)
+        if reward_claim_thread is not None and reward_claim_thread.is_alive():
+            reward_claim_thread.join(timeout=60)
+            if reward_claim_thread.is_alive():
+                logger.warning(
+                    "Reward campaign claim thread did not stop in time, continuing shutdown anyway"
                 )
 
         if (

@@ -2419,6 +2419,96 @@ def _drop_campaigns(*campaign_ids, channels=()):
     ]
 
 
+def _reward_campaign_view(*drop_ids):
+    # A reward campaign (quest) as one category's streams earn it: the groups
+    # that count there (#348).
+    [view] = _drop_campaigns("quest")
+    view.reward_categories = [{"id": "1", "displayName": "Shared Game"}]
+    view.drops = [SimpleNamespace(id=drop_id) for drop_id in drop_ids]
+    return [view]
+
+
+@pytest.mark.parametrize(
+    "followed_groups,pick_is_covered",
+    [
+        # The followed channel's category counts toward the same group.
+        (("group-b",), True),
+        # Or toward that group and another one.
+        (("group-a", "group-b"), True),
+        # It counts toward another group of the campaign: the discovered
+        # pick's reward would get no progress from it.
+        (("group-a",), False),
+    ],
+)
+def test_reward_campaign_is_covered_only_by_a_stream_earning_the_same_groups(
+    monkeypatch, followed_groups, pick_is_covered
+):
+    messages = _capture_info(monkeypatch)
+    category = _category_drop_streamer("category-streamer")
+    category.stream.campaigns = _reward_campaign_view("group-b")
+    follower = _followed_drop_streamer(
+        "followed-streamer", _reward_campaign_view(*followed_groups)
+    )
+    points = _watch_streamer("points", from_followers=True)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
+    )
+
+    assert ("category-streamer" not in _watched_for_drops(messages)) is pick_is_covered
+
+
+def test_watcher_reports_a_reward_drop_under_its_one_report_category(monkeypatch):
+    # The stream is in the group's second category; the sync and the claim
+    # report the drop under its first. A different category here would leave
+    # a second, never-finished row in the report.
+    saved = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__save_drop_progress_analytics",
+        lambda self, drop, **kwargs: saved.append(
+            (drop.id, kwargs.get("category_name_override"))
+        ),
+    )
+    drop = SimpleNamespace(
+        id="group#0",
+        has_preconditions_met=True,
+        is_claimed=False,
+        is_printable=False,
+        current_minutes_watched=12,
+        minutes_required=60,
+    )
+    [quest] = _reward_campaign_view()
+    quest.drops = [drop]
+    quest.reward_drop_report_categories = {"group#0": "First Game"}
+    [ordinary] = _drop_campaigns("drop-campaign")
+    ordinary.drops = [SimpleNamespace(**{**vars(drop), "id": "drop-1"})]
+    streamer = _category_drop_streamer("category-streamer")
+    streamer.stream.campaigns = [quest, ordinary]
+
+    class WithSavedProgress(list):
+        def append(self, twitch):
+            twitch.drop_progress_last_saved = {}
+            super().append(twitch)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.DROPS, Priority.ORDER],
+        post_side_effects=[SimpleNamespace(status_code=204)],
+        twitch_out=WithSavedProgress(),
+    )
+
+    # A Drop campaign's drop is reported under the campaign's own game.
+    assert saved == [("group#0", "First Game"), ("drop-1", None)]
+
+
 def test_category_pick_evicted_by_badge_is_logged_as_no_free_slot(monkeypatch):
     messages = []
     twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
