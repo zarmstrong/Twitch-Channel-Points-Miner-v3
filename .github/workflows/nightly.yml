@@ -1,0 +1,268 @@
+name: Nightly build
+
+# Builds the newest commit on master once a day and publishes it on a
+# channel of its own: the Docker tag `nightly` and a rolling GitHub
+# prerelease, also tagged `nightly`, holding the portable Windows build.
+# Stable releases are untouched: Docker's `latest`, the Docker Hub
+# description and the release the miner's update check reports all still
+# come from release-please.yml.
+
+on:
+  schedule:
+    # 06:17 UTC. Off the hour, when scheduled runs start late least often.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the build. Leave off for a dry run that only builds.
+        type: boolean
+        default: false
+      force:
+        description: Publish even when master hasn't changed since the last nightly build.
+        type: boolean
+        default: false
+  # A dry run for pull requests that change the nightly build itself.
+  pull_request:
+    paths:
+      - .github/workflows/nightly.yml
+      - .github/scripts/nightly-plan.js
+      - .github/scripts/nightly_version.py
+
+permissions:
+  contents: read
+
+# One nightly build at a time, so two runs can't publish out of order. Pull
+# requests get a group each, where a newer push replaces the run before it.
+concurrency:
+  group: nightly-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'zacharmstrong' }}
+
+jobs:
+  plan:
+    name: Plan nightly build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      publish: ${{ steps.decide.outputs.publish }}
+      release_tag: ${{ steps.decide.outputs.release_tag }}
+      version: ${{ steps.version.outputs.version }}
+      date: ${{ steps.version.outputs.date }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Publishes only what the scheduled run, or a manual run that asks
+      # for it, builds from master, and only when the Tests run for that
+      # commit passed and something was merged since the last nightly build.
+      # Everything else is a dry run. See nightly-plan.js.
+      - name: Decide whether to build and publish
+        id: decide
+        uses: actions/github-script@v9
+        env:
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          FORCE_INPUT: ${{ inputs.force }}
+          HAS_DOCKER_CREDENTIALS: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_TOKEN != '' }}
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-plan.js');
+            await automation.planNightly({
+              github,
+              context,
+              core,
+              sha: context.sha,
+              publishRequested: process.env.PUBLISH_INPUT === 'true',
+              force: process.env.FORCE_INPUT === 'true',
+              hasDockerCredentials: process.env.HAS_DOCKER_CREDENTIALS === 'true',
+            });
+
+      - name: Compute nightly version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          date=$(date -u +%Y%m%d)
+          version=$(python3 .github/scripts/nightly_version.py compute --date "${date}" --sha "${GITHUB_SHA}")
+          echo "Nightly version: ${version}"
+          echo "date=${date}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build_windows:
+    name: Build portable Windows executable
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Stamp nightly version
+        shell: pwsh
+        env:
+          NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python .github/scripts/nightly_version.py stamp $env:NIGHTLY_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Portable only. The installer shares its AppId with the stable
+      # release, so a nightly installer would replace a stable install.
+      - name: Build and smoke-test executable
+        uses: ./.github/actions/build-windows-exe
+        with:
+          flavor: portable
+
+      # The same file name every night, so a link to the download keeps
+      # working. The version is inside the build, not in the name.
+      - name: Package executable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/TwitchChannelPointsMiner-Portable.exe" -DestinationPath "dist/TwitchChannelPointsMiner-Portable-nightly.zip" -Force
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-windows-portable
+          path: dist/TwitchChannelPointsMiner-Portable-nightly.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # Waits for the Windows build, so Docker's nightly tag never moves on a
+  # night the Windows build failed.
+  docker:
+    name: Build Docker image
+    needs: [plan, build_windows]
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Stamp nightly version
+        env:
+          NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 .github/scripts/nightly_version.py stamp "${NIGHTLY_VERSION}"
+
+      # Only the published image is built for ARM64, which needs emulation.
+      - name: Set up QEMU
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # Only the nightly tag: never latest, and no tag per night to pile up.
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=nightly
+          labels: |
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+
+      # A dry run builds AMD64 only and pushes nothing.
+      - name: Build Docker image
+        id: docker_build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ needs.plan.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ needs.plan.outputs.publish == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          cache-from: type=gha
+          cache-to: ${{ needs.plan.outputs.publish == 'true' && 'type=gha,mode=max' || '' }}
+
+  publish_release:
+    name: Update nightly prerelease
+    needs: [plan, docker]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download portable zip
+        uses: actions/download-artifact@v8
+        with:
+          name: nightly-windows-portable
+          path: dist
+
+      # One release, updated in place, so watchers aren't notified every
+      # night. It is always a prerelease: GitHub never reports one as the
+      # latest release, which is what the miner's update check reads, and
+      # the release automation skips prereleases. The tag moves last, so a
+      # run that fails part-way is built again the next night.
+      - name: Update the nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
+          BUILD_DATE: ${{ needs.plan.outputs.date }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          ZIP_PATH: dist/TwitchChannelPointsMiner-Portable-nightly.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
+          short_sha="${GITHUB_SHA:0:7}"
+          built="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
+          title="Nightly build ${NIGHTLY_VERSION}"
+
+          notes_file=$(mktemp)
+          trap 'rm -f "${notes_file}"' EXIT
+          {
+            echo "An automatic build of the newest code on \`master\`. It passed the automated tests, but nobody has tried it against Twitch. Expect bugs, and use the [latest release](${repo_url}/releases/latest) unless you want to test a fix early."
+            echo
+            echo "* Version: \`${NIGHTLY_VERSION}\`"
+            echo "* Commit: [\`${short_sha}\`](${repo_url}/commit/${GITHUB_SHA})"
+            echo "* Built: ${built} (UTC)"
+            if [ -n "${RELEASE_TAG}" ]; then
+              echo "* [Changes since ${RELEASE_TAG}](${repo_url}/compare/${RELEASE_TAG}...${GITHUB_SHA})"
+            fi
+            echo
+            echo "### Windows"
+            echo
+            echo "Download \`TwitchChannelPointsMiner-Portable-nightly.zip\` below. Only the portable build is published nightly."
+            echo
+            echo "### Docker image"
+            echo
+            echo '```bash'
+            echo "docker pull ${image}:nightly"
+            echo '```'
+          } > "${notes_file}"
+
+          if gh release view nightly --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload nightly "${ZIP_PATH}" --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit nightly --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" --notes-file "${notes_file}" --prerelease --latest=false
+          else
+            gh release create nightly "${ZIP_PATH}" --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" --title "${title}" --notes-file "${notes_file}" \
+              --prerelease --latest=false
+          fi
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" \
+            -f sha="${GITHUB_SHA}" -F force=true --silent
