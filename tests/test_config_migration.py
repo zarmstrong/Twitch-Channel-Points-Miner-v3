@@ -772,6 +772,24 @@ def test_migrate_config_recovers_invalid_previous_migration_from_backup(tmp_path
     assert backup.read_text(encoding="utf-8") == CONFIG
 
 
+def test_migrate_config_recovers_a_file_only_the_compiler_rejects(tmp_path):
+    # Older migrations could write CONFIG_VERSION above a __future__ import.
+    # ast.parse accepts that file and compile() rejects it; it's invalid
+    # input, not invalid output, so it's still recovered from the backup.
+    config = tmp_path / "config.py"
+    backup = tmp_path / "config.py.v0.bak"
+    config.write_text(
+        "CONFIG_VERSION = 1\nfrom __future__ import annotations\nMINER_CONFIG = {}\n",
+        encoding="utf-8",
+    )
+    backup.write_text(CONFIG, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    assert config.read_text(encoding="utf-8") == migrate_config_source(CONFIG)[0]
+    assert backup.read_text(encoding="utf-8") == CONFIG
+
+
 def test_migrate_config_rewrites_invalid_file_from_current_version_backup(tmp_path):
     config = tmp_path / "config.py"
     backup = tmp_path / "config.py.v0.bak"

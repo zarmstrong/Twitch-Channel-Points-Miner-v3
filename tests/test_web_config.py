@@ -3715,6 +3715,8 @@ ANNOTATION_WALRUS = pytest.mark.skipif(
             marks=ANNOTATION_WALRUS,
         ),
         "LEVELS = [[(logging := level) for level in ()] for _ in ()]\n",
+        # A lambda's defaults run in the comprehension, which binds here.
+        "HELPERS = [lambda level=(logging := None): level for _ in (1,)]\n",
         "try:\n    import logging\nexcept ImportError:\n    logging = None\n",
         "for logging in ():\n    pass\n",
         "LEVELS = [(logging := level) for level in ()]\n",

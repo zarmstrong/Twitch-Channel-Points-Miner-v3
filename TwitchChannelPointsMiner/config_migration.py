@@ -723,6 +723,11 @@ def _checked_output(migrated, source_name):
 def migrate_config_source(source, source_name="config.py"):
     try:
         tree = ast.parse(source, filename=source_name)
+        # The compiler also rejects some files ast.parse accepts, such as a
+        # __future__ import that isn't first, which older migrations could
+        # write. Such a file is invalid input, so it can be recovered from a
+        # backup; only invalid output counts as GeneratedConfigError.
+        compile(tree, source_name, "exec", dont_inherit=True)
     except SyntaxError as error:
         raise ConfigMigrationError(f"Cannot parse {source_name}: {error}") from error
 
@@ -1221,8 +1226,9 @@ def _annotation_only_targets(nodes):
 
 def _comprehension_walrus_targets(comprehension):
     """The walrus targets in a comprehension that bind in its enclosing
-    scope: those in it or in comprehensions nested in it, but not in a
-    lambda, function or class inside it, which binds its own names."""
+    scope: those in it or in comprehensions nested in it, but not in the
+    body of a lambda inside it, which binds its own names. A lambda's
+    defaults still run in the comprehension."""
     targets = []
     stack = list(ast.iter_child_nodes(comprehension))
     while stack:
@@ -1230,6 +1236,7 @@ def _comprehension_walrus_targets(comprehension):
         if isinstance(node, ast.NamedExpr):
             targets.append(node.target)
         if isinstance(node, _NESTED_SCOPES) and not isinstance(node, _COMPREHENSIONS):
+            stack.extend(_enclosing_scope_parts(node))
             continue
         stack.extend(ast.iter_child_nodes(node))
     return targets
