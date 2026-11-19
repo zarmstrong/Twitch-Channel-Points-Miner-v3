@@ -324,6 +324,7 @@ MINE_CONFIG = {
 |---|---|
 | No category streamers are loaded | Confirm the game has an active, incomplete campaign and try its Twitch directory URL. Enable `print_open_drop_campaigns_on_load=True` to inspect detected campaigns. |
 | A live channel is skipped | With `category_drops_enabled=True`, it must have the `DropsEnabled` tag. Restricted campaigns may also require the channel to be on the campaign's allowlist. |
+| A channel is skipped with "the account is banned in this channel" or "timed out" | Twitch reports that your account is banned or timed out there. A timed-out channel comes back when the timeout ends; a lifted ban is noticed within 6 hours. |
 | A forced streamer is skipped | Confirm the login is live, streaming the requested game, and has the Drops tag when required. |
 | The chosen channels are unexpected | Check `category_sort`, `category_limit`, category order, and `CategoryCampaignOrder`. Restricted campaign allowlists take precedence over a normal category search. |
 | A removed category still affects selection | Refresh only adds streamers; restart the miner to remove already-loaded category channels. |

@@ -148,6 +148,16 @@ class GQLOperations:
             "}"
         ),
     }
+    # Resolves under both the TV and the Android login. `banStatus` is null
+    # when the account is not banned in the channel.
+    ChannelBanStatus = {
+        "operationName": "ChannelBanStatus",
+        "query": (
+            "query ChannelBanStatus($channelID: ID!) {"
+            "user(id: $channelID) { id self { banStatus { isPermanent expiresAt } } }"
+            "}"
+        ),
+    }
     GameSlug = {
         "operationName": "GameSlug",
         "query": "query GameSlug($id: ID!) { game(id: $id) { id slug } }",
