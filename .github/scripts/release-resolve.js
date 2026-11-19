@@ -30,11 +30,12 @@ function manifestTag(text) {
 }
 
 // A missing release or tag reads as "nothing to publish"; anything else fails.
-async function notFoundAsNull(request) {
+// getCommit answers 422 for a ref that doesn't exist, so it passes [404, 422].
+async function notFoundAsNull(request, notFound = [404]) {
   try {
     return (await request()).data;
   } catch (error) {
-    if (error.status === 404 || error.status === 422) return null;
+    if (notFound.includes(error.status)) return null;
     throw error;
   }
 }
@@ -48,7 +49,7 @@ async function findEarlierRelease({ github, context, core, tag }) {
   }
   const commit = await notFoundAsNull(() => github.rest.repos.getCommit({
     owner, repo, ref: `refs/tags/${tag}`,
-  }));
+  }), [404, 422]);
   if (!commit) {
     // A published release always has its tag, so this needs a person to look.
     core.warning(`Release ${tag} exists but its tag is missing; Docker and Windows files are not published.`);

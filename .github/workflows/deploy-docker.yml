@@ -80,46 +80,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Add Docker image to GitHub release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.ref }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${RELEASE_TAG#v}"
-          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
-
-          # Only a missing release skips the notes. Auth, rate-limit and
-          # network errors fail the step instead of passing as "no release".
-          if ! view_error=$(gh release view "${RELEASE_TAG}" --json tagName 2>&1 >/dev/null); then
-            if [[ "${view_error}" == *"release not found"* ]]; then
-              echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
-              exit 0
-            fi
-            echo "::error::Could not read GitHub release ${RELEASE_TAG}: ${view_error}"
-            exit 1
-          fi
-
-          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')
-          release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
-          docker_notes=$(cat <<EOF
-          <!-- docker-image:start -->
-          ### Docker image
-
-          * [\`${image}:${version}\`](https://hub.docker.com/r/${image}/tags?name=${version})
-
-          \`\`\`bash
-          docker pull ${image}:${version}
-          \`\`\`
-          <!-- docker-image:end -->
-          EOF
-          )
-          notes_file=$(mktemp)
-          trap 'rm -f "${notes_file}"' EXIT
-          printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
-          gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
-
       # Checked out after the build, so it isn't part of the build context.
       # A manually published older release doesn't have these scripts.
       - name: Checkout release automation
@@ -170,6 +130,48 @@ jobs:
           repository: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
           short-description: Automatically earn Twitch channel points, claim Drops, and manage predictions.
           readme-filepath: ./DOCKERHUB.md
+
+      # Last, so a GitHub API error here can't stop latest or the Docker Hub
+      # description from moving; the image is already pushed by now.
+      - name: Add Docker image to GitHub release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
+
+          # Only a missing release skips the notes. Auth, rate-limit and
+          # network errors fail the step instead of passing as "no release".
+          if ! view_error=$(gh release view "${RELEASE_TAG}" --json tagName 2>&1 >/dev/null); then
+            if [[ "${view_error}" == *"release not found"* ]]; then
+              echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
+              exit 0
+            fi
+            echo "::error::Could not read GitHub release ${RELEASE_TAG}: ${view_error}"
+            exit 1
+          fi
+
+          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')
+          release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
+          docker_notes=$(cat <<EOF
+          <!-- docker-image:start -->
+          ### Docker image
+
+          * [\`${image}:${version}\`](https://hub.docker.com/r/${image}/tags?name=${version})
+
+          \`\`\`bash
+          docker pull ${image}:${version}
+          \`\`\`
+          <!-- docker-image:end -->
+          EOF
+          )
+          notes_file=$(mktemp)
+          trap 'rm -f "${notes_file}"' EXIT
+          printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
+          gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
 
       - name: Image digest AMD64 and ARM64
         run: echo ${{ steps.docker_build.outputs.digest }}

@@ -145,6 +145,7 @@ test('a reported tag that is not bare SemVer fails without setting outputs', asy
 test('other API errors fail the step without setting outputs', async () => {
   for (const github of [
     fakeGithub({ release: httpError(500) }),
+    fakeGithub({ release: httpError(422) }),
     fakeGithub({ commit: httpError(403) }),
   ]) {
     const core = fakeCore();
