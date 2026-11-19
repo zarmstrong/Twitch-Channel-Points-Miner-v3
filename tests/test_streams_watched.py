@@ -18,6 +18,7 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _normalize_streams_watched,
     _normalize_watch_status_interval_minutes,
 )
+from TwitchChannelPointsMiner.classes import HttpSession
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.Settings import (
     Events,
@@ -178,6 +179,7 @@ def _run_one_watch_iteration(
     on_sleep=None,
     gql=None,
     channel_bans=None,
+    post_kwargs=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -228,20 +230,23 @@ def _run_one_watch_iteration(
 
         def _post(url, **kwargs):
             posted.append(url)
+            if post_kwargs is not None:
+                post_kwargs.append(kwargs)
             assert (
                 responses
-            ), "requests.post called more times than post_side_effects provided"
+            ), "HttpSession.post called more times than post_side_effects provided"
             effect = responses.pop(0)
             if isinstance(effect, Exception):
                 raise effect
             return effect
 
-        monkeypatch.setattr(requests, "post", _post)
+        monkeypatch.setattr(HttpSession, "post", _post)
     else:
         monkeypatch.setattr(
-            requests,
+            HttpSession,
             "post",
             lambda url, **kwargs: posted.append(url)
+            or (post_kwargs is not None and post_kwargs.append(kwargs))
             or SimpleNamespace(status_code=500),
         )
     monkeypatch.setattr(
@@ -575,7 +580,7 @@ def test_stale_category_streamer_refresh_flips_it_into_watch_rotation(monkeypatc
 
     posted = []
     monkeypatch.setattr(
-        requests,
+        HttpSession,
         "post",
         lambda url, **kwargs: posted.append(url) or SimpleNamespace(status_code=500),
     )

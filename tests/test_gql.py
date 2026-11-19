@@ -4820,7 +4820,7 @@ def _helix_twitch(monkeypatch, response_factory):
     twitch.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
     twitch.user_agent = "test-agent"
     monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Twitch.requests.get",
+        "TwitchChannelPointsMiner.classes.HttpSession.get",
         lambda url, **kwargs: response_factory(),
     )
     return twitch
@@ -4882,7 +4882,7 @@ def test_permanent_streams_error_is_an_evaluated_empty_category(monkeypatch):
             return FakeResponse({"data": [{"id": "ow-id", "name": "Overwatch 2"}]})
         return FakeResponse({"error": "Bad Request"}, 400)
 
-    monkeypatch.setattr("TwitchChannelPointsMiner.classes.Twitch.requests.get", get)
+    monkeypatch.setattr("TwitchChannelPointsMiner.classes.HttpSession.get", get)
     monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
 
     assert (
