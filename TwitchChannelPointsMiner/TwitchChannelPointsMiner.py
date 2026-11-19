@@ -1444,6 +1444,11 @@ class TwitchChannelPointsMiner:
                         refresh_context = time.time()
                         self.__refresh_channel_points_context()
 
+                    # A start learned since the refresh was scheduled, such
+                    # as the next window of a reward campaign's repeat.
+                    next_category_refresh_at = self.__refresh_by_next_drop_start(
+                        next_category_refresh_at
+                    )
                     if (
                         (categories or self.wildcard_categories)
                         and next_category_refresh_at is not None
@@ -1503,6 +1508,19 @@ class TwitchChannelPointsMiner:
             # A requested restart leaves through here without stopping the
             # workers, so keep what was recorded since the last pass.
             self.__save_daily_report_state_safely(retire_all=True)
+
+    def __refresh_by_next_drop_start(self, next_category_refresh_at):
+        """When the next category refresh is due: as scheduled, or just
+        after the next known campaign start when that comes first."""
+        if next_category_refresh_at is None:
+            return None
+        upcoming_drop_start = self.twitch.next_upcoming_drop_start()
+        if upcoming_drop_start is None:
+            return next_category_refresh_at
+        return min(
+            next_category_refresh_at,
+            time.time() + max((upcoming_drop_start - utc_now()).total_seconds(), 0) + 5,
+        )
 
     def __subscribe_user_drop_events(self):
         # Claim drops as soon as Twitch reports them claimable. Only needed when

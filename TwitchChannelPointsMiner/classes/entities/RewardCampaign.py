@@ -243,6 +243,7 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             "claimable": claimable,
             # Nothing more can be earned in the group as Twitch reports it.
             "finished": claimed or expired,
+            "grants": grants,
             "categories": categories,
         },
     }

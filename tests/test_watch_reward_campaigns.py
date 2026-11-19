@@ -6,7 +6,6 @@ reports no progress on.
 """
 
 import copy
-import itertools
 import logging
 import time
 from datetime import timedelta
@@ -30,6 +29,9 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     with_reward_category,
 )
 from TwitchChannelPointsMiner.classes import Twitch as twitch_module
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+    TwitchChannelPointsMiner,
+)
 from TwitchChannelPointsMiner.classes.Twitch import (
     WATCH_REWARD_FINISHED_REFRESH_SECONDS,
     WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
@@ -45,6 +47,39 @@ START_AT = "2020-01-01T00:00:00Z"
 END_AT = "2099-01-01T00:00:00Z"
 CATEGORY = {"id": "777", "displayName": "Example Game", "__typename": "Game"}
 OTHER_CATEGORY = {"id": "888", "displayName": "Other Game", "__typename": "Game"}
+
+
+class InlineThread:
+    """Stands in for the thread a channel listing claims on: the claim
+    runs when it is started, so a test sees its result at once."""
+
+    started = []
+
+    def __init__(self, target, **kwargs):
+        self.target = target
+
+    def start(self):
+        InlineThread.started.append(self)
+        self.target()
+
+    def is_alive(self):
+        return False
+
+
+class HeldThread(InlineThread):
+    """A claim thread that has started and not finished."""
+
+    def start(self):
+        InlineThread.started.append(self)
+
+    def is_alive(self):
+        return True
+
+
+@pytest.fixture(autouse=True)
+def claims_run_inline(monkeypatch):
+    monkeypatch.setattr(InlineThread, "started", [])
+    monkeypatch.setattr(twitch_module, "Thread", InlineThread)
 
 
 def stamp(moment):
@@ -1513,10 +1548,9 @@ def test_slow_listing_does_not_undo_a_claim_made_from_a_newer_one(monkeypatch):
     twitch = bare_twitch(gql)
     newer = gql.get_channel_drop_campaigns_progress
     interleaved = []
-    # A clock that moves with every reading, so the two requests are never
-    # stamped alike (a coarse system clock can do that).
-    clock = itertools.count(int(time.time()))
-    monkeypatch.setattr(twitch_module.time, "time", lambda: next(clock))
+    # A coarse clock stamps both requests alike; their order still counts.
+    stopped = time.time()
+    monkeypatch.setattr(twitch_module.time, "time", lambda: stopped)
 
     def slow(channel_id):
         if not interleaved:
@@ -1656,3 +1690,128 @@ def test_next_window_of_a_waiting_repeat_is_an_upcoming_start():
     # Not once the campaign is over.
     twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2020-06-01T00:00:00Z"
     assert twitch.next_upcoming_drop_start() is None
+
+
+def test_listing_claims_on_a_thread_of_its_own(monkeypatch):
+    # Listings are read on the thread that sends the minute-watched events,
+    # which a slow claim must not hold up.
+    monkeypatch.setattr(twitch_module, "Thread", HeldThread)
+    gql, _ = channel_listing(
+        watch_group(progress(status="CLAIMABLE", minutes=60, window=open_window()))
+    )
+    twitch = bare_twitch(gql)
+
+    [campaign], _, _ = twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert campaign["timeBasedDrops"][0]["_reward_group"]["claimable"] is True
+    [thread] = InlineThread.started
+    assert gql.claims == []
+
+    # No second thread while that one runs.
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+    assert InlineThread.started == [thread]
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    thread.target()
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+
+
+def test_listing_with_nothing_to_claim_starts_no_thread():
+    gql, _ = channel_listing(watch_group(progress(minutes=12, window=open_window())))
+
+    bare_twitch(gql)._Twitch__get_campaigns_from_channel_id("1")
+
+    assert InlineThread.started == []
+
+
+def test_repeat_keeps_its_drop_id_when_twitch_counts_it_before_the_claim():
+    # Watched as "#0", claimable with one repeat counted, and the next
+    # repeat watched with that same count: three listings, two repeats.
+    twitch = bare_twitch()
+
+    def listed(group_self):
+        [drop] = twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self))
+        )["timeBasedDrops"]
+        return drop["id"], drop["name"]
+
+    first = ("group-watch#0", "Daily Chest (0/6 earned)")
+    assert listed(progress(minutes=59, window=open_window())) == first
+    claimable = progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window())
+    assert listed(claimable) == first
+    # Still waiting to be claimed on the next listing.
+    assert listed(claimable) == first
+    assert listed(progress(minutes=5, grants=1, window=open_window())) == (
+        "group-watch#1",
+        "Daily Chest (1/6 earned)",
+    )
+
+
+def test_claimable_repeat_seen_first_does_not_take_an_older_repeats_id():
+    # The stored record is of a repeat claimed long ago; the listing reports
+    # a later one claimable. Nothing says they are the same repeat.
+    twitch = bare_twitch()
+    stale = progress(status="CLAIMABLE", minutes=60, grants=0, window=open_window())
+    newer = progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window())
+
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(stale)))
+    [drop] = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(newer))
+    )["timeBasedDrops"]
+
+    assert drop["id"] == "group-watch#1"
+
+
+def test_progress_cache_holds_the_reward_drops_that_can_be_watched_now():
+    # The stall check and the channel pick read this cache; the inventory
+    # it is built from never lists a reward campaign.
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=12, window=open_window())))
+    )
+
+    twitch._Twitch__cache_drop_inventory_progress({"dropCampaignsInProgress": None})
+
+    assert twitch.drop_inventory_progress == {
+        "example-game": (
+            (
+                "quest-1",
+                "Launch Celebration",
+                "group-watch#0",
+                "Daily Chest (0/6 earned)",
+                12,
+                60,
+                None,
+            ),
+        )
+    }
+
+    # A repeat waiting for its next window is not progress to watch for.
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(progress(grants=1, next_at=stamp(NOW + timedelta(hours=1))))
+        )
+    )
+    twitch._Twitch__cache_drop_inventory_progress({})
+    assert twitch.drop_inventory_progress == {}
+
+
+def test_category_refresh_is_brought_forward_to_a_start_learned_later(monkeypatch):
+    miner = object.__new__(TwitchChannelPointsMiner)
+    starts = []
+    miner.twitch = SimpleNamespace(
+        next_upcoming_drop_start=lambda: starts[0] if starts else None
+    )
+    refresh_by = miner._TwitchChannelPointsMiner__refresh_by_next_drop_start
+    scheduled = time.time() + 6 * 3600
+
+    assert refresh_by(None) is None
+    assert refresh_by(scheduled) == scheduled
+
+    # A channel listing reports the next window an hour away.
+    starts.append(utc_now() + timedelta(hours=1))
+    assert refresh_by(scheduled) == pytest.approx(time.time() + 3605, abs=5)
+    # A start further off than the refresh changes nothing.
+    assert refresh_by(time.time() + 60) == pytest.approx(time.time() + 60, abs=5)
