@@ -3610,3 +3610,68 @@ def test_earned_rows_are_finished_by_a_later_record_when_the_report_cannot_be_sa
     twitch._Twitch__remember_watch_reward_campaign(copy.deepcopy(earned))
 
     assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"
+
+
+def test_claim_twitch_did_not_accept_is_tried_again_without_a_streamer(monkeypatch):
+    # Nothing is left to watch, so no campaign sync runs to send the claim
+    # again, and the ordinary category refresh can come after the campaign
+    # has ended.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(status="CLAIMABLE", minutes=60), times=1)
+    )
+    working_claim = twitch.gql.claim_drop_rewards
+    twitch.gql.claim_drop_rewards = lambda instance_id: SimpleNamespace(
+        status=None, errors=["service unavailable"]
+    )
+
+    evaluate(monkeypatch, twitch, [listing()])
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+    # Accepted, it leaves nothing to come back for.
+    twitch.watch_reward_pending_starts = set()
+    twitch.gql.claim_drop_rewards = working_claim
+    evaluate(monkeypatch, twitch, [listing()])
+
+    assert twitch.gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert twitch.watch_reward_pending_starts == set()
+
+
+def test_row_of_a_repeat_lost_waiting_to_be_claimed_is_not_finished(
+    monkeypatch, tmp_path
+):
+    # Should Twitch count a repeat only when it is claimed, one whose claim
+    # never went through is followed by the next with the count unchanged.
+    # Its number is below the current one, but it was not earned.
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps(
+            {
+                "drops": [
+                    {
+                        "drop_id": "group-watch#0",
+                        "category": "Example Game",
+                        "status": "failed",
+                        "failed_to_achieve": True,
+                        "current_minutes_watched": 59,
+                        "minutes_required": 60,
+                    }
+                ]
+            }
+        )
+    )
+    twitch = report_twitch(monkeypatch, tmp_path)
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(status="CLAIMABLE", minutes=60, window=open_window()),
+        progress(minutes=3, window=open_window()),
+    ):
+        stored = twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self))
+        )
+
+    assert stored["timeBasedDrops"][0]["id"] == "group-watch#1"
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert (row["status"], row["failed_to_achieve"]) == ("failed", True)

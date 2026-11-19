@@ -2755,6 +2755,7 @@ class Twitch(object):
                 # campaign sync comes along to try it again: a reward waiting
                 # to be claimed gives no reason to load a streamer.
                 self.__claim_watch_reward_drops(stored)
+                self.__retry_unaccepted_reward_claims(campaign_id)
                 views = reward_category_views(
                     stored, requested_category_slugs, self.__slugify
                 )
@@ -9313,7 +9314,12 @@ class Twitch(object):
         earned = set()
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
-            for number in range(group.get("repeat") or 0):
+            # No more of them than Twitch counted: the number also moves
+            # on from a repeat that was lost waiting to be claimed (see
+            # __keep_repeat_drop_ids), which was not earned.
+            for number in range(
+                min(group.get("repeat") or 0, group.get("grants") or 0)
+            ):
                 earned.add(repeat_drop_id(group["id"], number))
             if (drop.get("self") or {}).get("isClaimed") is True:
                 earned.add(str(drop["id"]))
@@ -9932,6 +9938,29 @@ class Twitch(object):
                 drop,
                 campaign_name_override=campaign.get("name"),
                 category_name_override=categories[0].get("displayName") or "Unknown",
+            )
+
+    def __retry_unaccepted_reward_claims(self, campaign_id):
+        """Have the categories refreshed again when a progress read would
+        next be due, if a reward of the stored campaign is still waiting to
+        be claimed after its claim was sent.
+
+        A reward waiting to be claimed gives no reason to load a streamer,
+        so with nothing else to watch no campaign sync runs to send the
+        claim again, and the ordinary category refresh can be hours off:
+        later than the campaign's end."""
+        stored = self.__watch_reward_campaigns().get(campaign_id)
+        if stored is None or self.__is_open_drop_campaign(stored) is not True:
+            return
+        if not any(
+            (drop.get("self") or {}).get("isClaimed") is not True
+            and (drop.get("self") or {}).get("dropInstanceID")
+            for drop in stored.get("timeBasedDrops") or []
+        ):
+            return
+        with _watch_reward_lock(self):
+            self.__note_watch_reward_starts(
+                {utc_now() + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)}
             )
 
     def __category_has_watch_reward(self, twitch_campaigns) -> bool:
