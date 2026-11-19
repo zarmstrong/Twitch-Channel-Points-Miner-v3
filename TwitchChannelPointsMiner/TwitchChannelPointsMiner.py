@@ -3169,6 +3169,17 @@ class TwitchChannelPointsMiner:
                     "Sync campaigns thread did not stop in time, continuing shutdown anyway"
                 )
 
+        # Started by the two threads above, so looked for after them. A
+        # claim Twitch is still answering would otherwise be recorded after
+        # the final report state is saved, or be cut off by the exit.
+        reward_claim_thread = getattr(self.twitch, "watch_reward_claim_thread", None)
+        if reward_claim_thread is not None and reward_claim_thread.is_alive():
+            reward_claim_thread.join(timeout=60)
+            if reward_claim_thread.is_alive():
+                logger.warning(
+                    "Reward campaign claim thread did not stop in time, continuing shutdown anyway"
+                )
+
         if (
             self.drop_badge_catalog_thread is not None
             and self.drop_badge_catalog_thread.is_alive()

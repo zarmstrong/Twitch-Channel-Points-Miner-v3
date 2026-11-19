@@ -2681,14 +2681,10 @@ class Twitch(object):
                 continue
             if stored is None:
                 continue
+            self.__recheck_watch_reward_categories(stored)
             views = reward_category_views(
                 stored, requested_category_slugs, self.__slugify
             )
-            if not views:
-                self.__recheck_watch_reward_categories(stored)
-                views = reward_category_views(
-                    stored, requested_category_slugs, self.__slugify
-                )
             if views:
                 # Only a campaign the miner could watch for is worth a
                 # channel listing to bring its progress up to date.
@@ -9322,10 +9318,12 @@ class Twitch(object):
         its groups since it was stored, asking at most once every
         WATCH_REWARD_LOOKUP_RETRY_SECONDS.
 
-        For a campaign none of whose categories is configured: no channel
-        is listed for it, so nothing else would notice a configured category
-        being added. With the category known, the evaluation reads the
-        campaign from a channel there, which brings the rest."""
+        For a campaign no channel has reported in that time: none of its
+        categories is configured, or none has a live channel, so nothing
+        else would notice a configured category being added. (A channel's
+        listing brings the categories with it.) With the category known,
+        the evaluation reads the campaign from a channel there, which brings
+        the rest."""
         details = stored["_watch_reward"]
         checked_at = details.get("categories_checked_at") or details.get("read_at")
         if (time.time() - (checked_at or 0)) < WATCH_REWARD_LOOKUP_RETRY_SECONDS:
@@ -9608,6 +9606,11 @@ class Twitch(object):
                 with _watch_reward_lock(self):
                     self.watch_reward_claim_requested = False
                 for campaign in list(self.__watch_reward_campaigns().values()):
+                    if getattr(self, "running", True) is not True:
+                        # Shutting down, which waits for this thread: what
+                        # is left is claimed from the first listing of the
+                        # next run.
+                        break
                     if self.__is_open_drop_campaign(campaign) is not True:
                         # Over: a claim that kept failing would be sent
                         # again ahead of every reward that can still be had.

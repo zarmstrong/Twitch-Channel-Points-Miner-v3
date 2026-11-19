@@ -612,6 +612,45 @@ def test_stop_workers_retires_and_waits_for_the_running_irc_thread():
     streamer.retire_chat.assert_called_once_with(timeout=10)
 
 
+def test_stop_workers_waits_for_a_reward_claim_still_being_answered():
+    # Twitch can take over a minute to answer a claim. Left running, it
+    # would be recorded after the final report state is saved.
+    miner = _miner()
+    thread = MagicMock()
+    thread.is_alive.side_effect = [True, False]
+    miner.twitch.watch_reward_claim_thread = thread
+
+    with patch(f"{MODULE}.logger") as logger:
+        miner._TwitchChannelPointsMiner__stop_workers()
+
+    thread.join.assert_called_once_with(timeout=60)
+    logger.warning.assert_not_called()
+
+
+def test_stop_workers_does_not_wait_for_a_reward_claim_thread_that_is_done():
+    miner = _miner()
+    thread = MagicMock()
+    thread.is_alive.return_value = False
+    miner.twitch.watch_reward_claim_thread = thread
+
+    miner._TwitchChannelPointsMiner__stop_workers()
+
+    thread.join.assert_not_called()
+
+
+def test_stop_workers_goes_on_when_a_reward_claim_never_finishes():
+    miner = _miner()
+    thread = MagicMock()
+    thread.is_alive.return_value = True
+    miner.twitch.watch_reward_claim_thread = thread
+
+    with patch(f"{MODULE}.logger") as logger:
+        miner._TwitchChannelPointsMiner__stop_workers()
+
+    thread.join.assert_called_once_with(timeout=60)
+    assert "Reward campaign claim thread" in logger.warning.call_args.args[0]
+
+
 def test_late_status_update_after_shutdown_does_not_start_a_chat(monkeypatch):
     # An online/offline update still in flight when the miner stops (e.g. the
     # minute watcher's) must not start a chat for the streamer afterwards.

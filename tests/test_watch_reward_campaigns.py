@@ -20,7 +20,11 @@ from TwitchChannelPointsMiner.classes.entities.Campaign import (
     campaign_channel_scope,
     campaign_from_channel_progress,
 )
-from TwitchChannelPointsMiner.classes.entities.Drop import Drop, utc_now
+from TwitchChannelPointsMiner.classes.entities.Drop import (
+    Drop,
+    drop_sub_requirement_unmet,
+    utc_now,
+)
 from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     campaign_from_reward_groups,
     is_watch_reward_campaign,
@@ -2452,6 +2456,36 @@ def test_claim_thread_claims_every_stored_campaign(monkeypatch):
     ]
 
 
+def test_claim_thread_sends_no_further_claim_once_the_miner_is_stopping(
+    monkeypatch,
+):
+    # Shutdown waits for this thread; what is left is claimed next run.
+    monkeypatch.setattr(twitch_module, "Thread", HeldThread)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    accept = gql.claim_drop_rewards
+
+    def claim_as_the_miner_stops(instance_id):
+        twitch.running = False
+        # Another listing asks for claims meanwhile.
+        twitch.watch_reward_claim_requested = True
+        return accept(instance_id)
+
+    gql.claim_drop_rewards = claim_as_the_miner_stops
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(claimable)), other_campaign(claimable)]
+    )
+    [thread] = InlineThread.started
+    thread.target()
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert twitch.watch_reward_claim_thread is None
+
+
 def test_slow_thread_does_not_publish_its_older_record_to_the_progress_cache(
     monkeypatch,
 ):
@@ -2954,6 +2988,55 @@ def test_category_added_to_a_campaign_nobody_lists_is_found(monkeypatch):
     assert len(lookups) == 2
     assert listing_calls == ["4242"]
     assert set(deadlines) == {"other-game"}
+
+
+def test_category_added_while_the_known_one_has_nobody_live_is_found(monkeypatch):
+    # The configured category it was stored with has no live channel, so no
+    # listing brings the campaign's categories up to date. Twitch adds a
+    # second configured category.
+    structure = reward_campaign(watch_group())
+    twitch, lookups, _ = evaluation_twitch(
+        watch_group(progress(minutes=12)), structure=structure
+    )
+    directory_calls = []
+
+    def read():
+        del directory_calls[:]
+        evaluate(
+            monkeypatch,
+            twitch,
+            [listing()],
+            requested=("example-game", "other-game"),
+            channels=(),
+            directory_calls=directory_calls,
+        )
+        return [slug for slug, _ in directory_calls]
+
+    assert read() == ["slug-777"]
+    structure["rewardGroups"][0]["progressCriteria"]["categories"].append(
+        OTHER_CATEGORY
+    )
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    details["read_at"] -= 3601
+    details["refresh_attempted_at"] -= 3601
+
+    assert sorted(read()) == ["slug-777", "slug-888"]
+    assert len(lookups) == 2
+    # Asked once an hour, not on every evaluation.
+    read()
+    assert len(lookups) == 2
+
+
+def test_watch_group_that_also_asks_for_subscriptions_keeps_that_requirement():
+    group = watch_group(progress(minutes=5))
+    group["progressCriteria"]["requirements"]["subs"] = 2
+
+    [drop] = convert(group)["timeBasedDrops"]
+
+    assert drop["requiredSubs"] == 2
+    assert drop_sub_requirement_unmet(drop) is True
+    [plain] = convert(watch_group(progress(minutes=5)))["timeBasedDrops"]
+    assert plain["requiredSubs"] == 0
 
 
 def test_opened_window_is_acted_on_again_when_its_refresh_evaluated_nothing(

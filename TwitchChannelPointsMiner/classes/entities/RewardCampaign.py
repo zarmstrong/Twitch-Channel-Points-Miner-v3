@@ -245,7 +245,10 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
         # number of repeats). So the repeat being watched has the count for
         # its number, and the one earned or waiting to be claimed is the
         # last one counted. Numbered from what Twitch sends alone, a repeat
-        # keeps its ID across a restart.
+        # keeps its ID across a restart. (Should Twitch count a repeat only
+        # when it is claimed, the stored record keeps the numbers right
+        # while the miner runs; a miner started while a repeat waits to be
+        # claimed then numbers that one repeat one too low.)
         repeat_number = grants
         if claimed or claimable:
             repeat_number = max(min(grants, times) - 1, 0)
@@ -258,7 +261,9 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
         "startAt": start_at,
         "endAt": end_at,
         "requiredMinutesWatched": required,
-        "requiredSubs": 0,
+        # A watch group that asks for subscriptions as well is left to the
+        # checks every drop with a subscription requirement gets.
+        "requiredSubs": _count(criteria["requirements"].get("subs")),
         "benefitEdges": [
             {
                 "benefit": {
