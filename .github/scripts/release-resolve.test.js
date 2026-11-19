@@ -132,6 +132,17 @@ test('after a failure, a finished release on this commit is resolved with nothin
   assert.deepEqual(core.outputs, outputs('3.21.2', { docker: false, windows: false }));
 });
 
+test('a re-run resolves a finished release on any commit, to close its issues', async () => {
+  // A later commit's run recovered the release and only the issue closer
+  // failed; a full re-run keeps that later SHA.
+  for (const sha of [SHA, 'b'.repeat(40)]) {
+    const core = fakeCore();
+    const github = fakeGithub({ release: publishedRelease(), commit: { sha } });
+    assert.equal(await resolve(github, core, { recheck: true, rerun: true }), '3.21.2');
+    assert.deepEqual(core.outputs, outputs('3.21.2', { docker: false, windows: false }));
+  }
+});
+
 test('only the missing parts of a release are published again', async () => {
   const finished = publishedRelease();
   for (const [release, docker, windows] of [
@@ -158,7 +169,7 @@ test('after a failure, a published release on this commit is published', async (
   ]);
   assert.deepEqual(core.messages.at(-1), [
     'notice',
-    'Release 3.21.2 is this commit\'s release; publishing whatever it is missing.',
+    'Release 3.21.2 is being published again; publishing whatever it is missing.',
   ]);
 });
 

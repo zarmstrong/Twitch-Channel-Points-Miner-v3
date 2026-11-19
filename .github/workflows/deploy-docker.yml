@@ -13,6 +13,11 @@ on:
         description: Bare SemVer release tag to publish (for example, 3.9.0)
         required: true
         type: string
+      rebuild:
+        description: Build and push the image again even if this version is already on Docker Hub
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -68,7 +73,34 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.ref }}
 
+      # A version tag that's already pushed isn't built again: a retry after
+      # a later step failed (latest, description, notes) would otherwise
+      # replace the published image with a different build. If the check
+      # itself fails, the image is built, as before.
+      - name: Check whether this version is already pushed
+        id: existing
+        env:
+          RELEASE_TAG: ${{ inputs.ref }}
+          REBUILD: ${{ inputs.rebuild }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          pushed=true
+          for image in \
+            "${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner" \
+            "${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2"; do
+            if ! docker buildx imagetools inspect "${image}:${RELEASE_TAG}" >/dev/null 2>&1; then
+              pushed=false
+            fi
+          done
+          if [[ "${REBUILD}" == "true" ]]; then
+            pushed=false
+          fi
+          echo "Version ${RELEASE_TAG} already pushed: ${pushed}"
+          echo "pushed=${pushed}" >> "${GITHUB_OUTPUT}"
+
       - name: Build and push AMD64 and ARM64
+        if: steps.existing.outputs.pushed != 'true'
         id: docker_build
         uses: docker/build-push-action@v7
         with:

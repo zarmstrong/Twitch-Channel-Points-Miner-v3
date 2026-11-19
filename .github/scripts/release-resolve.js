@@ -75,7 +75,7 @@ function missingParts(release, tag) {
 // release from Release Please; it publishes the release here instead.
 // Returns the parts to publish, or null when there is nothing to do.
 async function findUnpublishedRelease({
-  github, context, core, tag, recheck,
+  github, context, core, tag, recheck, rerun,
 }) {
   const { owner, repo } = context.repo;
   const release = await notFoundAsNull(() => github.rest.repos.getReleaseByTag({ owner, repo, tag }));
@@ -92,10 +92,11 @@ async function findUnpublishedRelease({
     return null;
   }
   const finished = publishingFinished(release, tag);
-  if (commit.sha === context.sha && recheck) {
-    // A re-run or failed attempt of the release commit's run: publish what's
-    // missing and close the released issues again.
-    core.notice(`Release ${tag} is this commit's release; publishing whatever it is missing.`);
+  if ((commit.sha === context.sha && recheck) || rerun) {
+    // A failed attempt of the release commit's run, or any re-run (which
+    // may be of a later commit's run that recovered this release): publish
+    // what's missing and close the released issues again.
+    core.notice(`Release ${tag} is being published again; publishing whatever it is missing.`);
     return missingParts(release, tag);
   }
   // The release commit's own run can be replaced while it waits (one
@@ -114,9 +115,9 @@ async function findUnpublishedRelease({
 }
 
 // `recheck` is true when Release Please failed in any attempt of this job, or
-// when the run itself is a re-run.
+// when the run itself is a re-run; `rerun` only for a re-run.
 async function resolveRelease({
-  github, context, core, releaseCreated, tagName, recheck, manifestText,
+  github, context, core, releaseCreated, tagName, recheck, rerun = false, manifestText,
 }) {
   let tag = '';
   let parts = { docker: false, windows: false };
@@ -135,7 +136,7 @@ async function resolveRelease({
       core.warning('The release manifest has no usable version; nothing to publish.');
     } else {
       const missing = await findUnpublishedRelease({
-        github, context, core, tag: candidate, recheck,
+        github, context, core, tag: candidate, recheck, rerun,
       });
       if (missing) {
         tag = candidate;

@@ -95,6 +95,7 @@ jobs:
           RELEASE_CREATED: ${{ needs.release_please.outputs.release_created }}
           RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
           RECHECK: ${{ needs.release_please.result != 'success' || needs.release_please.outputs.first_attempt_failed == 'true' || github.run_attempt != '1' }}
+          RERUN: ${{ github.run_attempt != '1' }}
         with:
           script: |
             const automation = require('./.github/scripts/release-resolve.js');
@@ -105,6 +106,7 @@ jobs:
               releaseCreated: process.env.RELEASE_CREATED,
               tagName: process.env.RELEASE_TAG,
               recheck: process.env.RECHECK === 'true',
+              rerun: process.env.RERUN === 'true',
               manifestText: automation.readManifest(),
             });
 
