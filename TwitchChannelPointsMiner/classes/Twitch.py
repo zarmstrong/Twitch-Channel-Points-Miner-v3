@@ -843,9 +843,11 @@ class Twitch(object):
           saved now, it would put the reported reward back to in progress
           (the minute watcher reports a drop as in progress until its own
           copy is told of the claim);
-        - anything but its claim on a repeat before the stored one, which
-          was earned: progress, or "failed" from a copy taken before it was
-          counted and looked at after its window closed."""
+        - progress on a repeat before the stored one, which is over, or
+          "failed" on one that was earned: from a copy taken before it was
+          counted and looked at after its window closed. A repeat lost
+          waiting to be claimed is before the stored one too, and its last
+          snapshot does say failed."""
         for campaign in list(
             (getattr(self, "watch_reward_campaigns", None) or {}).values()
         ):
@@ -857,7 +859,13 @@ class Twitch(object):
                     earlier = drop_id[len(prefix) :]
                     if (
                         number is not None
-                        and status != "captured"
+                        and (
+                            status == "in_progress"
+                            or (
+                                status != "captured"
+                                and self.__is_reward_row_known_earned(drop_id)
+                            )
+                        )
                         and drop_id.startswith(prefix)
                         and earlier.isdigit()
                         and int(earlier) < number
@@ -880,6 +888,14 @@ class Twitch(object):
                     and (time.time() - restarted_at) < WATCH_REWARD_STALE_COPY_SECONDS
                 )
         return False
+
+    def __is_reward_row_known_earned(self, drop_id) -> bool:
+        """Whether a stored record has shown the reward drop earned in this
+        session (see __finish_earned_reward_rows)."""
+        return any(
+            earned_id == drop_id
+            for earned_id, _ in getattr(self, "watch_reward_earned_rows", None) or ()
+        )
 
     def __save_drop_snapshot_if_new(self, tracking_key, minutes_watched, status, save):
         """Call `save` to write this progress snapshot to the report if it
@@ -9310,22 +9326,21 @@ class Twitch(object):
         Earned are
 
         - the repeat a group was on when its count went up;
+        - a drop Twitch reports earned;
         - on the first record of a group in a session, as many of the
           repeats before its current one as Twitch has counted. They are
           numbered from that count alone then, which repairs the rows an
-          earlier session left behind;
-        - a drop Twitch reports earned.
+          earlier session left in progress. Only those: a row left as
+          failed may be a repeat lost waiting to be claimed, which the
+          count does not tell from an earned one.
 
         Not every repeat numbered below the current one: the number also
-        moves on from a repeat lost waiting to be claimed (see
-        __keep_repeat_drop_ids), and a count that goes up later does not
-        say which of the repeats before it was the one earned.
+        moves on from a lost repeat (see __keep_repeat_drop_ids), and a
+        count that goes up later does not say which of the repeats before
+        it was the one earned.
 
         A row is done once per session, when it could be read and written:
         a report file that could not is tried again with the next record."""
-        mutex = getattr(self, "analytics_mutex", None)
-        if mutex is None:
-            return
         before = {}
         if (
             previous is not None
@@ -9338,6 +9353,8 @@ class Twitch(object):
                     for drop in previous.get("timeBasedDrops") or []
                 },
             }
+        # (drop ID, seen earned): not seen, the row is one counted as earned
+        # on a first record.
         earned = set()
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
@@ -9346,11 +9363,19 @@ class Twitch(object):
                 for number in range(
                     min(group.get("repeat") or 0, group.get("grants") or 0)
                 ):
-                    earned.add(repeat_drop_id(group["id"], number))
+                    earned.add((repeat_drop_id(group["id"], number), False))
             elif (group.get("grants") or 0) > (was["_reward_group"].get("grants") or 0):
-                earned.add(str(was["id"]))
+                earned.add((str(was["id"]), True))
             if (drop.get("self") or {}).get("isClaimed") is True:
-                earned.add(str(drop["id"]))
+                earned.add((str(drop["id"]), True))
+        mutex = getattr(self, "analytics_mutex", None)
+        if mutex is None:
+            # No report to repair; the rows are still known as earned.
+            self.watch_reward_earned_rows = frozenset(
+                (getattr(self, "watch_reward_earned_rows", None) or frozenset())
+                | earned
+            )
+            return
         now_ms = round(time.time() * 1000)
         now_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         try:
@@ -9367,13 +9392,12 @@ class Twitch(object):
                     return
 
                 def finish(row) -> bool:
-                    if (
-                        not isinstance(row, dict)
-                        or str(row.get("drop_id") or "") not in pending
-                        # In progress, or "failed": written from a copy of
-                        # the record taken before the repeat was counted,
-                        # once its window had closed.
-                        or row.get("status") == "captured"
+                    if not isinstance(row, dict) or row.get("status") == "captured":
+                        return False
+                    drop_id = str(row.get("drop_id") or "")
+                    if (drop_id, True) not in pending and not (
+                        (drop_id, False) in pending
+                        and row.get("status") == "in_progress"
                     ):
                         return False
                     row["status"] = "captured"
@@ -9454,9 +9478,27 @@ class Twitch(object):
                 # A repeat that was waiting to be claimed is counted by its
                 # claim, which has a line of its own.
                 if was_group.get("claimable") is not True:
-                    news.append(
-                        (True, f"Reward earned: {stored.get('name')} - {was['name']}")
-                    )
+                    if (
+                        group.get("complete_all") is True
+                        and group["grants"] < group["times"]
+                    ):
+                        # Counted toward a reward that comes with the last
+                        # repeat: not earned yet, and no claim event.
+                        news.append(
+                            (
+                                False,
+                                f"{stored.get('name')} - {was['name']}: counted, "
+                                f"{group['grants']} of {group['times']} repeats "
+                                "in; the reward comes with the last one",
+                            )
+                        )
+                    else:
+                        news.append(
+                            (
+                                True,
+                                f"Reward earned: {stored.get('name')} - {was['name']}",
+                            )
+                        )
                 continue
             if drop["id"] != was["id"]:
                 continue

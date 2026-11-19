@@ -294,6 +294,8 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             # earned once.
             "repeat": repeat_number,
             "times": times,
+            # The reward comes with the last repeat, not with each one.
+            "complete_all": complete_all,
             "name": name,
             "next_start": next_start,
             "categories": categories,

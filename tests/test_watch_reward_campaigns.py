@@ -3459,26 +3459,29 @@ def test_finishing_earned_rows_reads_the_report_file_once_per_repeat(
     assert len(opened) == 1
 
 
-def test_row_written_as_failed_for_an_earned_repeat_is_finished(monkeypatch, tmp_path):
+def failed_row(drop_id="group-watch#0", minutes=59):
+    return {
+        "drop_id": drop_id,
+        "category": "Example Game",
+        "status": "failed",
+        "failed_to_achieve": True,
+        "current_minutes_watched": minutes,
+        "minutes_required": 60,
+    }
+
+
+def test_row_written_as_failed_for_a_repeat_seen_earned_is_finished(
+    monkeypatch, tmp_path
+):
     # The sync copied the record at 59 minutes and wrote the row after the
     # window had closed, as failed; Twitch had counted the repeat meanwhile.
-    (tmp_path / "drops_by_category.json").write_text(
-        json.dumps(
-            {
-                "drops": [
-                    {
-                        "drop_id": "group-watch#0",
-                        "category": "Example Game",
-                        "status": "failed",
-                        "failed_to_achieve": True,
-                        "current_minutes_watched": 59,
-                        "minutes_required": 60,
-                    }
-                ]
-            }
-        )
-    )
     twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps({"drops": [failed_row()]})
+    )
 
     twitch._Twitch__remember_watch_reward_campaign(
         convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
@@ -3487,6 +3490,57 @@ def test_row_written_as_failed_for_an_earned_repeat_is_finished(monkeypatch, tmp
     row = report_rows(twitch, tmp_path)["group-watch#0"]
     assert (row["status"], row["failed_to_achieve"]) == ("captured", False)
     assert row["current_minutes_watched"] == 60
+
+
+def test_row_an_earlier_session_left_as_failed_is_not_finished_by_the_count(
+    monkeypatch, tmp_path
+):
+    # On the first record of a session the count is all there is to go by:
+    # one repeat was earned. Should Twitch count a repeat when it is
+    # claimed, that can be the second, after a first lost unclaimed.
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps({"drops": [failed_row()]})
+    )
+    twitch = report_twitch(monkeypatch, tmp_path)
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, grants=1, window=open_window())))
+    )
+
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert (row["status"], row["failed_to_achieve"]) == ("failed", True)
+
+
+def test_failed_snapshot_of_a_lost_repeat_is_saved_and_of_an_earned_one_is_not():
+    def save(twitch, status):
+        return twitch._Twitch__save_drop_snapshot_if_new(
+            "group-watch#0|art", 59, status, lambda: None
+        )
+
+    # Lost waiting to be claimed: the count did not move, the next repeat
+    # is being watched. Its last snapshot does say failed.
+    lost = snapshot_twitch()
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(status="CLAIMABLE", minutes=60, window=open_window()),
+        progress(minutes=3, window=open_window()),
+    ):
+        stored = lost._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self))
+        )
+    assert stored["timeBasedDrops"][0]["id"] == "group-watch#1"
+    assert save(lost, "in_progress") is False
+    assert save(lost, "failed") is True
+
+    # Counted by Twitch: a copy from before, looked at after the window
+    # closed, says failed of a repeat that was earned.
+    earned = snapshot_twitch()
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(minutes=60, grants=1, window=open_window()),
+    ):
+        earned._Twitch__remember_watch_reward_campaign(convert(watch_group(group_self)))
+    assert save(earned, "failed") is False
 
 
 def test_reward_group_that_still_needs_a_subscription_has_no_progress_row():
@@ -3732,3 +3786,32 @@ def test_minutes_alone_do_not_report_a_reward_that_needs_a_subscription_as_earne
 
     row = report_rows(twitch, tmp_path)["group-watch"]
     assert (row["status"], row["current_minutes_watched"]) == ("in_progress", 60)
+
+
+def test_repeat_counted_toward_a_reward_that_comes_with_the_last_is_not_earned(
+    caplog,
+):
+    # Twitch counts each repeat of such a group; the reward is earned, and
+    # claimed, once all of them are in.
+    def all_repeats(group_self):
+        group = watch_group(group_self)
+        group["progressCriteria"]["repeatableConfig"][
+            "shouldCompleteAllRepeatsToEarn"
+        ] = True
+        return convert(group)
+
+    twitch = bare_twitch()
+    with caplog.at_level(logging.INFO, logger=twitch_module.__name__):
+        for group_self in (
+            progress(minutes=52, window=open_window()),
+            progress(minutes=60, grants=1, window=open_window()),
+        ):
+            twitch._Twitch__remember_watch_reward_campaign(all_repeats(group_self))
+
+    [record] = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert record.getMessage() == (
+        "Launch Celebration - Daily Chest (repeat 1 of 6): counted, 1 of 6 "
+        "repeats in; the reward comes with the last one"
+    )
+    assert record.event == Events.DROP_STATUS
+    assert record.skip_telegram is True
