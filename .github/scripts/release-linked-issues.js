@@ -241,13 +241,16 @@ async function releaseContains(github, owner, repo, tag, sha) {
   return data.status === 'ahead' || data.status === 'identical';
 }
 
-// Published releases, newest first.
-async function publishedReleases(github, owner, repo) {
+// Published releases, newest first. Prereleases are left out unless asked
+// for: one, such as the rolling nightly build, doesn't end a release cycle,
+// so the fixes it contains are still awaiting release.
+async function publishedReleases(github, owner, repo, { prereleases = false } = {}) {
   const releases = await github.paginate(github.rest.repos.listReleases, {
     owner, repo, per_page: 100,
   });
   return releases
     .filter((release) => !release.draft && release.published_at)
+    .filter((release) => prereleases || !release.prerelease)
     .sort((left, right) => new Date(right.published_at) - new Date(left.published_at));
 }
 
@@ -261,12 +264,16 @@ async function releaseCutoff(github, owner, repo, release) {
   return data.commit.committer.date;
 }
 
+// The newest full release published before `newTag`. `newTag` itself may be
+// a prerelease, which then closes the issues it ships like any release.
 async function previousPublishedRelease(github, owner, repo, newTag) {
-  const published = await publishedReleases(github, owner, repo);
+  const published = await publishedReleases(github, owner, repo, { prereleases: true });
   const current = published.find((release) => release.tag_name === newTag);
   if (!current) return null;
   return published.find(
-    (release) => new Date(release.published_at) < new Date(current.published_at),
+    (release) =>
+      !release.prerelease &&
+      new Date(release.published_at) < new Date(current.published_at),
   ) || null;
 }
 
