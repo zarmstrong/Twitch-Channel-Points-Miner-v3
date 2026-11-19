@@ -9,6 +9,8 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import sys
+
 import pytest
 from flask import Flask
 
@@ -3615,6 +3617,8 @@ def test_an_edit_is_refused_when_the_config_rebinds_the_name(tmp_path, rebinding
         "    logging.info(message)\n",
         "import logging\n\ndef outer():\n    global logging\n"
         "    def inner():\n        logging = 1\n    return inner\n",
+        # A walrus inside a lambda binds in the lambda.
+        "import logging\n\nHELPERS = [lambda: (logging := 1) for _ in ()]\n",
         # A rebinding after MINER_CONFIG runs too late to shadow the edit.
         "",
     ],
@@ -3647,6 +3651,12 @@ def test_an_edit_is_allowed_when_only_other_scopes_bind_the_name(tmp_path, prelu
     assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
 
 
+# Python 3.14 defers annotations and rejects a walrus inside one.
+ANNOTATION_WALRUS = pytest.mark.skipif(
+    sys.version_info >= (3, 14), reason="a walrus in an annotation is a SyntaxError"
+)
+
+
 @pytest.mark.parametrize(
     "rebinding",
     [
@@ -3655,6 +3665,20 @@ def test_an_edit_is_allowed_when_only_other_scopes_bind_the_name(tmp_path, prelu
         "def helper():\n    global logging\n    def logging():\n        pass\n",
         "def helper():\n    global logging\n    return [(logging := x) for x in ()]\n",
         "def outer():\n    def inner():\n        global logging\n        del logging\n",
+        # Annotations run when the def runs (without postponed annotations).
+        pytest.param(
+            "def helper(value: (logging := None)):\n    pass\n",
+            marks=ANNOTATION_WALRUS,
+        ),
+        pytest.param(
+            "def helper() -> (logging := None):\n    pass\n",
+            marks=ANNOTATION_WALRUS,
+        ),
+        pytest.param(
+            "def helper(*args: (logging := None)):\n    pass\n",
+            marks=ANNOTATION_WALRUS,
+        ),
+        "LEVELS = [[(logging := level) for level in ()] for _ in ()]\n",
         "try:\n    import logging\nexcept ImportError:\n    logging = None\n",
         "for logging in ():\n    pass\n",
         "LEVELS = [(logging := level) for level in ()]\n",

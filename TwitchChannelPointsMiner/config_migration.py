@@ -1091,17 +1091,28 @@ def _module_scope_nodes(tree):
             children = [*arguments.defaults]
             children += [default for default in arguments.kw_defaults if default]
             children += getattr(node, "decorator_list", [])
+            # Annotations run in the module too, unless postponed; counting
+            # them always only refuses more.
+            every_argument = [
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *filter(None, (arguments.vararg, arguments.kwarg)),
+            ]
+            children += [
+                argument.annotation
+                for argument in every_argument
+                if argument.annotation is not None
+            ]
+            if getattr(node, "returns", None) is not None:
+                children.append(node.returns)
         elif isinstance(node, ast.ClassDef):
             children = [*node.decorator_list, *node.bases, *node.keywords]
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)) or (
             isinstance(node, ast.GeneratorExp)
         ):
             children = [node.generators[0].iter]
-            children += [
-                child.target
-                for child in ast.walk(node)
-                if isinstance(child, ast.NamedExpr)
-            ]
+            children += _comprehension_walrus_targets(node)
         elif type(node).__name__ == "TypeAlias":
             # The value and type parameters get their own scope.
             children = [node.name]
@@ -1113,6 +1124,25 @@ def _module_scope_nodes(tree):
                 for name in sorted(_assigned_globals(node))
             ]
         stack.extend(children)
+
+
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _comprehension_walrus_targets(comprehension):
+    """The walrus targets in a comprehension that bind in its enclosing
+    scope: those in it or in comprehensions nested in it, but not in a
+    lambda, function or class inside it, which binds its own names."""
+    targets = []
+    stack = list(ast.iter_child_nodes(comprehension))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.NamedExpr):
+            targets.append(node.target)
+        if isinstance(node, _NESTED_SCOPES) and not isinstance(node, _COMPREHENSIONS):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return targets
 
 
 def _own_scope_nodes(scope):
@@ -1168,14 +1198,10 @@ def _assigned_globals(scope):
         bound = {name for node in own for name in _names_bound_by(node)}
         # A walrus in a comprehension binds in the enclosing function.
         bound |= {
-            node.target.id
+            target.id
             for comprehension in own
-            if isinstance(
-                comprehension,
-                (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
-            )
-            for node in ast.walk(comprehension)
-            if isinstance(node, ast.NamedExpr)
+            if isinstance(comprehension, _COMPREHENSIONS)
+            for target in _comprehension_walrus_targets(comprehension)
         }
         names |= declared & bound
     return names
