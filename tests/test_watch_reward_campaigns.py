@@ -3675,3 +3675,60 @@ def test_row_of_a_repeat_lost_waiting_to_be_claimed_is_not_finished(
     assert stored["timeBasedDrops"][0]["id"] == "group-watch#1"
     row = report_rows(twitch, tmp_path)["group-watch#0"]
     assert (row["status"], row["failed_to_achieve"]) == ("failed", True)
+
+
+def test_count_going_up_later_does_not_finish_the_row_of_a_lost_repeat(
+    monkeypatch, tmp_path
+):
+    # Counted on the claim, repeat 1 was lost and repeat 2 earned: the count
+    # of 1 says one repeat was earned, not that it was the first.
+    def row(drop_id, status, minutes):
+        return {
+            "drop_id": drop_id,
+            "category": "Example Game",
+            "status": status,
+            "failed_to_achieve": status == "failed",
+            "current_minutes_watched": minutes,
+            "minutes_required": 60,
+        }
+
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps({"drops": [row("group-watch#0", "failed", 59)]})
+    )
+    twitch = report_twitch(monkeypatch, tmp_path)
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(status="CLAIMABLE", minutes=60, window=open_window()),
+        # The window ended with the claim not made: the next repeat.
+        progress(minutes=58, window=open_window()),
+    ):
+        twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(group_self)))
+    save_synced_rows(twitch)
+    assert report_rows(twitch, tmp_path)["group-watch#1"]["status"] == "in_progress"
+
+    for group_self in (
+        progress(status="CLAIMABLE", minutes=60, window=open_window()),
+        progress(minutes=2, grants=1, window=open_window()),
+    ):
+        stored = twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self))
+        )
+
+    assert stored["timeBasedDrops"][0]["id"] == "group-watch#2"
+    rows = report_rows(twitch, tmp_path)
+    assert rows["group-watch#0"]["status"] == "failed"
+    assert rows["group-watch#1"]["status"] == "captured"
+
+
+def test_minutes_alone_do_not_report_a_reward_that_needs_a_subscription_as_earned(
+    monkeypatch, tmp_path
+):
+    twitch = report_twitch(monkeypatch, tmp_path)
+    needs_subs = watch_group(progress(minutes=60), times=1)
+    needs_subs["progressCriteria"]["requirements"]["subs"] = 2
+    twitch._Twitch__remember_watch_reward_campaign(convert(needs_subs))
+
+    save_synced_rows(twitch)
+
+    row = report_rows(twitch, tmp_path)["group-watch"]
+    assert (row["status"], row["current_minutes_watched"]) == ("in_progress", 60)
