@@ -9179,6 +9179,7 @@ class Twitch(object):
                 return previous
             self.__keep_repeat_drop_ids(previous, stored)
             self.__forget_snapshots_of_restarted_drops(previous, stored)
+            news = self.__watch_reward_progress_news(previous, stored)
             now = utc_now()
             starts = set()
             for drop in stored.get("timeBasedDrops") or []:
@@ -9213,7 +9214,72 @@ class Twitch(object):
             if campaign_id in completed:
                 self.completed_drop_campaigns = set(completed) - {campaign_id}
         self.__publish_watch_reward_progress(campaign_id)
+        # Said outside the lock: a log line can go out to a notifier.
+        for earned, line in news:
+            if earned:
+                logger.info(
+                    line,
+                    extra={"emoji": ":gift:", "event": Events.DROP_CLAIM},
+                )
+            else:
+                logger.info(
+                    line,
+                    extra={
+                        "emoji": ":bar_chart:",
+                        "event": Events.DROP_STATUS,
+                        **SKIP_NOTIFICATIONS,
+                    },
+                )
         return stored
+
+    @staticmethod
+    def __watch_reward_progress_news(previous, stored):
+        """What a listing of a reward campaign shows over `previous`, the
+        record it replaces: (earned, line) for each group whose minutes went
+        up, and for each one Twitch counted without a claim.
+
+        These groups get their minutes from a channel listing every few
+        minutes, not from the per-minute reports a drop's progress bar is
+        printed from, and a group Twitch counts by itself is never claimed.
+        Without these lines the log would not say that a reward campaign is
+        being earned, or that it was."""
+        if (
+            previous is None
+            or previous["_watch_reward"].get("progress_known") is not True
+            or stored["_watch_reward"].get("progress_known") is not True
+        ):
+            return []
+        before = {
+            drop["_reward_group"]["id"]: drop
+            for drop in previous.get("timeBasedDrops") or []
+        }
+        news = []
+        for drop in stored.get("timeBasedDrops") or []:
+            group = drop["_reward_group"]
+            was = before.get(group["id"])
+            if was is None:
+                continue
+            was_group = was["_reward_group"]
+            if group.get("grants", 0) > was_group.get("grants", 0):
+                # A repeat that was waiting to be claimed is counted by its
+                # claim, which has a line of its own.
+                if was_group.get("claimable") is not True:
+                    news.append(
+                        (True, f"Reward earned: {stored.get('name')} - {was['name']}")
+                    )
+                continue
+            if drop["id"] != was["id"]:
+                continue
+            minutes = drop["self"]["currentMinutesWatched"]
+            if minutes > was["self"]["currentMinutesWatched"]:
+                news.append(
+                    (
+                        False,
+                        f"{stored.get('name')} - {drop['name']}: {minutes}/"
+                        f"{drop['requiredMinutesWatched']} minutes watched",
+                    )
+                )
+        return news
 
     @staticmethod
     def __keep_repeat_drop_ids(previous, stored):

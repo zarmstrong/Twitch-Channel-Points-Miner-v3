@@ -34,6 +34,7 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     with_reward_category,
 )
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
+from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.Twitch import (
     WATCH_REWARD_FINISHED_REFRESH_SECONDS,
     WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
@@ -3197,3 +3198,84 @@ def test_opened_window_is_not_retried_for_categories_with_drops_off():
     twitch.retry_unevaluated_watch_reward_opening()
 
     assert twitch.watch_reward_pending_starts == set()
+
+
+def remembered_lines(caplog, *group_selves, times=6):
+    """The INFO lines logged while a campaign's listings are stored one
+    after another, each with the group in the next of `group_selves`."""
+    twitch = bare_twitch()
+    with caplog.at_level(logging.INFO, logger=twitch_module.__name__):
+        for group_self in group_selves:
+            twitch._Twitch__remember_watch_reward_campaign(
+                convert(watch_group(group_self, times=times))
+            )
+    return [record for record in caplog.records if record.levelno == logging.INFO]
+
+
+def test_minutes_gained_between_two_listings_are_logged(caplog):
+    # A reward group's minutes come from a channel listing every few
+    # minutes, so the progress bar of a drop (printed on a quarter reached
+    # one minute at a time) says nothing about it.
+    records = remembered_lines(
+        caplog,
+        progress(minutes=3, window=open_window()),
+        progress(minutes=14, window=open_window()),
+    )
+
+    assert [record.getMessage() for record in records] == [
+        "Launch Celebration - Daily Chest (repeat 1 of 6): 14/60 minutes watched"
+    ]
+    # A line for the console and the log file: one every few minutes is too
+    # many for a notifier.
+    assert records[0].skip_telegram is True
+
+
+def test_listing_without_new_minutes_logs_nothing(caplog):
+    records = remembered_lines(
+        caplog,
+        # The first listing has nothing to compare with.
+        progress(minutes=14, window=open_window()),
+        progress(minutes=14, window=open_window()),
+    )
+
+    assert records == []
+
+
+def test_repeat_twitch_counts_without_a_claim_is_logged_as_earned(caplog):
+    # What Twitch reports for a group it counts by itself: the minutes in,
+    # the count up, and no CLAIMABLE in between, so no claim line either.
+    records = remembered_lines(
+        caplog,
+        progress(minutes=52, window=open_window()),
+        progress(minutes=60, grants=1, window=open_window()),
+    )
+
+    assert [record.getMessage() for record in records] == [
+        "Reward earned: Launch Celebration - Daily Chest (repeat 1 of 6)"
+    ]
+    assert records[0].event == Events.DROP_CLAIM
+    assert getattr(records[0], "skip_telegram", False) is False
+
+
+def test_single_reward_twitch_counts_without_a_claim_is_logged_as_earned(caplog):
+    records = remembered_lines(
+        caplog,
+        progress(minutes=9),
+        progress(status="CLAIMED", minutes=15, grants=1),
+        times=1,
+    )
+
+    assert [record.getMessage() for record in records] == [
+        "Reward earned: Launch Celebration - Daily Chest"
+    ]
+
+
+def test_claimed_repeat_is_not_logged_as_earned_again(caplog):
+    # Its claim has a line of its own.
+    records = remembered_lines(
+        caplog,
+        progress(status="CLAIMABLE", minutes=60, window=open_window()),
+        progress(minutes=0, grants=1, window=open_window()),
+    )
+
+    assert records == []
