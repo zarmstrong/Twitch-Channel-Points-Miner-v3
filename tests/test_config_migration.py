@@ -1470,6 +1470,11 @@ _CONFIG_TAIL = (
         # The config's own fallback: moving the import would change LEVEL.
         "try:\n    LEVEL = logging.INFO\nexcept NameError:\n    LEVEL = 30\n",
         "try:\n    LEVEL = logging.INFO\nexcept (ValueError, Exception):\n    LEVEL = 30\n",
+        # R327-23: a function the module only defines, or that binds the name
+        # itself, and a class with its own import.
+        "def make_level():\n    return logging.INFO\nHANDLER = make_level\n",
+        "def make_level(logging=None):\n    return logging\nLEVEL = make_level()\n",
+        "class Levels:\n    import logging\n    INFO = logging.INFO\n",
     ],
 )
 def test_late_import_repair_leaves_references_that_dont_run_first(use):
@@ -1493,6 +1498,15 @@ def test_late_import_repair_leaves_references_that_dont_run_first(use):
         "class Levels:\n    LEVEL = logging.INFO\nLEVEL = Levels.LEVEL\n",
         "LEVEL = [logging.INFO for _ in (1,)][0]\n",
         "try:\n    LEVEL = logging.INFO\nexcept ValueError:\n    LEVEL = 30\n",
+        # R327-23: a function body runs when the module calls it.
+        "def make_level():\n    return logging.INFO\nLEVEL = make_level()\n",
+        "def outer():\n    return inner()\ndef inner():\n    return logging.INFO\n"
+        "LEVEL = outer()\n",
+        "def deco(function):\n    function.level = logging.INFO\n    return function\n"
+        "@deco\ndef f():\n    pass\nLEVEL = f.level\n",
+        # A handler can't catch what else or finally raises.
+        "try:\n    pass\nexcept NameError:\n    pass\nelse:\n    LEVEL = logging.INFO\n",
+        "try:\n    pass\nexcept NameError:\n    pass\nfinally:\n    LEVEL = logging.INFO\n",
     ],
 )
 def test_late_import_repair_covers_references_that_run_as_the_module_loads(use):
@@ -1506,6 +1520,35 @@ def test_late_import_repair_covers_references_that_run_as_the_module_loads(use):
     namespace = {}
     exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
     assert namespace["LEVEL"] == logging.INFO
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 14), reason="annotations are evaluated lazily"
+)
+def test_late_import_repair_covers_an_eager_argument_annotation():
+    # R327-23: without the future import, an annotation runs at the def.
+    source = (
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "def helper(value: logging.INFO = 0):\n    return value\n"
+        "LEVEL = helper.__annotations__['value']\n"
+        f"import logging\n{_CONFIG_TAIL}"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["LEVEL"] == logging.INFO
+
+
+def test_late_import_repair_skips_a_postponed_annotation():
+    source = (
+        f"from __future__ import annotations\nCONFIG_VERSION = {CONFIG_VERSION}\n"
+        "def helper(value: logging.INFO = 0):\n    return value\n"
+        f"import logging\n{_CONFIG_TAIL}"
+    )
+
+    assert migrate_config_source(source)[0] == source
 
 
 def test_unversioned_config_keeps_its_docstring_and_future_import_first():

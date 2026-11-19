@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -476,25 +477,85 @@ def _may_catch_name_error(handler):
     )
 
 
-def _reads_while_running(node, name):
+def _binds_locally(scope, name):
+    """Whether a function or class binds name in its own namespace, so name
+    there isn't the module's (unless the scope declares it global)."""
+    nodes = list(_own_scope_nodes(scope))
+    if any(isinstance(node, ast.Global) and name in node.names for node in nodes):
+        return False
+    if not isinstance(scope, ast.ClassDef):
+        arguments = scope.args
+        every_argument = [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            *filter(None, (arguments.vararg, arguments.kwarg)),
+        ]
+        if any(argument.arg == name for argument in every_argument):
+            return True
+    return any(name in _names_bound_by(node) for node in nodes)
+
+
+def _reads_while_running(node, name, functions, eager_annotations):
     """Whether node, a top-level statement, reads name while the module runs,
     so a binding below it comes too late.
 
-    Earlier migrations wrote references into calls anywhere in the file,
-    including under if, with or a class, and in a function's defaults, which
-    all run as the module loads. A function, lambda or generator body runs
-    later, so it doesn't count. Neither does a try statement whose handlers
-    may catch NameError: that may be the config's own fallback, which a
-    repair would change. Annotations are skipped, since they aren't evaluated
-    under `from __future__ import annotations`.
+    Earlier migrations wrote references into calls anywhere in the file:
+    under if, with or a class, in a function's defaults, or in a function's
+    body. A function body runs as the module loads only when the module
+    calls it, so the bodies of functions (from functions, the module's
+    top-level ones) called or used as a decorator are read too. A lambda or
+    generator body runs later. A try statement's body and handlers don't
+    count when a handler may catch NameError: that may be the config's own
+    fallback, which a repair would change. A function or class that binds
+    name itself refers to its own binding. Argument annotations count only
+    when eager_annotations; variable annotations never do.
     """
     stack = [node]
+    entered = set()
+
+    def enter(function_name):
+        function = functions.get(function_name)
+        if function is not None and function_name not in entered:
+            entered.add(function_name)
+            if not _binds_locally(function, name):
+                stack.extend(function.body)
+
     while stack:
         child = stack.pop()
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            stack.extend(child.args.defaults)
-            stack.extend(default for default in child.args.kw_defaults if default)
-            stack.extend(getattr(child, "decorator_list", []))
+            arguments = child.args
+            stack.extend(arguments.defaults)
+            stack.extend(default for default in arguments.kw_defaults if default)
+            decorators = getattr(child, "decorator_list", [])
+            stack.extend(decorators)
+            for decorator in decorators:
+                if isinstance(decorator, ast.Name):
+                    enter(decorator.id)
+            if eager_annotations and not isinstance(child, ast.Lambda):
+                every_argument = [
+                    *arguments.posonlyargs,
+                    *arguments.args,
+                    *arguments.kwonlyargs,
+                    *filter(None, (arguments.vararg, arguments.kwarg)),
+                ]
+                stack.extend(
+                    argument.annotation
+                    for argument in every_argument
+                    if argument.annotation is not None
+                )
+                if child.returns is not None:
+                    stack.append(child.returns)
+            continue
+        if isinstance(child, ast.ClassDef):
+            stack.extend(child.decorator_list)
+            stack.extend(child.bases)
+            stack.extend(child.keywords)
+            for decorator in child.decorator_list:
+                if isinstance(decorator, ast.Name):
+                    enter(decorator.id)
+            if not _binds_locally(child, name):
+                stack.extend(child.body)
             continue
         if isinstance(child, ast.GeneratorExp):
             stack.append(child.generators[0].iter)
@@ -507,6 +568,9 @@ def _reads_while_running(node, name):
         if type(child).__name__ in ("Try", "TryStar") and any(
             _may_catch_name_error(handler) for handler in child.handlers
         ):
+            # A handler can't catch what else or finally raises.
+            stack.extend(child.orelse)
+            stack.extend(child.finalbody)
             continue
         if type(child).__name__ in (
             "TypeAlias",
@@ -516,6 +580,8 @@ def _reads_while_running(node, name):
         ):
             # Evaluated lazily.
             continue
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+            enter(child.func.id)
         if (
             isinstance(child, ast.Name)
             and child.id == name
@@ -534,11 +600,24 @@ def _late_imports(tree):
     import, which could be below the statement they wrote a reference into,
     so the config raised NameError on every start (#327). Such an import is
     added again above the first statement that reads its name while the
-    module runs (_reads_while_running); the later one then changes nothing. A name the module binds another way up to that use is
-    left alone; a function's own binding can't shadow the module's import.
+    module runs (_reads_while_running); the later one then changes nothing.
+    A name the module binds another way up to that use is left alone; a
+    function's own binding can't shadow the module's import.
     """
     statements = []
     first_use = len(tree.body)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    # Python 3.14 evaluates annotations lazily, as the future import does.
+    eager_annotations = sys.version_info < (3, 14) and not any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
     for name, binding in _MIGRATION_IMPORTS.items():
         imported = next(
             (
@@ -555,7 +634,7 @@ def _late_imports(tree):
             (
                 index
                 for index, node in enumerate(tree.body[:imported])
-                if _reads_while_running(node, name)
+                if _reads_while_running(node, name, functions, eager_annotations)
             ),
             None,
         )
