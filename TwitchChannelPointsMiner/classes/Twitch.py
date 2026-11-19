@@ -49,6 +49,7 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     is_watch_reward_campaign,
     is_watch_reward_listing,
     repeat_drop_id,
+    repeat_drop_name,
     reward_category_views,
     with_claim_instance_ids,
     with_reward_category,
@@ -2532,9 +2533,6 @@ class Twitch(object):
                 return False
             return requested_category_slugs is None or slug in requested_category_slugs
 
-        # The refresh an opened reward window called for got this far.
-        self.watch_reward_opening_unevaluated = False
-
         active_deadlines = {}
         active_campaigns = {}
         active_campaign_deadlines = {}
@@ -2987,6 +2985,10 @@ class Twitch(object):
         self.active_drop_campaign_deadlines = active_campaign_deadlines
         self.twitch_campaign_names_by_game = twitch_campaign_names
 
+        # The refresh an opened reward window called for got this far. Not
+        # said any sooner: an error on the way leaves it to be made again
+        # (see retry_unevaluated_watch_reward_opening).
+        self.watch_reward_opening_unevaluated = False
         return active_deadlines, twitch_category_slugs
 
     @staticmethod
@@ -8648,7 +8650,15 @@ class Twitch(object):
                 )
         try:
             response = self.gql.get_available_drops(str(channel_id))
-            return response.campaigns, response.campaigns_available, True
+            campaigns = response.campaigns
+            if callable(progress_query):
+                # Asked in place of the progress query, this listing holds
+                # the channel's Drop campaigns only. A reward campaign counts
+                # on every channel of its categories, listed or not: left
+                # out here, it would read as not running on this channel
+                # for as long as the progress query fails.
+                campaigns = self.__with_stored_watch_rewards(campaigns)
+            return campaigns, response.campaigns_available, True
         except RetryError as error:
             self.__log_drop_check(
                 f"unable to load channel-advertised campaigns for {channel_id}: "
@@ -8663,6 +8673,24 @@ class Twitch(object):
                 level=logging.DEBUG,
             )
             return [], False, False
+
+    def __with_stored_watch_rewards(self, campaigns) -> list:
+        """`campaigns` followed by the stored reward campaigns that are
+        still running and not among them."""
+        campaigns = list(campaigns or [])
+        listed = {
+            str(campaign.get("id"))
+            for campaign in campaigns
+            if isinstance(campaign, dict)
+        }
+        return campaigns + [
+            stored
+            for campaign_id, stored in list(
+                (getattr(self, "watch_reward_campaigns", None) or {}).items()
+            )
+            if campaign_id not in listed
+            and self.__is_open_drop_campaign(stored) is True
+        ]
 
     def __get_reward_campaigns_raw_query(self):
         query_variants = [
@@ -9228,13 +9256,11 @@ class Twitch(object):
                 same_repeat = counted == 0 and was.get("claimable") is not True
             if same_repeat:
                 number = last
-                if group.get("claimable") is True:
-                    # Reported as the repeat it was watched as.
-                    drop["name"] = earlier["name"]
             elif group.get("finished") is not True:
                 number = max(number, last + 1)
             group["repeat"] = number
             drop["id"] = repeat_drop_id(group["id"], number)
+            drop["name"] = repeat_drop_name(group["name"], number, group["times"])
 
     def __forget_snapshots_of_restarted_drops(self, previous, stored):
         """Let the progress of a drop that started over be reported again.

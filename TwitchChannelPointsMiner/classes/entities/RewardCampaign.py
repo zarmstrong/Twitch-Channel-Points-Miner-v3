@@ -128,6 +128,13 @@ def repeat_drop_id(group_id, repeat_number) -> str:
     return f"{group_id}#{repeat_number}"
 
 
+def repeat_drop_name(group_name, repeat_number, times) -> str:
+    """The name of one repeat of a repeating reward group. It says which
+    repeat the drop is, not how many Twitch has counted: that number moves
+    while the repeat is watched for, claimed and reported."""
+    return f"{group_name} (repeat {min(repeat_number + 1, times)} of {times})"
+
+
 def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     """One reward group as a time-based drop, or None when watching cannot
     earn it or its state is unknown.
@@ -221,17 +228,15 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     # is on its way, or the answer was slow) does not show otherwise.
     next_start = None
     if claimable and grants < times:
-        moments = [
-            moment for moment in (next_window, window_expires) if moment is not None
-        ]
-        upcoming = [moment for moment in moments if moment > now]
-        if moments:
-            next_start = (upcoming[0] if upcoming else max(moments)).strftime(
-                TWITCH_DATETIME_FORMAT
-            )
+        # Twitch's own word for when the group can be earned again, else
+        # the end of the window the repeat was earned in.
+        opens = next_window if next_window is not None else window_expires
+        if opens is not None:
+            next_start = opens.strftime(TWITCH_DATETIME_FORMAT)
 
     drop_id = str(group["id"])
     name = group.get("name") or campaign["name"]
+    drop_name = name
     repeat_number = None
     if times > 1:
         # The count is read as the repeats whose minutes are in, the way
@@ -245,11 +250,11 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
         if claimed or claimable:
             repeat_number = max(min(grants, times) - 1, 0)
         drop_id = repeat_drop_id(group["id"], repeat_number)
-        name = f"{name} ({min(grants, times)}/{times} earned)"
+        drop_name = repeat_drop_name(name, repeat_number, times)
     rewards = group.get("rewards")
     return {
         "id": drop_id,
-        "name": name,
+        "name": drop_name,
         "startAt": start_at,
         "endAt": end_at,
         "requiredMinutesWatched": required,
@@ -283,6 +288,8 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             # The number in a repeating group's drop ID; None for a group
             # earned once.
             "repeat": repeat_number,
+            "times": times,
+            "name": name,
             "next_start": next_start,
             "categories": categories,
         },

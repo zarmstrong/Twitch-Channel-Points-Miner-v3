@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from TwitchChannelPointsMiner.classes import Twitch as twitch_module
 from TwitchChannelPointsMiner.classes.entities.Campaign import (
     Campaign,
     CampaignChannelScope,
@@ -28,16 +29,14 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     with_claim_instance_ids,
     with_reward_category,
 )
-from TwitchChannelPointsMiner.classes import Twitch as twitch_module
-from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
-    TwitchChannelPointsMiner,
-)
+from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Twitch import (
     WATCH_REWARD_FINISHED_REFRESH_SECONDS,
     WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
     WATCH_REWARD_UNLISTED_SECONDS,
     Twitch,
 )
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
 
 # The real clock: the Twitch-level tests convert through the channel listing,
 # which reads it. Windows and waits below are hours away, so a test taking a
@@ -225,7 +224,7 @@ def test_campaign_takes_its_game_from_the_watch_groups_category():
     # The subscription group and the group without progress are left out.
     [drop] = result["timeBasedDrops"]
     assert drop["id"] == "group-watch#0"
-    assert drop["name"] == "Daily Chest (0/6 earned)"
+    assert drop["name"] == "Daily Chest (repeat 1 of 6)"
     assert drop["requiredMinutesWatched"] == 60
     # Due before today's window closes, not before the campaign does.
     assert drop["startAt"] == START_AT
@@ -1758,7 +1757,7 @@ def test_repeat_keeps_its_drop_id_when_twitch_counts_it_before_the_claim():
         )["timeBasedDrops"]
         return drop["id"], drop["name"]
 
-    first = ("group-watch#0", "Daily Chest (0/6 earned)")
+    first = ("group-watch#0", "Daily Chest (repeat 1 of 6)")
     assert listed(progress(minutes=59, window=open_window())) == first
     claimable = progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window())
     assert listed(claimable) == first
@@ -1766,7 +1765,7 @@ def test_repeat_keeps_its_drop_id_when_twitch_counts_it_before_the_claim():
     assert listed(claimable) == first
     assert listed(progress(minutes=5, grants=1, window=open_window())) == (
         "group-watch#1",
-        "Daily Chest (1/6 earned)",
+        "Daily Chest (repeat 2 of 6)",
     )
 
 
@@ -1852,6 +1851,39 @@ def test_repeat_after_one_never_counted_gets_a_number_of_its_own():
     ]
 
 
+def test_repeat_is_named_for_its_number_not_for_the_count():
+    # Announced when it is claimed, by which time Twitch may have counted
+    # it: the first repeat earned is not "0 earned", nor the second.
+    twitch = bare_twitch()
+
+    def listed(group_self):
+        [drop] = twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self, times=3))
+        )["timeBasedDrops"]
+        return drop["name"]
+
+    assert [
+        listed(watched_repeat(0)),
+        listed(claimable_repeat(1)),
+        listed(watched_repeat(1)),
+        # Counted when claimed after all, and this claim never made: the
+        # stored record numbers the next repeat, and names it to match.
+        listed(claimable_repeat(1)),
+        listed(watched_repeat(1)),
+        listed(progress(status="CLAIMED", grants=3)),
+    ] == [
+        "Daily Chest (repeat 1 of 3)",
+        "Daily Chest (repeat 1 of 3)",
+        "Daily Chest (repeat 2 of 3)",
+        "Daily Chest (repeat 2 of 3)",
+        "Daily Chest (repeat 3 of 3)",
+        "Daily Chest (repeat 3 of 3)",
+    ]
+    # A group earned once keeps its own name.
+    [once] = convert(watch_group(progress(minutes=5), times=1))["timeBasedDrops"]
+    assert once["name"] == "Daily Chest"
+
+
 def test_repeat_is_numbered_after_the_one_before_a_listing_left_the_group_out():
     twitch = bare_twitch()
 
@@ -1890,7 +1922,7 @@ def test_progress_cache_holds_the_reward_drops_that_can_be_watched_now():
                 "quest-1",
                 "Launch Celebration",
                 "group-watch#0",
-                "Daily Chest (0/6 earned)",
+                "Daily Chest (repeat 1 of 6)",
                 12,
                 60,
                 None,
@@ -1973,7 +2005,7 @@ def test_finished_group_is_its_last_repeat_not_one_more():
     ]
     assert (earned["id"], earned["name"]) == (
         "group-watch#5",
-        "Daily Chest (6/6 earned)",
+        "Daily Chest (repeat 6 of 6)",
     )
 
     # The last repeat, counted before its claim and seen claimable first.
@@ -2047,6 +2079,23 @@ def test_claimable_repeat_listed_after_its_next_window_opened_is_looked_at_again
     # However recent, the record is read again by the refresh that follows.
     assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
     assert listing_calls == ["4242"]
+
+
+def test_next_window_is_the_one_twitch_names_although_the_old_one_is_still_open():
+    # Eligible again since a moment ago, while the window the repeat was
+    # earned in has hours left: the later moment is not when to come back.
+    eligible = NOW - timedelta(seconds=20)
+    claimable = progress(
+        status="CLAIMABLE",
+        minutes=60,
+        grants=1,
+        window=open_window(),
+        next_at=stamp(eligible),
+    )
+
+    [drop] = convert(watch_group(claimable))["timeBasedDrops"]
+
+    assert drop["_reward_group"]["next_start"] == stamp(eligible)
 
 
 def test_past_window_end_stands_in_for_a_missing_next_eligibility_time():
@@ -2259,6 +2308,70 @@ def test_campaign_ending_is_not_a_window_opening():
     stored["_watch_reward"]["read_at"] -= 180
 
     assert twitch._Twitch__watch_reward_windows_opened(stored) == []
+
+
+def drops_listing_twitch(progress_query):
+    """Twitch whose channel progress query is `progress_query` and whose
+    drops listing, asked in its place, names one Drop campaign."""
+    drop_campaign = {"id": "drop-campaign", "name": "Some Drops"}
+    gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[drop_campaign], campaigns_available=True
+        )
+    )
+    if progress_query is not None:
+        gql.get_channel_drop_campaigns_progress = progress_query
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5)))
+    )
+    return twitch
+
+
+def failing_progress_query(channel_id):
+    raise RetryError("DropChannelCampaignsProgress", [])
+
+
+def null_progress_query(channel_id):
+    return SimpleNamespace(campaigns=[], campaigns_available=False)
+
+
+@pytest.mark.parametrize(
+    "progress_query", [failing_progress_query, null_progress_query]
+)
+def test_drops_listing_asked_instead_still_counts_the_stored_reward_campaign(
+    progress_query,
+):
+    # The listing has the channel's Drop campaigns only. Without the stored
+    # campaign the channel would read as not running the quest for as long
+    # as the progress query fails.
+    twitch = drops_listing_twitch(progress_query)
+
+    campaigns, available, answered = twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert [campaign["id"] for campaign in campaigns] == ["drop-campaign", "quest-1"]
+    assert campaigns[1] is twitch.watch_reward_campaigns["quest-1"]
+    assert (available, answered) == (True, True)
+
+
+def test_drops_listing_while_the_progress_query_is_retired_counts_it_too():
+    twitch = drops_listing_twitch(
+        lambda channel_id: pytest.fail("not asked while it is retired")
+    )
+    twitch.channel_progress_query_retired_until = time.time() + 600
+
+    campaigns, _, _ = twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert [campaign["id"] for campaign in campaigns] == ["drop-campaign", "quest-1"]
+
+
+def test_drops_listing_leaves_out_a_stored_reward_campaign_that_is_over():
+    twitch = drops_listing_twitch(failing_progress_query)
+    twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2020-02-01T00:00:00Z"
+
+    campaigns, _, _ = twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert [campaign["id"] for campaign in campaigns] == ["drop-campaign"]
 
 
 def test_start_the_record_was_read_after_is_not_an_opening(monkeypatch):
@@ -2868,6 +2981,26 @@ def test_opened_window_is_acted_on_again_when_its_refresh_evaluated_nothing(
     evaluate(monkeypatch, twitch, [listing()])
     twitch.retry_unevaluated_watch_reward_opening()
     assert twitch.watch_reward_pending_starts == set()
+
+
+def test_opened_window_is_acted_on_again_when_its_evaluation_fails_part_way(
+    monkeypatch,
+):
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=5, grants=1, window=open_window()))
+    )
+    twitch.watch_reward_pending_starts = {utc_now() - timedelta(seconds=10)}
+    assert twitch.take_opened_watch_reward_start() is True
+
+    def broken(self, campaign, preferred_slugs=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Twitch, "_Twitch__refresh_watch_reward_progress", broken)
+    with pytest.raises(OSError):
+        evaluate(monkeypatch, twitch, [listing()])
+    twitch.retry_unevaluated_watch_reward_opening()
+
+    assert len(twitch.watch_reward_pending_starts) == 1
 
 
 def test_opened_window_is_not_retried_for_categories_with_drops_off():

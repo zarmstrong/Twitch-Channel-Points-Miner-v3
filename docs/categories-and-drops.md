@@ -68,7 +68,7 @@ category for an hour on each of six days. The miner then:
   in, claims the reward, and returns when the next window opens;
 - leaves out the rewards that need a subscription, and any reward on a track
   where your account has to pick a lane;
-- shows each repeat as its own drop, for example `Daily Chest (2/6 earned)`.
+- shows each repeat as its own drop, for example `Daily Chest (repeat 3 of 6)`.
 
 Any live channel in the category counts, with the Drops tag or without. When
 the category also has a Drop campaign, Drops-enabled channels are picked
