@@ -112,7 +112,11 @@ test('without a failure, an unfinished release on this commit is published', asy
   const core = fakeCore();
   assert.equal(await resolve(fakeGithub(), core, { recheck: false }), '3.21.2');
   assert.deepEqual(core.outputs, outputs('3.21.2'));
-  assert.equal(core.messages.at(-1)[0], 'notice');
+  // A warning naming the parts, so repeated retries show on the run summary.
+  assert.deepEqual(core.messages.at(-1), [
+    'warning',
+    `Release 3.21.2 on ${SHA} is missing the Docker image and the Windows files; publishing again. This repeats on every push until it succeeds.`,
+  ]);
 });
 
 test('without a failure, an unfinished release on another commit is published', async () => {
@@ -122,7 +126,7 @@ test('without a failure, an unfinished release on another commit is published', 
   const github = fakeGithub({ commit: { sha: 'b'.repeat(40) } });
   assert.equal(await resolve(github, core, { recheck: false }), '3.21.2');
   assert.deepEqual(core.outputs, outputs('3.21.2'));
-  assert.equal(core.messages.at(-1)[0], 'notice');
+  assert.equal(core.messages.at(-1)[0], 'warning');
 });
 
 test('after a failure, a finished release on this commit is resolved with nothing to rebuild', async () => {
@@ -130,6 +134,10 @@ test('after a failure, a finished release on this commit is resolved with nothin
   const core = fakeCore();
   assert.equal(await resolve(fakeGithub({ release: publishedRelease() }), core), '3.21.2');
   assert.deepEqual(core.outputs, outputs('3.21.2', { docker: false, windows: false }));
+  assert.deepEqual(core.messages.at(-1), [
+    'notice',
+    'Release 3.21.2 is being published again; nothing is missing, so only its issues are closed again.',
+  ]);
 });
 
 test('a re-run resolves a finished release on any commit, to close its issues', async () => {
@@ -169,7 +177,7 @@ test('after a failure, a published release on this commit is published', async (
   ]);
   assert.deepEqual(core.messages.at(-1), [
     'notice',
-    'Release 3.21.2 is being published again; publishing whatever it is missing.',
+    'Release 3.21.2 is being published again; publishing the Docker image and the Windows files.',
   ]);
 });
 
@@ -290,7 +298,11 @@ test('an unfinished release on another commit is published', async () => {
     const core = fakeCore();
     assert.equal(await resolve(fakeGithub({ release, commit: { sha: other } }), core), '3.21.2');
     assert.deepEqual(core.outputs, outputs('3.21.2', { docker, windows }));
-    assert.equal(core.messages.at(-1)[0], 'notice');
+    const parts = [docker && 'the Docker image', windows && 'the Windows files'].filter(Boolean).join(' and ');
+    assert.deepEqual(core.messages.at(-1), [
+      'warning',
+      `Release 3.21.2 on ${other} is missing ${parts}; publishing again. This repeats on every push until it succeeds.`,
+    ]);
   }
 });
 

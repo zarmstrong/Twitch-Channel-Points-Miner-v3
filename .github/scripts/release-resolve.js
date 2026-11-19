@@ -74,6 +74,13 @@ function missingParts(release, tag) {
   return { docker: !dockerPublished(release), windows: !windowsPublished(release, tag) };
 }
 
+function describeParts(parts) {
+  const names = [];
+  if (parts.docker) names.push('the Docker image');
+  if (parts.windows) names.push('the Windows files');
+  return names.join(' and ');
+}
+
 // Release Please reads master's state, not the commit being built, so a run
 // for an earlier commit can create the release of a release PR merged while
 // it ran. If that run then fails, the release commit's own run sees no new
@@ -101,8 +108,12 @@ async function findUnpublishedRelease({
     // A failed attempt of the release commit's run, or any re-run (which
     // may be of a later commit's run that recovered this release): publish
     // what's missing and close the released issues again.
-    core.notice(`Release ${tag} is being published again; publishing whatever it is missing.`);
-    return missingParts(release, tag);
+    const missing = missingParts(release, tag);
+    const parts = describeParts(missing);
+    core.notice(parts
+      ? `Release ${tag} is being published again; publishing ${parts}.`
+      : `Release ${tag} is being published again; nothing is missing, so only its issues are closed again.`);
+    return missing;
   }
   // The release commit's own run can be replaced while it waits (one
   // pending run per concurrency group), so the run that created the release
@@ -111,8 +122,11 @@ async function findUnpublishedRelease({
   // therefore tried again on each push until it succeeds, or until the next
   // release replaces this one in the manifest.
   if (!finished) {
-    core.notice(`Release ${tag} on ${commit.sha} is missing its Docker notes or Windows files; publishing them now.`);
-    return missingParts(release, tag);
+    // A warning, so a part that keeps failing (for Windows, a full build on
+    // every push) shows on each run's summary.
+    const missing = missingParts(release, tag);
+    core.warning(`Release ${tag} on ${commit.sha} is missing ${describeParts(missing)}; publishing again. This repeats on every push until it succeeds.`);
+    return missing;
   }
   // Expected on every push after a release: the manifest still names the
   // latest release, which its own commit's run published.

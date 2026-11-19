@@ -41,9 +41,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.ref }}
         shell: bash
         run: |
-          # No build metadata (`+...`): Docker tags drop it, so two such
-          # versions would share one image tag.
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          # SemVer, matching RELEASE_TAG in release-resolve.js: a numeric
+          # prerelease identifier has no leading zero. No build metadata
+          # (`+...`): Docker tags drop it, so two such versions would share
+          # one image tag. The C locale keeps [A-Za-z] to ASCII letters.
+          export LC_ALL=C
+          id='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${id}(\.${id})*)?\$"
           if [[ ! "${RELEASE_TAG}" =~ ${semver} ]]; then
             echo "::error::ref must be a bare SemVer release tag such as 3.9.0, without build metadata"
             exit 1
@@ -262,4 +266,9 @@ jobs:
           gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
 
       - name: Image digest AMD64 and ARM64
-        run: echo ${{ steps.docker_build.outputs.digest }}
+        env:
+          DIGEST: ${{ steps.docker_build.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          echo "${DIGEST:-Not built: ${RELEASE_TAG} was already on Docker Hub.}"
