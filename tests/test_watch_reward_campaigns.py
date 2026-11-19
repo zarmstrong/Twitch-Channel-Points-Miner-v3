@@ -2798,6 +2798,9 @@ def test_progress_snapshot_of_a_repeat_before_the_stored_one_is_not_saved():
     assert (
         twitch._Twitch__save_watched_drop_progress_if_new(watched, lambda: None) is None
     )
+    # Nor to failed: a copy taken before the repeat was counted reads as
+    # that once its window has closed.
+    assert save("group-watch#1", "failed") is False
     # Its claim, reported late, still is; so is a drop of another group.
     assert save("group-watch#1", "captured") is True
     assert save("group-watch-two#1") is True
@@ -3160,11 +3163,12 @@ def test_opened_window_is_acted_on_again_when_its_refresh_evaluated_nothing(
         WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
     )
 
-    # A refresh that evaluates the campaigns settles it.
+    # A refresh that evaluates the campaigns settles it: all that is left to
+    # wait for is the close of the window the repeat is being watched in.
     twitch.watch_reward_pending_starts = set()
     evaluate(monkeypatch, twitch, [listing()])
     twitch.retry_unevaluated_watch_reward_opening()
-    assert twitch.watch_reward_pending_starts == set()
+    assert twitch.watch_reward_pending_starts == {NOW + timedelta(hours=23)}
 
 
 def test_opened_window_is_acted_on_again_when_its_evaluation_fails_part_way(
@@ -3452,3 +3456,72 @@ def test_finishing_earlier_rows_reads_the_report_file_once_per_repeat(
         )
 
     assert len(opened) == 1
+
+
+def test_row_written_as_failed_for_an_earned_repeat_is_finished(monkeypatch, tmp_path):
+    # The sync copied the record at 59 minutes and wrote the row after the
+    # window had closed, as failed; Twitch had counted the repeat meanwhile.
+    (tmp_path / "drops_by_category.json").write_text(
+        json.dumps(
+            {
+                "drops": [
+                    {
+                        "drop_id": "group-watch#0",
+                        "category": "Example Game",
+                        "status": "failed",
+                        "failed_to_achieve": True,
+                        "current_minutes_watched": 59,
+                        "minutes_required": 60,
+                    }
+                ]
+            }
+        )
+    )
+    twitch = report_twitch(monkeypatch, tmp_path)
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert (row["status"], row["failed_to_achieve"]) == ("captured", False)
+    assert row["current_minutes_watched"] == 60
+
+
+def test_reward_group_that_still_needs_a_subscription_has_no_progress_row():
+    # A row says the group is being earned by watching, which keeps the
+    # channel in the Drops slot. Watching alone cannot earn this one.
+    twitch = bare_twitch()
+    needs_subs = watch_group(progress(minutes=5, window=open_window()))
+    needs_subs["progressCriteria"]["requirements"]["subs"] = 2
+    stored = twitch._Twitch__remember_watch_reward_campaign(convert(needs_subs))
+
+    rows, _ = twitch._Twitch__watch_reward_progress_rows([stored])
+
+    assert rows == {}
+    plain = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, window=open_window())))
+    )
+    rows, _ = twitch._Twitch__watch_reward_progress_rows([plain])
+    assert [row[2] for row in rows["example-game"]] == ["group-watch#0"]
+
+
+def test_close_of_the_window_a_repeat_is_watched_in_is_waited_for():
+    # Unfinished when its window closes, the repeat starts over in the next
+    # one. With its channels offline by then, nothing else would look at the
+    # category again before the ordinary refresh, hours later.
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, window=open_window())))
+    )
+
+    assert twitch.watch_reward_pending_starts == {NOW + timedelta(hours=23)}
+
+
+def test_group_due_when_the_campaign_ends_has_no_window_to_wait_for():
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5), times=1))
+    )
+
+    assert not getattr(twitch, "watch_reward_pending_starts", None)

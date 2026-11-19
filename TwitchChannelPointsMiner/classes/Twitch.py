@@ -839,7 +839,9 @@ class Twitch(object):
           saved now, it would put the reported reward back to in progress
           (the minute watcher reports a drop as in progress until its own
           copy is told of the claim);
-        - progress on a repeat before the stored one, which is over."""
+        - anything but its claim on a repeat before the stored one, which
+          was earned: progress, or "failed" from a copy taken before it was
+          counted and looked at after its window closed."""
         for campaign in list(
             (getattr(self, "watch_reward_campaigns", None) or {}).values()
         ):
@@ -851,7 +853,7 @@ class Twitch(object):
                     earlier = drop_id[len(prefix) :]
                     if (
                         number is not None
-                        and status == "in_progress"
+                        and status != "captured"
                         and drop_id.startswith(prefix)
                         and earlier.isdigit()
                         and int(earlier) < number
@@ -1081,6 +1083,10 @@ class Twitch(object):
                 required = drop.get("requiredMinutesWatched") or 0
                 current = drop_self.get("currentMinutesWatched") or 0
                 if required <= 0 or current >= required:
+                    continue
+                # Watching alone cannot earn it until the account subscribes,
+                # so it is no reason to keep a channel in the Drops slot.
+                if drop_sub_requirement_unmet(drop):
                     continue
                 for category in group.get("categories") or []:
                     game_slug = self.__slugify(
@@ -9230,6 +9236,19 @@ class Twitch(object):
                     starts_at = self.__parse_twitch_datetime(value)
                     if starts_at is not None and starts_at > now:
                         starts.add(starts_at)
+                # A repeat due before the campaign ends is due when its
+                # window closes, and starts over in the next one if it is
+                # not finished by then. Should its channels go offline
+                # first, nothing else would look at the category when that
+                # window opens (see __watch_reward_windows_opened).
+                ends_at = self.__parse_twitch_datetime(drop.get("endAt"))
+                if (
+                    group.get("claimable") is not True
+                    and drop.get("endAt") != stored.get("endAt")
+                    and ends_at is not None
+                    and ends_at > now
+                ):
+                    starts.add(ends_at)
                 next_start = self.__parse_twitch_datetime(group.get("next_start"))
                 if next_start is not None and next_start <= now:
                     # That window is open already, and this listing still
@@ -9300,7 +9319,10 @@ class Twitch(object):
             if (
                 not isinstance(row, dict)
                 or str(row.get("drop_id") or "") not in pending
-                or row.get("status") != "in_progress"
+                # In progress, or "failed": written from a copy of the
+                # record taken before the repeat was counted, once its
+                # window had closed.
+                or row.get("status") == "captured"
             ):
                 return False
             row["status"] = "captured"
