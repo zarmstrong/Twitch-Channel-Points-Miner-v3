@@ -40,18 +40,28 @@ async function notFoundAsNull(request, notFound = [404]) {
   }
 }
 
-// The Docker workflow writes this block and the Windows job uploads these
-// files, so a release with all of them was published to the end.
+// The Docker workflow writes this block only after every Docker step
+// succeeded, and the Windows job uploads these files, so a release with all
+// of them was published to the end. GitHub can leave an empty asset behind
+// from a failed upload (state "starter"), so only a finished upload counts.
 const DOCKER_NOTES_MARKER = '<!-- docker-image:start -->';
 
 function publishingFinished(release, tag) {
-  const assets = new Set((release.assets || []).map((asset) => asset.name));
+  const assets = new Set((release.assets || [])
+    .filter((asset) => asset.state === 'uploaded' && asset.size > 0)
+    .map((asset) => asset.name));
   return String(release.body || '').includes(DOCKER_NOTES_MARKER)
     && assets.has(`TwitchChannelPointsMiner-Portable-${tag}.zip`)
     && assets.has(`TwitchChannelPointsMiner-${tag}-Setup.exe`);
 }
 
-async function findEarlierRelease({ github, context, core, tag }) {
+// Release Please reads master's state, not the commit being built, so a run
+// for an earlier commit can create the release of a release PR merged while
+// it ran. If that run then fails, the release commit's own run sees no new
+// release from Release Please; it publishes the release here instead.
+async function findUnpublishedRelease({
+  github, context, core, tag, recheck,
+}) {
   const { owner, repo } = context.repo;
   const release = await notFoundAsNull(() => github.rest.repos.getReleaseByTag({ owner, repo, tag }));
   if (!release || release.draft) {
@@ -66,21 +76,34 @@ async function findEarlierRelease({ github, context, core, tag }) {
     core.warning(`Release ${tag} exists but its tag is missing; Docker and Windows files are not published.`);
     return false;
   }
-  if (commit.sha !== context.sha) {
-    // A later push's run can create the release when the release commit's
-    // own run was still waiting and got replaced (one pending run per
-    // concurrency group). Publish it here if nobody finished publishing it.
-    if (!publishingFinished(release, tag)) {
-      core.notice(`Release ${tag} on ${commit.sha} has no Docker notes or Windows files yet; publishing it now.`);
+  const finished = publishingFinished(release, tag);
+  if (commit.sha === context.sha) {
+    if (recheck) {
+      // A re-run or failed attempt publishes this commit's release again.
+      core.notice(`Release ${tag} was created by an earlier Release Please attempt; publishing it now.`);
       return true;
     }
-    // Expected on every push after a release: the manifest still names the
-    // latest release, which its own commit's run published.
-    core.info(`Release ${tag} is on another commit than ${context.sha} and is already published; nothing to publish.`);
+    if (!finished) {
+      core.notice(`Release ${tag} on this commit was created by another run and not fully published; publishing it now.`);
+      return true;
+    }
+    core.info(`Release ${tag} on this commit is already published; nothing to publish.`);
     return false;
   }
-  core.notice(`Release ${tag} was created by an earlier Release Please attempt; publishing it now.`);
-  return true;
+  // A later push's run can also create the release when the release commit's
+  // own run was still waiting and got replaced (one pending run per
+  // concurrency group). After a failure or re-run, publish it if nobody
+  // finished publishing it. Ordinary pushes leave other commits' releases
+  // alone, so a release whose publishing keeps failing isn't rebuilt on
+  // every push.
+  if (recheck && !finished) {
+    core.notice(`Release ${tag} on ${commit.sha} has no Docker notes or Windows files yet; publishing it now.`);
+    return true;
+  }
+  // Expected on every push after a release: the manifest still names the
+  // latest release, which its own commit's run published.
+  core.info(`Release ${tag} is on another commit than ${context.sha}; nothing to publish.`);
+  return false;
 }
 
 // `recheck` is true when Release Please failed in any attempt of this job, or
@@ -96,13 +119,14 @@ async function resolveRelease({
     }
     tag = tagName;
     core.info(`Release Please created ${tag}.`);
-  } else if (!recheck) {
-    core.info('Release Please created no release.');
   } else {
+    if (!recheck) core.info('Release Please created no release.');
     const candidate = manifestTag(manifestText);
     if (!candidate) {
       core.warning('The release manifest has no usable version; nothing to publish.');
-    } else if (await findEarlierRelease({ github, context, core, tag: candidate })) {
+    } else if (await findUnpublishedRelease({
+      github, context, core, tag: candidate, recheck,
+    })) {
       tag = candidate;
     }
   }

@@ -56,6 +56,17 @@ function fakeCore() {
   };
 }
 
+function publishedRelease(tag = '3.21.2') {
+  return {
+    draft: false,
+    body: 'notes\n\n<!-- docker-image:start -->\n### Docker image\n<!-- docker-image:end -->\n',
+    assets: [
+      { name: `TwitchChannelPointsMiner-Portable-${tag}.zip`, state: 'uploaded', size: 10 },
+      { name: `TwitchChannelPointsMiner-${tag}-Setup.exe`, state: 'uploaded', size: 10 },
+    ],
+  };
+}
+
 function resolve(github, core, overrides = {}) {
   return resolveRelease({
     github,
@@ -77,12 +88,33 @@ test('a release Release Please reports is used without any lookup', async () => 
   assert.deepEqual(github.calls, []);
 });
 
-test('without a failure or re-run, no reported release means nothing to publish', async () => {
-  const github = fakeGithub();
+test('without a failure or re-run, a published release means nothing to publish', async () => {
+  for (const commit of [{ sha: SHA }, { sha: 'b'.repeat(40) }]) {
+    const github = fakeGithub({ release: publishedRelease(), commit });
+    const core = fakeCore();
+    assert.equal(await resolve(github, core, { recheck: false }), '');
+    assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
+  }
+});
+
+test('without a failure, an unfinished release on this commit is published', async () => {
+  // Another run's Release Please created it from master's state and failed.
   const core = fakeCore();
+  assert.equal(await resolve(fakeGithub(), core, { recheck: false }), '3.21.2');
+  assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+  assert.equal(core.messages.at(-1)[0], 'notice');
+});
+
+test('without a failure, an unfinished release on another commit is left alone', async () => {
+  const core = fakeCore();
+  const github = fakeGithub({ commit: { sha: 'b'.repeat(40) } });
   assert.equal(await resolve(github, core, { recheck: false }), '');
-  assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
-  assert.deepEqual(github.calls, []);
+  assert.equal(core.outputs.release_ready, 'false');
+});
+
+test('after a failure, a finished release on this commit is published again', async () => {
+  const core = fakeCore();
+  assert.equal(await resolve(fakeGithub({ release: publishedRelease() }), core), '3.21.2');
 });
 
 test('after a failure, a published release on this commit is published', async () => {
@@ -99,17 +131,6 @@ test('after a failure, a published release on this commit is published', async (
     'Release 3.21.2 was created by an earlier Release Please attempt; publishing it now.',
   ]);
 });
-
-function publishedRelease(tag = '3.21.2') {
-  return {
-    draft: false,
-    body: 'notes\n\n<!-- docker-image:start -->\n### Docker image\n<!-- docker-image:end -->\n',
-    assets: [
-      { name: `TwitchChannelPointsMiner-Portable-${tag}.zip` },
-      { name: `TwitchChannelPointsMiner-${tag}-Setup.exe` },
-    ],
-  };
-}
 
 test('a published release on another commit is not published again', async () => {
   const core = fakeCore();
@@ -220,6 +241,8 @@ test('an unfinished release on another commit is published', async () => {
     { ...finished, body: 'notes without the Docker block' },
     { ...finished, assets: finished.assets.slice(0, 1) },
     { ...finished, assets: finished.assets.slice(1) },
+    { ...finished, assets: [{ ...finished.assets[0], state: 'starter' }, finished.assets[1]] },
+    { ...finished, assets: [finished.assets[0], { ...finished.assets[1], size: 0 }] },
   ]) {
     const core = fakeCore();
     assert.equal(await resolve(fakeGithub({ release, commit: { sha: other } }), core), '3.21.2');
