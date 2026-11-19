@@ -1943,3 +1943,189 @@ def test_category_refresh_is_brought_forward_to_a_start_learned_later(monkeypatc
     assert refresh_by(scheduled) == pytest.approx(time.time() + 3605, abs=5)
     # A start further off than the refresh changes nothing.
     assert refresh_by(time.time() + 60) == pytest.approx(time.time() + 60, abs=5)
+
+
+def test_record_that_predates_an_opened_window_is_read_again(monkeypatch):
+    # Listed and claimed minutes before the next window: when the refresh
+    # scheduled for that window comes, the record is recent, and still shows
+    # the claimed repeat with its minutes in.
+    twitch, _, listing_calls = evaluation_twitch(
+        watch_group(progress(minutes=5, grants=1, window=open_window()))
+    )
+    twitch.twitchdrops_app_upcoming_starts = {}
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(
+                progress(
+                    status="CLAIMABLE",
+                    minutes=60,
+                    window=open_window(),
+                    next_at=stamp(NOW + timedelta(minutes=5)),
+                )
+            )
+        )
+    )
+    assert evaluate(monkeypatch, twitch, [listing()])[0] == {}
+    assert listing_calls == []
+
+    # The window opens.
+    [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    drop["_reward_group"]["next_start"] = stamp(NOW - timedelta(seconds=30))
+
+    assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
+    assert listing_calls == ["4242"]
+
+
+def test_read_for_an_opened_window_is_retried_when_no_channel_answers(monkeypatch):
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=5, grants=1, window=open_window())),
+        silent_channels=("9",),
+    )
+    twitch.twitchdrops_app_upcoming_starts = {}
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(progress(status="CLAIMABLE", minutes=60, window=open_window()))
+        )
+    )
+    [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    drop["_reward_group"]["next_start"] = stamp(NOW - timedelta(seconds=30))
+    # Nothing is retried before a read was made for the window: a campaign
+    # none of whose categories is configured never gets one.
+    assert twitch.next_upcoming_drop_start() is None
+    # Nor after a read made before it opened.
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    details["refresh_attempted_at"] = time.time() - 3600
+    assert twitch.next_upcoming_drop_start() is None
+
+    assert evaluate(monkeypatch, twitch, [listing()], channels=("9",))[0] == {}
+
+    retry_in = (twitch.next_upcoming_drop_start() - utc_now()).total_seconds()
+    assert retry_in == pytest.approx(WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5)
+
+
+def other_campaign(group_self):
+    """A second reward campaign, converted."""
+    group = watch_group(group_self)
+    group["id"] = "group-two"
+    return campaign_from_reward_groups(
+        reward_campaign(group) | {"id": "quest-2"}, now=NOW
+    )
+
+
+def test_claim_thread_also_claims_what_was_listed_while_it_was_busy(monkeypatch):
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    accept = gql.claim_drop_rewards
+
+    def claim_while_another_is_listed(instance_id):
+        if not gql.claims:
+            # Another thread's listing: the claim thread is busy, so no
+            # second one is started for it.
+            twitch._Twitch__store_listed_watch_rewards([other_campaign(claimable)])
+            assert len(InlineThread.started) == 1
+        return accept(instance_id)
+
+    gql.claim_drop_rewards = claim_while_another_is_listed
+
+    twitch._Twitch__store_listed_watch_rewards([convert(watch_group(claimable))])
+
+    assert gql.claims == [
+        "viewer-1#quest-1#group-watch",
+        "viewer-1#quest-2#group-two",
+    ]
+    # Done: the next claimable listing starts a thread again.
+    assert twitch.watch_reward_claim_thread is None
+
+
+def test_claim_thread_claims_every_stored_campaign(monkeypatch):
+    # Two claimable campaigns in one listing: the thread started for the
+    # first is still running when the second is stored.
+    monkeypatch.setattr(twitch_module, "Thread", HeldThread)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(claimable)), other_campaign(claimable)]
+    )
+    [thread] = InlineThread.started
+    thread.target()
+
+    assert gql.claims == [
+        "viewer-1#quest-1#group-watch",
+        "viewer-1#quest-2#group-two",
+    ]
+
+
+def test_slow_thread_does_not_publish_its_older_record_to_the_progress_cache(
+    monkeypatch,
+):
+    # Thread A stores its listing and is overtaken, before it updates the
+    # cache, by thread B storing and publishing a newer one.
+    twitch = bare_twitch()
+    twitch._Twitch__cache_drop_inventory_progress({})
+    publish = Twitch._Twitch__publish_watch_reward_progress
+    overtaken = []
+
+    def publish_after_being_overtaken(self, record):
+        if not overtaken:
+            overtaken.append(True)
+            twitch._Twitch__remember_watch_reward_campaign(
+                convert(watch_group(progress(minutes=22, window=open_window())))
+            )
+        return publish(self, record)
+
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__publish_watch_reward_progress",
+        publish_after_being_overtaken,
+    )
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=12, window=open_window())))
+    )
+
+    [row] = twitch.drop_inventory_progress["example-game"]
+    assert row[4] == 22
+
+
+def test_sync_claims_a_reward_group_under_the_category_it_is_filed_in(monkeypatch):
+    # The local campaign is named for its first category; the group that
+    # the sync finds claimable counts only in the second.
+    claims = []
+    twitch = bare_twitch()
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_inventory", lambda self: {"dropCampaignsInProgress": []}
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__save_drop_snapshot_from_dict", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "claim_drop",
+        lambda self, drop, **kwargs: claims.append(
+            (drop.id, kwargs.get("category_name_override"))
+        )
+        or True,
+    )
+    stored = twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            *two_category_groups(
+                progress(minutes=5, window=open_window()),
+                progress(status="CLAIMABLE", minutes=60, window=open_window()),
+            )
+        )
+    )
+    campaign = Campaign(copy.deepcopy(stored))
+    assert campaign.game["displayName"] == "Example Game"
+
+    twitch._Twitch__sync_campaigns([campaign])
+
+    assert claims == [("group-other#0", "Other Game")]

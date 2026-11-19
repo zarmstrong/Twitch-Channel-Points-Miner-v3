@@ -338,6 +338,7 @@ class Twitch(object):
         "watch_reward_lock",
         "watch_reward_lookup_failures",
         "watch_reward_claim_thread",
+        "watch_reward_claim_requested",
         "accepted_claim_drop_ids",
         "campaign_names",
         "reward_campaign_ids",
@@ -525,6 +526,7 @@ class Twitch(object):
         # not repeated on every refresh.
         self.watch_reward_lookup_failures = {}
         self.watch_reward_claim_thread = None
+        self.watch_reward_claim_requested = False
         self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
         # than watch time. Populated from the account-wide campaign
@@ -990,18 +992,24 @@ class Twitch(object):
                     )
         return rows_by_game, finished_ids
 
-    def __publish_watch_reward_progress(self, stored):
+    def __publish_watch_reward_progress(self, campaign_id):
         """Bring the progress cache's rows for a stored reward campaign up
-        to date with a record just stored.
+        to date with its record.
 
         Only a full inventory read rebuilds the cache, and passes in between
         keep it marked fresh: with the rows of an older record still in it,
-        the stall check would see a channel that is earning as stalled."""
+        the stall check would see a channel that is earning as stalled.
+
+        The record is read here, under the cache lock, and not handed in: of
+        two threads that each stored one, the one that stored the older can
+        be the last to get here."""
         with self.__drop_state_lock("drop_inventory_cache_lock"):
             if not getattr(self, "drop_inventory_progress_updated_at", 0):
                 # Not built yet; the read that builds it includes the record.
                 return
-            campaign_id = str(stored["id"])
+            stored = self.__watch_reward_campaigns().get(campaign_id)
+            if stored is None:
+                return
             progress = getattr(self, "drop_inventory_progress", None) or {}
             replaced_ids = {
                 row[2]
@@ -3295,6 +3303,20 @@ class Twitch(object):
                     starts_at = self.__parse_twitch_datetime(value)
                     if starts_at is not None and starts_at > now:
                         future_starts.append(starts_at)
+            # A window opened and the read made for it found no channel
+            # reporting the campaign: look again when the next read is due,
+            # instead of at the ordinary refresh.
+            opened = self.__watch_reward_windows_opened(campaign)
+            attempted = campaign["_watch_reward"].get("refresh_attempted_at") or 0
+            if opened and attempted:
+                attempted_at = datetime.fromtimestamp(attempted, timezone.utc).replace(
+                    tzinfo=None
+                )
+                retry_at = attempted_at + timedelta(
+                    seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+                )
+                if attempted_at >= max(opened) and retry_at > now:
+                    future_starts.append(retry_at)
         return min(future_starts) if future_starts else None
 
     @staticmethod
@@ -8957,7 +8979,7 @@ class Twitch(object):
             completed = getattr(self, "completed_drop_campaigns", None) or set()
             if campaign_id in completed:
                 self.completed_drop_campaigns = set(completed) - {campaign_id}
-        self.__publish_watch_reward_progress(stored)
+        self.__publish_watch_reward_progress(campaign_id)
         return stored
 
     @staticmethod
@@ -9102,6 +9124,17 @@ class Twitch(object):
         failures.pop(campaign_id, None)
         return self.__remember_watch_reward_campaign(campaign)
 
+    def __watch_reward_windows_opened(self, campaign) -> list:
+        """When the windows opened that followed the stored campaign's
+        claimable repeats and that its record, read before, knows nothing
+        of."""
+        now = utc_now()
+        opened = [
+            self.__parse_twitch_datetime(drop["_reward_group"].get("next_start"))
+            for drop in campaign.get("timeBasedDrops") or []
+        ]
+        return [moment for moment in opened if moment is not None and moment <= now]
+
     def __refresh_watch_reward_progress(self, campaign, preferred_slugs=None):
         """The stored record, read again from a live channel in one of its
         categories when its progress is unknown or older than
@@ -9122,12 +9155,18 @@ class Twitch(object):
             drop["_reward_group"].get("finished") is True
             for drop in campaign.get("timeBasedDrops") or []
         )
-        if details.get("progress_known") is True and (
-            time.time() - (details.get("read_at") or 0)
-        ) < (
-            WATCH_REWARD_FINISHED_REFRESH_SECONDS
-            if finished
-            else WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+        if (
+            details.get("progress_known") is True
+            and (time.time() - (details.get("read_at") or 0))
+            < (
+                WATCH_REWARD_FINISHED_REFRESH_SECONDS
+                if finished
+                else WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+            )
+            # However recent, a record that still shows a repeat waiting to
+            # be claimed after the next window opened says nothing about that
+            # window.
+            and not self.__watch_reward_windows_opened(campaign)
         ):
             return campaign
         # A read that found nothing is not repeated on every evaluation, which
@@ -9229,39 +9268,58 @@ class Twitch(object):
         return listed
 
     def __claim_watch_reward_drops_soon(self, campaign):
-        """Claim the stored campaign's waiting rewards on a thread of
-        their own.
+        """Claim the stored campaigns' waiting rewards on a thread of their
+        own.
 
         Channel listings are read on the thread that sends the
         minute-watched events for every channel. A claim waits for the claim
         lock and then for Twitch, which can take over a minute; done there,
-        it would stop the watching meanwhile. While one such thread runs no
-        other is started: a later listing or the campaign sync claims what
-        is left."""
+        it would stop the watching meanwhile. One thread does the claiming:
+        it goes through every stored campaign, and once more when a listing
+        asked for it while it was busy."""
         if not any(
             (drop.get("self") or {}).get("dropInstanceID")
             and (drop.get("self") or {}).get("isClaimed") is not True
             for drop in campaign.get("timeBasedDrops") or []
         ):
             return
-        running = getattr(self, "watch_reward_claim_thread", None)
-        if running is not None and running.is_alive():
-            return
-
-        def claim():
-            try:
-                self.__claim_watch_reward_drops(campaign)
-            except Exception as error:
-                # The sync retries the claim.
-                self.__log_drop_check(
-                    f"unable to claim the rewards of campaign {campaign['id']}: "
-                    f"{error}",
-                    level=logging.DEBUG,
-                )
-
-        thread = Thread(target=claim, name="Reward campaign claim", daemon=True)
-        self.watch_reward_claim_thread = thread
+        with _watch_reward_lock(self):
+            self.watch_reward_claim_requested = True
+            if getattr(self, "watch_reward_claim_thread", None) is not None:
+                return
+            thread = Thread(
+                target=self.__claim_stored_watch_reward_drops,
+                name="Reward campaign claim",
+                daemon=True,
+            )
+            self.watch_reward_claim_thread = thread
         thread.start()
+
+    def __claim_stored_watch_reward_drops(self):
+        try:
+            while True:
+                with _watch_reward_lock(self):
+                    self.watch_reward_claim_requested = False
+                for campaign in list(self.__watch_reward_campaigns().values()):
+                    try:
+                        self.__claim_watch_reward_drops(campaign)
+                    except Exception as error:
+                        # The sync retries the claim.
+                        self.__log_drop_check(
+                            "unable to claim the rewards of campaign "
+                            f"{campaign.get('id')}: {error}",
+                            level=logging.DEBUG,
+                        )
+                with _watch_reward_lock(self):
+                    if self.watch_reward_claim_requested is not True:
+                        # Checked and cleared under the lock a listing asks
+                        # under, so none is told a thread is at work that has
+                        # already decided to stop.
+                        self.watch_reward_claim_thread = None
+                        return
+        except BaseException:
+            self.watch_reward_claim_thread = None
+            raise
 
     def __claim_watch_reward_drops(self, campaign):
         """Claim every reward group of the stored campaign that is waiting
@@ -9803,10 +9861,22 @@ class Twitch(object):
                 if campaign_ref is not None:
                     campaign_ref.in_inventory = True
                     campaign_tracked_drop_ids = {drop.id for drop in campaign_ref.drops}
-                    campaign_ref.sync_drops(
-                        progress.get("timeBasedDrops", []),
-                        functools.partial(self.claim_drop, campaign_link=campaign_link),
+                    claim = functools.partial(
+                        self.claim_drop, campaign_link=campaign_link
                     )
+                    if is_watch_reward_campaign(progress):
+                        # The local campaign stands for all its categories
+                        # and is named for the first; the entry is the one
+                        # these drops are reported under.
+                        entry_game = progress.get("game") or {}
+                        claim = functools.partial(
+                            claim,
+                            campaign_name_override=progress.get("name"),
+                            category_name_override=entry_game.get("displayName")
+                            or entry_game.get("name")
+                            or "Unknown",
+                        )
+                    campaign_ref.sync_drops(progress.get("timeBasedDrops", []), claim)
                     # Remove all the claimed drops
                     campaign_ref.clear_drops()
 
