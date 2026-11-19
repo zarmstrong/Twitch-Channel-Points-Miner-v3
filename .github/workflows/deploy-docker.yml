@@ -134,6 +134,9 @@ jobs:
       # Last, so a GitHub API error here can't stop latest or the Docker Hub
       # description from moving; the image is already pushed by now.
       - name: Add Docker image to GitHub release notes
+        # The image is pushed, so a failed latest or description step above
+        # must not leave the release without its Docker block.
+        if: ${{ !cancelled() && steps.docker_build.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.ref }}

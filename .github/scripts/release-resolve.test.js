@@ -5,7 +5,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { manifestTag, readManifest, resolveRelease } = require('./release-resolve');
+const {
+  manifestTag, publishingFinished, readManifest, resolveRelease,
+} = require('./release-resolve');
 
 const SHA = 'a'.repeat(40);
 const context = { repo: { owner: 'o', repo: 'r' }, sha: SHA };
@@ -98,9 +100,21 @@ test('after a failure, a published release on this commit is published', async (
   ]);
 });
 
-test('a release on another commit is not published again', async () => {
+function publishedRelease(tag = '3.21.2') {
+  return {
+    draft: false,
+    body: 'notes\n\n<!-- docker-image:start -->\n### Docker image\n<!-- docker-image:end -->\n',
+    assets: [
+      { name: `TwitchChannelPointsMiner-Portable-${tag}.zip` },
+      { name: `TwitchChannelPointsMiner-${tag}-Setup.exe` },
+    ],
+  };
+}
+
+test('a published release on another commit is not published again', async () => {
   const core = fakeCore();
-  assert.equal(await resolve(fakeGithub({ commit: { sha: 'b'.repeat(40) } }), core), '');
+  const github = fakeGithub({ release: publishedRelease(), commit: { sha: 'b'.repeat(40) } });
+  assert.equal(await resolve(github, core), '');
   assert.equal(core.outputs.release_ready, 'false');
   assert.match(core.messages.at(-1)[1], /on another commit/);
   // Every push after a release lands here, so it is not a warning.
@@ -196,4 +210,26 @@ test('readManifest reads the file and returns an empty string when it is missing
 test('the repository manifest yields a tag', () => {
   const text = readManifest(path.join(__dirname, '..', '..', '.release-please-manifest.json'));
   assert.match(manifestTag(text), /^\d+\.\d+\.\d+/);
+});
+
+test('an unfinished release on another commit is published', async () => {
+  const other = 'b'.repeat(40);
+  const finished = publishedRelease();
+  for (const release of [
+    { draft: false },
+    { ...finished, body: 'notes without the Docker block' },
+    { ...finished, assets: finished.assets.slice(0, 1) },
+    { ...finished, assets: finished.assets.slice(1) },
+  ]) {
+    const core = fakeCore();
+    assert.equal(await resolve(fakeGithub({ release, commit: { sha: other } }), core), '3.21.2');
+    assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+    assert.equal(core.messages.at(-1)[0], 'notice');
+  }
+});
+
+test('publishing is finished only with the Docker block and both Windows files', () => {
+  assert.equal(publishingFinished(publishedRelease('3.22.0'), '3.22.0'), true);
+  assert.equal(publishingFinished(publishedRelease('3.21.2'), '3.22.0'), false);
+  assert.equal(publishingFinished({ body: null, assets: null }, '3.22.0'), false);
 });

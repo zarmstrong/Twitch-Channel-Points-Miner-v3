@@ -40,6 +40,17 @@ async function notFoundAsNull(request, notFound = [404]) {
   }
 }
 
+// The Docker workflow writes this block and the Windows job uploads these
+// files, so a release with all of them was published to the end.
+const DOCKER_NOTES_MARKER = '<!-- docker-image:start -->';
+
+function publishingFinished(release, tag) {
+  const assets = new Set((release.assets || []).map((asset) => asset.name));
+  return String(release.body || '').includes(DOCKER_NOTES_MARKER)
+    && assets.has(`TwitchChannelPointsMiner-Portable-${tag}.zip`)
+    && assets.has(`TwitchChannelPointsMiner-${tag}-Setup.exe`);
+}
+
 async function findEarlierRelease({ github, context, core, tag }) {
   const { owner, repo } = context.repo;
   const release = await notFoundAsNull(() => github.rest.repos.getReleaseByTag({ owner, repo, tag }));
@@ -56,9 +67,16 @@ async function findEarlierRelease({ github, context, core, tag }) {
     return false;
   }
   if (commit.sha !== context.sha) {
+    // A later push's run can create the release when the release commit's
+    // own run was still waiting and got replaced (one pending run per
+    // concurrency group). Publish it here if nobody finished publishing it.
+    if (!publishingFinished(release, tag)) {
+      core.notice(`Release ${tag} on ${commit.sha} has no Docker notes or Windows files yet; publishing it now.`);
+      return true;
+    }
     // Expected on every push after a release: the manifest still names the
     // latest release, which its own commit's run published.
-    core.info(`Release ${tag} is on another commit than ${context.sha}; nothing to publish.`);
+    core.info(`Release ${tag} is on another commit than ${context.sha} and is already published; nothing to publish.`);
     return false;
   }
   core.notice(`Release ${tag} was created by an earlier Release Please attempt; publishing it now.`);
@@ -103,6 +121,7 @@ function readManifest(path = '.release-please-manifest.json') {
 
 module.exports = {
   manifestTag,
+  publishingFinished,
   readManifest,
   resolveRelease,
 };

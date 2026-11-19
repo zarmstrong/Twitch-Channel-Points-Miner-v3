@@ -105,8 +105,9 @@ jobs:
       # navigation fails to open. The release is built from the release PR
       # body, so relinking it also fixes the notes of the next release. This
       # must finish before publish_docker rewrites the same release body.
+      # Runs on every push, not only for a release: with no tag it still
+      # relinks the open release PR.
       - name: Link PR references in release notes
-        if: steps.resolve.outputs.release_ready == 'true'
         # Cosmetic; never block the release, Docker, or Windows jobs.
         continue-on-error: true
         uses: actions/github-script@v9
