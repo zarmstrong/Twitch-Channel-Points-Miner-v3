@@ -9325,7 +9325,8 @@ class Twitch(object):
 
         Earned are
 
-        - the repeat a group was on when its count went up;
+        - the repeat a group was on when its count went up, unless it is
+          now waiting to be claimed: its claim writes its row;
         - a drop Twitch reports earned;
         - on the first record of a group in a session, as many of the
           repeats before its current one as Twitch has counted. They are
@@ -9364,7 +9365,9 @@ class Twitch(object):
                     min(group.get("repeat") or 0, group.get("grants") or 0)
                 ):
                     earned.add((repeat_drop_id(group["id"], number), False))
-            elif (group.get("grants") or 0) > (was["_reward_group"].get("grants") or 0):
+            elif (group.get("grants") or 0) > (
+                was["_reward_group"].get("grants") or 0
+            ) and not self.__counted_repeat_waits_for_its_claim(drop, was):
                 earned.add((str(was["id"]), True))
             if (drop.get("self") or {}).get("isClaimed") is True:
                 earned.add((str(drop["id"]), True))
@@ -9446,6 +9449,15 @@ class Twitch(object):
         os.replace(temp_file, analytics_file)
 
     @staticmethod
+    def __counted_repeat_waits_for_its_claim(drop, was) -> bool:
+        """Whether `drop` is the repeat `was` showed being watched, now
+        counted by Twitch and waiting to be claimed. It is not earned until
+        the claim is accepted, which is logged and reported then."""
+        return drop["_reward_group"].get("claimable") is True and str(
+            drop["id"]
+        ) == str(was["id"])
+
+    @staticmethod
     def __watch_reward_progress_news(previous, stored):
         """What a listing of a reward campaign shows over `previous`, the
         record it replaces: (earned, line) for each group whose minutes
@@ -9468,13 +9480,16 @@ class Twitch(object):
             for drop in previous.get("timeBasedDrops") or []
         }
         news = []
+        waits_for_its_claim = Twitch.__counted_repeat_waits_for_its_claim
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
             was = before.get(group["id"])
             if was is None:
                 continue
             was_group = was["_reward_group"]
-            if group.get("grants", 0) > was_group.get("grants", 0):
+            if group.get("grants", 0) > was_group.get(
+                "grants", 0
+            ) and not waits_for_its_claim(drop, was):
                 # A repeat that was waiting to be claimed is counted by its
                 # claim, which has a line of its own.
                 if was_group.get("claimable") is not True:
@@ -9951,7 +9966,20 @@ class Twitch(object):
                 daemon=True,
             )
             self.watch_reward_claim_thread = thread
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError as error:
+            # No thread could be had (a container's process limit, say).
+            # Left in place, this one would keep every later listing from
+            # starting another, and nothing would claim for the whole run.
+            with _watch_reward_lock(self):
+                if getattr(self, "watch_reward_claim_thread", None) is thread:
+                    self.watch_reward_claim_thread = None
+            self.__log_drop_check(
+                f"unable to start the reward campaign claim thread: {error}; "
+                "the next channel listing tries again",
+                level=logging.DEBUG,
+            )
 
     def __claim_stored_watch_reward_drops(self):
         try:

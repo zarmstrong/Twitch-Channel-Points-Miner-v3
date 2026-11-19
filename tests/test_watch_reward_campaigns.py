@@ -3815,3 +3815,66 @@ def test_repeat_counted_toward_a_reward_that_comes_with_the_last_is_not_earned(
     )
     assert record.event == Events.DROP_STATUS
     assert record.skip_telegram is True
+
+
+def test_repeat_counted_and_waiting_to_be_claimed_is_not_logged_as_earned(caplog):
+    # Twitch counted it with its minutes, and it has to be claimed: the
+    # claim is not sent yet, and may be refused.
+    records = remembered_lines(
+        caplog,
+        progress(minutes=52, window=open_window()),
+        progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window()),
+    )
+
+    assert [record.getMessage() for record in records] == [
+        "Launch Celebration - Daily Chest (repeat 1 of 6): 60/60 minutes watched"
+    ]
+    assert records[0].event == Events.DROP_STATUS
+
+
+def test_row_of_a_repeat_waiting_to_be_claimed_is_left_to_its_claim(
+    monkeypatch, tmp_path
+):
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=52, window=open_window())))
+    )
+    save_synced_rows(twitch)
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(
+                progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window())
+            )
+        )
+    )
+
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert (row["status"], row["current_minutes_watched"]) == ("in_progress", 52)
+
+
+def test_claim_thread_that_could_not_be_started_does_not_block_the_next_one(
+    monkeypatch,
+):
+    class NoThreadLeft(InlineThread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    gql, _ = channel_listing(
+        watch_group(progress(status="CLAIMABLE", minutes=60, window=open_window()))
+    )
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(twitch_module, "Thread", NoThreadLeft)
+
+    # The listing itself is not failed by it.
+    [campaign], _, _ = twitch._Twitch__get_campaigns_from_channel_id("1")
+    assert campaign["timeBasedDrops"][0]["_reward_group"]["claimable"] is True
+    assert gql.claims == []
+
+    monkeypatch.setattr(twitch_module, "Thread", InlineThread)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
