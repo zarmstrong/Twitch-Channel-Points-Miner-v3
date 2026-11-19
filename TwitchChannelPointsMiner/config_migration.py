@@ -340,8 +340,41 @@ def module_header_end(source, tree):
         if index < len(body) and _same_logical_line(source, last, body[index]):
             following = body[index]
             return following.lineno - 1, following.col_offset
-        header = max(header, last.end_lineno)
+        line_offsets = _line_start_offsets(source)
+        extra = _continued_lines(source, line_offsets, last)
+        header = max(header, last.end_lineno + extra)
     return header, 0
+
+
+def _continued_lines(source, line_offsets, node):
+    """How many physical lines a trailing backslash joins to node's last
+    line (a docstring followed by a backslash, then a blank or comment line).
+    Inserting on one of them would land inside node's logical line."""
+    lines = line_offsets.lines
+    index = node.end_lineno - 1
+    rest = source[
+        _source_offset(line_offsets, node.end_lineno, node.end_col_offset) : (
+            line_offsets[index] + len(lines[index]) if index < len(lines) else None
+        )
+    ]
+    extra = 0
+    while _code_only(rest.rstrip("\r\n")).rstrip(" \t\f").endswith("\\"):
+        index += 1
+        if index >= len(lines):
+            break
+        extra += 1
+        rest = lines[index]
+    return extra
+
+
+def _line_after(line_offsets, node, extra):
+    """Offset of the line after node's last line and the extra lines joined
+    to it, or the end of the source."""
+    index = node.end_lineno + extra
+    if index < len(line_offsets):
+        return line_offsets[index]
+    lines = line_offsets.lines
+    return line_offsets[len(lines) - 1] + len(lines[-1]) if lines else 0
 
 
 def _same_logical_line(source, first, second):
@@ -395,6 +428,9 @@ def _import_offset(source, line_offsets, tree, first_use):
         following = _statement_on_same_line(source, line_offsets, tree, node)
         if following is not None:
             return following
+        extra = _continued_lines(source, line_offsets, node)
+        if extra:
+            return _line_after(line_offsets, node, extra)
         end = _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
         # Keep a trailing `;` (`import os;`) with its statement.
         semicolon = re.match(r"[ \t]*;", source[end:])
@@ -408,7 +444,9 @@ def _import_offset(source, line_offsets, tree, first_use):
             following = _statement_on_same_line(source, line_offsets, tree, node)
             if following is not None:
                 return following
-            return line_offsets[node.end_lineno]
+            return _line_after(
+                line_offsets, node, _continued_lines(source, line_offsets, node)
+            )
     return _header_offset(source, line_offsets, tree)
 
 

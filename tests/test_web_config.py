@@ -3515,6 +3515,32 @@ def test_config_import_goes_before_a_statement_sharing_the_header_line(header):
         assert ast.get_docstring(ast.parse(updated)) == "Doc."
 
 
+@pytest.mark.parametrize(
+    "header",
+    ['"""Doc.""" \\\n\n', '"""Doc.""" \\\n# note\n'],
+)
+def test_an_import_goes_below_lines_a_backslash_joins_to_the_docstring(
+    tmp_path, header
+):
+    config = tmp_path / "config.py"
+    config.write_text(
+        header + f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "example"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "RANDOM"}}
+    )
+
+    updated = config.read_text(encoding="utf-8")
+    assert ast.get_docstring(ast.parse(updated)) == "Doc."
+    assert _load_config(config).MINER_CONFIG["username"] == "example"
+
+
 def test_an_import_after_a_continued_docstring_line_is_saved(tmp_path):
     # R327-05: the first statement shares the docstring's logical line past a
     # backslash continuation. The import goes right before that statement,

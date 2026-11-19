@@ -1552,6 +1552,15 @@ def test_an_older_config_whose_last_entry_is_parenthesized_migrates(
         'from __future__ import annotations; \\\n  MINER_CONFIG = {"username": "alice"}\n',
         'import os; \\\n  MINER_CONFIG = {"username": "alice"}\n',
         'CONFIG_VERSION = 5; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+        # A backslash joins a blank or comment line to the header's line.
+        '"""Doc.""" \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc.""" \\\n# note\nMINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc.""" \\\r\n\r\nMINER_CONFIG = {"username": "alice"}\r\n',
+        'import os \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        'CONFIG_VERSION = 5 \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        'from __future__ import annotations \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        # A backslash in a comment continues nothing.
+        '"""Doc.""" # not \\\nMINER_CONFIG = {"username": "alice"}\n',
     ],
 )
 def test_a_header_continued_onto_the_next_line_migrates(first_lines):
