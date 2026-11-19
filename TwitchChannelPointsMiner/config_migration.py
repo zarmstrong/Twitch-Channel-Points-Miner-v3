@@ -461,6 +461,39 @@ def _import_edit(source, line_offsets, tree, first_use, statements):
     return (import_offset, prefix + "\n".join(statements) + "\n")
 
 
+def _reads_while_running(node, name):
+    """Whether node, a top-level statement, is a simple statement that reads
+    name as it runs, so a binding below it comes too late.
+
+    Earlier migrations only wrote references into simple statements (the
+    config's assignments and calls). A function or lambda body runs later,
+    and a statement inside try, if or with may be the config's own fallback
+    (`except NameError:`), so those are left as the user wrote them.
+    """
+    if isinstance(node, ast.AnnAssign):
+        # The annotation is skipped: it isn't evaluated under
+        # `from __future__ import annotations`.
+        stack = [node.target] + ([node.value] if node.value else [])
+    elif isinstance(node, (ast.Assign, ast.AugAssign, ast.Expr)):
+        stack = [node]
+    else:
+        return False
+    while stack:
+        child = stack.pop()
+        if isinstance(child, ast.Lambda):
+            stack.extend(child.args.defaults)
+            stack.extend(default for default in child.args.kw_defaults if default)
+            continue
+        if (
+            isinstance(child, ast.Name)
+            and child.id == name
+            and isinstance(child.ctx, ast.Load)
+        ):
+            return True
+        stack.extend(ast.iter_child_nodes(child))
+    return False
+
+
 def _late_imports(tree):
     """The migration's imports that tree has only below a statement using them,
     and the index of the first such statement.
@@ -468,7 +501,8 @@ def _late_imports(tree):
     Earlier releases added the migration's imports below the last top-level
     import, which could be below the statement they wrote a reference into,
     so the config raised NameError on every start (#327). Such an import is
-    added again above the first statement using its name; the later one then
+    added again above the first simple statement that reads its name as it
+    runs (_reads_while_running); the later one then
     changes nothing. A name the module binds another way up to that use is
     left alone; a function's own binding can't shadow the module's import.
     """
@@ -490,10 +524,7 @@ def _late_imports(tree):
             (
                 index
                 for index, node in enumerate(tree.body[:imported])
-                if any(
-                    isinstance(child, ast.Name) and child.id == name
-                    for child in ast.walk(node)
-                )
+                if _reads_while_running(node, name)
             ),
             None,
         )

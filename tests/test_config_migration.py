@@ -1452,6 +1452,51 @@ def test_late_import_repair_leaves_a_name_the_config_binds_above_its_use(
     assert migrated.count("import ColorPalette") == 2
 
 
+_CONFIG_TAIL = (
+    'MINER_CONFIG = {"username": "alice"}\n'
+    "STREAMERS = []\n"
+    "MINE_CONFIG = {}\n"
+    "ANALYTICS_CONFIG = None\n"
+)
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        # A function body runs only when it's called, after the import.
+        "def make_level():\n    return logging.WARNING\n",
+        "LEVEL = lambda: logging.WARNING\n",
+        # The config's own fallback: moving the import would change LEVEL.
+        "try:\n    LEVEL = logging.INFO\nexcept NameError:\n    LEVEL = 30\n",
+        "if True:\n    LEVEL = logging.INFO\n",
+    ],
+)
+def test_late_import_repair_leaves_references_that_dont_run_first(use):
+    # R327-21: such a config starts as it is, so it must not be rewritten
+    # (a read-only config would then stop the miner from starting).
+    source = f"CONFIG_VERSION = {CONFIG_VERSION}\n{use}import logging\n{_CONFIG_TAIL}"
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrated == source
+
+
+def test_late_import_repair_covers_a_lambda_default():
+    # A default is evaluated where the lambda is written.
+    source = (
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "LEVEL = (lambda level=logging.INFO: level)()\n"
+        "import logging\n"
+        f"{_CONFIG_TAIL}"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["LEVEL"] == logging.INFO
+
+
 def test_unversioned_config_keeps_its_docstring_and_future_import_first():
     # #327: CONFIG_VERSION used to go above both, a SyntaxError for the
     # __future__ import and no longer a docstring.
