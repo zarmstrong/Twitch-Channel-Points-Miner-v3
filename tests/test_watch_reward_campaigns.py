@@ -37,6 +37,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Twitch import (
     WATCH_REWARD_FINISHED_REFRESH_SECONDS,
     WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
+    WATCH_REWARD_STALE_COPY_SECONDS,
     WATCH_REWARD_UNLISTED_SECONDS,
     Twitch,
 )
@@ -2632,6 +2633,89 @@ def test_snapshot_from_before_a_window_started_over_is_not_saved():
     assert twitch._Twitch__save_drop_snapshot_if_new(
         "other-drop|art", 40, "in_progress", lambda: None
     )
+
+
+def test_copy_from_before_a_window_started_over_stays_out_over_later_listings():
+    twitch = snapshot_twitch()
+    for minutes in (40, 5, 6, 7):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(progress(minutes=minutes, window=open_window())))
+        )
+
+    def save(minutes):
+        return twitch._Twitch__save_drop_snapshot_if_new(
+            "group-watch#0|art", minutes, "in_progress", lambda: None
+        )
+
+    assert save(40) is False
+    assert save(7) is True
+
+
+def test_minutes_ahead_of_the_stored_record_are_progress_not_an_older_copy():
+    # The minute watcher can learn of minutes before the next listing does.
+    # Only a window that just started over makes more minutes than the
+    # record has a sign of an older copy.
+    twitch = snapshot_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=30, window=open_window())))
+    )
+    watched = SimpleNamespace(id="group-watch#0", current_minutes_watched=35)
+
+    assert twitch._Twitch__save_watched_drop_progress_if_new(watched, lambda: None) == (
+        -1
+    )
+    assert twitch._Twitch__save_drop_snapshot_if_new(
+        "group-watch#0|art", 36, "in_progress", lambda: None
+    )
+
+
+def test_minutes_ahead_of_the_record_count_again_some_time_after_a_restart():
+    twitch = snapshot_twitch()
+    for minutes in (40, 5):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(progress(minutes=minutes, window=open_window())))
+        )
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    details["restarted_at"] = {
+        "group-watch#0": time.time() - WATCH_REWARD_STALE_COPY_SECONDS - 1
+    }
+
+    assert twitch._Twitch__save_drop_snapshot_if_new(
+        "group-watch#0|art", 9, "in_progress", lambda: None
+    )
+    # And the mark is not carried into the next record.
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=6, window=open_window())))
+    )
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    assert details["restarted_at"] == {}
+
+
+def test_stored_record_is_never_grown_in_place(monkeypatch):
+    # Other threads deep-copy the record without a lock. A key or a set
+    # member added meanwhile fails the copy ("changed size during
+    # iteration"), so later writes only replace values that were there.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=12)), silent_channels={"1", "2"}
+    )
+    stored = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=12)))
+    )
+    details = stored["_watch_reward"]
+    keys = set(details)
+    unanswered = details["refresh_channels_unanswered"]
+    assert isinstance(unanswered, frozenset)
+
+    # A read that asks channels, records them as unanswered, moves the
+    # category offset on and re-checks the categories.
+    details["read_at"] -= 3601
+    evaluate(monkeypatch, twitch, [listing()], channels=("1", "2"))
+
+    assert twitch.watch_reward_campaigns["quest-1"] is stored
+    assert set(details) == keys
+    assert details["refresh_channels_unanswered"] == {"1", "2"}
+    assert unanswered == frozenset()
+    assert details["categories_checked_at"] and details["refresh_attempted_at"]
 
 
 def test_snapshot_of_a_group_that_is_over_is_saved_with_the_minutes_it_got_to():

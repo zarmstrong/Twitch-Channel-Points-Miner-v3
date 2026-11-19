@@ -230,6 +230,9 @@ WATCH_REWARD_REFRESH_CHANNEL_LIMIT = 4
 # name is still watched for after the last channel listing that reported it.
 WATCH_REWARD_UNLISTED_SECONDS = 30 * 60
 WATCH_REWARD_REFRESH_CHANNELS_PER_CATEGORY = 2
+# How long after a reward drop's window started over a progress snapshot with
+# more minutes than the stored record is taken for a copy from before it.
+WATCH_REWARD_STALE_COPY_SECONDS = 10 * 60
 # A claim Twitch accepted without delivering the reward, because the
 # campaign's game account is not linked. The inventory reporting the account
 # as linked retries it at once; this is only the fallback.
@@ -821,12 +824,15 @@ class Twitch(object):
         from a record older than the stored one. Called with the
         watch-reward lock held.
 
-        The stored record is the newest listing, and the only source of a
-        reward drop's minutes. A snapshot is older than it when it has
+        The stored record is the newest listing. A snapshot is older than
+        it when it has
 
-        - more minutes, on a drop still being watched: those of a window
-          that has since started over (see
-          __forget_snapshots_of_restarted_drops);
+        - more minutes, on a drop whose window started over in the last
+          WATCH_REWARD_STALE_COPY_SECONDS: those of the window before (see
+          __forget_snapshots_of_restarted_drops). Only for that long: the
+          sync and the watcher renew their copies within it, and minutes
+          the watcher learns ahead of the next listing are progress, not an
+          older copy;
         - fewer, or the same as progress still, on a drop since earned:
           saved now, it would put the reported reward back to in progress
           (the minute watcher reports a drop as in progress until its own
@@ -857,7 +863,14 @@ class Twitch(object):
                 if group.get("finished") is True:
                     # Over without being earned: nothing newer is held back.
                     return False
-                return watched < minutes_watched
+                restarted_at = (
+                    campaign["_watch_reward"].get("restarted_at") or {}
+                ).get(drop_id)
+                return (
+                    watched < minutes_watched
+                    and restarted_at is not None
+                    and (time.time() - restarted_at) < WATCH_REWARD_STALE_COPY_SECONDS
+                )
         return False
 
     def __save_drop_snapshot_if_new(self, tracking_key, minutes_watched, status, save):
@@ -9133,6 +9146,20 @@ class Twitch(object):
         )
         stored["_watch_reward"]["read_at"] = read_at
         stored["_watch_reward"]["request_order"] = request_order
+        # Every key the record's readers write later is in it from the
+        # start, and they replace values rather than change them in place:
+        # other threads deep-copy the record without a lock, and a dict or
+        # set that grows meanwhile makes the copy fail.
+        stored["_watch_reward"].update(
+            {
+                "refresh_attempted_at": 0,
+                "refresh_offset": 0,
+                "refresh_channels_unanswered": frozenset(),
+                "categories_checked_at": None,
+                "restarted_at": {},
+                "earlier_drops": {},
+            }
+        )
         # Compared and stored under one lock: the reward-group lookup runs on
         # the discovery thread while a channel listing can arrive on another.
         with _watch_reward_lock(self):
@@ -9278,6 +9305,19 @@ class Twitch(object):
             and drop["_reward_group"].get("finished") is not True
             and ((drop.get("self") or {}).get("currentMinutesWatched") or 0)
             < before.get(str(drop["id"]), 0)
+        }
+        # When each drop started over, kept while a copy from before can
+        # still be around (see __reward_snapshot_is_stale).
+        now = time.time()
+        stored["_watch_reward"]["restarted_at"] = {
+            **{
+                drop_id: restarted_at
+                for drop_id, restarted_at in (
+                    previous["_watch_reward"].get("restarted_at") or {}
+                ).items()
+                if (now - restarted_at) < WATCH_REWARD_STALE_COPY_SECONDS
+            },
+            **{drop_id: now for drop_id in restarted},
         }
         if not restarted:
             return
@@ -9527,9 +9567,10 @@ class Twitch(object):
             # the channels that answered nothing before are passed over for
             # the ones after them, and asked again once every channel on the
             # page has been.
-            unanswered = details.setdefault("refresh_channels_unanswered", set())
+            unanswered = details.get("refresh_channels_unanswered") or frozenset()
             if all(channel_id in unanswered for channel_id in channel_ids):
-                unanswered.difference_update(channel_ids)
+                unanswered = unanswered - set(channel_ids)
+                details["refresh_channels_unanswered"] = unanswered
             queried_here = 0
             for channel_id in channel_ids:
                 if (
@@ -9539,7 +9580,8 @@ class Twitch(object):
                     break
                 if channel_id in unanswered:
                     continue
-                unanswered.add(channel_id)
+                unanswered = unanswered | {channel_id}
+                details["refresh_channels_unanswered"] = unanswered
                 queried_here += 1
                 queried += 1
                 # The listing itself stores what it finds, as a new record:

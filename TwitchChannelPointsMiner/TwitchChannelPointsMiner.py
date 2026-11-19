@@ -3170,8 +3170,9 @@ class TwitchChannelPointsMiner:
                 )
 
         # Started by the two threads above, so looked for after them. A
-        # claim Twitch is still answering would otherwise be recorded after
-        # the final report state is saved, or be cut off by the exit.
+        # claim Twitch is still answering would otherwise be cut off by the
+        # exit, or be recorded after the report state is saved for the last
+        # time at the end of this method.
         reward_claim_thread = getattr(self.twitch, "watch_reward_claim_thread", None)
         if reward_claim_thread is not None and reward_claim_thread.is_alive():
             reward_claim_thread.join(timeout=60)

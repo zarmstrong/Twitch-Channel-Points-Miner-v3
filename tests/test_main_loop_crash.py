@@ -627,6 +627,26 @@ def test_stop_workers_waits_for_a_reward_claim_still_being_answered():
     logger.warning.assert_not_called()
 
 
+def test_stop_workers_saves_what_a_reward_claim_recorded_while_it_waited():
+    # The report state is saved first thing and again at the end; a claim
+    # answered during the wait is recorded in between.
+    miner = _miner()
+    events = []
+    thread = MagicMock()
+    thread.is_alive.side_effect = [True, False]
+    thread.join.side_effect = lambda timeout: events.append("joined")
+    miner.twitch.watch_reward_claim_thread = thread
+
+    with patch.object(
+        TwitchChannelPointsMiner,
+        "_TwitchChannelPointsMiner__save_daily_report_state_safely",
+        side_effect=lambda retire_all=False: events.append("saved"),
+    ):
+        miner._TwitchChannelPointsMiner__stop_workers()
+
+    assert events == ["saved", "joined", "saved"]
+
+
 def test_stop_workers_does_not_wait_for_a_reward_claim_thread_that_is_done():
     miner = _miner()
     thread = MagicMock()
