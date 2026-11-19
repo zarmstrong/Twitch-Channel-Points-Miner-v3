@@ -9,12 +9,13 @@ const fs = require('node:fs');
 // this looks for a published release of the manifest version on the commit
 // being built, and hands that release to the publishing jobs instead.
 
-// SemVer 2.0.0: numeric prerelease identifiers have no leading zeros.
+// SemVer 2.0.0: numeric prerelease identifiers have no leading zeros. Build
+// metadata (`+...`) isn't accepted: Docker tags drop it, so two such
+// versions would share one image tag and the second would reuse the first.
 const PRERELEASE_ID = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
 const RELEASE_TAG = new RegExp(
   '^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)'
-  + `(?:-${PRERELEASE_ID}(?:\\.${PRERELEASE_ID})*)?`
-  + '(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$',
+  + `(?:-${PRERELEASE_ID}(?:\\.${PRERELEASE_ID})*)?$`,
 );
 
 // This repository's tags are the bare manifest version (no `v`, no component).
@@ -44,6 +45,10 @@ async function notFoundAsNull(request, notFound = [404]) {
 // succeeded, and the Windows job uploads these files, so a release with all
 // of them was published to the end. GitHub can leave an empty asset behind
 // from a failed upload (state "starter"), so only a finished upload counts.
+// Before this script, the block was written before `latest` and the Docker
+// Hub description. Only the manifest's release is checked here, and the one
+// current when that changed (3.21.1) finished all of its Docker steps, so
+// the block means the same for every release this script sees.
 const DOCKER_NOTES_MARKER = '<!-- docker-image:start -->';
 
 function dockerPublished(release) {

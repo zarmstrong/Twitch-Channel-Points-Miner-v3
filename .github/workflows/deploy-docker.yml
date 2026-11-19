@@ -35,9 +35,11 @@ jobs:
           RELEASE_TAG: ${{ inputs.ref }}
         shell: bash
         run: |
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          # No build metadata (`+...`): Docker tags drop it, so two such
+          # versions would share one image tag.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if [[ ! "${RELEASE_TAG}" =~ ${semver} ]]; then
-            echo "::error::ref must be a bare SemVer release tag such as 3.9.0"
+            echo "::error::ref must be a bare SemVer release tag such as 3.9.0, without build metadata"
             exit 1
           fi
 
@@ -79,7 +81,7 @@ jobs:
       # repository has it, it's copied to the other instead. Only a "not
       # found" answer counts as missing; any other registry error fails the
       # job, and a later run retries. It checks the tags the build would push,
-      # as metadata-action wrote them (it turns a `+` into `-`, for example).
+      # exactly as metadata-action wrote them.
       - name: Check whether this version is already pushed
         id: existing
         env:

@@ -249,10 +249,12 @@ test('the manifest tag is the bare root version, prereleases included', () => {
 });
 
 test('manifest versions must be valid SemVer', () => {
-  for (const version of ['3.22.0-0', '3.22.0-rc.1', '3.22.0-0a', '3.22.0-post.5', '3.22.0+001', '3.22.0-rc.1+build.7']) {
+  for (const version of ['3.22.0-0', '3.22.0-rc.1', '3.22.0-0a', '3.22.0-post.5']) {
     assert.equal(manifestTag(JSON.stringify({ '.': version })), version, version);
   }
-  for (const version of ['3.22.0-01', '3.22.0-rc.01', '03.22.0', '3.22.0-', '3.22.0-rc..1', '3.22.0+', 'v3.22.0']) {
+  // Build metadata too: Docker tags drop it, so two such versions would
+  // share one image tag.
+  for (const version of ['3.22.0-01', '3.22.0-rc.01', '03.22.0', '3.22.0-', '3.22.0-rc..1', '3.22.0+', 'v3.22.0', '3.22.0+001', '3.22.0-rc.1+build.7']) {
     assert.equal(manifestTag(JSON.stringify({ '.': version })), null, version);
   }
 });
