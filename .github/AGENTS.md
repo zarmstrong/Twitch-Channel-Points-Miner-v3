@@ -16,6 +16,7 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 - `workflows/release-please.yml` creates releases and publishes the Docker image (through `deploy-docker.yml`) and the Windows files.
   - The publishing jobs depend on `resolve_release`, not on `release_please`. It runs even when `release_please` failed. After a failed Release Please attempt or a re-run, `scripts/release-resolve.js` publishes a release that already exists for the commit being built (test: `node .github/scripts/release-resolve.test.js`). Re-running the release commit's workflow run publishes a release whose first run stopped early.
   - The Windows files are added with `gh release upload --clobber`, which never writes the release body.
+  - Runs share the `release-please-master` concurrency group, so two runs never edit a release body at once. Keep any job that writes the body inside this workflow, or give it the same protection.
 - `workflows/deploy-docker.yml` owns the `<!-- docker-image:start -->` / `<!-- docker-image:end -->` block in release notes. A job that runs alongside it must not write back a copy of the release body it read earlier, or the block can disappear.
 - `workflows/mark-issues-awaiting-release.yml` labels issues fixed on `master` until a release ships them.
 

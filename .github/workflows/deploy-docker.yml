@@ -90,9 +90,15 @@ jobs:
           version="${RELEASE_TAG#v}"
           image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
 
-          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
-            exit 0
+          # Only a missing release skips the notes. Auth, rate-limit and
+          # network errors fail the step instead of passing as "no release".
+          if ! view_error=$(gh release view "${RELEASE_TAG}" --json tagName 2>&1 >/dev/null); then
+            if [[ "${view_error}" == *"release not found"* ]]; then
+              echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
+              exit 0
+            fi
+            echo "::error::Could not read GitHub release ${RELEASE_TAG}: ${view_error}"
+            exit 1
           fi
 
           release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')

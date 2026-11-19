@@ -10,6 +10,15 @@ permissions:
   contents: write
   pull-requests: write
 
+# Runs read and then rewrite the release body (the PR-link step here, the
+# Docker notes step in deploy-docker.yml), so two runs at once can drop each
+# other's edits. Queue them instead. GitHub keeps one pending run per group,
+# so a newer push replaces an older one still waiting; Release Please works
+# from repository state, so the newer run still creates any pending release.
+concurrency:
+  group: release-please-master
+  cancel-in-progress: false
+
 jobs:
   release_please:
     name: Create release
@@ -97,6 +106,7 @@ jobs:
       # body, so relinking it also fixes the notes of the next release. This
       # must finish before publish_docker rewrites the same release body.
       - name: Link PR references in release notes
+        if: steps.resolve.outputs.release_ready == 'true'
         # Cosmetic; never block the release, Docker, or Windows jobs.
         continue-on-error: true
         uses: actions/github-script@v9

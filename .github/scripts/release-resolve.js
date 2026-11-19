@@ -49,7 +49,14 @@ async function findEarlierRelease({ github, context, core, tag }) {
   const commit = await notFoundAsNull(() => github.rest.repos.getCommit({
     owner, repo, ref: `refs/tags/${tag}`,
   }));
-  if (!commit || commit.sha !== context.sha) {
+  if (!commit) {
+    // A published release always has its tag, so this needs a person to look.
+    core.warning(`Release ${tag} exists but its tag is missing; Docker and Windows files are not published.`);
+    return false;
+  }
+  if (commit.sha !== context.sha) {
+    // Expected on every push after a release: the manifest still names the
+    // latest release, which its own commit's run published.
     core.info(`Release ${tag} is on another commit than ${context.sha}; nothing to publish.`);
     return false;
   }
@@ -64,6 +71,10 @@ async function resolveRelease({
 }) {
   let tag = '';
   if (releaseCreated === 'true' && tagName) {
+    // The tag feeds checkout refs, shell environments and gh release upload.
+    if (!RELEASE_TAG.test(tagName)) {
+      throw new Error(`Release Please reported tag ${JSON.stringify(tagName)}, which is not a bare SemVer version.`);
+    }
     tag = tagName;
     core.info(`Release Please created ${tag}.`);
   } else if (!recheck) {

@@ -103,18 +103,42 @@ test('a release on another commit is not published again', async () => {
   assert.equal(await resolve(fakeGithub({ commit: { sha: 'b'.repeat(40) } }), core), '');
   assert.equal(core.outputs.release_ready, 'false');
   assert.match(core.messages.at(-1)[1], /on another commit/);
+  // Every push after a release lands here, so it is not a warning.
+  assert.equal(core.messages.at(-1)[0], 'info');
 });
 
-test('a missing or draft release, or a missing tag, means nothing to publish', async () => {
+test('a missing or draft release means nothing to publish', async () => {
   for (const github of [
     fakeGithub({ release: httpError(404) }),
     fakeGithub({ release: { draft: true } }),
+  ]) {
+    const core = fakeCore();
+    assert.equal(await resolve(github, core), '');
+    assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
+    assert.equal(core.messages.at(-1)[0], 'info');
+  }
+});
+
+test('a published release whose tag is missing warns and publishes nothing', async () => {
+  for (const github of [
     fakeGithub({ commit: httpError(404) }),
     fakeGithub({ commit: httpError(422) }),
   ]) {
     const core = fakeCore();
     assert.equal(await resolve(github, core), '');
     assert.deepEqual(core.outputs, { release_ready: 'false', tag_name: '' });
+    assert.equal(core.messages.at(-1)[0], 'warning');
+    assert.match(core.messages.at(-1)[1], /tag is missing/);
+  }
+});
+
+test('a reported tag that is not bare SemVer fails without setting outputs', async () => {
+  for (const tagName of ['v3.21.2', '3.21', '3.21.2; rm -rf /', '3.21.2\n', 'refs/tags/3.21.2', ' 3.21.2']) {
+    const github = fakeGithub();
+    const core = fakeCore();
+    await assert.rejects(resolve(github, core, { releaseCreated: 'true', tagName }), /not a bare SemVer/, tagName);
+    assert.deepEqual(core.outputs, {});
+    assert.deepEqual(github.calls, []);
   }
 });
 
