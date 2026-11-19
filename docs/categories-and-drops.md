@@ -56,6 +56,27 @@ to discovered channels. If a username is both explicitly configured and found by
 category discovery, it remains explicitly configured and keeps its explicit
 settings.
 
+### Reward campaigns earned by watching
+
+Twitch also runs sitewide reward campaigns (quests), such as a game's launch
+celebration, which it lists apart from Drop campaigns. A category counts as
+active for one of these when part of the campaign is earned by watch time in
+that category. For example, a campaign may award a badge for watching the
+category for an hour on each of six days. The miner then:
+
+- watches a channel in the category until the current repeat's minutes are
+  in, claims the reward, and returns when the next window opens;
+- leaves out the rewards that need a subscription, and any reward on a track
+  where your account has to pick a lane;
+- shows each repeat as its own drop, for example `Daily Chest (2/6 earned)`.
+
+Any live channel in the category counts, with the Drops tag or without. When
+the category also has a Drop campaign, Drops-enabled channels are picked
+first, because they earn both; the others are used when none is live.
+
+Nothing has to be configured beyond listing the category. A reward campaign
+that only asks for subscriptions is still skipped.
+
 ## Category configuration reference
 
 | Option | Default | Description |
@@ -323,6 +344,7 @@ MINE_CONFIG = {
 | Symptom | What to check |
 |---|---|
 | No category streamers are loaded | Confirm the game has an active, incomplete campaign and try its Twitch directory URL. Enable `print_open_drop_campaigns_on_load=True` to inspect detected campaigns. |
+| A category with a reward campaign (quest) stops being watched | A repeating reward is earned once per window, usually a day. The miner leaves the category when the current repeat is earned and returns when the next window opens. Subscription rewards in the same campaign are never mined. |
 | A live channel is skipped | With `category_drops_enabled=True`, it must have the `DropsEnabled` tag. Restricted campaigns may also require the channel to be on the campaign's allowlist. |
 | A channel is skipped with "the account is banned in this channel" or "timed out" | Twitch reports that your account is banned or timed out there. A timed-out channel comes back when the timeout ends; a lifted ban is noticed within 6 hours. |
 | A forced streamer is skipped | Confirm the login is live, streaming the requested game, and has the Drops tag when required. |
