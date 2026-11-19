@@ -2339,3 +2339,92 @@ def test_group_that_pays_out_once_every_repeat_is_in_claims_only_then():
     )
     assert complete["_reward_group"]["claimable"] is True
     assert complete["self"]["dropInstanceID"] == "viewer-1#quest-1#group-watch"
+
+
+def test_stream_view_keeps_the_category_each_drop_is_reported_under():
+    campaign = Campaign(
+        convert(
+            watch_group(
+                progress(minutes=12, window=open_window()),
+                categories=[CATEGORY, OTHER_CATEGORY],
+            )
+        )
+    )
+
+    view = campaign.in_reward_category(OTHER_CATEGORY)
+
+    assert view.game["displayName"] == "Other Game"
+    assert view.reward_drop_report_categories == {"group-watch#0": "Example Game"}
+
+
+def test_category_added_to_a_campaign_nobody_lists_is_found(monkeypatch):
+    # Stored with one category, which is not configured, so no channel is
+    # ever listed for it. Twitch then adds the configured category.
+    structure = reward_campaign(watch_group())
+    twitch, lookups, listing_calls = evaluation_twitch(
+        watch_group(
+            progress(minutes=12, window=open_window()),
+            categories=[CATEGORY, OTHER_CATEGORY],
+        ),
+        structure=structure,
+    )
+    assert (
+        evaluate(monkeypatch, twitch, [listing()], requested=("other-game",))[0] == {}
+    )
+    assert len(lookups) == 1 and listing_calls == []
+
+    structure["rewardGroups"][0]["progressCriteria"]["categories"].append(
+        OTHER_CATEGORY
+    )
+    # Not asked again right away.
+    evaluate(monkeypatch, twitch, [listing()], requested=("other-game",))
+    assert len(lookups) == 1
+
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    details["read_at"] -= 3601
+    deadlines = evaluate(monkeypatch, twitch, [listing()], requested=("other-game",))[0]
+
+    assert len(lookups) == 2
+    assert listing_calls == ["4242"]
+    assert set(deadlines) == {"other-game"}
+
+
+def test_opened_window_is_acted_on_again_when_its_refresh_evaluated_nothing(
+    monkeypatch,
+):
+    # The inventory did not load in the refresh made for the opening: no
+    # campaign was evaluated, and the opening is used up.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=5, grants=1, window=open_window()))
+    )
+    twitch.retry_unevaluated_watch_reward_opening()
+    assert not getattr(twitch, "watch_reward_pending_starts", None)
+
+    twitch.watch_reward_pending_starts = {utc_now() - timedelta(seconds=10)}
+    assert twitch.take_opened_watch_reward_start() is True
+    twitch.retry_unevaluated_watch_reward_opening()
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+    # A refresh that evaluates the campaigns settles it.
+    twitch.watch_reward_pending_starts = set()
+    evaluate(monkeypatch, twitch, [listing()])
+    twitch.retry_unevaluated_watch_reward_opening()
+    assert twitch.watch_reward_pending_starts == set()
+
+
+def test_opened_window_is_not_retried_for_categories_with_drops_off():
+    # Nothing is ever evaluated for them, so there is nothing to wait for.
+    twitch = bare_twitch()
+    twitch.watch_reward_pending_starts = {utc_now() - timedelta(seconds=10)}
+    assert twitch.take_opened_watch_reward_start() is True
+
+    assert twitch.filter_categories_with_active_drops(
+        ["Example Game"], drops_enabled=False
+    ) == ["Example Game"]
+    twitch.retry_unevaluated_watch_reward_opening()
+
+    assert twitch.watch_reward_pending_starts == set()

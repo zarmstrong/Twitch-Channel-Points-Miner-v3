@@ -1475,6 +1475,10 @@ class TwitchChannelPointsMiner:
                                     ),
                                 )
                         finally:
+                            # A refresh made for an opened reward window that
+                            # evaluated nothing is made again before the
+                            # ordinary interval.
+                            self.twitch.retry_unevaluated_watch_reward_opening()
                             effective_category_refresh_seconds = (
                                 min(category_refresh_interval_seconds, 5 * 60)
                                 if self.twitch.twitchdrops_app_campaigns

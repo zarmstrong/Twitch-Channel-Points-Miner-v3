@@ -340,6 +340,7 @@ class Twitch(object):
         "watch_reward_claim_thread",
         "watch_reward_claim_requested",
         "watch_reward_pending_starts",
+        "watch_reward_opening_unevaluated",
         "accepted_claim_drop_ids",
         "campaign_names",
         "reward_campaign_ids",
@@ -529,6 +530,7 @@ class Twitch(object):
         self.watch_reward_claim_thread = None
         self.watch_reward_claim_requested = False
         self.watch_reward_pending_starts = set()
+        self.watch_reward_opening_unevaluated = False
         self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
         # than watch time. Populated from the account-wide campaign
@@ -2459,6 +2461,9 @@ class Twitch(object):
                 return False
             return requested_category_slugs is None or slug in requested_category_slugs
 
+        # The refresh an opened reward window called for got this far.
+        self.watch_reward_opening_unevaluated = False
+
         active_deadlines = {}
         active_campaigns = {}
         active_campaign_deadlines = {}
@@ -2610,6 +2615,11 @@ class Twitch(object):
             views = reward_category_views(
                 stored, requested_category_slugs, self.__slugify
             )
+            if not views:
+                self.__recheck_watch_reward_categories(stored)
+                views = reward_category_views(
+                    stored, requested_category_slugs, self.__slugify
+                )
             if views:
                 # Only a campaign the miner could watch for is worth a
                 # channel listing to bring its progress up to date.
@@ -3317,7 +3327,20 @@ class Twitch(object):
             opened = {moment for moment in pending if moment <= now}
             if opened:
                 self.watch_reward_pending_starts = pending - opened
+                self.watch_reward_opening_unevaluated = True
         return bool(opened)
+
+    def retry_unevaluated_watch_reward_opening(self):
+        """Called after a category refresh. If one was made for an opened
+        window and evaluated no campaigns (the inventory did not load, or
+        the refresh failed before it got there), have it made again when a
+        progress read would next be due, and so on until one does."""
+        with _watch_reward_lock(self):
+            if getattr(self, "watch_reward_opening_unevaluated", False) is not True:
+                return
+            self.__note_watch_reward_starts(
+                {utc_now() + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)}
+            )
 
     @staticmethod
     def __reward_name_is_owned(reward_name, owned_reward_names, game_name=""):
@@ -3971,6 +3994,9 @@ class Twitch(object):
         if not categories:
             return []
         if drops_enabled is False:
+            # No campaign is ever evaluated: an opened reward window has
+            # nothing to wait for.
+            self.watch_reward_opening_unevaluated = False
             return categories
 
         category_slug = self.__category_slug
@@ -4140,6 +4166,7 @@ class Twitch(object):
         preferred_unevaluated_slugs = set(self.unevaluated_category_slugs)
         self.unevaluated_category_slugs = set()
         if drops_enabled is False:
+            self.watch_reward_opening_unevaluated = False
             return []
 
         if inventory is None:
@@ -7430,6 +7457,18 @@ class Twitch(object):
                                                 drop,
                                                 campaign=campaign,
                                                 streamer_username=streamer.username,
+                                                # A reward campaign's drop has
+                                                # one category it is reported
+                                                # under, which need not be the
+                                                # one being watched.
+                                                category_name_override=(
+                                                    getattr(
+                                                        campaign,
+                                                        "reward_drop_report_categories",
+                                                        None,
+                                                    )
+                                                    or {}
+                                                ).get(drop.id),
                                             )
                                             if (
                                                 last_saved_minutes
@@ -9155,6 +9194,54 @@ class Twitch(object):
                 if instance_id not in stale_claims
             }
 
+    def __request_watch_reward_groups(self, campaign_id):
+        """A reward campaign converted from Twitch's answer about its reward
+        groups, which carries no progress. None when Twitch does not answer
+        or watching earns nothing in it."""
+        request = copy.deepcopy(GQLOperations.RewardCampaignDetails)
+        request["variables"] = {"id": campaign_id}
+        try:
+            response = self.gql.post_gql_request_raw(
+                GQLOperations.RewardCampaignDetails["operationName"], request
+            )
+        except RetryError as error:
+            self.__log_drop_check(
+                f"unable to load the reward groups of campaign {campaign_id}: "
+                f"{error}",
+                level=logging.DEBUG,
+            )
+            return None
+        data = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(data, dict):
+            return None
+        return campaign_from_reward_groups(data.get("dropsCampaign"))
+
+    def __recheck_watch_reward_categories(self, stored):
+        """Add to a stored reward campaign the categories Twitch has given
+        its groups since it was stored, asking at most once every
+        WATCH_REWARD_LOOKUP_RETRY_SECONDS.
+
+        For a campaign none of whose categories is configured: no channel
+        is listed for it, so nothing else would notice a configured category
+        being added. With the category known, the evaluation reads the
+        campaign from a channel there, which brings the rest."""
+        details = stored["_watch_reward"]
+        checked_at = details.get("categories_checked_at") or details.get("read_at")
+        if (time.time() - (checked_at or 0)) < WATCH_REWARD_LOOKUP_RETRY_SECONDS:
+            return
+        details["categories_checked_at"] = time.time()
+        campaign = self.__request_watch_reward_groups(str(stored["id"]))
+        if campaign is None:
+            return
+        known_ids = {category["id"] for category in details.get("categories") or []}
+        added = [
+            category
+            for category in campaign["_watch_reward"].get("categories") or []
+            if category["id"] not in known_ids
+        ]
+        if added:
+            details["categories"] = list(details.get("categories") or []) + added
+
     def __load_watch_reward_campaign(self, listing):
         """The stored record of a reward campaign the dashboard lists as
         earned by watching, looking up its reward groups when it was never
@@ -9173,22 +9260,7 @@ class Twitch(object):
             and (time.time() - failed_at) < WATCH_REWARD_LOOKUP_RETRY_SECONDS
         ):
             return None
-        request = copy.deepcopy(GQLOperations.RewardCampaignDetails)
-        request["variables"] = {"id": campaign_id}
-        campaign = None
-        try:
-            response = self.gql.post_gql_request_raw(
-                GQLOperations.RewardCampaignDetails["operationName"], request
-            )
-            data = response.get("data") if isinstance(response, dict) else None
-            if isinstance(data, dict):
-                campaign = campaign_from_reward_groups(data.get("dropsCampaign"))
-        except RetryError as error:
-            self.__log_drop_check(
-                f"unable to load the reward groups of campaign {campaign_id}: "
-                f"{error}",
-                level=logging.DEBUG,
-            )
+        campaign = self.__request_watch_reward_groups(campaign_id)
         if campaign is None:
             failures[campaign_id] = time.time()
             self.__log_drop_check(

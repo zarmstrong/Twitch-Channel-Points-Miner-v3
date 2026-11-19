@@ -239,6 +239,7 @@ class Campaign(object):
         "channels",
         "reward_categories",
         "reward_drop_category_ids",
+        "reward_drop_report_categories",
     ]
 
     def __init__(self, dict):
@@ -269,6 +270,17 @@ class Campaign(object):
             }
             for drop in (dict["timeBasedDrops"] if self.reward_categories else [])
             if REWARD_GROUP_KEY in drop
+        }
+        # The name of the one category each drop's progress and claim are
+        # reported under: its first, whichever of them a stream was watched
+        # in.
+        self.reward_drop_report_categories = {
+            drop["id"]: (
+                drop[REWARD_GROUP_KEY]["categories"][0].get("displayName")
+                or drop[REWARD_GROUP_KEY]["categories"][0].get("name")
+            )
+            for drop in (dict["timeBasedDrops"] if self.reward_categories else [])
+            if (drop.get(REWARD_GROUP_KEY) or {}).get("categories")
         }
 
     def __repr__(self):
