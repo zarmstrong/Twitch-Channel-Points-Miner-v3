@@ -2419,6 +2419,48 @@ def _drop_campaigns(*campaign_ids, channels=()):
     ]
 
 
+def _reward_campaign_view(*drop_ids):
+    # A reward campaign (quest) as one category's streams earn it: the groups
+    # that count there (#348).
+    [view] = _drop_campaigns("quest")
+    view.reward_categories = [{"id": "1", "displayName": "Shared Game"}]
+    view.drops = [SimpleNamespace(id=drop_id) for drop_id in drop_ids]
+    return [view]
+
+
+@pytest.mark.parametrize(
+    "followed_groups,pick_is_covered",
+    [
+        # The followed channel's category counts toward the same group.
+        (("group-b",), True),
+        # It counts toward another group of the campaign: the discovered
+        # pick's reward would get no progress from it.
+        (("group-a",), False),
+    ],
+)
+def test_reward_campaign_is_covered_only_by_a_stream_earning_the_same_groups(
+    monkeypatch, followed_groups, pick_is_covered
+):
+    messages = _capture_info(monkeypatch)
+    category = _category_drop_streamer("category-streamer")
+    category.stream.campaigns = _reward_campaign_view("group-b")
+    follower = _followed_drop_streamer(
+        "followed-streamer", _reward_campaign_view(*followed_groups)
+    )
+    points = _watch_streamer("points", from_followers=True)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
+    )
+
+    assert ("category-streamer" not in _watched_for_drops(messages)) is pick_is_covered
+
+
 def test_category_pick_evicted_by_badge_is_logged_as_no_free_slot(monkeypatch):
     messages = []
     twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")

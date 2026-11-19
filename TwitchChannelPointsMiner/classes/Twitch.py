@@ -7052,6 +7052,19 @@ class Twitch(object):
                         if campaign.has_watchable_drops()
                     ]
 
+                def _earned_part(campaign):
+                    # What watching a stream earns of a campaign, to compare
+                    # between streams. A Drop campaign is earned whole. A
+                    # reward campaign's stream holds only the groups its
+                    # category counts toward, so two streams of one campaign
+                    # can earn different rewards.
+                    if getattr(campaign, "reward_categories", None):
+                        return (
+                            campaign.id,
+                            frozenset(drop.id for drop in campaign.drops),
+                        )
+                    return campaign.id
+
                 @functools.lru_cache(maxsize=None)
                 def _drop_campaign_key(index):
                     # The campaign IDs a stream would earn, or None when that
@@ -7063,7 +7076,7 @@ class Twitch(object):
                         getattr(campaign, "channels", None) for campaign in campaigns
                     ):
                         return None
-                    return frozenset(campaign.id for campaign in campaigns)
+                    return frozenset(_earned_part(campaign) for campaign in campaigns)
 
                 drop_cover_revoked = getattr(self, "drop_cover_revoked", None) or set()
                 # The stall check is a covering stream's safety net: it needs
@@ -7100,7 +7113,7 @@ class Twitch(object):
                         getattr(streamer.stream, "channel_campaign_ids", None) or []
                     )
                     return frozenset(
-                        campaign.id
+                        _earned_part(campaign)
                         for campaign in _watchable_campaigns(index)
                         if campaign.id in advertised
                     )
@@ -8964,6 +8977,7 @@ class Twitch(object):
             ):
                 return previous
             self.__keep_claimable_drop_ids(previous, stored)
+            self.__forget_snapshots_of_restarted_drops(previous, stored)
             known[campaign_id] = stored
             # Still under the lock: a newer listing stored and claimed while
             # this ran would have its accepted claim forgotten here.
@@ -9012,6 +9026,39 @@ class Twitch(object):
             ):
                 drop["id"] = earlier["id"]
                 drop["name"] = earlier["name"]
+
+    def __forget_snapshots_of_restarted_drops(self, previous, stored):
+        """Let the progress of a drop that started over be reported again.
+
+        A window that closes before its minutes are in takes them with it,
+        and the next one counts from zero under the same drop ID: no repeat
+        was granted. Progress is only saved when it rises, so the report
+        would keep the old window's minutes until the new one passed them."""
+        if previous is None:
+            return
+        before = {
+            str(drop["id"]): (drop.get("self") or {}).get("currentMinutesWatched") or 0
+            for drop in previous.get("timeBasedDrops") or []
+        }
+        restarted = {
+            str(drop["id"])
+            for drop in stored.get("timeBasedDrops") or []
+            if drop["_reward_group"].get("claimable") is not True
+            and drop["_reward_group"].get("finished") is not True
+            and ((drop.get("self") or {}).get("currentMinutesWatched") or 0)
+            < before.get(str(drop["id"]), 0)
+        }
+        if not restarted:
+            return
+        # Keys are the drop ID alone (the watcher's) or start with it and a
+        # separator (see __drop_tracking_key).
+        for saved in (
+            getattr(self, "drop_progress_last_saved", None),
+            getattr(self, "drop_status_last_saved", None),
+        ):
+            for key in list(saved or {}):
+                if str(key).split("|", 1)[0] in restarted:
+                    saved.pop(key, None)
 
     @staticmethod
     def __watch_reward_drop_ids_with_work_left(stored) -> set:

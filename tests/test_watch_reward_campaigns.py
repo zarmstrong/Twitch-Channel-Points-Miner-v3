@@ -2129,3 +2129,35 @@ def test_sync_claims_a_reward_group_under_the_category_it_is_filed_in(monkeypatc
     twitch._Twitch__sync_campaigns([campaign])
 
     assert claims == [("group-other#0", "Other Game")]
+
+
+def test_window_that_starts_over_is_reported_from_its_own_minutes():
+    # The window closed at 40 of 60 minutes: no repeat granted, so the next
+    # one counts from zero under the same drop ID. Progress is only saved
+    # when it rises.
+    twitch = bare_twitch()
+    twitch.drop_progress_last_saved = {
+        "group-watch#0": 40,
+        "group-watch#0|art|Daily Chest|Launch Celebration|Example Game|Chest|": 40,
+        "group-watch#01|unrelated": 7,
+        "other-drop": 30,
+    }
+    twitch.drop_status_last_saved = {
+        "group-watch#0|art|Daily Chest|Launch Celebration|Example Game|Chest|": (
+            "in_progress"
+        )
+    }
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=40, window=open_window())))
+    )
+    assert len(twitch.drop_progress_last_saved) == 4
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, window=open_window())))
+    )
+
+    assert twitch.drop_progress_last_saved == {
+        "group-watch#01|unrelated": 7,
+        "other-drop": 30,
+    }
+    assert twitch.drop_status_last_saved == {}
