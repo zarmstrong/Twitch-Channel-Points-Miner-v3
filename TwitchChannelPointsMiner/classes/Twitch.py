@@ -48,6 +48,7 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     campaign_from_reward_groups,
     is_watch_reward_campaign,
     is_watch_reward_listing,
+    repeat_drop_id,
     reward_category_views,
     with_claim_instance_ids,
     with_reward_category,
@@ -9013,31 +9014,19 @@ class Twitch(object):
                 and (
                     stored["_watch_reward"].get("progress_known") is not True
                     # An answer that arrives after a newer one would undo it:
-                    # a reward claimed in between would read as in progress
-                    # again, and its accepted claim be forgotten below.
+                    # a repeat claimed in between would read as waiting to be
+                    # claimed again, and the one after it as a repeat more.
                     or (previous["_watch_reward"].get("request_order") or 0)
                     > request_order
                 )
             ):
                 return previous
-            self.__keep_claimable_drop_ids(previous, stored)
+            self.__keep_repeat_drop_ids(previous, stored)
             self.__forget_snapshots_of_restarted_drops(previous, stored)
-            # Which listing first reported each claimable drop: claim_drop
-            # tells a repeat that turned claimable after its request was sent
-            # from the one it claimed.
-            claimable_before = {
-                str(drop["id"]): drop["_reward_group"].get("claimable_since")
-                for drop in (previous or {}).get("timeBasedDrops") or []
-                if drop["_reward_group"].get("claimable") is True
-            }
             now = utc_now()
             starts = set()
             for drop in stored.get("timeBasedDrops") or []:
                 group = drop["_reward_group"]
-                if group.get("claimable") is True:
-                    group["claimable_since"] = (
-                        claimable_before.get(str(drop["id"])) or request_order
-                    )
                 if group.get("finished") is True:
                     continue
                 # The drop's own start, or for a repeat waiting to be claimed
@@ -9048,9 +9037,6 @@ class Twitch(object):
                         starts.add(starts_at)
             self.__note_watch_reward_starts(starts)
             known[campaign_id] = stored
-            # Still under the lock: a newer listing stored and claimed while
-            # this ran would have its accepted claim forgotten here.
-            self.__reopen_watch_reward_drops(stored)
         # The inventory lists a reward campaign as completed once any of its
         # groups is (a claimed subscription reward, say), and the account-wide
         # evaluation files every reward campaign as purchase-gated. Neither
@@ -9066,35 +9052,75 @@ class Twitch(object):
         return stored
 
     @staticmethod
-    def __keep_claimable_drop_ids(previous, stored):
-        """Give each claimable drop of `stored` the ID and name the same
-        repeat had in `previous`, the record it replaces.
+    def __keep_repeat_drop_ids(previous, stored):
+        """Number each repeating group's drop in `stored` after the drop the
+        group had in `previous`, the record it replaces: the same repeat
+        keeps its ID, and a new repeat gets one no earlier repeat had.
 
-        A repeat's drop ID carries the number of repeats granted, and Twitch
-        may count a repeat when it is earned rather than when it is claimed.
-        The drop watched as "#0" would then turn up claimable as "#1", and
-        the next repeat be watched as "#1" too: one repeat reported under two
-        IDs, and two repeats under one. The count moving by one as the group
-        turns claimable is that case; the same count is the same repeat
-        either way."""
+        A repeat's drop ID starts from the number of repeats granted, and
+        Twitch may count a repeat when it is earned rather than when it is
+        claimed. The drop watched as "#0" would then turn up claimable as
+        "#1", and the next repeat be watched as "#1" too: one repeat reported
+        under two IDs, and two repeats under one. A repeat first seen
+        claimable with its count already in is the same case one listing
+        later. So the count alone does not name the repeat; what the group
+        did since the last listing does:
+
+        - still watched, or still claimable, with the same count: the same
+          repeat. So is a watched repeat that turned claimable with the
+          count the same or one higher.
+        - watched after being claimable, or with a higher count: a new
+          repeat, numbered above the last one.
+        - finished: the last repeat, which the one before may already be."""
         if previous is None:
             return
+        # A listing can leave a group out for a while (Twitch reports no
+        # progress on it): its last drop is kept for when it is back.
         before = {
-            drop["_reward_group"]["id"]: drop
-            for drop in previous.get("timeBasedDrops") or []
-            if drop["_reward_group"].get("finished") is not True
+            **(previous["_watch_reward"].get("earlier_drops") or {}),
+            **{
+                drop["_reward_group"]["id"]: drop
+                for drop in previous.get("timeBasedDrops") or []
+            },
+        }
+        listed = {
+            drop["_reward_group"]["id"] for drop in stored.get("timeBasedDrops") or []
+        }
+        stored["_watch_reward"]["earlier_drops"] = {
+            group_id: drop
+            for group_id, drop in before.items()
+            if group_id not in listed
         }
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
             earlier = before.get(group["id"])
-            if earlier is None or group.get("claimable") is not True:
+            number = group.get("repeat")
+            if earlier is None or number is None:
                 continue
-            counted = group.get("grants", 0) - earlier["_reward_group"].get("grants", 0)
-            if counted == 0 or (
-                counted == 1 and earlier["_reward_group"].get("claimable") is not True
-            ):
-                drop["id"] = earlier["id"]
-                drop["name"] = earlier["name"]
+            was = earlier["_reward_group"]
+            last = was.get("repeat")
+            if last is None:
+                continue
+            counted = group.get("grants", 0) - was.get("grants", 0)
+            if group.get("finished") is True:
+                same_repeat = last >= number
+            elif was.get("finished") is True:
+                same_repeat = False
+            elif group.get("claimable") is True:
+                same_repeat = counted == 0 or (
+                    counted == 1 and was.get("claimable") is not True
+                )
+            else:
+                same_repeat = counted == 0 and was.get("claimable") is not True
+            if same_repeat:
+                number = last
+                if group.get("claimable") is True:
+                    # Reported as the repeat it was watched as.
+                    drop["name"] = earlier["name"]
+            elif group.get("finished") is not True:
+                number = max(number, last + 1)
+            group["repeat"] = number
+            drop["id"] = repeat_drop_id(group["id"], number)
 
     def __forget_snapshots_of_restarted_drops(self, previous, stored):
         """Let the progress of a drop that started over be reported again.
@@ -9128,71 +9154,6 @@ class Twitch(object):
             for key in list(saved or {}):
                 if str(key).split("|", 1)[0] in restarted:
                     saved.pop(key, None)
-
-    @staticmethod
-    def __watch_reward_drop_ids_with_work_left(stored) -> set:
-        return {
-            str(drop["id"])
-            for drop in stored.get("timeBasedDrops") or []
-            if drop["_reward_group"].get("claimable") is not True
-            and drop["_reward_group"].get("finished") is not True
-        }
-
-    def __reopen_watch_reward_drops(self, stored):
-        """Forget the accepted claims of the stored campaign's drops that
-        have work left. Called with the watch-reward lock held.
-
-        A repeat's drop ID carries the number of repeats granted, and Twitch
-        may count a repeat before or after its claim. If it counts before,
-        the claimed drop and the next repeat share an ID, and the accepted
-        claim would hide the new repeat for good. A drop Twitch reports as
-        neither claimable nor finished has work left, whatever was claimed
-        under its ID.
-
-        A claim still on its way is not seen here; claim_drop looks at the
-        stored record once it is accepted. Nor is one waited for: listings
-        are read on the thread that sends the minute-watched events, and the
-        claim lock is held for as long as Twitch takes to answer. The next
-        listing reopens what this one could not."""
-        reopened = self.__watch_reward_drop_ids_with_work_left(stored) & set(
-            getattr(self, "accepted_drop_ids", None) or ()
-        )
-        if not reopened:
-            return
-        claim_lock = self.__claim_lock()
-        if not claim_lock.acquire(blocking=False):
-            return
-        try:
-            self.__forget_accepted_claims(reopened)
-        finally:
-            claim_lock.release()
-
-    def __forget_accepted_claims(self, drop_ids):
-        """Called under the claim lock."""
-        self.accepted_drop_ids = (
-            frozenset(getattr(self, "accepted_drop_ids", None) or ()) - drop_ids
-        )
-        # The claim Twitch accepted under that ID was for the repeat before:
-        # when this one becomes claimable it is a new claim.
-        accepted_for = getattr(self, "accepted_claim_drop_ids", None) or {}
-        stale_claims = {
-            instance_id
-            for instance_id, drop_id in accepted_for.items()
-            if drop_id in drop_ids
-        }
-        if stale_claims:
-            self.accepted_claim_drop_ids = {
-                instance_id: drop_id
-                for instance_id, drop_id in accepted_for.items()
-                if instance_id not in stale_claims
-            }
-            self.accepted_drop_claims = {
-                instance_id: stamp
-                for instance_id, stamp in (
-                    getattr(self, "accepted_drop_claims", None) or {}
-                ).items()
-                if instance_id not in stale_claims
-            }
 
     def __request_watch_reward_groups(self, campaign_id):
         """A reward campaign converted from Twitch's answer about its reward
@@ -9391,15 +9352,10 @@ class Twitch(object):
                 else None
             )
             streams = game.get("streams") if isinstance(game, dict) else None
-            queried_here = 0
+            channel_ids = []
             for edge in (
                 streams.get("edges") if isinstance(streams, dict) else []
             ) or []:
-                if (
-                    queried_here >= WATCH_REWARD_REFRESH_CHANNELS_PER_CATEGORY
-                    or queried >= WATCH_REWARD_REFRESH_CHANNEL_LIMIT
-                ):
-                    break
                 node = edge.get("node") if isinstance(edge, dict) else None
                 broadcaster = (
                     node.get("broadcaster") if isinstance(node, dict) else None
@@ -9407,14 +9363,31 @@ class Twitch(object):
                 channel_id = (
                     broadcaster.get("id") if isinstance(broadcaster, dict) else None
                 )
-                if not channel_id:
+                if channel_id:
+                    channel_ids.append(str(channel_id))
+            # The directory keeps its order from one read to the next, so
+            # the channels that answered nothing before are passed over for
+            # the ones after them, and asked again once every channel on the
+            # page has been.
+            unanswered = details.setdefault("refresh_channels_unanswered", set())
+            if all(channel_id in unanswered for channel_id in channel_ids):
+                unanswered.difference_update(channel_ids)
+            queried_here = 0
+            for channel_id in channel_ids:
+                if (
+                    queried_here >= WATCH_REWARD_REFRESH_CHANNELS_PER_CATEGORY
+                    or queried >= WATCH_REWARD_REFRESH_CHANNEL_LIMIT
+                ):
+                    break
+                if channel_id in unanswered:
                     continue
+                unanswered.add(channel_id)
                 queried_here += 1
                 queried += 1
                 # The listing itself stores what it finds, as a new record:
                 # the same one still being stored means this channel's
                 # listing failed or left the campaign out.
-                self.__get_campaigns_from_channel_id(str(channel_id))
+                self.__get_campaigns_from_channel_id(channel_id)
                 refreshed = known.get(campaign_id)
                 if (
                     refreshed is not None
@@ -10750,7 +10723,6 @@ class Twitch(object):
         # Held across the request so a concurrent pass sees the accepted claim
         # instead of claiming and notifying a second time.
         with self.__claim_lock():
-            sent_after = next(_WATCH_REWARD_REQUEST_ORDER)
             result = self.__claim_drop(
                 drop,
                 campaign=campaign,
@@ -10763,36 +10735,6 @@ class Twitch(object):
                 self.__update_pending_drop_claim(
                     str(drop.id), drop.drop_instance_id, clear=result is True
                 )
-                # A channel listing stored while the request was on its way
-                # may already report the next repeat of a reward group under
-                # this drop ID. It found no accepted claim to forget then, so
-                # the one recorded just now would hide that repeat.
-                # Or that repeat is already waiting to be claimed itself:
-                # first listed so after this request was sent, it is not the
-                # one Twitch just accepted.
-                drop_ids = {str(drop.id)}
-                next_repeat = False
-                for stored in list(
-                    (getattr(self, "watch_reward_campaigns", None) or {}).values()
-                ):
-                    if drop_ids & self.__watch_reward_drop_ids_with_work_left(stored):
-                        next_repeat = True
-                    for stored_drop in stored.get("timeBasedDrops") or []:
-                        if (
-                            str(stored_drop["id"]) in drop_ids
-                            and stored_drop["_reward_group"].get("claimable") is True
-                            and (
-                                stored_drop["_reward_group"].get("claimable_since") or 0
-                            )
-                            > sent_after
-                        ):
-                            next_repeat = True
-                            # Its claim ID went with the accepted claim.
-                            stored_drop["self"][
-                                "dropInstanceID"
-                            ] = drop.drop_instance_id
-                if next_repeat:
-                    self.__forget_accepted_claims(drop_ids)
             return result
 
     def __claim_drop(

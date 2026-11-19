@@ -123,6 +123,11 @@ def _watch_group_categories(group) -> list:
     ]
 
 
+def repeat_drop_id(group_id, repeat_number) -> str:
+    """The drop ID of one repeat of a repeating reward group."""
+    return f"{group_id}#{repeat_number}"
+
+
 def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     """One reward group as a time-based drop, or None when watching cannot
     earn it or its state is unknown.
@@ -220,13 +225,14 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
 
     drop_id = str(group["id"])
     name = group.get("name") or campaign["name"]
+    repeat_number = None
     if times > 1:
         # A group with every repeat counted is the last repeat, earned or
         # waiting to be claimed, not one more after it.
-        repeat = grants
+        repeat_number = grants
         if claimed or (claimable and grants >= times):
-            repeat = max(min(grants, times) - 1, 0)
-        drop_id = f"{drop_id}#{repeat}"
+            repeat_number = max(min(grants, times) - 1, 0)
+        drop_id = repeat_drop_id(group["id"], repeat_number)
         name = f"{name} ({min(grants, times)}/{times} earned)"
     rewards = group.get("rewards")
     return {
@@ -262,6 +268,9 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             # Nothing more can be earned in the group as Twitch reports it.
             "finished": claimed or expired,
             "grants": grants,
+            # The number in a repeating group's drop ID; None for a group
+            # earned once.
+            "repeat": repeat_number,
             "next_start": next_start,
             "categories": categories,
         },
