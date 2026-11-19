@@ -764,8 +764,9 @@ def migrate_config_source(source, source_name="config.py"):
     if safe_config and "priority" not in config_names and "Priority" in rebound:
         # The miner's built-in order applies instead, and it has no FAVORITE.
         logger.warning(
-            f"{source_name} defines Priority itself, so the migration did not "
-            "add MINER_CONFIG['priority']. The built-in order applies (STREAK, "
+            f"{source_name} may bind Priority itself (an assignment, another "
+            "import or a wildcard import), so the migration did not add "
+            "MINER_CONFIG['priority']. The built-in order applies (STREAK, "
             "DROPS, ORDER, without FAVORITE); add 'priority' to MINER_CONFIG "
             "to change it.",
             extra={"emoji": ":warning:"},

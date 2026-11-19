@@ -3616,7 +3616,7 @@ def test_an_edit_is_refused_when_the_config_rebinds_the_name(tmp_path, rebinding
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="defines logging itself"):
+    with pytest.raises(ConfigEditError, match="may bind logging itself"):
         update_managed_web_config(
             config,
             {"action": "update_logging", "values": {"console_level": "WARNING"}},
@@ -3737,7 +3737,7 @@ def test_an_edit_is_refused_for_a_module_level_rebinding_in_any_statement(
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="defines logging itself"):
+    with pytest.raises(ConfigEditError, match="may bind logging itself"):
         update_managed_web_config(
             config,
             {"action": "update_logging", "values": {"console_level": "WARNING"}},
@@ -3822,7 +3822,7 @@ def test_an_edit_is_refused_when_another_import_binds_the_name(tmp_path, imports
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="defines Streamer itself"):
+    with pytest.raises(ConfigEditError, match="may bind Streamer itself"):
         update_managed_web_config(
             config,
             {
@@ -3855,7 +3855,7 @@ def test_an_edit_is_refused_when_a_wildcard_from_elsewhere_may_bind_the_name(
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="defines Streamer itself"):
+    with pytest.raises(ConfigEditError, match="may bind Streamer itself"):
         update_managed_web_config(
             config,
             {

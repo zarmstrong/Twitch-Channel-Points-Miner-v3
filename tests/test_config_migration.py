@@ -1939,7 +1939,7 @@ def test_a_rebound_priority_warns_that_the_default_list_was_not_added(caplog):
         migrated, _, _ = migrate_config_source(source)
 
     assert "'priority'" not in migrated
-    assert "defines Priority itself" in caplog.text
+    assert "may bind Priority itself" in caplog.text
     assert "without FAVORITE" in caplog.text
 
 

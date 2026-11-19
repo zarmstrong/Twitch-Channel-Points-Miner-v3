@@ -1747,8 +1747,9 @@ def _with_config_import(encoded, statement, used_in=()):
     for bound in expected:
         if bound in rebound:
             raise ConfigEditError(
-                f"config.py defines {bound} itself, so the dashboard can't "
-                f"safely write a {bound} reference. Edit it in config.py instead."
+                f"config.py may bind {bound} itself (an assignment, another "
+                f"import or a wildcard import), so the dashboard can't safely "
+                f"write a {bound} reference. Edit it in config.py instead."
             )
     if _has_config_import(tree, statement, used_in):
         return encoded
