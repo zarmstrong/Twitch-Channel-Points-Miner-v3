@@ -11,7 +11,6 @@ import os
 import re
 import shutil
 import stat
-import sys
 import tempfile
 from pathlib import Path
 
@@ -462,197 +461,6 @@ def _import_edit(source, line_offsets, tree, first_use, statements):
     return (import_offset, prefix + "\n".join(statements) + "\n")
 
 
-# A handler for one of these, or for anything that isn't a plain name, may
-# catch the NameError a too-late import raises.
-_NAME_ERROR_CATCHERS = {"NameError", "Exception", "BaseException"}
-
-
-def _may_catch_name_error(handler):
-    if handler.type is None:
-        return True
-    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-    return any(
-        not isinstance(kind, ast.Name) or kind.id in _NAME_ERROR_CATCHERS
-        for kind in kinds
-    )
-
-
-def _binds_locally(scope, name):
-    """Whether a function or class binds name in its own namespace, so name
-    there isn't the module's (unless the scope declares it global)."""
-    nodes = list(_own_scope_nodes(scope))
-    if any(isinstance(node, ast.Global) and name in node.names for node in nodes):
-        return False
-    if not isinstance(scope, ast.ClassDef):
-        arguments = scope.args
-        every_argument = [
-            *arguments.posonlyargs,
-            *arguments.args,
-            *arguments.kwonlyargs,
-            *filter(None, (arguments.vararg, arguments.kwarg)),
-        ]
-        if any(argument.arg == name for argument in every_argument):
-            return True
-    return any(name in _names_bound_by(node) for node in nodes)
-
-
-def _reads_while_running(node, name, functions, eager_annotations):
-    """Whether node, a top-level statement, reads name while the module runs,
-    so a binding below it comes too late.
-
-    Earlier migrations wrote references into calls anywhere in the file:
-    under if, with or a class, in a function's defaults, or in a function's
-    body. A function body runs as the module loads only when the module
-    calls it, so the bodies of functions (from functions, the module's
-    top-level ones) called or used as a decorator are read too. A lambda or
-    generator body runs later. A try statement's body and handlers don't
-    count when a handler may catch NameError: that may be the config's own
-    fallback, which a repair would change. A function or class that binds
-    name itself refers to its own binding. Argument annotations count only
-    when eager_annotations; variable annotations never do.
-    """
-    stack = [node]
-    entered = set()
-
-    def enter(function_name):
-        function = functions.get(function_name)
-        if function is not None and function_name not in entered:
-            entered.add(function_name)
-            if not _binds_locally(function, name):
-                stack.extend(function.body)
-
-    while stack:
-        child = stack.pop()
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            arguments = child.args
-            stack.extend(arguments.defaults)
-            stack.extend(default for default in arguments.kw_defaults if default)
-            decorators = getattr(child, "decorator_list", [])
-            stack.extend(decorators)
-            for decorator in decorators:
-                if isinstance(decorator, ast.Name):
-                    enter(decorator.id)
-            if eager_annotations and not isinstance(child, ast.Lambda):
-                every_argument = [
-                    *arguments.posonlyargs,
-                    *arguments.args,
-                    *arguments.kwonlyargs,
-                    *filter(None, (arguments.vararg, arguments.kwarg)),
-                ]
-                stack.extend(
-                    argument.annotation
-                    for argument in every_argument
-                    if argument.annotation is not None
-                )
-                if child.returns is not None:
-                    stack.append(child.returns)
-            continue
-        if isinstance(child, ast.ClassDef):
-            stack.extend(child.decorator_list)
-            stack.extend(child.bases)
-            stack.extend(child.keywords)
-            for decorator in child.decorator_list:
-                if isinstance(decorator, ast.Name):
-                    enter(decorator.id)
-            if not _binds_locally(child, name):
-                stack.extend(child.body)
-            continue
-        if isinstance(child, ast.GeneratorExp):
-            stack.append(child.generators[0].iter)
-            continue
-        if isinstance(child, ast.AnnAssign):
-            stack.append(child.target)
-            if child.value is not None:
-                stack.append(child.value)
-            continue
-        if type(child).__name__ in ("Try", "TryStar") and any(
-            _may_catch_name_error(handler) for handler in child.handlers
-        ):
-            # A handler can't catch what else or finally raises.
-            stack.extend(child.orelse)
-            stack.extend(child.finalbody)
-            continue
-        if type(child).__name__ in (
-            "TypeAlias",
-            "TypeVar",
-            "ParamSpec",
-            "TypeVarTuple",
-        ):
-            # Evaluated lazily.
-            continue
-        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
-            enter(child.func.id)
-        if (
-            isinstance(child, ast.Name)
-            and child.id == name
-            and isinstance(child.ctx, ast.Load)
-        ):
-            return True
-        stack.extend(ast.iter_child_nodes(child))
-    return False
-
-
-def _late_imports(tree):
-    """The migration's imports that tree has only below a statement using them,
-    and the index of the first such statement.
-
-    Earlier releases added the migration's imports below the last top-level
-    import, which could be below the statement they wrote a reference into,
-    so the config raised NameError on every start (#327). Such an import is
-    added again above the first statement that reads its name while the
-    module runs (_reads_while_running); the later one then changes nothing.
-    A name the module binds another way up to that use is left alone; a
-    function's own binding can't shadow the module's import.
-    """
-    statements = []
-    first_use = len(tree.body)
-    functions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    # Python 3.14 evaluates annotations lazily, as the future import does.
-    eager_annotations = sys.version_info < (3, 14) and not any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == "__future__"
-        and any(alias.name == "annotations" for alias in node.names)
-        for node in tree.body
-    )
-    for name, binding in _MIGRATION_IMPORTS.items():
-        imported = next(
-            (
-                index
-                for index, node in enumerate(tree.body)
-                if isinstance(node, (ast.Import, ast.ImportFrom))
-                and any(import_binding(node, alias) == binding for alias in node.names)
-            ),
-            None,
-        )
-        if imported is None:
-            continue
-        used = next(
-            (
-                index
-                for index, node in enumerate(tree.body[:imported])
-                if _reads_while_running(node, name, functions, eager_annotations)
-            ),
-            None,
-        )
-        if used is None:
-            continue
-        above_use = ast.Module(body=tree.body[: used + 1], type_ignores=[])
-        if name in rebound_names(above_use, {name: binding}, module_scope=True):
-            continue
-        level, module, imported_name, _ = binding
-        statements.append(
-            f"import {imported_name}"
-            if module is None
-            else f"from {'.' * level}{module} import {imported_name}"
-        )
-        first_use = min(first_use, used)
-    return statements, first_use
-
-
 def _statement_on_same_line(source, line_offsets, tree, node):
     """Offset of the statement after node when it follows a `;` on node's
     last logical line; inserting below node would put the insertion after it,
@@ -954,11 +762,6 @@ def migrate_config_source(source, source_name="config.py"):
     # Edits from here on may use the names in required_imports.
     first_default_edit = len(edits)
     if version == CONFIG_VERSION:
-        late_imports, late_use = _late_imports(tree)
-        if late_imports:
-            edits.append(
-                _import_edit(source, line_offsets, tree, late_use, late_imports)
-            )
         migrated = _checked_output(_apply_edits(source, edits), source_name)
         return migrated, version, version
     config_names = _dict_names(config)
@@ -1147,13 +950,7 @@ def migrate_config_source(source, source_name="config.py"):
                 )
             )
 
-    # An earlier migration's late import is repaired in the same pass, so the
-    # upgraded config starts the first time.
-    late_imports, late_use = _late_imports(tree)
-    first_use = min(
-        _first_statement_edited(line_offsets, tree, edits[first_default_edit:]),
-        late_use,
-    )
+    first_use = _first_statement_edited(line_offsets, tree, edits[first_default_edit:])
     # The missing imports go above the first statement that uses them, so an
     # import of the same name counts only when it is already above it (one
     # below would bind the name too late and the config would raise NameError).
@@ -1163,9 +960,6 @@ def migrate_config_source(source, source_name="config.py"):
         for statement in required_imports
         if statement.split()[-1] not in rebound
         and not _name_is_imported(tree.body[:first_use], statement.split()[-1])
-    ]
-    required_imports += [
-        statement for statement in late_imports if statement not in required_imports
     ]
     if required_imports:
         edits.append(
