@@ -5,17 +5,17 @@ every call opens a new TCP connection and repeats the TLS handshake. The
 miner's frequent Twitch requests (GQL, minute-watched events, Helix) use
 these helpers instead, and each thread reuses its own pooled connections.
 
-``requests.Session`` isn't documented as thread-safe, so sessions are never
-shared between threads.
+``requests.Session`` isn't documented as thread-safe, so each thread gets its
+own from ``session()``. Don't pass the returned session to another thread.
 
 A kept-alive connection can be closed by the server while it sits idle in
 the pool. urllib3 notices most of those closes before it reuses the socket,
 but a close that lands just before a request makes that request fail, and
 requests doesn't retry a POST. To keep that window small, a thread's session
 is closed and replaced once it has gone ``IDLE_SECONDS`` without a request,
-before a server or load balancer is likely to drop the idle connection. A session's
-connections are also closed when its thread ends and the session is
-garbage-collected.
+before a server or load balancer is likely to drop the idle connection. A
+session's connections are also closed when its thread ends and the session
+is garbage-collected.
 
 Bare calls never carried cookies from one request to the next, and these
 sessions don't either: their cookie jar rejects every cookie. Headers are
