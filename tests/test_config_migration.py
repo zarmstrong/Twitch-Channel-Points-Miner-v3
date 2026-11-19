@@ -1352,6 +1352,63 @@ ANALYTICS_CONFIG = None
     assert namespace["LOGGER"].console_level == logging.INFO
 
 
+# What the migration before #327 wrote for the config above: the current
+# CONFIG_VERSION, with the imports below the LoggerSettings(...) call using them.
+EARLIER_LATE_IMPORT_OUTPUT = f"""\
+CONFIG_VERSION = {CONFIG_VERSION}
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(save=False, console_level=logging.INFO, color_palette=ColorPalette())
+import os
+from TwitchChannelPointsMiner.classes.Settings import Priority
+import logging
+from TwitchChannelPointsMiner.logger import ColorPalette
+
+MINER_CONFIG = {{"username": "alice", "logger_settings": LOGGER, "priority": [Priority.STREAK]}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = None
+"""
+
+
+def test_migrate_config_repairs_imports_an_earlier_migration_placed_too_late(
+    tmp_path,
+):
+    # R327-16: that config already has the current CONFIG_VERSION, so without
+    # a repair it raised NameError on every start after the upgrade too.
+    config = tmp_path / "config.py"
+    config.write_text(EARLIER_LATE_IMPORT_OUTPUT, encoding="utf-8")
+    with pytest.raises(NameError):
+        exec(EARLIER_LATE_IMPORT_OUTPUT, {})
+
+    assert migrate_config(config) is True
+
+    repaired = config.read_text(encoding="utf-8")
+    namespace = {}
+    exec(compile(repaired, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["LOGGER"].console_level == logging.INFO
+    lines = repaired.splitlines()
+    assert lines[2:4] == [
+        "import logging",
+        "from TwitchChannelPointsMiner.logger import ColorPalette",
+    ]
+    # Priority was imported above its first use already.
+    assert repaired.count("import Priority") == 1
+    backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
+    assert backup.read_text(encoding="utf-8") == EARLIER_LATE_IMPORT_OUTPUT
+    assert migrate_config(config) is False
+
+
+def test_late_import_repair_leaves_a_name_the_config_binds_itself():
+    source = EARLIER_LATE_IMPORT_OUTPUT.replace(
+        "ANALYTICS_CONFIG = None\n", "ANALYTICS_CONFIG = None\nlogging = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrated.count("import logging") == 1
+    assert migrated.count("import ColorPalette") == 2
+
+
 def test_unversioned_config_keeps_its_docstring_and_future_import_first():
     # #327: CONFIG_VERSION used to go above both, a SyntaxError for the
     # __future__ import and no longer a docstring.
@@ -1683,6 +1740,29 @@ def test_an_import_below_its_first_use_does_not_count_as_present(late_import):
     exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
     assert namespace["MINER_CONFIG"]["username"] == "alice"
     assert namespace["LOGGER"].save is False
+
+
+def test_defaults_are_not_given_a_name_a_function_annotates_locally():
+    # R327-17: an annotation without a value binds nothing in the module, but
+    # in a function it makes the name local, so logging.INFO written into
+    # that function would raise UnboundLocalError.
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        "def make_logger():\n"
+        "    settings = LoggerSettings(save=False)\n"
+        "    logging: object\n"
+        "    return settings\n"
+        "\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": make_logger()}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert "logging.INFO" not in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].save is False
 
 
 def test_defaults_are_not_given_names_a_factory_binds_locally():

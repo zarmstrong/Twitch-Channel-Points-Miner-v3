@@ -450,6 +450,69 @@ def _import_offset(source, line_offsets, tree, first_use):
     return _header_offset(source, line_offsets, tree)
 
 
+def _import_edit(source, line_offsets, tree, first_use, statements):
+    """The edit adding statements above tree.body[first_use]."""
+    import_offset = _import_offset(source, line_offsets, tree, first_use)
+    # A line break is only missing after an import's last character; a header
+    # offset is a line start or follows `; `.
+    prefix = (
+        "\n" if import_offset and source[import_offset - 1] not in "\r\n\t ;" else ""
+    )
+    return (import_offset, prefix + "\n".join(statements) + "\n")
+
+
+def _late_import_repair(source, line_offsets, tree):
+    """The edit re-importing names an earlier migration imported too late.
+
+    Earlier releases added the migration's imports below the last top-level
+    import, which could be below the statement they wrote a reference into,
+    and still set the current CONFIG_VERSION, so the config raised NameError
+    on every start (#327). Such an import is added again above the first
+    statement using its name; the later one then changes nothing. A name the
+    config binds some other way is left alone.
+    """
+    rebound = rebound_names(tree)
+    statements = []
+    first_use = len(tree.body)
+    for name, binding in _MIGRATION_IMPORTS.items():
+        if name in rebound:
+            continue
+        imported = next(
+            (
+                index
+                for index, node in enumerate(tree.body)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+                and any(import_binding(node, alias) == binding for alias in node.names)
+            ),
+            None,
+        )
+        if imported is None:
+            continue
+        used = next(
+            (
+                index
+                for index, node in enumerate(tree.body[:imported])
+                if any(
+                    isinstance(child, ast.Name) and child.id == name
+                    for child in ast.walk(node)
+                )
+            ),
+            None,
+        )
+        if used is None:
+            continue
+        level, module, imported_name, _ = binding
+        statements.append(
+            f"import {imported_name}"
+            if module is None
+            else f"from {'.' * level}{module} import {imported_name}"
+        )
+        first_use = min(first_use, used)
+    if not statements:
+        return None
+    return _import_edit(source, line_offsets, tree, first_use, statements)
+
+
 def _statement_on_same_line(source, line_offsets, tree, node):
     """Offset of the statement after node when it follows a `;` on node's
     last logical line; inserting below node would put the insertion after it,
@@ -751,6 +814,9 @@ def migrate_config_source(source, source_name="config.py"):
     # Edits from here on may use the names in required_imports.
     first_default_edit = len(edits)
     if version == CONFIG_VERSION:
+        repair = _late_import_repair(source, line_offsets, tree)
+        if repair:
+            edits.append(repair)
         migrated = _checked_output(_apply_edits(source, edits), source_name)
         return migrated, version, version
     config_names = _dict_names(config)
@@ -951,15 +1017,9 @@ def migrate_config_source(source, source_name="config.py"):
         and not _name_is_imported(tree.body[:first_use], statement.split()[-1])
     ]
     if required_imports:
-        import_offset = _import_offset(source, line_offsets, tree, first_use)
-        # A line break is only missing after an import's last character; a
-        # header offset is a line start or follows `; `.
-        prefix = (
-            "\n"
-            if import_offset and source[import_offset - 1] not in "\r\n\t ;"
-            else ""
+        edits.append(
+            _import_edit(source, line_offsets, tree, first_use, required_imports)
         )
-        edits.append((import_offset, prefix + "\n".join(required_imports) + "\n"))
 
     version_node = _assignment_value(tree, "CONFIG_VERSION")
     if version_node is None:
@@ -1350,7 +1410,12 @@ def rebound_names(tree, expected=None, module_scope=False):
             if isinstance(node, (ast.Import, ast.ImportFrom))
         }
     nodes = list(nodes)
-    declared_only = _annotation_only_targets(nodes)
+    # An annotation without a value binds nothing in the module, but in a
+    # function it makes the name local, so a reference written there would
+    # raise UnboundLocalError. Only module-level ones are skipped.
+    declared_only = _annotation_only_targets(
+        nodes if module_scope else _module_scope_nodes(tree)
+    )
     names = set()
     for node in nodes:
         if id(node) in declared_only:
