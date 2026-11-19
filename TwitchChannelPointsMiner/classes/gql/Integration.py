@@ -1,13 +1,16 @@
 import copy
 import logging
 import traceback
+from datetime import datetime, timezone
 from secrets import token_hex
 from typing import Any, Callable, Protocol, TypeVar
 
 import requests
 from requests import Response
 
+from TwitchChannelPointsMiner.classes import HttpSession
 from TwitchChannelPointsMiner.classes.ClientSession import ClientSession
+from TwitchChannelPointsMiner.classes.entities.ChannelBanStatus import ChannelBanStatus
 from TwitchChannelPointsMiner.classes.gql.data.Parser import Parser
 from TwitchChannelPointsMiner.classes.gql.data.response.ChannelPointsContext import (
     ChannelPointsContextResponse,
@@ -110,6 +113,46 @@ def error_context(e: Exception) -> str | None:
         return traceback.format_exc()
 
 
+def _ban_expiry_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at.timestamp()
+
+
+def parse_channel_ban_status(value: Any, channel_id: str) -> ChannelBanStatus | None:
+    """
+    Reads one ChannelBanStatus response.
+    :return: The status, or None when the answer is unknown: errors, a missing
+        or malformed field, or a different or missing user. Unknown never means
+        banned, so a failed check can't empty the watch list.
+    """
+    if not isinstance(value, dict) or value.get("errors"):
+        return None
+    data = value.get("data")
+    user = data.get("user") if isinstance(data, dict) else None
+    if not isinstance(user, dict) or str(user.get("id") or "") != str(channel_id):
+        return None
+    viewer = user.get("self")
+    if not isinstance(viewer, dict) or "banStatus" not in viewer:
+        return None
+    ban = viewer["banStatus"]
+    if ban is None:
+        return ChannelBanStatus(False)
+    if not isinstance(ban, dict):
+        return None
+    return ChannelBanStatus(
+        True,
+        permanent=ban.get("isPermanent") is True,
+        expires_at=_ban_expiry_timestamp(ban.get("expiresAt")),
+    )
+
+
 def parse_raw_response(value: Any) -> dict:
     if isinstance(value, dict):
         return value
@@ -127,6 +170,13 @@ class PostRequest(Protocol):
 # The light drops-progress check sends one request per watched channel and
 # falls back to a full Inventory read when it fails, so it never retries.
 DROP_SESSION_ATTEMPT_STRATEGY = AttemptStrategy(attempts=1)
+
+# A failed ban check leaves the channel's state unknown and is retried a few
+# minutes later, so it doesn't hold up the minute watcher with retries.
+CHANNEL_BAN_ATTEMPT_STRATEGY = AttemptStrategy(attempts=1)
+# Twitch rejects a whole batch of more than 35 operations
+# (BATCH_LIMIT_EXCEEDED); stay below that.
+CHANNEL_BAN_BATCH_SIZE = 30
 
 
 class GQL:
@@ -169,8 +219,8 @@ class GQL:
 
     @staticmethod
     def __default_post_request(url: str, json: dict | list, headers: dict[str, str]):
-        """Post through requests with the timeout used by the legacy GQL client."""
-        return requests.post(url, json=json, headers=headers, timeout=(5, 30))
+        """Post over this thread's pooled session, with the timeout used by the legacy GQL client."""
+        return HttpSession.post(url, json=json, headers=headers, timeout=(5, 30))
 
     @staticmethod
     def __loggable_content(request_json: dict | list, content: str) -> str:
@@ -363,19 +413,24 @@ class GQL:
         return self.__handle_result(result, operation_name)
 
     def post_gql_request_batch(
-        self, operation_name: str, request_json: list[dict], parse: Callable[[Any], T]
+        self,
+        operation_name: str,
+        request_json: list[dict],
+        parse: Callable[[Any], T],
+        attempt_strategy: AttemptStrategy | None = None,
     ) -> list[T]:
         """
         Posts the given GQL request batch. Handles automatic retries according to the `retry_strategy`.
         :param operation_name: The name of the GQL operation.
         :param request_json: The data to send as a list of the batched items.
         :param parse: The function to use to parse the data.
+        :param attempt_strategy: Overrides the shared strategy for this call only.
         :return: The parsed response, either a single object or a list if the request was a list.
         :raises RetryError: If one or more errors occurred while attempting the request.
         """
         if not request_json:
             return []
-        result = self.attempt_strategy.make_attempts(
+        result = (attempt_strategy or self.attempt_strategy).make_attempts(
             lambda: self.__post_gql_request(request_json, parse),
             validate_response,
             is_recoverable_error,
@@ -390,12 +445,49 @@ class GQL:
         )
 
     def post_gql_request_batch_raw(
-        self, operation_name: str, request_json: list[dict]
+        self,
+        operation_name: str,
+        request_json: list[dict],
+        attempt_strategy: AttemptStrategy | None = None,
     ) -> list[dict]:
         """Post variable-schema operations as a batch and retain raw responses."""
         return self.post_gql_request_batch(
-            operation_name, request_json, parse_raw_response
+            operation_name, request_json, parse_raw_response, attempt_strategy
         )
+
+    def channel_ban_statuses(
+        self, channel_ids: list[str]
+    ) -> dict[str, ChannelBanStatus]:
+        """
+        Checks whether the account is banned or timed out in each channel.
+        :param channel_ids: The channel (user) ids to check.
+        :return: The status of every channel Twitch answered clearly. A channel
+            whose answer was missing, malformed or carried errors is left out,
+            and so is every channel after the first failed request, so the
+            caller can treat it as unknown and keep its last known state.
+        """
+        statuses: dict[str, ChannelBanStatus] = {}
+        for chunk in create_chunks(list(channel_ids), CHANNEL_BAN_BATCH_SIZE):
+            request_json = []
+            for channel_id in chunk:
+                request_json.append(copy.deepcopy(GQLOperations.ChannelBanStatus))
+                request_json[-1]["variables"] = {"channelID": channel_id}
+            try:
+                responses = self.post_gql_request_batch_raw(
+                    GQLOperations.ChannelBanStatus["operationName"],
+                    request_json,
+                    CHANNEL_BAN_ATTEMPT_STRATEGY,
+                )
+            except Exception as e:
+                # The remaining chunks would most likely fail the same way;
+                # their channels stay unknown until the next check.
+                logger.debug(f"ChannelBanStatus check failed: {e}")
+                break
+            for channel_id, response in zip(chunk, responses):
+                status = parse_channel_ban_status(response, channel_id)
+                if status is not None:
+                    statuses[channel_id] = status
+        return statuses
 
     def video_player_stream_info_overlay_channel(
         self, streamer_username: str

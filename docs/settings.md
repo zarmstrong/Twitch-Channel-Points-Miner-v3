@@ -26,6 +26,13 @@ channel-points balance reaches that value. A pending watch streak can temporaril
 bypass the limit so its reward is not missed. Set `favorite=True` per streamer
 and include `Priority.FAVORITE` to reserve watch slots for favorites first.
 
+Channels where your account is banned or timed out are skipped for both
+points and Drops. This covers configured streamers, followed channels and
+discovered channels alike. The miner checks each live channel when it first
+considers it, then every 30 minutes, every 6 hours for a permanent ban, and
+again when a timeout ends. Each change is logged once at INFO. If a check
+fails, the channel keeps its last known state and is not treated as banned.
+
 ## Android login
 
 By default the miner logs in as Twitch's TV app. Twitch withholds some Drops

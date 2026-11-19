@@ -148,6 +148,16 @@ class GQLOperations:
             "}"
         ),
     }
+    # Resolves under both the TV and the Android login. `banStatus` is null
+    # when the account is not banned in the channel.
+    ChannelBanStatus = {
+        "operationName": "ChannelBanStatus",
+        "query": (
+            "query ChannelBanStatus($channelID: ID!) {"
+            "user(id: $channelID) { id self { banStatus { isPermanent expiresAt } } }"
+            "}"
+        ),
+    }
     GameSlug = {
         "operationName": "GameSlug",
         "query": "query GameSlug($id: ID!) { game(id: $id) { id slug } }",
@@ -157,6 +167,31 @@ class GQLOperations:
         "query": (
             "query CategoryGame($slug: String!) {"
             "game(slug: $slug) { id name displayName }"
+            "}"
+        ),
+    }
+    # The reward groups of a sitewide reward campaign (a quest), which names
+    # the categories it counts in. Hand-written: Twitch's web client only has
+    # it as a fragment of campaign-specific operations.
+    RewardCampaignDetails = {
+        "operationName": "RewardCampaignDetails",
+        "query": (
+            "query RewardCampaignDetails($id: ID!) {"
+            "dropsCampaign(id: $id) {"
+            "id name status startAt endAt game { id name } "
+            "rewardGroups {"
+            "id name track lane "
+            "progressCriteria {"
+            "requirementType requirements { minutesWatched subs } "
+            "isRepeatable "
+            "repeatableConfig {"
+            "repeatableTimes resetIntervalSeconds shouldCompleteAllRepeatsToEarn"
+            "} "
+            "channels { id } categories { id displayName }"
+            "} "
+            "rewards { id name distributionType thumbnailURL }"
+            "}"
+            "}"
             "}"
         ),
     }
