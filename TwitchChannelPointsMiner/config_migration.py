@@ -6,6 +6,7 @@ import ast
 import builtins
 import errno
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ import stat
 import tempfile
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 _LINE_PATTERN = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 # PEP 263: an encoding declaration is a comment on line 1, or on line 2 when
 # line 1 is blank or a comment too.
@@ -376,7 +378,11 @@ def _import_offset(source, line_offsets, tree, first_use):
         end = _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
         # Keep a trailing `;` (`import os;`) with its statement.
         semicolon = re.match(r"[ \t]*;", source[end:])
-        return end + semicolon.end() if semicolon else end
+        if semicolon:
+            end += semicolon.end()
+        # And a trailing comment with its line: insert below that line.
+        comment = re.match(r"[ \t]*#[^\r\n]*(?:\r\n|\r|\n)?", source[end:])
+        return end + comment.end() if comment else end
     for node in above_first_use:
         if _assignment_value(ast.Module(body=[node]), "CONFIG_VERSION") is not None:
             following = _statement_on_same_line(line_offsets, tree, node)
@@ -466,8 +472,61 @@ def _source_offset(line_offsets, lineno, col_offset):
     return start + chars
 
 
+def _code_only(text):
+    """text with its comments blanked out. Only for gaps between a dict's
+    keys and values, which hold no strings, so every `#` starts a comment."""
+    return re.sub(r"#[^\r\n]*", lambda match: " " * len(match.group()), text)
+
+
+def _entry_start(source, line_offsets, node, index):
+    """Where dict entry index starts, including parentheses around its key
+    (or the `**` of an unpacked mapping)."""
+    key = node.keys[index]
+    value = node.values[index]
+    first = key if key is not None else value
+    start = _source_offset(line_offsets, first.lineno, first.col_offset)
+    if index:
+        previous = node.values[index - 1]
+        gap_start = _source_offset(
+            line_offsets, previous.end_lineno, previous.end_col_offset
+        )
+    else:
+        # Just after the opening brace.
+        gap_start = _source_offset(line_offsets, node.lineno, node.col_offset) + 1
+    gap = _code_only(source[gap_start:start])
+    # The previous value's closing parentheses and the separating comma come
+    # first; anything opened after them wraps this entry.
+    tail = gap.rsplit(",", 1)[-1] if index else gap
+    tail_start = start - len(tail)
+    marker = "**" if key is None else "("
+    position = tail.find(marker)
+    return tail_start + position if position >= 0 else start
+
+
+def _entry_value_end(source, line_offsets, key, value):
+    """Where a dict entry's value ends, including parentheses around it."""
+    value_start = _source_offset(line_offsets, value.lineno, value.col_offset)
+    end = _source_offset(line_offsets, value.end_lineno, value.end_col_offset)
+    if key is None:
+        return end
+    key_end = _source_offset(line_offsets, key.end_lineno, key.end_col_offset)
+    between = _code_only(source[key_end:value_start])
+    opened = between[between.index(":") + 1 :].count("(")
+    while opened:
+        closing = re.match(r"(?:\s|\\|#[^\r\n]*)*\)", source[end:])
+        if closing is None:
+            break
+        end += closing.end()
+        opened -= 1
+    return end
+
+
 def _dict_entry_removal(source, line_offsets, tree, node, name):
-    """Return a source edit removing a statically resolvable dictionary entry."""
+    """Return a source edit removing a statically resolvable dictionary entry.
+
+    The edit spans the whole entry, including parentheses around its key or
+    value (`"password": ("secret")`), so no stray `(` or `)` is left behind.
+    """
     index = next(
         (
             index
@@ -481,15 +540,13 @@ def _dict_entry_removal(source, line_offsets, tree, node, name):
 
     key = node.keys[index]
     value = node.values[index]
-    start = _source_offset(line_offsets, key.lineno, key.col_offset)
+    start = _entry_start(source, line_offsets, node, index)
     if index + 1 < len(node.keys):
-        next_key = node.keys[index + 1]
-        end = _source_offset(line_offsets, next_key.lineno, next_key.col_offset)
-        return start, end, ""
+        return start, _entry_start(source, line_offsets, node, index + 1), ""
 
-    end = _source_offset(line_offsets, value.end_lineno, value.end_col_offset)
+    end = _entry_value_end(source, line_offsets, key, value)
     closing = _source_offset(line_offsets, node.end_lineno, node.end_col_offset - 1)
-    trailing = source[end:closing]
+    trailing = _code_only(source[end:closing])
     comma = trailing.find(",")
     if comma >= 0:
         return start, end + comma + 1, ""
@@ -498,7 +555,7 @@ def _dict_entry_removal(source, line_offsets, tree, node, name):
         previous_end = _source_offset(
             line_offsets, previous.end_lineno, previous.end_col_offset
         )
-        separator = source[previous_end:start].rfind(",")
+        separator = _code_only(source[previous_end:start]).rfind(",")
         if separator >= 0:
             start = previous_end + separator
     return start, end, ""
@@ -629,6 +686,15 @@ def migrate_config_source(source, source_name="config.py"):
     )
     required_imports = []
     rebound = rebound_names(tree)
+    if safe_config and "priority" not in config_names and "Priority" in rebound:
+        # The miner's built-in order applies instead, and it has no FAVORITE.
+        logger.warning(
+            f"{source_name} defines Priority itself, so the migration did not "
+            "add MINER_CONFIG['priority']. The built-in order applies (STREAK, "
+            "DROPS, ORDER, without FAVORITE); add 'priority' to MINER_CONFIG "
+            "to change it.",
+            extra={"emoji": ":warning:"},
+        )
     if safe_config and "priority" not in config_names and "Priority" not in rebound:
         missing_miner_options.append(
             "'priority': [Priority.STREAK, Priority.DROPS, Priority.ORDER, "
@@ -992,7 +1058,60 @@ _MIGRATION_IMPORTS = {
 }
 
 
-def rebound_names(tree, expected=None):
+_NESTED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+def _module_scope_nodes(tree):
+    """Yield the nodes of tree that run in, and can bind names of, the module
+    namespace: everything except function, lambda, class and comprehension
+    bodies. Their names, decorators, defaults, bases and first iterables run
+    in the module; a walrus in a comprehension binds there too. Names a
+    nested scope declares `global` are yielded as Name stores."""
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            arguments = node.args
+            children = [*arguments.defaults]
+            children += [default for default in arguments.kw_defaults if default]
+            children += getattr(node, "decorator_list", [])
+        elif isinstance(node, ast.ClassDef):
+            children = [*node.decorator_list, *node.bases, *node.keywords]
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)) or (
+            isinstance(node, ast.GeneratorExp)
+        ):
+            children = [node.generators[0].iter]
+            children += [
+                child.target
+                for child in ast.walk(node)
+                if isinstance(child, ast.NamedExpr)
+            ]
+        elif type(node).__name__ == "TypeAlias":
+            # The value and type parameters get their own scope.
+            children = [node.name]
+        else:
+            children = list(ast.iter_child_nodes(node))
+        if isinstance(node, _NESTED_SCOPES):
+            children += [
+                ast.Name(id=name, ctx=ast.Store())
+                for child in ast.walk(node)
+                if isinstance(child, ast.Global)
+                for name in child.names
+            ]
+        stack.extend(children)
+
+
+def rebound_names(tree, expected=None, module_scope=False):
     """Names the config binds other than with the import that should bind them.
 
     expected maps a bound name to the import binding (see import_binding) a
@@ -1006,14 +1125,29 @@ def rebound_names(tree, expected=None):
     target, a type parameter... Such a name may not be that import where a
     written reference runs, so the migration leaves defaults using it out
     (the class's own default applies) and the dashboard refuses the edit.
+
+    The migration writes into calls that can sit in any scope, so by default
+    every binding in the file counts. With module_scope=True only bindings in
+    the module namespace count (an import under `if` or `try` is top-level
+    there): the dashboard writes only into top-level assignments, which a
+    function's local names can't shadow.
     """
     if expected is None:
         expected = _MIGRATION_IMPORTS
-    top_level = {
-        id(node) for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
-    }
+    if module_scope:
+        nodes = list(_module_scope_nodes(tree))
+        top_level = {
+            id(node) for node in nodes if isinstance(node, (ast.Import, ast.ImportFrom))
+        }
+    else:
+        nodes = ast.walk(tree)
+        top_level = {
+            id(node)
+            for node in tree.body
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        }
     names = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 if alias.name == "*":
@@ -1058,8 +1192,11 @@ def rebound_names(tree, expected=None):
 
 
 def _uses_any(value, names):
-    """Whether a default's source text starts with one of names."""
-    return re.split(r"[.(]", value, maxsplit=1)[0] in names
+    """Whether a default's source reads any of names."""
+    return any(
+        isinstance(node, ast.Name) and node.id in names
+        for node in ast.walk(ast.parse(value, mode="eval"))
+    )
 
 
 def _uses_any_of(values, names):

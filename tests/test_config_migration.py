@@ -1,10 +1,12 @@
 import ast
+import difflib
 import errno
 import hashlib
 import inspect
 import logging
 import os
 import platform
+import re
 import stat
 import sys
 from pathlib import Path
@@ -1443,7 +1445,7 @@ def test_invalid_generated_output_does_not_recover_from_a_backup(tmp_path):
     before = config.read_bytes()
     backup_before = backup.read_bytes()
 
-    with pytest.raises(ConfigMigrationError, match="generated invalid"):
+    with pytest.raises(GeneratedConfigError, match="generated invalid"):
         migrate_config(config)
 
     assert config.read_bytes() == before
@@ -1454,30 +1456,69 @@ def test_invalid_generated_output_does_not_recover_from_a_backup(tmp_path):
     ]
 
 
-def test_invalid_output_at_the_current_version_is_not_written(tmp_path):
+@pytest.mark.parametrize(
+    "miner_config",
+    [
+        '{"username": "alice", "password": ("secret")}',
+        '{"username": "alice", "password": ( ( "secret" ) ) }',
+        '{\n    "username": "alice",\n    "password": (  # note (\n'
+        '        "secret"\n    )\n}',
+        '{\n    "username": "alice",\n    "password": ("secret"),\n}',
+    ],
+)
+def test_a_parenthesized_password_is_removed_at_the_current_version(
+    tmp_path, miner_config
+):
     # R327-07: a config already at CONFIG_VERSION only gets its password
-    # removed, and that edit leaves a parenthesized value's ")" behind. The
-    # broken result must be refused like any other invalid migration output.
+    # removed. The removal must take the value's parentheses with it, so the
+    # result is valid and saved, not refused on every start.
     config = tmp_path / "config.py"
     config.write_text(
         f"CONFIG_VERSION = {CONFIG_VERSION}\n"
-        'MINER_CONFIG = {"username": "alice", "password": ("secret")}\n',
+        f"MINER_CONFIG = {miner_config}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
         encoding="utf-8",
     )
+
+    assert migrate_config(config) is True
+
+    migrated = config.read_text(encoding="utf-8")
+    assert "secret" not in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"] == {"username": "alice"}
     backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
-    backup.write_text(CONFIG, encoding="utf-8")
-    before = config.read_bytes()
-    backup_before = backup.read_bytes()
+    assert "secret" not in backup.read_text(encoding="utf-8")
+    # The saved file needs no further edit, so the next start is a no-op.
+    assert migrate_config(config) is False
 
-    with pytest.raises(GeneratedConfigError, match="generated invalid"):
-        migrate_config(config)
 
-    assert config.read_bytes() == before
-    assert backup.read_bytes() == backup_before
-    assert sorted(path.name for path in tmp_path.iterdir()) == [
-        "config.py",
-        f"config.py.v{CONFIG_VERSION}.bak",
-    ]
+@pytest.mark.parametrize(
+    "entries, expected",
+    [
+        ('{("password"): "s", "username": "a"}', {"username": "a"}),
+        (
+            '{"username": "a", ("password") : ("s"), ("x"): 1}',
+            {"username": "a", "x": 1},
+        ),
+        ('{"password": "s", **EXTRA}', {"extra": True}),
+        ('{"username": "a", "password": "s"  # a, b\n}', {"username": "a"}),
+    ],
+)
+def test_password_removal_keeps_neighbouring_entries_intact(entries, expected):
+    source = (
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'EXTRA = {"extra": True}\n'
+        f"MINER_CONFIG = {entries}\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"] == expected
 
 
 @pytest.mark.parametrize(
@@ -1770,3 +1811,180 @@ def test_a_wildcard_from_another_module_keeps_the_dependent_defaults_out():
     assert "logging.INFO" not in migrated
     assert "priority" not in namespace["MINER_CONFIG"]
     assert namespace["MINER_CONFIG"]["logger_settings"].less is False
+
+
+def test_a_rebound_priority_warns_that_the_default_list_was_not_added(caplog):
+    source = 'def Priority():\n    pass\n\nMINER_CONFIG = {"username": "alice"}\n'
+
+    with caplog.at_level(logging.WARNING):
+        migrated, _, _ = migrate_config_source(source)
+
+    assert "'priority'" not in migrated
+    assert "defines Priority itself" in caplog.text
+    assert "without FAVORITE" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("[logging.INFO]", True),
+        ("(ColorPalette.DEFAULT,)", True),
+        ("dict(level=logging.INFO)", True),
+        ("logging.INFO", True),
+        ("'logging'", False),
+        ("[Priority.STREAK]", False),
+    ],
+)
+def test_uses_any_reads_every_name_in_a_default(value, expected):
+    from TwitchChannelPointsMiner.config_migration import _uses_any
+
+    assert _uses_any(value, {"logging", "ColorPalette"}) is expected
+
+
+@pytest.mark.parametrize(
+    "last_import", ["import os  # comment", "import os;  # comment"]
+)
+def test_imports_are_added_below_an_import_with_a_trailing_comment(last_import):
+    source = f'{last_import}\nMINER_CONFIG = {{"username": "alice"}}\n'
+
+    migrated, _, _ = migrate_config_source(source)
+
+    lines = migrated.split("\n")
+    assert lines[0] == f"CONFIG_VERSION = {CONFIG_VERSION}"
+    assert lines[1] == last_import
+    assert lines[2].startswith("from TwitchChannelPointsMiner.classes.Settings")
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert len(namespace["MINER_CONFIG"]["priority"]) == 4
+
+
+def _example_at_version(version):
+    source = (Path(__file__).resolve().parent.parent / "config.example.py").read_text(
+        encoding="utf-8"
+    )
+    replacement = "" if version == 0 else f"CONFIG_VERSION = {version}\n"
+    old, count = re.subn(r"^CONFIG_VERSION = \d+\n", replacement, source, flags=re.M)
+    assert count == 1
+    return old
+
+
+@pytest.mark.parametrize("version", [0, 5, 9, 11])
+def test_config_example_migrates_from_older_versions_by_adding_only_defaults(
+    version,
+):
+    # Golden test: config.example.py migrated from an older version is the
+    # same file with CONFIG_VERSION updated and only these lines inserted.
+    # The output is the same as before #327's placement changes.
+    old = _example_at_version(version)
+
+    migrated, old_version, new_version = migrate_config_source(old)
+
+    assert (old_version, new_version) == (version, CONFIG_VERSION)
+    expected_lines = [
+        "        username=None,\n",
+        "    'blacklist': [],\n",
+        "    'track_category_streamer_points': False,\n",
+    ]
+    if version:
+        old = old.replace(
+            f"CONFIG_VERSION = {version}\n", f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        )
+    else:
+        # An unversioned file gets CONFIG_VERSION below its coding line.
+        expected_lines.insert(0, f"CONFIG_VERSION = {CONFIG_VERSION}\n")
+        assert migrated.split("\n")[:2] == [
+            "# -*- coding: utf-8 -*-",
+            f"CONFIG_VERSION = {CONFIG_VERSION}",
+        ]
+    matcher = difflib.SequenceMatcher(
+        a=old.splitlines(keepends=True),
+        b=migrated.splitlines(keepends=True),
+        autojunk=False,
+    )
+    changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
+    assert {opcode[0] for opcode in changes} == {"insert"}
+    inserted = [line for _, _, _, j1, j2 in changes for line in matcher.b[j1:j2]]
+    assert inserted == expected_lines
+    # Migrating the output again changes nothing.
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        CONFIG,
+        "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"
+        '"""Doc."""\nfrom __future__ import annotations\n'
+        'MINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc."""; MINER_CONFIG = {"username": "alice"}\n',
+        "import os  # comment\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}\n'
+        'MINE_CONFIG = {"categories": []}\n',
+    ],
+)
+def test_migrating_the_migrations_own_output_is_a_no_op(source):
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrate_config_source(migrated) == (
+        migrated,
+        CONFIG_VERSION,
+        CONFIG_VERSION,
+    )
+
+
+def test_non_ascii_text_before_a_semicolon_shared_header_keeps_offsets():
+    # ast columns are UTF-8 byte offsets; the inserts must land on characters.
+    source = '"""Dökümän für Ålice."""; MINER_CONFIG = {"username": "ålice"}\n'
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrated.startswith(
+        f'"""Dökümän für Ålice."""; CONFIG_VERSION = {CONFIG_VERSION}\n'
+    )
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["__doc__"] == "Dökümän für Ålice."
+    assert namespace["MINER_CONFIG"]["username"] == "ålice"
+    assert len(namespace["MINER_CONFIG"]["priority"]) == 4
+
+
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_crlf_and_cr_configs_migrate_with_their_header_first(tmp_path, newline):
+    source = newline.join(
+        [
+            "# -*- coding: utf-8 -*-",
+            '"""Doc."""',
+            "import os  # comment",
+            "from TwitchChannelPointsMiner.logger import LoggerSettings",
+            'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}',
+            "STREAMERS = []",
+            'MINE_CONFIG = {"categories": []}',
+            "ANALYTICS_CONFIG = None",
+            "",
+        ]
+    )
+    header = [
+        "# -*- coding: utf-8 -*-",
+        '"""Doc."""',
+        f"CONFIG_VERSION = {CONFIG_VERSION}",
+        "import os  # comment",
+    ]
+
+    # The source itself: the user's lines keep their line endings.
+    migrated, _, _ = migrate_config_source(source)
+
+    assert re.split(r"\r\n|\r|\n", migrated)[:4] == header
+    assert f"import os  # comment{newline}" in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].console_level == logging.INFO
+    assert migrate_config_source(migrated)[0] == migrated
+
+    # The file: read with universal newlines, so it is saved with LF endings.
+    config = tmp_path / "config.py"
+    config.write_bytes(source.encode("utf-8"))
+
+    assert migrate_config(config) is True
+    assert config.read_bytes().decode("utf-8").split("\n")[:4] == header
+    assert migrate_config(config) is False

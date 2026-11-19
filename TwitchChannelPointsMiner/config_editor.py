@@ -1724,15 +1724,26 @@ def _with_config_import(encoded, statement, used_in=()):
         raise ConfigEditError(
             f"Refusing to edit a configuration that does not parse: {error}"
         ) from error
-    # A name the config also binds another way (logging = ..., an alias, a
-    # parameter...) may not be the import where the edit writes it, and adding
-    # the import could replace the config's own value. Refuse the edit.
+    # A name the module also binds another way (logging = ..., an alias, a
+    # def...) may not be the import where the edit writes it, and adding the
+    # import could replace the config's own value. Refuse the edit. The edit
+    # writes into a top-level assignment, so only module-level bindings up to
+    # that statement can shadow it; a function's own `import logging` or a
+    # parameter named logging can't.
     requested = ast.parse(statement).body[0]
     expected = {
         binding[3]: binding
         for binding in (import_binding(requested, alias) for alias in requested.names)
     }
-    rebound = rebound_names(tree, expected)
+    edited = next(
+        (index for index, node in enumerate(tree.body) if _assigns_to(node, used_in)),
+        len(tree.body),
+    )
+    rebound = rebound_names(
+        ast.Module(body=tree.body[: edited + 1], type_ignores=[]),
+        expected,
+        module_scope=True,
+    )
     for bound in expected:
         if bound in rebound:
             raise ConfigEditError(
@@ -1743,7 +1754,8 @@ def _with_config_import(encoded, statement, used_in=()):
         return encoded
     # Below the shebang, encoding declaration, docstring and __future__
     # imports, which must stay first, and above every other statement.
-    line, col_offset = module_header_end(encoded.decode("utf-8"), tree)
+    # utf-8-sig: a BOM would otherwise hide a shebang or coding line.
+    line, col_offset = module_header_end(encoded.decode("utf-8-sig"), tree)
     newline = _newline(encoded).encode("utf-8")
     inserted = statement.encode("utf-8") + newline
     # bytes.splitlines() breaks lines exactly where the tokenizer does, and

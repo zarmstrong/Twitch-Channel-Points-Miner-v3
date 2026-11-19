@@ -3598,6 +3598,137 @@ def test_an_edit_is_refused_when_the_config_rebinds_the_name(tmp_path, rebinding
 
 
 @pytest.mark.parametrize(
+    "prelude",
+    [
+        # A function's own import, parameter or loop target is local to it.
+        "import logging\n\ndef helper():\n    import logging\n    return logging\n",
+        "def helper():\n    import logging\n    return logging\n",
+        "def helper(logging):\n    return logging\n",
+        "def helper():\n    for logging in ():\n        pass\n",
+        "helper = lambda logging: logging\n",
+        "LEVELS = [logging for logging in ()]\n",
+        # Guarded imports of the module itself bind the same thing.
+        "try:\n    import logging\nexcept ImportError:\n    pass\n",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import logging\n",
+        # A rebinding after MINER_CONFIG runs too late to shadow the edit.
+        "",
+    ],
+)
+def test_an_edit_is_allowed_when_only_other_scopes_bind_the_name(tmp_path, prelude):
+    config = tmp_path / "config.py"
+    late = "logging = None\n" if not prelude else ""
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{prelude}"
+        "\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "example",\n'
+        '    "logger_settings": LoggerSettings(),\n'
+        "}\n"
+        f"{late}"
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+    )
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "def helper():\n    global logging\n    logging = None\n",
+        "try:\n    import logging\nexcept ImportError:\n    logging = None\n",
+        "for logging in ():\n    pass\n",
+        "LEVELS = [(logging := level) for level in ()]\n",
+    ],
+)
+def test_an_edit_is_refused_for_a_module_level_rebinding_in_any_statement(
+    tmp_path, rebinding
+):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{rebinding}"
+        'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}\n'
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="defines logging itself"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "header, newline",
+    [
+        ('"""Dökümän."""; ', "\n"),
+        ("# -*- coding: utf-8 -*-\r\n", "\r\n"),
+    ],
+)
+def test_an_import_is_added_below_a_bom_non_ascii_or_crlf_header(
+    tmp_path, header, newline
+):
+    config = tmp_path / "config.py"
+    body = newline.join(
+        [
+            "from TwitchChannelPointsMiner.logger import LoggerSettings",
+            'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}',
+            'STREAMERS = ["one"]',
+            'MINE_CONFIG = {"categories": []}',
+            "ANALYTICS_CONFIG = None",
+            "",
+        ]
+    )
+    config.write_bytes(
+        (f"{header}CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}{newline}{body}").encode(
+            "utf-8"
+        )
+    )
+
+    update_managed_web_config(
+        config,
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+    )
+
+    # The import goes below the header (the editor saves CRLF files with
+    # LF line endings, as it did before).
+    written = config.read_text(encoding="utf-8")
+    assert written.startswith(header.rstrip("\r\n") + ("\n" if "\n" in header else ""))
+    assert written.split("CONFIG_VERSION")[0].endswith("import logging\n")
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+def test_an_import_is_added_below_a_coding_line_after_a_bom():
+    encoded = "\ufeff# -*- coding: utf-8 -*-\nX = 1\n".encode("utf-8")
+
+    updated = config_editor._with_config_import(encoded, "import logging")
+
+    assert updated == "\ufeff# -*- coding: utf-8 -*-\nimport logging\nX = 1\n".encode(
+        "utf-8"
+    )
+
+
+@pytest.mark.parametrize(
     "imports",
     [
         # R327-17: this binds the Streamer module, not the class.
