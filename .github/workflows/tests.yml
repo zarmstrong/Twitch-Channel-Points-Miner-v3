@@ -75,6 +75,7 @@ jobs:
         run: |
           node .github/scripts/release-linked-issues.test.js
           node .github/scripts/release-pull-links.test.js
+          node .github/scripts/docker-latest-tag.test.js
 
   black:
     name: Black

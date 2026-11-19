@@ -177,6 +177,12 @@ _drop_inventory_state = local()
 # channel is ruled out until a query succeeds, so category refreshes stop
 # re-seeding it as eligible after every failure.
 CHANNEL_QUERY_FAILURE_LIMIT = 3
+# How often a channel's ban status is checked again (#331): channels the
+# account isn't banned in, permanent bans, and failed or unclear checks. A
+# timeout is checked again when it ends.
+CHANNEL_BAN_RECHECK_SECONDS = 30 * 60
+CHANNEL_BAN_PERMANENT_RECHECK_SECONDS = 6 * 60 * 60
+CHANNEL_BAN_RETRY_SECONDS = 5 * 60
 # How long an inventory snapshot's per-drop progress may be applied to a
 # channel's advertised campaigns. Inventory syncs run every few minutes but can
 # be six apart, so DROP_INVENTORY_FRESHNESS_SECONDS would lapse between syncs
@@ -305,6 +311,7 @@ class Twitch(object):
         "restart_requested",
         "gql",
         "stream_segment_watchers",
+        "channel_bans",
     ]
 
     def __init__(self, username, user_agent, gql_factory=None, android_login=False):
@@ -481,6 +488,9 @@ class Twitch(object):
         self.drop_badge_rewards = []
         self.restart_requested = Event()
         self.stream_segment_watchers = {}
+        # channel_id -> (ChannelBanStatus or None while unknown, next check
+        # time). Only the minute watcher reads and writes it.
+        self.channel_bans = {}
 
     def __request_authentication_restart(self):
         if self.restart_requested.is_set():
@@ -5926,6 +5936,110 @@ class Twitch(object):
                 del watchers[username]
                 watcher.close()
 
+    def __channel_bans(self):
+        bans = getattr(self, "channel_bans", None)
+        if bans is None:
+            bans = self.channel_bans = {}
+        return bans
+
+    def __channel_ban_active(self, streamer, now):
+        """Return True when the account is known to be banned in the channel."""
+        channel_id = str(getattr(streamer, "channel_id", "") or "")
+        if not channel_id:
+            return False
+        entry = getattr(self, "channel_bans", None)
+        entry = entry.get(channel_id) if entry else None
+        return bool(entry and entry[0] is not None and entry[0].active(now))
+
+    def __refresh_channel_bans(self, streamers, now):
+        """Check the ban status of online channels whose check is due.
+
+        Each answer is cached per channel id, so a channel that is discovered
+        again keeps its known ban. A failed or unclear answer keeps the last
+        known state and is retried a few minutes later: an outage never marks
+        a channel banned.
+        """
+        gql = getattr(self, "gql", None)
+        if gql is None:
+            return
+        bans = self.__channel_bans()
+        due = {}
+        for streamer in streamers:
+            if streamer.is_online is not True:
+                continue
+            channel_id = str(getattr(streamer, "channel_id", "") or "")
+            if not channel_id or channel_id in due:
+                continue
+            entry = bans.get(channel_id)
+            if entry is None or entry[1] <= now:
+                due[channel_id] = streamer
+        if due:
+            statuses = gql.channel_ban_statuses(list(due))
+            for channel_id, streamer in due.items():
+                previous = bans.get(channel_id)
+                previous_status = previous[0] if previous else None
+                status = statuses.get(channel_id)
+                if status is None:
+                    bans[channel_id] = (
+                        previous_status,
+                        now + CHANNEL_BAN_RETRY_SECONDS,
+                    )
+                    continue
+                bans[channel_id] = (
+                    status,
+                    now + self.__channel_ban_recheck(status, now),
+                )
+                self.__log_channel_ban_change(streamer, previous_status, status)
+        # Forget channels that are gone, unless a ban still applies, so a
+        # channel that comes back keeps it.
+        present = {
+            str(getattr(streamer, "channel_id", "") or "") for streamer in streamers
+        }
+        for channel_id, (status, _) in list(bans.items()):
+            if channel_id not in present and not (
+                status is not None and status.active(now)
+            ):
+                bans.pop(channel_id, None)
+
+    @staticmethod
+    def __channel_ban_recheck(status, now):
+        if not status.banned:
+            return CHANNEL_BAN_RECHECK_SECONDS
+        if status.permanent:
+            return CHANNEL_BAN_PERMANENT_RECHECK_SECONDS
+        if status.expires_at is None:
+            return CHANNEL_BAN_RETRY_SECONDS
+        # Check again once the timeout ends, so the channel comes back then.
+        return min(
+            max(status.expires_at - now, 60),
+            CHANNEL_BAN_PERMANENT_RECHECK_SECONDS,
+        )
+
+    @staticmethod
+    def __log_channel_ban_change(streamer, previous, status):
+        if status.banned:
+            if previous is not None and previous.same_ban(status):
+                return
+            if status.permanent:
+                reason = "the account is banned in this channel"
+            elif status.expires_at is not None:
+                until = datetime.fromtimestamp(status.expires_at).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+                reason = f"the account is timed out in this channel until {until}"
+            else:
+                reason = "the account is timed out in this channel"
+            logger.info(
+                f"Skipping {streamer.username} for points and Drops: {reason}",
+                extra={"emoji": ":no_entry_sign:"},
+            )
+        elif previous is not None and previous.banned:
+            logger.info(
+                f"{streamer.username} can be watched again: the account is no "
+                "longer banned or timed out there",
+                extra={"emoji": ":white_check_mark:"},
+            )
+
     def send_minute_watched_events(
         self,
         streamers,
@@ -5978,10 +6092,18 @@ class Twitch(object):
                         # now instead of watching it drift further out of date.
                         self.check_streamer_online(streamers_snapshot[i])
 
+                try:
+                    self.__refresh_channel_bans(streamers_snapshot, now)
+                except Exception as e:
+                    # Never let the ban check stop the watcher; channels keep
+                    # their last known state.
+                    logger.debug(f"Channel ban check failed: {e}")
+
                 streamers_index = [
                     i
                     for i in range(0, len(streamers_snapshot))
                     if streamers_snapshot[i].is_online is True
+                    and not self.__channel_ban_active(streamers_snapshot[i], now)
                     and (
                         not is_drop_discovered(streamers_snapshot[i])
                         or self.__drops_condition(streamers_snapshot[i]) is True
