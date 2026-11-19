@@ -1743,6 +1743,21 @@ def test_listing_claims_on_a_thread_of_its_own(monkeypatch):
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
 
 
+def test_listing_starts_no_claim_thread_once_the_miner_is_stopping(monkeypatch):
+    # Shutdown has looked for the claim thread by then, and would not wait
+    # for one started after.
+    monkeypatch.setattr(twitch_module, "Thread", HeldThread)
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing(watch_group(claimable))
+    twitch = bare_twitch(gql)
+    twitch.running = False
+
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert InlineThread.started == []
+    assert getattr(twitch, "watch_reward_claim_thread", None) is None
+
+
 def test_listing_with_nothing_to_claim_starts_no_thread():
     gql, _ = channel_listing(watch_group(progress(minutes=12, window=open_window())))
 

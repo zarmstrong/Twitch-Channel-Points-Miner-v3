@@ -9631,6 +9631,10 @@ class Twitch(object):
         ):
             return
         with _watch_reward_lock(self):
+            if getattr(self, "running", True) is not True:
+                # Shutting down: a thread started now would not be waited
+                # for. The first listing of the next run claims it.
+                return
             self.watch_reward_claim_requested = True
             if getattr(self, "watch_reward_claim_thread", None) is not None:
                 return
