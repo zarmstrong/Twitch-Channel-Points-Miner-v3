@@ -3396,6 +3396,29 @@ def test_an_existing_import_is_not_added_again(existing):
     assert config_editor._with_config_import(source, SOURCE_IMPORT) == source
 
 
+def test_an_exact_import_below_a_wildcard_binds_the_name_again():
+    # R327-18: the wildcard might bind logging, but the import below it runs
+    # later and binds the module before MINER_CONFIG uses it.
+    source = b"from os.path import *\nimport logging\nMINER_CONFIG = {}\n"
+
+    assert (
+        config_editor._with_config_import(source, "import logging", ("MINER_CONFIG",))
+        == source
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"import logging\nfrom os.path import *\nMINER_CONFIG = {}\n",
+        b"from os.path import *\nMINER_CONFIG = {}\nimport logging\n",
+    ],
+)
+def test_a_wildcard_after_the_last_import_above_the_edit_is_refused(source):
+    with pytest.raises(ConfigEditError, match="may bind logging itself"):
+        config_editor._with_config_import(source, "import logging", ("MINER_CONFIG",))
+
+
 def test_an_aliased_import_does_not_bind_the_name_an_edit_writes():
     source = (SOURCE_IMPORT + " as SS\nSTREAMERS = []\n").encode("utf-8")
 

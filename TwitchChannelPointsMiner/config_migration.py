@@ -1416,6 +1416,18 @@ def rebound_names(tree, expected=None, module_scope=False):
     declared_only = _annotation_only_targets(
         nodes if module_scope else _module_scope_nodes(tree)
     )
+    # The dashboard passes the module only up to the statement it edits. An
+    # exact import directly in that body, below a wildcard, binds the name
+    # again before the statement runs, so the wildcard doesn't count for it.
+    # Maps each name to the line of its last exact import.
+    exact_after = {}
+    if module_scope:
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    binding = import_binding(node, alias) if alias.name != "*" else None
+                    if binding and expected.get(binding[3]) == binding:
+                        exact_after[binding[3]] = node.lineno
     names = set()
     for node in nodes:
         if id(node) in declared_only:
@@ -1425,11 +1437,13 @@ def rebound_names(tree, expected=None, module_scope=False):
                 if alias.name == "*":
                     # A wildcard can bind any name (a package's wildcard
                     # binds its loaded submodules), so only one from the
-                    # expected module is known to bind the expected object.
+                    # expected module is known to bind the expected object,
+                    # or one followed by the expected import.
                     names.update(
                         bound
                         for bound, binding in expected.items()
                         if binding[:2] != (node.level, node.module)
+                        and exact_after.get(bound, 0) <= node.lineno
                     )
                     continue
                 binding = import_binding(node, alias)
