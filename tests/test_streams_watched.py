@@ -179,6 +179,7 @@ def _run_one_watch_iteration(
     on_sleep=None,
     gql=None,
     channel_bans=None,
+    post_kwargs=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -229,6 +230,8 @@ def _run_one_watch_iteration(
 
         def _post(url, **kwargs):
             posted.append(url)
+            if post_kwargs is not None:
+                post_kwargs.append(kwargs)
             assert (
                 responses
             ), "HttpSession.post called more times than post_side_effects provided"
@@ -243,6 +246,7 @@ def _run_one_watch_iteration(
             HttpSession,
             "post",
             lambda url, **kwargs: posted.append(url)
+            or (post_kwargs is not None and post_kwargs.append(kwargs))
             or SimpleNamespace(status_code=500),
         )
     monkeypatch.setattr(

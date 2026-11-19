@@ -14,7 +14,7 @@ The miner runs many threads against the same objects: the main loop in `TwitchCh
 - Locks and fields that tests may not set up are read with `getattr(self, "name", default)`, and some locks are created lazily, because many tests build `Twitch` with `object.__new__` and skip `__init__`. Follow that pattern when you add state that other code reads.
 - Every new attribute on a class with `__slots__` needs a slot entry.
 - Results that must not leak between threads, such as the latest Drops dashboard outcome, are thread-local (`_drops_dashboard_state` in `classes/Twitch.py`).
-- Frequent Twitch HTTP requests (GQL, minute-watched events, Helix) go through `HttpSession.get` / `HttpSession.post` in `classes/HttpSession.py`. Each thread keeps one pooled `requests.Session` that never stores cookies. Tests patch `HttpSession.get` / `post`, not `requests.get` / `post`, which those paths no longer call.
+- Frequent Twitch HTTP requests (GQL, minute-watched events, Helix) go through `HttpSession.get` / `HttpSession.post` in `classes/HttpSession.py`. Each thread keeps one pooled `requests.Session` that never stores cookies and is replaced after `IDLE_SECONDS` without a request. Tests patch `HttpSession.get` / `post`, not `requests.get` / `post`, which those paths no longer call.
 - Other shared containers can be held by several objects. For example, the miner, the websocket pool and every websocket hold the same `events_predictions` dict. Keep such a container the same object and change it in place. Replacing it would leave the other holders with the old one.
 
 ## Configuration files
