@@ -78,7 +78,9 @@ jobs:
       # A version tag that's already pushed isn't built again: a retry after
       # a later step failed (latest, description, notes) would otherwise
       # replace the published image with a different build. When only one
-      # repository has it, it's copied to the other instead. Only a "not
+      # repository has it, it's copied to the other instead, and when the two
+      # hold different builds, the primary one is copied over the legacy
+      # one. Only a "not
       # found" answer counts as missing; any other registry error fails the
       # job, and a later run retries. It checks the tags the build would push,
       # exactly as metadata-action wrote them.
@@ -103,14 +105,21 @@ jobs:
             echo "pushed=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+          error_file="$(mktemp)"
+          trap 'rm -f "${error_file}"' EXIT
+          # Prints the image's digest, or "missing".
           image_state() {
-            local output
-            if output="$(docker buildx imagetools inspect "$1" 2>&1)"; then
-              echo pushed
-            elif [[ "${output}" == *": not found"* ]]; then
+            local output digest
+            if output="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2>"${error_file}")"; then
+              if ! digest="$(jq -er '.digest' <<< "${output}")"; then
+                echo "::error::Could not read the digest of $1 from: ${output%%$'\n'*}" >&2
+                return 1
+              fi
+              echo "${digest}"
+            elif grep -q ': not found' "${error_file}"; then
               echo missing
             else
-              echo "::error::Could not check whether $1 is on Docker Hub: ${output%%$'\n'*}" >&2
+              echo "::error::Could not check whether $1 is on Docker Hub: $(head -n 1 "${error_file}")" >&2
               return 1
             fi
           }
@@ -121,7 +130,13 @@ jobs:
             pushed=false
           elif [[ "${primary_state}" == missing ]]; then
             docker buildx imagetools create --tag "${primary}" "${legacy}" || exit 1
-          elif [[ "${legacy_state}" == missing ]]; then
+          elif [[ "${legacy_state}" != "${primary_state}" ]]; then
+            # Missing, or a different build: a rebuild can push the primary
+            # repository and then fail on the legacy one. The primary
+            # repository is the one the release notes link.
+            if [[ "${legacy_state}" != missing ]]; then
+              echo "::warning::${legacy} (${legacy_state}) differs from ${primary} (${primary_state}); copying ${primary} over it."
+            fi
             docker buildx imagetools create --tag "${legacy}" "${primary}" || exit 1
           fi
           echo "Version ${RELEASE_TAG} already pushed: ${pushed}"
