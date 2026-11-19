@@ -837,16 +837,16 @@ class Twitch(object):
                 )
         return False
 
-    def __take_drop_snapshot_save(self, tracking_key, minutes_watched, status):
-        """Whether this progress snapshot is to be saved, recording it as
-        saved when it is.
+    def __save_drop_snapshot_if_new(self, tracking_key, minutes_watched, status, save):
+        """Call `save` to write this progress snapshot to the report if it
+        is to be saved, recording it as saved. Returns whether it was.
 
-        Decided and recorded in one step, under the lock a reward campaign's
-        record is stored under: the sync and the minute watcher work on
-        copies, and a listing that finds a window started over forgets what
-        was saved for the drop. A copy from before that listing, recorded
-        after it, would keep the new window's lower minutes out of the
-        report until they passed the old ones."""
+        Decided, recorded and written in one step, under the lock a reward
+        campaign's record is stored under: the sync and the minute watcher
+        work on copies, and a listing that finds a window started over
+        forgets what was saved for the drop. A copy from before that
+        listing, recorded or written after it, would put the old window's
+        minutes back in the report over the new one's."""
         with _watch_reward_lock(self):
             if self.__reward_snapshot_is_stale(
                 str(tracking_key).split("|", 1)[0], minutes_watched
@@ -858,12 +858,14 @@ class Twitch(object):
             ):
                 return False
             self.__mark_drop_snapshot_saved(tracking_key, minutes_watched, status)
+            save()
             return True
 
-    def __take_watched_drop_progress_save(self, drop):
-        """The minutes last saved for a drop the minute watcher has new
-        progress on (-1 for none), recording the new ones as saved. None
-        when there is nothing new to save. See __take_drop_snapshot_save."""
+    def __save_watched_drop_progress_if_new(self, drop, save):
+        """Call `save` to write the progress of a drop the minute watcher has
+        new minutes on, recording them as saved. Returns the minutes saved
+        before (-1 for none), or None when there was nothing new to save.
+        See __save_drop_snapshot_if_new."""
         progress_key = drop.id
         with _watch_reward_lock(self):
             last_saved_minutes = self.drop_progress_last_saved.get(progress_key, -1)
@@ -874,6 +876,7 @@ class Twitch(object):
             ):
                 return None
             self.drop_progress_last_saved[progress_key] = drop.current_minutes_watched
+            save()
             return last_saved_minutes
 
     def __slugify(self, value: str) -> str:
@@ -1471,26 +1474,22 @@ class Twitch(object):
                     str(variant.get("item_art_url") or ""),
                 ]
             )
-            if (
-                self.__take_drop_snapshot_save(
-                    variant_key,
-                    drop.current_minutes_watched,
-                    effective_status,
-                )
-                is False
-            ):
-                continue
-
-            self.__save_drop_progress_analytics(
-                drop,
-                campaign=campaign,
-                streamer_username=streamer_username,
-                campaign_name_override=campaign_name_override,
-                category_name_override=category_name_override,
-                status_override=effective_status,
-                item_name_override=variant.get("name"),
-                benefit_override=variant.get("benefit"),
-                item_art_url_override=variant.get("item_art_url"),
+            self.__save_drop_snapshot_if_new(
+                variant_key,
+                drop.current_minutes_watched,
+                effective_status,
+                functools.partial(
+                    self.__save_drop_progress_analytics,
+                    drop,
+                    campaign=campaign,
+                    streamer_username=streamer_username,
+                    campaign_name_override=campaign_name_override,
+                    category_name_override=category_name_override,
+                    status_override=effective_status,
+                    item_name_override=variant.get("name"),
+                    benefit_override=variant.get("benefit"),
+                    item_art_url_override=variant.get("item_art_url"),
+                ),
             )
 
     def scrape_drop_progress_from_inventory(self, reason="startup"):
@@ -1563,28 +1562,24 @@ class Twitch(object):
                                 str(variant.get("item_art_url") or ""),
                             ]
                         )
-                        if (
-                            self.__take_drop_snapshot_save(
-                                variant_key,
-                                drop.current_minutes_watched,
-                                status,
-                            )
-                            is False
+                        if self.__save_drop_snapshot_if_new(
+                            variant_key,
+                            drop.current_minutes_watched,
+                            status,
+                            functools.partial(
+                                self.__save_drop_progress_analytics,
+                                drop,
+                                campaign=None,
+                                streamer_username=None,
+                                campaign_name_override=campaign_name_override,
+                                category_name_override=category_name_override,
+                                status_override=status,
+                                item_name_override=variant.get("name"),
+                                benefit_override=variant.get("benefit"),
+                                item_art_url_override=variant.get("item_art_url"),
+                            ),
                         ):
-                            continue
-
-                        self.__save_drop_progress_analytics(
-                            drop,
-                            campaign=None,
-                            streamer_username=None,
-                            campaign_name_override=campaign_name_override,
-                            category_name_override=category_name_override,
-                            status_override=status,
-                            item_name_override=variant.get("name"),
-                            benefit_override=variant.get("benefit"),
-                            item_art_url_override=variant.get("item_art_url"),
-                        )
-                        variant_saved = True
+                            variant_saved = True
 
                     if variant_saved is True:
                         saved += 1
@@ -7537,11 +7532,10 @@ class Twitch(object):
                                         and drop.is_claimed is False
                                         and drop.current_minutes_watched > 0
                                     ):
-                                        last_saved_minutes = (
-                                            self.__take_watched_drop_progress_save(drop)
-                                        )
-                                        if last_saved_minutes is not None:
-                                            self.__save_drop_progress_analytics(
+                                        last_saved_minutes = self.__save_watched_drop_progress_if_new(
+                                            drop,
+                                            functools.partial(
+                                                self.__save_drop_progress_analytics,
                                                 drop,
                                                 campaign=campaign,
                                                 streamer_username=streamer.username,
@@ -7557,7 +7551,9 @@ class Twitch(object):
                                                     )
                                                     or {}
                                                 ).get(drop.id),
-                                            )
+                                            ),
+                                        )
+                                        if last_saved_minutes is not None:
                                             if (
                                                 last_saved_minutes
                                                 < drop.minutes_required
@@ -9323,14 +9319,23 @@ class Twitch(object):
         return self.__remember_watch_reward_campaign(campaign)
 
     def __watch_reward_windows_opened(self, campaign) -> list:
-        """When the windows opened that followed the stored campaign's
-        claimable repeats and that its record, read before, knows nothing
-        of."""
+        """When the windows opened that the stored campaign's record, read
+        before, knows nothing of: the one that follows a repeat waiting to
+        be claimed, and the one a repeat was waiting for (after the repeat
+        before it was earned, or for a window to close whose minutes could
+        not be finished in time)."""
         now = utc_now()
-        opened = [
-            self.__parse_twitch_datetime(drop["_reward_group"].get("next_start"))
-            for drop in campaign.get("timeBasedDrops") or []
-        ]
+        read_at = datetime.fromtimestamp(
+            campaign["_watch_reward"].get("read_at") or 0, timezone.utc
+        ).replace(tzinfo=None)
+        opened = []
+        for drop in campaign.get("timeBasedDrops") or []:
+            group = drop["_reward_group"]
+            opened.append(self.__parse_twitch_datetime(group.get("next_start")))
+            if group.get("claimable") is not True and group.get("finished") is not True:
+                starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
+                if starts_at is not None and starts_at > read_at:
+                    opened.append(starts_at)
         return [moment for moment in opened if moment is not None and moment <= now]
 
     def __retry_read_for_opened_window(self, campaign):

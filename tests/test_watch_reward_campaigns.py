@@ -2094,6 +2094,50 @@ def test_read_for_an_opened_window_is_retried_when_no_channel_answers(monkeypatc
     assert twitch.watch_reward_pending_starts == {retry_at}
 
 
+def test_repeat_whose_wait_ended_is_looked_for_again_when_nobody_is_live(
+    monkeypatch,
+):
+    # Earned for this window and waiting for the next: the wait is the
+    # drop's own start. When it comes, no channel is live in the category.
+    twitch, _, listing_calls = evaluation_twitch(watch_group(progress(grants=1)))
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(progress(grants=1, next_at=stamp(NOW + timedelta(minutes=5))))
+        )
+    )
+    stored = twitch.watch_reward_campaigns["quest-1"]
+    [drop] = stored["timeBasedDrops"]
+    assert drop["startAt"] == stamp(NOW + timedelta(minutes=5))
+    drop["startAt"] = stamp(NOW - timedelta(seconds=30))
+    stored["_watch_reward"]["read_at"] -= 600
+    twitch.watch_reward_pending_starts = set()
+
+    evaluate(monkeypatch, twitch, [listing()], channels=())
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+    assert listing_calls == []
+
+
+def test_start_the_record_was_read_after_is_not_an_opening(monkeypatch):
+    # The campaign's own start, long past, or a window the last listing
+    # already reported open: an empty category is left to the ordinary
+    # refresh, as for any campaign.
+    twitch, _, _ = evaluation_twitch(watch_group(progress(minutes=5)))
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5)))
+    )
+    stored = twitch.watch_reward_campaigns["quest-1"]
+    stored["_watch_reward"]["read_at"] -= 2 * WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+    twitch.watch_reward_pending_starts = set()
+
+    evaluate(monkeypatch, twitch, [listing()], channels=())
+
+    assert twitch.watch_reward_pending_starts == set()
+
+
 def other_campaign(group_self):
     """A second reward campaign, converted."""
     group = watch_group(group_self)
@@ -2254,70 +2298,84 @@ def test_window_that_starts_over_is_reported_from_its_own_minutes():
     assert twitch.drop_status_last_saved == {}
 
 
+def snapshot_twitch():
+    twitch = bare_twitch()
+    twitch.drop_progress_last_saved = {}
+    twitch.drop_status_last_saved = {}
+    return twitch
+
+
 def test_snapshot_from_before_a_window_started_over_is_not_saved():
     # The sync copied the record at 40 minutes; a listing then reported the
     # window started over. Saved now, the copy's 40 minutes would keep the
     # new window's out of the report until they passed them.
-    twitch = bare_twitch()
-    twitch.drop_progress_last_saved = {}
-    twitch.drop_status_last_saved = {}
+    twitch = snapshot_twitch()
     key = "group-watch#0|art|Daily Chest|Launch Celebration|Example Game|Chest|"
     for minutes in (40, 5):
         twitch._Twitch__remember_watch_reward_campaign(
             convert(watch_group(progress(minutes=minutes, window=open_window())))
         )
+    written = []
 
-    take = twitch._Twitch__take_drop_snapshot_save
-    assert take(key, 40, "in_progress") is False
+    def save(minutes):
+        return twitch._Twitch__save_drop_snapshot_if_new(
+            key, minutes, "in_progress", lambda: written.append(minutes)
+        )
+
+    assert save(40) is False
     assert twitch.drop_progress_last_saved == {}
-    assert take(key, 5, "in_progress") is True
-    assert take(key, 5, "in_progress") is False
+    assert save(5) is True
+    assert save(5) is False
     assert twitch.drop_progress_last_saved == {key: 5}
+    assert written == [5]
 
     # The minute watcher's copy likewise.
-    stale = SimpleNamespace(id="group-watch#0", current_minutes_watched=40)
-    assert twitch._Twitch__take_watched_drop_progress_save(stale) is None
-    fresh = SimpleNamespace(id="group-watch#0", current_minutes_watched=5)
-    assert twitch._Twitch__take_watched_drop_progress_save(fresh) == -1
-    assert twitch._Twitch__take_watched_drop_progress_save(fresh) is None
+    def save_watched(minutes):
+        drop = SimpleNamespace(id="group-watch#0", current_minutes_watched=minutes)
+        return twitch._Twitch__save_watched_drop_progress_if_new(
+            drop, lambda: written.append(("watched", minutes))
+        )
+
+    assert save_watched(40) is None
+    assert save_watched(5) == -1
+    assert save_watched(5) is None
+    assert written == [5, ("watched", 5)]
 
     # A drop that is no reward campaign's is saved as ever.
-    assert take("other-drop|art", 40, "in_progress") is True
+    assert twitch._Twitch__save_drop_snapshot_if_new(
+        "other-drop|art", 40, "in_progress", lambda: None
+    )
 
 
 def test_snapshot_of_a_group_that_is_over_is_saved_with_the_minutes_it_got_to():
     # Nothing is watched for it any more, so no newer minutes are held back.
-    twitch = bare_twitch()
-    twitch.drop_progress_last_saved = {}
-    twitch.drop_status_last_saved = {}
+    twitch = snapshot_twitch()
     twitch._Twitch__remember_watch_reward_campaign(
         convert(watch_group(progress(status="EXPIRED")))
     )
 
-    assert twitch._Twitch__take_drop_snapshot_save("group-watch#0|art", 40, "failed")
-
-
-def test_snapshot_is_recorded_as_saved_under_the_lock_records_are_stored_under(
-    monkeypatch,
-):
-    # Decided before a listing forgets the drop's saved minutes and recorded
-    # after it, an older copy's minutes would be back.
-    twitch = bare_twitch()
-    twitch.drop_progress_last_saved = {}
-    twitch.drop_status_last_saved = {}
-    held = []
-    mark = Twitch._Twitch__mark_drop_snapshot_saved
-
-    def mark_checking_the_lock(self, *args):
-        held.append(twitch_module._watch_reward_lock(self).locked())
-        return mark(self, *args)
-
-    monkeypatch.setattr(
-        Twitch, "_Twitch__mark_drop_snapshot_saved", mark_checking_the_lock
+    assert twitch._Twitch__save_drop_snapshot_if_new(
+        "group-watch#0|art", 40, "failed", lambda: None
     )
 
-    assert twitch._Twitch__take_drop_snapshot_save("drop-1|art", 3, "in_progress")
-    assert held == [True]
+
+def test_snapshot_is_written_under_the_lock_records_are_stored_under():
+    # Approved before a listing reports the window started over and written
+    # after it, an older copy's minutes would replace the new window's in
+    # the report. A listing waits for the write instead.
+    twitch = snapshot_twitch()
+    lock = twitch_module._watch_reward_lock(twitch)
+    held = []
+    drop = SimpleNamespace(id="drop-1", current_minutes_watched=3)
+
+    assert twitch._Twitch__save_drop_snapshot_if_new(
+        "drop-1|art", 3, "in_progress", lambda: held.append(lock.locked())
+    )
+    assert twitch._Twitch__save_watched_drop_progress_if_new(
+        drop, lambda: held.append(lock.locked())
+    ) == (-1)
+    assert held == [True, True]
+    assert lock.locked() is False
 
 
 def category_retry_twitch(group_self, end_at=END_AT):
