@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: github-traffic-badges
@@ -19,67 +19,40 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: gh login
-        run: echo "${{ secrets.SECRET_TOKEN }}" | gh auth login --with-token
+      - name: Fetch the latest view counts
+        env:
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh api "repos/$REPOSITORY/traffic/views" > traffic.json
 
-      - name: parse latest traffic count
+      - name: Download the previous counts from the gist
+        env:
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          TRAFFIC_ID: ${{ secrets.TRAFFIC_ID }}
         run: |
-          curl --user "${{ github.actor }}:${{ secrets.SECRET_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/traffic/views \
-            > traffic.json
-      - name: create gist and download previous count
-        id: set_id
-        run: |
-          if [ -n "${{ secrets.TRAFFIC_ID }}" ]
-          then
-              echo "TRAFFIC_ID found"
-              echo "GIST=${{ secrets.TRAFFIC_ID }}" >> "$GITHUB_OUTPUT"
-              curl https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.TRAFFIC_ID }}/raw/traffic.json > traffic_before.json
-              if cat traffic_before.json | grep '404: Not Found'; then
-                echo "TRAFFIC_ID is no longer valid. Update the TRAFFIC_ID repository secret."
-                exit 1
-              fi
-          else
-              echo "TRAFFIC_ID is not configured. Create a gist and add its ID as the TRAFFIC_ID repository secret."
-              exit 1
+          if [ -z "$TRAFFIC_ID" ]; then
+            echo "::error::TRAFFIC_ID is not configured. Create a gist and add its ID as the TRAFFIC_ID repository secret."
+            exit 1
           fi
-      - name: update traffic.json
-        run: |
-          curl https://gist.githubusercontent.com/MShawon/d37c49ee4ce03f64b92ab58b0cec289f/raw/traffic.py > traffic.py
-          python3 traffic.py
-      - name: Update gist with latest count
-        run: |
-          content=$(sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/\"/\\"/g' -e 's/\r//g' "traffic.json" | sed -E ':a;N;$!ba;s/\r{0,1}\n/\\n/g')
-          echo '{"description": "${{ github.repository }} traffic statistics", "files": {"traffic.json": {"content": "'"$content"'"}}}' > post_traffic.json
-          curl -s -X PATCH \
-            --user "${{ github.actor }}:${{ secrets.SECRET_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d @post_traffic.json https://api.github.com/gists/${{ steps.set_id.outputs.GIST }} > /dev/null 2>&1
-          if [ ! -f TRAFFIC.md ]; then
-            shields="https://img.shields.io/badge/dynamic/json?color=success&label=Views&query=count&url="
-            url="https://gist.githubusercontent.com/${{ github.actor }}/${{ steps.set_id.outputs.GIST }}/raw/traffic.json"
-            repo="https://github.com/MShawon/github-clone-count-badge"
-            echo ''> TRAFFIC.md
-            echo '
-            **Markdown**
-            ```markdown' >> TRAFFIC.md
-            echo "[![GitHub Traffic]($shields$url&logo=github)]($repo)" >> TRAFFIC.md
-            echo '
-            ```
-            **HTML**
-            ```html' >> TRAFFIC.md
-            echo "<a href='$repo'><img alt='GitHub Traffic' src='$shields$url&logo=github'></a>" >> TRAFFIC.md
-            echo '```' >> TRAFFIC.md
+          gh api "gists/$TRAFFIC_ID" --jq '
+            .files["traffic.json"]
+            | if . == null then error("the gist has no traffic.json; check the TRAFFIC_ID secret")
+              elif .truncated then error("traffic.json is too large to read through the API")
+              else .content end' > traffic_before.json
 
-            git add TRAFFIC.md
-            git config --global user.name "GitHub Action"
-            git config --global user.email "action@github.com"
-            git commit -m "create traffic count badge"
-          fi
-      - name: Push
+      - name: Merge the counts
+        run: python3 .github/scripts/merge_traffic_counts.py views traffic.json traffic_before.json
+
+      - name: Update the gist with the latest counts
+        env:
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          TRAFFIC_ID: ${{ secrets.TRAFFIC_ID }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          git pull --rebase origin "$GITHUB_REF_NAME"
-          git push origin "HEAD:$GITHUB_REF_NAME"
+          jq -n \
+            --arg description "$REPOSITORY traffic statistics" \
+            --rawfile content traffic.json \
+            '{description: $description, files: {"traffic.json": {content: $content}}}' \
+            | gh api --method PATCH "gists/$TRAFFIC_ID" --input - > /dev/null
