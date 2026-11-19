@@ -3515,10 +3515,10 @@ def test_config_import_goes_before_a_statement_sharing_the_header_line(header):
         assert ast.get_docstring(ast.parse(updated)) == "Doc."
 
 
-def test_a_misplaced_import_is_refused_before_it_is_saved(tmp_path):
-    # R327-05: the header logic reads physical lines, so a docstring line
-    # continued with a backslash gets the import mid logical line. That is a
-    # known limitation; the edit must be refused with config.py untouched.
+def test_an_import_after_a_continued_docstring_line_is_saved(tmp_path):
+    # R327-05: the first statement shares the docstring's logical line past a
+    # backslash continuation. The import goes right before that statement,
+    # ending the logical line, instead of splitting it.
     config = tmp_path / "config.py"
     config.write_text(
         '"""Doc."""; \\\n'
@@ -3528,14 +3528,15 @@ def test_a_misplaced_import_is_refused_before_it_is_saved(tmp_path):
         "ANALYTICS_CONFIG = None\n",
         encoding="utf-8",
     )
-    before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="would not parse"):
-        update_managed_web_config(
-            config, {"action": "update_category", "values": {"sort": "RANDOM"}}
-        )
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "RANDOM"}}
+    )
 
-    assert config.read_bytes() == before
+    updated = config.read_text(encoding="utf-8")
+    assert ast.get_docstring(ast.parse(updated)) == "Doc."
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["username"] == "example"
 
 
 @pytest.mark.parametrize("late_import", ["", "import logging"])

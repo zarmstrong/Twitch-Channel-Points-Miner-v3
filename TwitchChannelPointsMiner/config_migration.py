@@ -307,7 +307,8 @@ def module_header_end(source, tree):
     an encoding declaration only on line 1 or 2, the docstring only as the
     first statement, and `from __future__` imports must come before every
     other statement, so all of them stay above. The column is not 0 only when
-    the first other statement shares the header's last line (after a `;`).
+    the first other statement shares the header's last logical line (after a
+    `;`, possibly past a backslash continuation).
     """
     lines = [line.rstrip("\r\n") for line in _LINE_PATTERN.findall(source)[:2]]
     header = 0
@@ -336,10 +337,29 @@ def module_header_end(source, tree):
         index += 1
     if index:
         last = body[index - 1]
-        if index < len(body) and body[index].lineno == last.end_lineno:
-            return last.end_lineno - 1, body[index].col_offset
+        if index < len(body) and _same_logical_line(source, last, body[index]):
+            following = body[index]
+            return following.lineno - 1, following.col_offset
         header = max(header, last.end_lineno)
     return header, 0
+
+
+def _same_logical_line(source, first, second):
+    """Whether second starts on first's logical line: after a `;`, on the
+    same physical line or past a backslash continuation. Inserted statements
+    then go right before second, so they end that logical line."""
+    if second.lineno == first.end_lineno:
+        return True
+    line_offsets = _line_start_offsets(source)
+    between = _code_only(
+        source[
+            _source_offset(line_offsets, first.end_lineno, first.end_col_offset) : (
+                _source_offset(line_offsets, second.lineno, second.col_offset)
+            )
+        ]
+    )
+    joined = re.sub(r"\\(?:\r\n|\r|\n)", "", between)
+    return "\n" not in joined and "\r" not in joined
 
 
 def _header_offset(source, line_offsets, tree):
@@ -372,7 +392,7 @@ def _import_offset(source, line_offsets, tree, first_use):
     ]
     if imports:
         node = imports[-1]
-        following = _statement_on_same_line(line_offsets, tree, node)
+        following = _statement_on_same_line(source, line_offsets, tree, node)
         if following is not None:
             return following
         end = _source_offset(line_offsets, node.end_lineno, node.end_col_offset)
@@ -385,18 +405,19 @@ def _import_offset(source, line_offsets, tree, first_use):
         return end + comment.end() if comment else end
     for node in above_first_use:
         if _assignment_value(ast.Module(body=[node]), "CONFIG_VERSION") is not None:
-            following = _statement_on_same_line(line_offsets, tree, node)
+            following = _statement_on_same_line(source, line_offsets, tree, node)
             if following is not None:
                 return following
             return line_offsets[node.end_lineno]
     return _header_offset(source, line_offsets, tree)
 
 
-def _statement_on_same_line(line_offsets, tree, node):
+def _statement_on_same_line(source, line_offsets, tree, node):
     """Offset of the statement after node when it follows a `;` on node's
-    last line; inserting below node would put the insertion after it."""
+    last logical line; inserting below node would put the insertion after it,
+    or (past a backslash continuation) in the middle of that logical line."""
     index = tree.body.index(node) + 1
-    if index < len(tree.body) and tree.body[index].lineno == node.end_lineno:
+    if index < len(tree.body) and _same_logical_line(source, node, tree.body[index]):
         following = tree.body[index]
         return _source_offset(line_offsets, following.lineno, following.col_offset)
     return None
@@ -612,18 +633,28 @@ def _closing_line_insertion(source, line_offsets, node, lines):
             separator = ", " if candidates else ""
         return [(closing_offset, separator + ", ".join(lines))]
 
+    indent = closing_prefix + "    "
     if candidates:
-        indent = source[
+        first_indent = source[
             line_offsets[candidates[0].lineno - 1] : _source_offset(
                 line_offsets, candidates[0].lineno, candidates[0].col_offset
             )
         ]
-    else:
-        indent = closing_prefix + "    "
+        # Unless the first element shares the opening line (`X = {"a": 1,`),
+        # where the text before it isn't an indent.
+        if not first_indent.strip():
+            indent = first_indent
     insertions = [(closing_line_start, "".join(f"{indent}{line},\n" for line in lines))]
     if final_candidates:
         last = final_candidates[-1]
         last_end = _source_offset(line_offsets, last.end_lineno, last.end_col_offset)
+        # Step past parentheses around the last element (`"x": ("v")`), so
+        # the comma goes after them, not inside where it makes a tuple.
+        while True:
+            closing = _CLOSING_PAREN.match(source, last_end)
+            if closing is None or closing.end() > closing_offset:
+                break
+            last_end = closing.end()
         if not source[last_end:closing_offset].lstrip().startswith(","):
             insertions.append((last_end, ","))
     return insertions

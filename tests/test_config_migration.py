@@ -1426,10 +1426,18 @@ def test_migration_inserts_before_a_statement_sharing_the_header_line(header):
         assert ast.get_docstring(ast.parse(migrated)) == "Doc."
 
 
-def test_invalid_generated_output_does_not_recover_from_a_backup(tmp_path):
-    # R327-06: the migration's own output doesn't compile here (the first key
-    # shares the `{` line, which _closing_line_insertion mis-indents). The
-    # file is valid, so it must not be replaced by migrating an older backup.
+def test_invalid_generated_output_does_not_recover_from_a_backup(tmp_path, monkeypatch):
+    # R327-06: when the migration's own output doesn't compile (forced here),
+    # the file is still valid, so it must not be replaced by migrating an
+    # older backup.
+    from TwitchChannelPointsMiner import config_migration
+
+    apply_edits = config_migration._apply_edits
+    monkeypatch.setattr(
+        config_migration,
+        "_apply_edits",
+        lambda source, edits: apply_edits(source, edits) + ")\n",
+    )
     config = tmp_path / "config.py"
     config.write_text(
         'MINER_CONFIG = {"username": "alice",\n'
@@ -1495,6 +1503,90 @@ def test_a_parenthesized_password_is_removed_at_the_current_version(
     assert "secret" not in backup.read_text(encoding="utf-8")
     # The saved file needs no further edit, so the next start is a no-op.
     assert migrate_config(config) is False
+
+
+@pytest.mark.parametrize(
+    "last_entry, expected",
+    [
+        ('"password": ("secret")\n', {}),
+        ('"password": ("secret"),\n', {}),
+        ('"other": ("x")\n', {"other": "x"}),
+        ('"other": ( ("x")  # note )\n    )\n', {"other": "x"}),
+    ],
+)
+def test_an_older_config_whose_last_entry_is_parenthesized_migrates(
+    last_entry, expected
+):
+    # Defaults are added after the last entry. Its comma goes after the
+    # parentheses (not inside, where it makes a tuple), and it survives the
+    # password's removal when the password is that last entry.
+    source = (
+        "CONFIG_VERSION = 11\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "alice",\n'
+        f"    {last_entry}"
+        "}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert "secret" not in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    config = namespace["MINER_CONFIG"]
+    assert config["username"] == "alice"
+    assert "password" not in config
+    for name, value in expected.items():
+        assert config[name] == value
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+@pytest.mark.parametrize(
+    "first_lines",
+    [
+        '"""Doc."""; \\\n    MINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc."""; \\\r\n    MINER_CONFIG = {"username": "alice"}\r\n',
+        'from __future__ import annotations; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+        'import os; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+        'CONFIG_VERSION = 5; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+    ],
+)
+def test_a_header_continued_onto_the_next_line_migrates(first_lines):
+    # The first statement shares the header's logical line past a backslash
+    # continuation; inserted statements must not split that logical line.
+    source = first_lines + "STREAMERS = []\nMINE_CONFIG = {}\nANALYTICS_CONFIG = None\n"
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["username"] == "alice"
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+def test_a_dict_whose_first_entry_shares_the_opening_line_migrates():
+    # The dashboard writes this layout when it adds to a one-line dict. The
+    # added defaults take the closing line's indent plus four spaces.
+    source = (
+        'MINER_CONFIG = {"username": "alice"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": [],\n'
+        '    "category_sort": "RANDOM",\n'
+        "}\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINE_CONFIG"]["category_sort"] == "RANDOM"
+    assert "\n    'blacklist': [],\n" in migrated
+    assert migrate_config_source(migrated)[0] == migrated
 
 
 def test_closing_paren_scan_is_linear_on_a_run_of_hashes():
