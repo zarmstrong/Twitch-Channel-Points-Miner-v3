@@ -2243,3 +2243,99 @@ def test_claim_thread_leaves_a_campaign_that_is_over_alone(monkeypatch):
     twitch._Twitch__store_listed_watch_rewards([other_campaign(claimable)])
 
     assert gql.claims == ["viewer-1#quest-2#group-two"]
+
+
+def test_known_campaign_is_evaluated_when_a_listing_omits_its_requirements(
+    monkeypatch,
+):
+    # The dashboard names it without watch requirements, and the source
+    # that sends them failed this time. Seen as watch-earned before, it is
+    # not a purchase-gated reward now.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=12, window=open_window()))
+    )
+    assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
+    bare = {
+        key: value
+        for key, value in listing().items()
+        if key not in ("unlockRequirements", "isSitewide")
+    }
+
+    assert set(evaluate(monkeypatch, twitch, [bare])[0]) == {"example-game"}
+    assert "quest-1" not in twitch.reward_campaign_ids
+
+
+def test_window_opening_met_while_a_failed_read_backs_off_is_retried(monkeypatch):
+    # The read failed minutes before the window opened. The refresh made
+    # for the opening may not read again yet, and the opening is used up.
+    twitch, _, listing_calls = evaluation_twitch(
+        watch_group(progress(minutes=5, grants=1, window=open_window()))
+    )
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(progress(status="CLAIMABLE", minutes=60, window=open_window()))
+        )
+    )
+    stored = twitch.watch_reward_campaigns["quest-1"]
+    stored["timeBasedDrops"][0]["_reward_group"]["next_start"] = stamp(
+        NOW - timedelta(seconds=30)
+    )
+    attempted_at = time.time() - 300
+    stored["_watch_reward"]["refresh_attempted_at"] = attempted_at
+    twitch.watch_reward_pending_starts = set()
+
+    assert evaluate(monkeypatch, twitch, [listing()])[0] == {}
+    assert listing_calls == []
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    due_in = (retry_at - utc_now()).total_seconds()
+    assert due_in == pytest.approx(WATCH_REWARD_PROGRESS_REFRESH_SECONDS - 300, abs=5)
+    # Asked again before then, it is the same retry.
+    evaluate(monkeypatch, twitch, [listing()])
+    assert twitch.watch_reward_pending_starts == {retry_at}
+
+
+def test_wildcard_channel_keeps_a_reward_campaign_the_catalog_does_not_list():
+    # The external catalog lists another campaign for the game. A wildcard
+    # channel is held to the catalog's campaign names, which never include
+    # a reward campaign.
+    gql, _ = channel_listing(
+        watch_group(
+            progress(minutes=12, window=open_window()), categories=[OTHER_CATEGORY]
+        )
+    )
+    twitch = bare_twitch(gql)
+    twitch.campaign_details_withheld_streak = 0
+    twitch.twitchdrops_app_campaigns = {
+        "other-game": [{"id": "gist-1", "name": "Catalog Campaign", "channels": []}]
+    }
+    streamer = category_streamer()
+    streamer.from_category = False
+    streamer.from_wildcard_category = True
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(streamer) == ["quest-1"]
+
+
+def test_group_that_pays_out_once_every_repeat_is_in_claims_only_then():
+    # Twitch reports such a group CLAIMABLE after each repeat; its own
+    # drops tray offers the claim once all of them are counted.
+    def all_repeats_group(group_self):
+        group = watch_group(group_self)
+        group["progressCriteria"]["repeatableConfig"][
+            "shouldCompleteAllRepeatsToEarn"
+        ] = True
+        return with_claim_instance_ids(convert(group), "viewer-1")["timeBasedDrops"][0]
+
+    part_way = all_repeats_group(
+        progress(status="CLAIMABLE", minutes=60, grants=2, window=open_window())
+    )
+    assert part_way["_reward_group"]["claimable"] is False
+    assert part_way["self"]["dropInstanceID"] is None
+    # This window's minutes are in; the next repeat starts when it closes.
+    assert part_way["startAt"] == open_window()["expiresAt"]
+
+    complete = all_repeats_group(
+        progress(status="CLAIMABLE", minutes=60, grants=6, window=open_window())
+    )
+    assert complete["_reward_group"]["claimable"] is True
+    assert complete["self"]["dropInstanceID"] == "viewer-1#quest-1#group-watch"

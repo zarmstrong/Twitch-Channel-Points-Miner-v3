@@ -180,6 +180,10 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
         expired = True
         end_at = start_at
     elif status == "CLAIMABLE" and (not complete_all or grants >= times):
+        # A group that pays out only once every repeat is in reports
+        # CLAIMABLE after each one, and Twitch's own drops tray offers the
+        # claim only with all of them counted. Until then it is a repeat
+        # like any other, handled below.
         claimable = True
         watched = required
     elif grants >= times:

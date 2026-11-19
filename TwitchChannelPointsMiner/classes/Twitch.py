@@ -2591,7 +2591,13 @@ class Twitch(object):
                 campaigns_by_id[campaign_id] = stored
                 unlisted_reward_ids.add(campaign_id)
         for campaign_id, campaign in list(campaigns_by_id.items()):
-            if is_watch_reward_campaign(campaign):
+            if (
+                is_watch_reward_campaign(campaign)
+                # Known from an earlier listing: one that names it without
+                # its watch requirements (the source that sends them can
+                # fail) must not turn it back into a purchase-gated reward.
+                or campaign_id in self.__watch_reward_campaigns()
+            ):
                 stored = self.__watch_reward_campaigns().get(campaign_id)
             elif campaign.get(
                 "_is_reward_campaign"
@@ -7971,6 +7977,9 @@ class Twitch(object):
                         for campaign in advertised_campaigns
                         if str(campaign.get("name") or "").strip().casefold()
                         in expected_names
+                        # The catalog does not list reward campaigns; this
+                        # one passed the account-wide evaluation instead.
+                        or is_watch_reward_campaign(campaign)
                     ]
             self.__log_drop_check_json(
                 f"Twitch channel campaigns for '{streamer.username}'",
@@ -9203,6 +9212,28 @@ class Twitch(object):
         ]
         return [moment for moment in opened if moment is not None and moment <= now]
 
+    def __retry_read_for_opened_window(self, campaign):
+        """Have the category refreshed again when the campaign's next read
+        is due, if a window of it has opened that its record knows nothing
+        of.
+
+        The read made for the opening found no channel reporting the
+        campaign, or may not be made yet after one that failed. Without
+        this the category would wait for the ordinary refresh, which can be
+        hours off."""
+        if not self.__watch_reward_windows_opened(campaign):
+            return
+        attempted_at = campaign["_watch_reward"].get("refresh_attempted_at") or 0
+        with _watch_reward_lock(self):
+            self.__note_watch_reward_starts(
+                {
+                    datetime.fromtimestamp(
+                        attempted_at + WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
+                        timezone.utc,
+                    ).replace(tzinfo=None)
+                }
+            )
+
     def __refresh_watch_reward_progress(self, campaign, preferred_slugs=None):
         """The stored record, read again from a live channel in one of its
         categories when its progress is unknown or older than
@@ -9240,9 +9271,11 @@ class Twitch(object):
         # A read that found nothing is not repeated on every evaluation, which
         # can run every few minutes: the category may simply have no live
         # channel, and each attempt costs a directory request per category.
-        if (
-            time.time() - (details.get("refresh_attempted_at") or 0)
-        ) < WATCH_REWARD_PROGRESS_REFRESH_SECONDS:
+        attempted_at = details.get("refresh_attempted_at") or 0
+        if (time.time() - attempted_at) < WATCH_REWARD_PROGRESS_REFRESH_SECONDS:
+            # The refresh a window's opening called for can find the read
+            # still backing off.
+            self.__retry_read_for_opened_window(campaign)
             return campaign
         details["refresh_attempted_at"] = time.time()
         campaign_id = campaign["id"]
@@ -9317,17 +9350,7 @@ class Twitch(object):
                     and refreshed["_watch_reward"].get("progress_known") is True
                 ):
                     return refreshed
-        if self.__watch_reward_windows_opened(campaign):
-            # The read made for an opened window found no channel reporting
-            # the campaign: look again when the next read is due, instead of
-            # at the ordinary refresh.
-            with _watch_reward_lock(self):
-                self.__note_watch_reward_starts(
-                    {
-                        utc_now()
-                        + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
-                    }
-                )
+        self.__retry_read_for_opened_window(campaign)
         return known.get(campaign_id, campaign)
 
     def __store_listed_watch_rewards(self, campaigns, requested=None) -> list:
