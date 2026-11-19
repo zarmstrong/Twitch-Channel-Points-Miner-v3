@@ -215,13 +215,20 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
                 end_at = window_expires.strftime(TWITCH_DATETIME_FORMAT)
 
     # When the repeat after a claimable one opens, as far as Twitch says:
-    # once claimed, the group has nothing to watch for until then.
+    # once claimed, the group has nothing to watch for until then. A moment
+    # already past is kept too. It says the next window is open, which a
+    # listing that still shows this repeat waiting to be claimed (the claim
+    # is on its way, or the answer was slow) does not show otherwise.
     next_start = None
     if claimable and grants < times:
-        for upcoming in (next_window, window_expires):
-            if upcoming is not None and upcoming > now:
-                next_start = upcoming.strftime(TWITCH_DATETIME_FORMAT)
-                break
+        moments = [
+            moment for moment in (next_window, window_expires) if moment is not None
+        ]
+        upcoming = [moment for moment in moments if moment > now]
+        if moments:
+            next_start = (upcoming[0] if upcoming else max(moments)).strftime(
+                TWITCH_DATETIME_FORMAT
+            )
 
     drop_id = str(group["id"])
     name = group.get("name") or campaign["name"]

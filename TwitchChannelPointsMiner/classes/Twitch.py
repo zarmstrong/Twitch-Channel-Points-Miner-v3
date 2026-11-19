@@ -826,8 +826,10 @@ class Twitch(object):
         - more minutes, on a drop still being watched: those of a window
           that has since started over (see
           __forget_snapshots_of_restarted_drops);
-        - fewer, on a drop since earned: saved now, it would put the
-          reported reward back to in progress;
+        - fewer, or the same as progress still, on a drop since earned:
+          saved now, it would put the reported reward back to in progress
+          (the minute watcher reports a drop as in progress until its own
+          copy is told of the claim);
         - progress on a repeat before the stored one, which is over."""
         for campaign in list(
             (getattr(self, "watch_reward_campaigns", None) or {}).values()
@@ -850,7 +852,7 @@ class Twitch(object):
                 drop_self = drop.get("self") or {}
                 watched = drop_self.get("currentMinutesWatched") or 0
                 if group.get("claimable") is True or drop_self.get("isClaimed") is True:
-                    return minutes_watched < watched
+                    return status == "in_progress" or minutes_watched < watched
                 if group.get("finished") is True:
                     # Over without being earned: nothing newer is held back.
                     return False
@@ -9138,6 +9140,14 @@ class Twitch(object):
                     starts_at = self.__parse_twitch_datetime(value)
                     if starts_at is not None and starts_at > now:
                         starts.add(starts_at)
+                next_start = self.__parse_twitch_datetime(group.get("next_start"))
+                if next_start is not None and next_start <= now:
+                    # That window is open already, and this listing still
+                    # shows the repeat before it. Looked at again when the
+                    # next read is due: its claim is on its way.
+                    starts.add(
+                        now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
+                    )
             self.__note_watch_reward_starts(starts)
             known[campaign_id] = stored
         # The inventory lists a reward campaign as completed once any of its

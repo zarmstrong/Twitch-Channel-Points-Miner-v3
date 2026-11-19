@@ -2012,6 +2012,63 @@ def test_claimable_repeat_schedules_the_return_for_its_next_window():
     assert learned(grantCount=6) == (None, set())
 
 
+def test_claimable_repeat_listed_after_its_next_window_opened_is_looked_at_again(
+    monkeypatch,
+):
+    # The answer crossed the boundary: still the repeat before, waiting to
+    # be claimed, and both moments Twitch names are just past. The opening
+    # scheduled from an earlier listing has been acted on already.
+    just_past = NOW - timedelta(seconds=20)
+    claimable = progress(
+        status="CLAIMABLE",
+        minutes=60,
+        grants=1,
+        window={
+            "startedAt": stamp(NOW - timedelta(hours=24)),
+            "expiresAt": stamp(NOW - timedelta(seconds=40)),
+        },
+        next_at=stamp(just_past),
+    )
+    twitch, _, listing_calls = evaluation_twitch(
+        watch_group(progress(minutes=1, grants=1, window=open_window()))
+    )
+    twitch.watch_reward_pending_starts = set()
+
+    [drop] = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(claimable))
+    )["timeBasedDrops"]
+
+    assert drop["_reward_group"]["next_start"] == stamp(just_past)
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+    # However recent, the record is read again by the refresh that follows.
+    assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
+    assert listing_calls == ["4242"]
+
+
+def test_past_window_end_stands_in_for_a_missing_next_eligibility_time():
+    ended = NOW - timedelta(seconds=40)
+    claimable = progress(
+        status="CLAIMABLE",
+        minutes=60,
+        grants=1,
+        window={
+            "startedAt": stamp(NOW - timedelta(hours=24)),
+            "expiresAt": stamp(ended),
+        },
+    )
+
+    [drop] = convert(watch_group(claimable))["timeBasedDrops"]
+    assert drop["_reward_group"]["next_start"] == stamp(ended)
+
+    # Neither named: nothing to go by.
+    [drop] = convert(watch_group(claimable | {"currentWindow": None}))["timeBasedDrops"]
+    assert drop["_reward_group"]["next_start"] is None
+
+
 def test_category_refresh_runs_when_a_reward_window_has_opened():
     miner = object.__new__(TwitchChannelPointsMiner)
     opened = []
@@ -2464,10 +2521,14 @@ def test_snapshot_from_before_a_reward_was_earned_is_not_saved(group_self):
         )
 
     assert save(59, "in_progress") is False
-    watched = SimpleNamespace(id=drop["id"], current_minutes_watched=59)
-    assert (
-        twitch._Twitch__save_watched_drop_progress_if_new(watched, lambda: None) is None
-    )
+    # The minute watcher reports in progress until its own copy of the drop
+    # is told of the claim, with every minute in or not.
+    for minutes in (59, 60):
+        watched = SimpleNamespace(id=drop["id"], current_minutes_watched=minutes)
+        assert (
+            twitch._Twitch__save_watched_drop_progress_if_new(watched, lambda: None)
+            is None
+        )
     assert save(60, "captured") is True
 
 
