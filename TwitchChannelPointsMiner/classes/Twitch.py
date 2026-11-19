@@ -813,6 +813,69 @@ class Twitch(object):
         self.drop_progress_last_saved[tracking_key] = minutes_watched
         self.drop_status_last_saved[tracking_key] = status
 
+    def __reward_snapshot_is_stale(self, drop_id, minutes_watched) -> bool:
+        """Whether a progress snapshot of a reward campaign's drop was taken
+        from a record older than the stored one. Called with the
+        watch-reward lock held.
+
+        The stored record is the newest listing, and the only source of a
+        reward drop's minutes. More minutes than it has, on a drop still
+        being watched, are those of a window that has since started over
+        (see __forget_snapshots_of_restarted_drops)."""
+        for campaign in list(
+            (getattr(self, "watch_reward_campaigns", None) or {}).values()
+        ):
+            for drop in campaign.get("timeBasedDrops") or []:
+                if str(drop["id"]) != drop_id:
+                    continue
+                group = drop["_reward_group"]
+                return (
+                    group.get("claimable") is not True
+                    and group.get("finished") is not True
+                    and ((drop.get("self") or {}).get("currentMinutesWatched") or 0)
+                    < minutes_watched
+                )
+        return False
+
+    def __take_drop_snapshot_save(self, tracking_key, minutes_watched, status):
+        """Whether this progress snapshot is to be saved, recording it as
+        saved when it is.
+
+        Decided and recorded in one step, under the lock a reward campaign's
+        record is stored under: the sync and the minute watcher work on
+        copies, and a listing that finds a window started over forgets what
+        was saved for the drop. A copy from before that listing, recorded
+        after it, would keep the new window's lower minutes out of the
+        report until they passed the old ones."""
+        with _watch_reward_lock(self):
+            if self.__reward_snapshot_is_stale(
+                str(tracking_key).split("|", 1)[0], minutes_watched
+            ):
+                return False
+            if (
+                self.__should_save_drop_snapshot(tracking_key, minutes_watched, status)
+                is False
+            ):
+                return False
+            self.__mark_drop_snapshot_saved(tracking_key, minutes_watched, status)
+            return True
+
+    def __take_watched_drop_progress_save(self, drop):
+        """The minutes last saved for a drop the minute watcher has new
+        progress on (-1 for none), recording the new ones as saved. None
+        when there is nothing new to save. See __take_drop_snapshot_save."""
+        progress_key = drop.id
+        with _watch_reward_lock(self):
+            last_saved_minutes = self.drop_progress_last_saved.get(progress_key, -1)
+            if drop.current_minutes_watched <= last_saved_minutes:
+                return None
+            if self.__reward_snapshot_is_stale(
+                str(progress_key), drop.current_minutes_watched
+            ):
+                return None
+            self.drop_progress_last_saved[progress_key] = drop.current_minutes_watched
+            return last_saved_minutes
+
     def __slugify(self, value: str) -> str:
         normalized = unicodedata.normalize("NFKD", str(value))
         ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
@@ -1409,7 +1472,7 @@ class Twitch(object):
                 ]
             )
             if (
-                self.__should_save_drop_snapshot(
+                self.__take_drop_snapshot_save(
                     variant_key,
                     drop.current_minutes_watched,
                     effective_status,
@@ -1418,11 +1481,6 @@ class Twitch(object):
             ):
                 continue
 
-            self.__mark_drop_snapshot_saved(
-                variant_key,
-                drop.current_minutes_watched,
-                effective_status,
-            )
             self.__save_drop_progress_analytics(
                 drop,
                 campaign=campaign,
@@ -1506,7 +1564,7 @@ class Twitch(object):
                             ]
                         )
                         if (
-                            self.__should_save_drop_snapshot(
+                            self.__take_drop_snapshot_save(
                                 variant_key,
                                 drop.current_minutes_watched,
                                 status,
@@ -1515,11 +1573,6 @@ class Twitch(object):
                         ):
                             continue
 
-                        self.__mark_drop_snapshot_saved(
-                            variant_key,
-                            drop.current_minutes_watched,
-                            status,
-                        )
                         self.__save_drop_progress_analytics(
                             drop,
                             campaign=None,
@@ -3342,6 +3395,50 @@ class Twitch(object):
             self.__note_watch_reward_starts(
                 {utc_now() + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)}
             )
+
+    def retry_failed_watch_reward_category(self, category_slugs):
+        """Called when the live channels of a category could not be looked
+        up. If a reward campaign has a repeat to watch there now, have the
+        category refreshed again when a progress read would next be due.
+
+        The ordinary refresh can be hours off, and a repeat's minutes are
+        due before its window closes. An opened window's refresh is spent
+        once the campaigns are evaluated, which is before the channels are
+        looked up."""
+        slugs = {str(slug) for slug in category_slugs or () if slug}
+        if not slugs:
+            return
+        now = utc_now()
+        for campaign in list(
+            (getattr(self, "watch_reward_campaigns", None) or {}).values()
+        ):
+            if self.__is_open_drop_campaign(campaign) is not True:
+                continue
+            for drop in campaign.get("timeBasedDrops") or []:
+                group = drop["_reward_group"]
+                starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
+                if (
+                    group.get("claimable") is True
+                    or group.get("finished") is True
+                    # Not open yet: its start is already waited for.
+                    or (starts_at is not None and starts_at > now)
+                ):
+                    continue
+                if slugs & {
+                    self.__slugify(category.get(key) or "")
+                    for category in group.get("categories") or []
+                    for key in ("displayName", "name")
+                }:
+                    with _watch_reward_lock(self):
+                        self.__note_watch_reward_starts(
+                            {
+                                now
+                                + timedelta(
+                                    seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+                                )
+                            }
+                        )
+                    return
 
     @staticmethod
     def __reward_name_is_owned(reward_name, owned_reward_names, game_name=""):
@@ -7440,20 +7537,10 @@ class Twitch(object):
                                         and drop.is_claimed is False
                                         and drop.current_minutes_watched > 0
                                     ):
-                                        progress_key = drop.id
                                         last_saved_minutes = (
-                                            self.drop_progress_last_saved.get(
-                                                progress_key,
-                                                -1,
-                                            )
+                                            self.__take_watched_drop_progress_save(drop)
                                         )
-                                        if (
-                                            drop.current_minutes_watched
-                                            > last_saved_minutes
-                                        ):
-                                            self.drop_progress_last_saved[
-                                                progress_key
-                                            ] = drop.current_minutes_watched
+                                        if last_saved_minutes is not None:
                                             self.__save_drop_progress_analytics(
                                                 drop,
                                                 campaign=campaign,
@@ -9057,14 +9144,15 @@ class Twitch(object):
         group had in `previous`, the record it replaces: the same repeat
         keeps its ID, and a new repeat gets one no earlier repeat had.
 
-        A repeat's drop ID starts from the number of repeats granted, and
-        Twitch may count a repeat when it is earned rather than when it is
-        claimed. The drop watched as "#0" would then turn up claimable as
-        "#1", and the next repeat be watched as "#1" too: one repeat reported
-        under two IDs, and two repeats under one. A repeat first seen
-        claimable with its count already in is the same case one listing
-        later. So the count alone does not name the repeat; what the group
-        did since the last listing does:
+        A repeat's drop ID starts from the number of repeats granted, read
+        as Twitch counting a repeat once its minutes are in (see
+        _reward_group_drop). Should it count a repeat only when it is
+        claimed, the drop watched as "#0" would turn up claimable as "#0"
+        with the count unchanged and the next repeat be watched as "#1":
+        the same numbers, which is what the rules below keep whichever way
+        the count moves. They also keep a repeat's number when the count
+        alone would change it. What the group did since the last listing
+        names the repeat:
 
         - still watched, or still claimable, with the same count: the same
           repeat. So is a watched repeat that turned claimable with the

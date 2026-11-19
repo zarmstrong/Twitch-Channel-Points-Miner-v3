@@ -2548,6 +2548,11 @@ class TwitchChannelPointsMiner:
                 unevaluated_category_slugs.update(category_slugs)
                 if error.game_slug:
                     unevaluated_category_slugs.add(error.game_slug)
+                # A reward campaign's repeat is due before its window closes,
+                # which the next ordinary refresh can come after.
+                self.twitch.retry_failed_watch_reward_category(
+                    set(category_slugs) | {error.game_slug}
+                )
                 consequence = (
                     "its tracked streamers are kept until the next refresh"
                     if tracking

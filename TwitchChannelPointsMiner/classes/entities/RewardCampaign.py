@@ -227,10 +227,15 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     name = group.get("name") or campaign["name"]
     repeat_number = None
     if times > 1:
-        # A group with every repeat counted is the last repeat, earned or
-        # waiting to be claimed, not one more after it.
+        # The count is read as the repeats whose minutes are in, the way
+        # Twitch's drops tray reads it (it offers the claim of a group that
+        # pays out once every repeat is in when the count reaches the
+        # number of repeats). So the repeat being watched has the count for
+        # its number, and the one earned or waiting to be claimed is the
+        # last one counted. Numbered from what Twitch sends alone, a repeat
+        # keeps its ID across a restart.
         repeat_number = grants
-        if claimed or (claimable and grants >= times):
+        if claimed or claimable:
             repeat_number = max(min(grants, times) - 1, 0)
         drop_id = repeat_drop_id(group["id"], repeat_number)
         name = f"{name} ({min(grants, times)}/{times} earned)"

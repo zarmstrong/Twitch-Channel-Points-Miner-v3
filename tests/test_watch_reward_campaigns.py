@@ -1033,21 +1033,19 @@ def test_next_repeat_claimable_within_the_hour_is_sent_to_twitch(monkeypatch):
         drop.update({**drop_data["self"], "dropInstanceID": instance_id})
         return drop
 
-    assert twitch.claim_drop(claimable(0)) is True
+    assert twitch.claim_drop(claimable(1)) is True
     # The same repeat again, before the listing catches up: not re-sent.
-    assert twitch.claim_drop(claimable(0)) is True
+    assert twitch.claim_drop(claimable(1)) is True
     assert sent == [instance_id]
 
-    assert twitch.claim_drop(claimable(1)) is True
+    assert twitch.claim_drop(claimable(2)) is True
     assert sent == [instance_id, instance_id]
     assert twitch.accepted_drop_ids >= {"group-watch#0", "group-watch#1"}
 
 
 def test_accepted_claim_does_not_hide_the_next_repeat():
-    # Twitch may count a repeat before its claim: the claimed drop and the
-    # next repeat then both read "1 granted".
     twitch = bare_twitch()
-    twitch.accepted_drop_ids = frozenset({"group-watch#1", "other-drop"})
+    twitch.accepted_drop_ids = frozenset({"group-watch#0", "other-drop"})
 
     def listed(group_self):
         [drop] = twitch._Twitch__remember_watch_reward_campaign(
@@ -1056,11 +1054,11 @@ def test_accepted_claim_does_not_hide_the_next_repeat():
         return drop["id"]
 
     assert listed(progress(status="CLAIMABLE", minutes=60, grants=1)) == (
-        "group-watch#1"
+        "group-watch#0"
     )
     # The next repeat is a drop of its own, so the accepted claim stays.
-    assert listed(progress(minutes=0, grants=1)) == "group-watch#2"
-    assert twitch.accepted_drop_ids == {"group-watch#1", "other-drop"}
+    assert listed(progress(minutes=0, grants=1)) == "group-watch#1"
+    assert twitch.accepted_drop_ids == {"group-watch#0", "other-drop"}
 
 
 def test_evaluation_claims_a_reward_waiting_to_be_claimed(monkeypatch):
@@ -1688,9 +1686,9 @@ def test_claim_answered_after_the_next_repeat_was_listed_does_not_hide_it(
     twitch._Twitch__get_campaigns_from_channel_id("1")
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
-    assert twitch.accepted_drop_ids == {"group-watch#1"}
+    assert twitch.accepted_drop_ids == {"group-watch#0"}
     [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
-    assert drop["id"] == "group-watch#2"
+    assert drop["id"] == "group-watch#1"
 
     # The repeat stored meanwhile is claimed in its turn.
     twitch._Twitch__get_campaigns_from_channel_id("1")
@@ -1787,43 +1785,70 @@ def test_claimable_repeat_seen_first_does_not_take_an_older_repeats_id():
     assert drop["id"] == "group-watch#1"
 
 
-def test_each_repeat_has_a_drop_id_no_earlier_repeat_had():
-    # Twitch counts each repeat before its claim, and the first listing finds
-    # one already waiting to be claimed: its count is one ahead of the
-    # repeat it would have been watched as.
+def repeat_ids(listings, restart_between=False):
+    """The drop ID each listing of a three-repeat group is stored under, by
+    one miner or by one started anew before every listing."""
     twitch = bare_twitch()
-
-    def listed(group_self):
+    ids = []
+    for group_self in listings:
+        if restart_between:
+            twitch = bare_twitch()
         [drop] = twitch._Twitch__remember_watch_reward_campaign(
             convert(watch_group(group_self, times=3))
         )["timeBasedDrops"]
-        return drop["id"]
+        ids.append(drop["id"])
+    return ids
 
-    def claimable(grants):
-        return progress(
-            status="CLAIMABLE", minutes=60, grants=grants, window=open_window()
-        )
 
-    def watching(grants, minutes=5):
-        return progress(minutes=minutes, grants=grants, window=open_window())
+def claimable_repeat(grants):
+    return progress(status="CLAIMABLE", minutes=60, grants=grants, window=open_window())
 
-    assert [
-        listed(claimable(1)),
-        listed(watching(1)),
-        # A window that starts over is the same repeat: none was granted.
-        listed(watching(1, minutes=0)),
-        listed(claimable(2)),
-        listed(watching(2)),
-        listed(claimable(3)),
-        listed(progress(status="CLAIMED", grants=3)),
-    ] == [
+
+def watched_repeat(grants, minutes=5):
+    return progress(minutes=minutes, grants=grants, window=open_window())
+
+
+@pytest.mark.parametrize("restart_between", [False, True])
+def test_each_repeat_has_a_drop_id_no_earlier_repeat_had(restart_between):
+    # Twitch counts each repeat once its minutes are in. The numbers come
+    # from what it sends alone, so a restart at any point changes none.
+    assert repeat_ids(
+        [
+            watched_repeat(0),
+            claimable_repeat(1),
+            watched_repeat(1),
+            # A window that starts over is the same repeat: none was granted.
+            watched_repeat(1, minutes=0),
+            claimable_repeat(2),
+            watched_repeat(2),
+            claimable_repeat(3),
+            progress(status="CLAIMED", grants=3),
+        ],
+        restart_between=restart_between,
+    ) == [f"group-watch#{number}" for number in (0, 0, 1, 1, 1, 2, 2, 2)]
+
+
+def test_repeats_are_numbered_the_same_if_twitch_counts_them_when_claimed():
+    assert repeat_ids(
+        [
+            watched_repeat(0),
+            claimable_repeat(0),
+            watched_repeat(1),
+            claimable_repeat(1),
+            watched_repeat(2),
+            claimable_repeat(2),
+            progress(status="CLAIMED", grants=3),
+        ]
+    ) == [f"group-watch#{number}" for number in (0, 0, 1, 1, 2, 2, 2)]
+
+
+def test_repeat_after_one_never_counted_gets_a_number_of_its_own():
+    # Counted when claimed, and the claim was never made: the next repeat
+    # is watched with the count the lost one had.
+    assert repeat_ids([watched_repeat(0), claimable_repeat(0), watched_repeat(0)]) == [
+        "group-watch#0",
+        "group-watch#0",
         "group-watch#1",
-        "group-watch#2",
-        "group-watch#2",
-        "group-watch#2",
-        "group-watch#3",
-        "group-watch#3",
-        "group-watch#3",
     ]
 
 
@@ -1839,12 +1864,12 @@ def test_repeat_is_numbered_after_the_one_before_a_listing_left_the_group_out():
         ]
 
     other = watch_group(progress(minutes=3), times=1) | {"id": "group-other"}
-    claimable = progress(status="CLAIMABLE", minutes=60, grants=1)
-    assert listed(watch_group(claimable), other) == ["group-watch#1", "group-other"]
+    claimable = progress(status="CLAIMABLE", minutes=60)
+    assert listed(watch_group(claimable), other) == ["group-watch#0", "group-other"]
     # Twitch reports the other group's progress but none on this one.
     assert listed(watch_group(None), other) == ["group-other"]
-    assert listed(watch_group(progress(minutes=5, grants=1)), other) == [
-        "group-watch#2",
+    assert listed(watch_group(progress(minutes=5)), other) == [
+        "group-watch#1",
         "group-other",
     ]
 
@@ -2227,6 +2252,115 @@ def test_window_that_starts_over_is_reported_from_its_own_minutes():
         "other-drop": 30,
     }
     assert twitch.drop_status_last_saved == {}
+
+
+def test_snapshot_from_before_a_window_started_over_is_not_saved():
+    # The sync copied the record at 40 minutes; a listing then reported the
+    # window started over. Saved now, the copy's 40 minutes would keep the
+    # new window's out of the report until they passed them.
+    twitch = bare_twitch()
+    twitch.drop_progress_last_saved = {}
+    twitch.drop_status_last_saved = {}
+    key = "group-watch#0|art|Daily Chest|Launch Celebration|Example Game|Chest|"
+    for minutes in (40, 5):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(progress(minutes=minutes, window=open_window())))
+        )
+
+    take = twitch._Twitch__take_drop_snapshot_save
+    assert take(key, 40, "in_progress") is False
+    assert twitch.drop_progress_last_saved == {}
+    assert take(key, 5, "in_progress") is True
+    assert take(key, 5, "in_progress") is False
+    assert twitch.drop_progress_last_saved == {key: 5}
+
+    # The minute watcher's copy likewise.
+    stale = SimpleNamespace(id="group-watch#0", current_minutes_watched=40)
+    assert twitch._Twitch__take_watched_drop_progress_save(stale) is None
+    fresh = SimpleNamespace(id="group-watch#0", current_minutes_watched=5)
+    assert twitch._Twitch__take_watched_drop_progress_save(fresh) == -1
+    assert twitch._Twitch__take_watched_drop_progress_save(fresh) is None
+
+    # A drop that is no reward campaign's is saved as ever.
+    assert take("other-drop|art", 40, "in_progress") is True
+
+
+def test_snapshot_of_a_group_that_is_over_is_saved_with_the_minutes_it_got_to():
+    # Nothing is watched for it any more, so no newer minutes are held back.
+    twitch = bare_twitch()
+    twitch.drop_progress_last_saved = {}
+    twitch.drop_status_last_saved = {}
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(status="EXPIRED")))
+    )
+
+    assert twitch._Twitch__take_drop_snapshot_save("group-watch#0|art", 40, "failed")
+
+
+def test_snapshot_is_recorded_as_saved_under_the_lock_records_are_stored_under(
+    monkeypatch,
+):
+    # Decided before a listing forgets the drop's saved minutes and recorded
+    # after it, an older copy's minutes would be back.
+    twitch = bare_twitch()
+    twitch.drop_progress_last_saved = {}
+    twitch.drop_status_last_saved = {}
+    held = []
+    mark = Twitch._Twitch__mark_drop_snapshot_saved
+
+    def mark_checking_the_lock(self, *args):
+        held.append(twitch_module._watch_reward_lock(self).locked())
+        return mark(self, *args)
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__mark_drop_snapshot_saved", mark_checking_the_lock
+    )
+
+    assert twitch._Twitch__take_drop_snapshot_save("drop-1|art", 3, "in_progress")
+    assert held == [True]
+
+
+def category_retry_twitch(group_self, end_at=END_AT):
+    twitch = bare_twitch()
+    twitch.watch_reward_pending_starts = set()
+    campaign = convert(watch_group(group_self))
+    campaign["endAt"] = end_at
+    twitch._Twitch__remember_watch_reward_campaign(campaign)
+    twitch.watch_reward_pending_starts = set()
+    return twitch
+
+
+def test_failed_channel_lookup_of_a_category_with_a_repeat_to_watch_is_retried():
+    twitch = category_retry_twitch(progress(minutes=5, window=open_window()))
+
+    twitch.retry_failed_watch_reward_category({"example-game", None})
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    wait = (retry_at - utc_now()).total_seconds()
+    assert 0 < wait <= WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+
+
+@pytest.mark.parametrize(
+    "group_self, slugs, end_at",
+    [
+        # Another category's lookup failed.
+        (progress(minutes=5), {"other-game"}, END_AT),
+        # Nothing to watch for: waiting to be claimed, earned, not open yet.
+        (progress(status="CLAIMABLE", minutes=60, grants=6), {"example-game"}, END_AT),
+        (progress(status="CLAIMED", grants=6), {"example-game"}, END_AT),
+        (progress(grants=1, next_at="2098-01-01T00:00:00Z"), {"example-game"}, END_AT),
+        # The campaign is over.
+        (progress(minutes=5), {"example-game"}, "2020-02-01T00:00:00Z"),
+    ],
+)
+def test_failed_channel_lookup_is_left_to_the_ordinary_refresh(
+    group_self, slugs, end_at
+):
+    twitch = category_retry_twitch(group_self, end_at)
+
+    twitch.retry_failed_watch_reward_category(slugs)
+
+    assert twitch.watch_reward_pending_starts == set()
 
 
 def test_claim_answered_after_the_next_repeat_turned_claimable_is_not_its_claim(
