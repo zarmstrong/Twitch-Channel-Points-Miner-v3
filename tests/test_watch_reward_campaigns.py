@@ -37,6 +37,7 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
 from TwitchChannelPointsMiner.classes.Settings import Events
 from TwitchChannelPointsMiner.classes.Twitch import (
+    DROP_FULL_INVENTORY_SYNC_SECONDS,
     WATCH_REWARD_FINISHED_REFRESH_SECONDS,
     WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
     WATCH_REWARD_STALE_COPY_SECONDS,
@@ -3436,7 +3437,7 @@ def test_row_left_in_progress_by_an_earlier_session_is_finished(monkeypatch, tmp
     assert rows["another-drop"]["status"] == "in_progress"
 
 
-def test_finishing_earlier_rows_reads_the_report_file_once_per_repeat(
+def test_finishing_earned_rows_reads_the_report_file_once_per_repeat(
     monkeypatch, tmp_path
 ):
     # A record is stored every couple of minutes while a group is watched.
@@ -3525,3 +3526,87 @@ def test_group_due_when_the_campaign_ends_has_no_window_to_wait_for():
     )
 
     assert not getattr(twitch, "watch_reward_pending_starts", None)
+
+
+def test_copy_from_before_a_window_started_over_stays_out_until_a_full_sync():
+    # Only a full inventory sync renews the minute watcher's copy of a drop.
+    # Until one has, its minutes are those of the window before.
+    twitch = snapshot_twitch()
+    for minutes in (40, 5):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(progress(minutes=minutes, window=open_window())))
+        )
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    details["restarted_at"] = {
+        "group-watch#0": time.time() - DROP_FULL_INVENTORY_SYNC_SECONDS - 60
+    }
+    watched = SimpleNamespace(id="group-watch#0", current_minutes_watched=40)
+
+    assert (
+        twitch._Twitch__save_watched_drop_progress_if_new(watched, lambda: None) is None
+    )
+    assert WATCH_REWARD_STALE_COPY_SECONDS >= 2 * DROP_FULL_INVENTORY_SYNC_SECONDS
+
+
+@pytest.mark.parametrize(
+    "times, before, earned, drop_id",
+    [
+        # A single reward, and the last repeat of one: no later repeat
+        # follows whose record would show this one earned.
+        (1, progress(minutes=50), progress("CLAIMED", 60, grants=1), "group-watch"),
+        (
+            6,
+            progress(minutes=50, grants=5, window=open_window()),
+            progress("CLAIMED", 60, grants=6, window=open_window()),
+            "group-watch#5",
+        ),
+    ],
+)
+def test_row_of_the_last_reward_twitch_counted_is_finished_without_a_sync(
+    monkeypatch, tmp_path, times, before, earned, drop_id
+):
+    # The inventory sync writes an earned drop's row too, but not for a
+    # campaign that has ended by the time it runs.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(before, times=times))
+    )
+    save_synced_rows(twitch)
+    assert report_rows(twitch, tmp_path)[drop_id]["status"] == "in_progress"
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(earned, times=times))
+    )
+
+    row = report_rows(twitch, tmp_path)[drop_id]
+    assert (row["status"], row["current_minutes_watched"]) == ("captured", 60)
+
+
+def test_earned_rows_are_finished_by_a_later_record_when_the_report_cannot_be_saved(
+    monkeypatch, tmp_path
+):
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+    save_synced_rows(twitch)
+    earned = convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    real_replace = twitch_module.os.replace
+    failures = [OSError("disk full")]
+
+    def failing_once(source, target):
+        if failures:
+            raise failures.pop()
+        return real_replace(source, target)
+
+    monkeypatch.setattr(twitch_module.os, "replace", failing_once)
+
+    # The record is stored all the same: its caller reads an error as a
+    # listing that failed.
+    stored = twitch._Twitch__remember_watch_reward_campaign(copy.deepcopy(earned))
+    assert stored["timeBasedDrops"][0]["id"] == "group-watch#1"
+    assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "in_progress"
+
+    twitch._Twitch__remember_watch_reward_campaign(copy.deepcopy(earned))
+
+    assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"

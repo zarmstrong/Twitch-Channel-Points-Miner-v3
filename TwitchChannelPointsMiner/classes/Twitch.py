@@ -231,8 +231,10 @@ WATCH_REWARD_REFRESH_CHANNEL_LIMIT = 4
 WATCH_REWARD_UNLISTED_SECONDS = 30 * 60
 WATCH_REWARD_REFRESH_CHANNELS_PER_CATEGORY = 2
 # How long after a reward drop's window started over a progress snapshot with
-# more minutes than the stored record is taken for a copy from before it.
-WATCH_REWARD_STALE_COPY_SECONDS = 10 * 60
+# more minutes than the stored record is taken for a copy from before it. The
+# minute watcher's copy is only renewed by a full inventory sync, so this has
+# to outlast one, and one that failed and was made again.
+WATCH_REWARD_STALE_COPY_SECONDS = 2 * DROP_FULL_INVENTORY_SYNC_SECONDS
 # A claim Twitch accepted without delivering the reward, because the
 # campaign's game account is not linked. The inventory reporting the account
 # as linked retries it at once; this is only the fallback.
@@ -9271,7 +9273,7 @@ class Twitch(object):
             if campaign_id in completed:
                 self.completed_drop_campaigns = set(completed) - {campaign_id}
         self.__publish_watch_reward_progress(campaign_id)
-        self.__finish_earlier_repeat_rows(stored)
+        self.__finish_earned_reward_rows(stored)
         # Said outside the lock: a log line can go out to a notifier.
         for earned, line in news:
             if earned:
@@ -9290,28 +9292,35 @@ class Twitch(object):
                 )
         return stored
 
-    def __finish_earlier_repeat_rows(self, stored):
-        """Mark the report rows of the repeats before each group's current
-        one as earned.
+    def __finish_earned_reward_rows(self, stored):
+        """Mark as earned the report rows of the rewards the stored record
+        shows were earned: the repeats before each group's current one, and
+        a group Twitch reports earned.
 
-        A repeat Twitch counts by itself is never claimed, so nothing else
-        writes its last row: the report would keep it at the minutes of the
-        last listing before the count went up, as in progress, for good.
-        Done once per repeat and session, on the first record that shows a
-        later repeat, which is also the first one after a restart."""
+        A reward Twitch counts by itself is never claimed, so nothing else
+        writes the last row of a repeat: the report would keep it at the
+        minutes of the last listing before the count went up, as in
+        progress, for good. The last repeat and a single reward are written
+        by the next inventory sync, unless the campaign has ended by then.
+
+        Each is done once per session, on the first record that shows it
+        earned (which is also the first one after a restart) and whose rows
+        could be read and written: a report file that could not is tried
+        again with the next record."""
         mutex = getattr(self, "analytics_mutex", None)
         if mutex is None:
             return
-        earlier = set()
+        earned = set()
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
             for number in range(group.get("repeat") or 0):
-                earlier.add(repeat_drop_id(group["id"], number))
+                earned.add(repeat_drop_id(group["id"], number))
+            if (drop.get("self") or {}).get("isClaimed") is True:
+                earned.add(str(drop["id"]))
         finished = getattr(self, "watch_reward_finished_rows", None) or frozenset()
-        pending = earlier - finished
+        pending = earned - finished
         if not pending:
             return
-        self.watch_reward_finished_rows = frozenset(finished | pending)
         now_ms = round(time.time() * 1000)
         now_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
@@ -9336,30 +9345,44 @@ class Twitch(object):
             row["percentage_progress"] = 100
             return True
 
-        with mutex:
-            for row in (getattr(self, "drop_report_state", None) or {}).values():
-                finish(row)
-            if Settings.enable_analytics is not True:
-                return
-            analytics_file = os.path.join(
-                Settings.analytics_path, "drops_by_category.json"
+        try:
+            with mutex:
+                for row in (getattr(self, "drop_report_state", None) or {}).values():
+                    finish(row)
+                self.__finish_report_file_rows(finish)
+        except (OSError, ValueError) as error:
+            # The record is stored all the same, and these rows are looked
+            # at again with the next one: the caller reads some errors as a
+            # failed listing.
+            self.__log_drop_check(
+                f"unable to mark earned reward rows in the report: {error}",
+                level=logging.DEBUG,
             )
-            if os.path.isfile(analytics_file) is False:
-                return
-            with open(analytics_file, "r", encoding="utf-8") as current:
-                try:
-                    data = json.load(current)
-                except json.JSONDecodeError:
-                    return
-            drops = data.get("drops") if isinstance(data, dict) else None
-            if not isinstance(drops, list):
-                return
-            if not [row for row in drops if finish(row)]:
-                return
-            temp_file = analytics_file + ".temp"
-            with open(temp_file, "w", encoding="utf-8") as temp_handle:
-                json.dump(data, temp_handle, indent=4)
-            os.replace(temp_file, analytics_file)
+            return
+        self.watch_reward_finished_rows = frozenset(
+            (getattr(self, "watch_reward_finished_rows", None) or frozenset()) | pending
+        )
+
+    @staticmethod
+    def __finish_report_file_rows(finish):
+        """Apply `finish` to the rows of the saved report, and save it again
+        if it changed one. Called with the analytics lock held."""
+        if Settings.enable_analytics is not True:
+            return
+        analytics_file = os.path.join(Settings.analytics_path, "drops_by_category.json")
+        if os.path.isfile(analytics_file) is False:
+            return
+        with open(analytics_file, "r", encoding="utf-8") as current:
+            data = json.load(current)
+        drops = data.get("drops") if isinstance(data, dict) else None
+        if not isinstance(drops, list):
+            return
+        if not [row for row in drops if finish(row)]:
+            return
+        temp_file = analytics_file + ".temp"
+        with open(temp_file, "w", encoding="utf-8") as temp_handle:
+            json.dump(data, temp_handle, indent=4)
+        os.replace(temp_file, analytics_file)
 
     @staticmethod
     def __watch_reward_progress_news(previous, stored):
