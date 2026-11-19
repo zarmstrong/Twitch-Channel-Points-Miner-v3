@@ -485,12 +485,12 @@ def test_category_view_holds_only_the_groups_that_count_there():
     )
 
     assert [drop["id"] for drop in result["timeBasedDrops"]] == [
-        "group-watch#6",
+        "group-watch#5",
         "group-other#0",
     ]
     first = with_reward_category(result, game_id="777")
     second = with_reward_category(result, game_id="888")
-    assert [drop["id"] for drop in first["timeBasedDrops"]] == ["group-watch#6"]
+    assert [drop["id"] for drop in first["timeBasedDrops"]] == ["group-watch#5"]
     assert [drop["id"] for drop in second["timeBasedDrops"]] == ["group-other#0"]
     # The stored record itself is left whole.
     assert len(result["timeBasedDrops"]) == 2
@@ -1788,14 +1788,142 @@ def test_progress_cache_holds_the_reward_drops_that_can_be_watched_now():
         )
     }
 
+    # A newer listing reaches the cache without waiting for the next
+    # inventory read: left at 12 minutes, the channel would look stalled.
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=22, window=open_window())))
+    )
+    [row] = twitch.drop_inventory_progress["example-game"]
+    assert row[4] == 22
+    assert twitch.drop_inventory_minutes_by_drop_id == {"group-watch#0": 22}
+
     # A repeat waiting for its next window is not progress to watch for.
     twitch._Twitch__remember_watch_reward_campaign(
         convert(
             watch_group(progress(grants=1, next_at=stamp(NOW + timedelta(hours=1))))
         )
     )
+    assert twitch.drop_inventory_progress == {}
     twitch._Twitch__cache_drop_inventory_progress({})
     assert twitch.drop_inventory_progress == {}
+
+
+def test_progress_cache_is_not_built_by_a_listing_alone():
+    # Readers take a built cache as the inventory's word on every game; a
+    # listing only updates one an inventory read has built.
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=12, window=open_window())))
+    )
+
+    assert not getattr(twitch, "drop_inventory_progress", None)
+
+
+def test_progress_cache_lists_a_drop_under_every_category_it_counts_in():
+    # The stall check looks up the game being watched, which can be the
+    # second category of the group.
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(
+                progress(minutes=12, window=open_window()),
+                categories=[CATEGORY, OTHER_CATEGORY],
+            )
+        )
+    )
+
+    twitch._Twitch__cache_drop_inventory_progress({})
+
+    assert set(twitch.drop_inventory_progress) == {"example-game", "other-game"}
+    assert twitch.drop_inventory_minutes_by_drop_id == {"group-watch#0": 12}
+
+
+def test_claimable_reward_goes_into_the_cache_as_finished():
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=12, window=open_window())))
+    )
+    twitch._Twitch__cache_drop_inventory_progress({})
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(progress(status="CLAIMABLE", minutes=60, window=open_window()))
+        )
+    )
+
+    assert twitch.drop_inventory_progress == {}
+    assert twitch.drop_inventory_minutes_by_drop_id == {}
+    assert twitch.drop_inventory_finished_ids == {"group-watch#0"}
+
+
+def test_reopening_a_repeat_does_not_wait_for_a_claim_in_progress():
+    # The claim lock is held for as long as Twitch takes to answer a claim,
+    # and the listing is read on the thread that sends the watch events.
+    twitch = bare_twitch()
+    twitch.accepted_drop_ids = frozenset({"group-watch#1"})
+    asked = []
+    twitch.claim_drop_lock = SimpleNamespace(
+        acquire=lambda blocking=True: asked.append(blocking) or False
+    )
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, grants=1, window=open_window())))
+    )
+
+    assert asked == [False]
+    # Left for the next listing.
+    assert twitch.accepted_drop_ids == {"group-watch#1"}
+
+
+def test_finished_group_is_its_last_repeat_not_one_more():
+    # Six repeats are watched as #0 to #5 whichever way Twitch counts.
+    [earned] = convert(watch_group(progress(status="CLAIMED", grants=6)))[
+        "timeBasedDrops"
+    ]
+    assert (earned["id"], earned["name"]) == (
+        "group-watch#5",
+        "Daily Chest (6/6 earned)",
+    )
+
+    # The last repeat, counted before its claim and seen claimable first.
+    [waiting] = convert(
+        watch_group(progress(status="CLAIMABLE", minutes=60, grants=6))
+    )["timeBasedDrops"]
+    assert waiting["id"] == "group-watch#5"
+
+    # Counted once claimed: the first repeat, earned.
+    [first] = convert(watch_group(progress(status="CLAIMED", grants=1)))[
+        "timeBasedDrops"
+    ]
+    assert first["id"] == "group-watch#0"
+
+
+def test_claimable_repeat_schedules_the_return_for_its_next_window():
+    # Claimed during an evaluation, it leaves nothing to watch and so no
+    # channel to report the next window: Twitch's word for it is kept.
+    twitch = bare_twitch()
+    twitch.twitchdrops_app_upcoming_starts = {}
+    opens = NOW + timedelta(hours=1)
+    claimable = progress(
+        status="CLAIMABLE", minutes=60, window=open_window(), next_at=stamp(opens)
+    )
+
+    [drop] = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(claimable))
+    )["timeBasedDrops"]
+
+    assert drop["_reward_group"]["next_start"] == stamp(opens)
+    assert twitch.next_upcoming_drop_start() == opens
+
+    # Without a next eligibility time, the window's end is when to look.
+    del claimable["nextEligibleAt"]
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    assert twitch.next_upcoming_drop_start() == NOW + timedelta(hours=23)
+
+    # The last repeat has no next window.
+    claimable["grantCount"] = 6
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    assert twitch.next_upcoming_drop_start() is None
 
 
 def test_category_refresh_is_brought_forward_to_a_start_learned_later(monkeypatch):

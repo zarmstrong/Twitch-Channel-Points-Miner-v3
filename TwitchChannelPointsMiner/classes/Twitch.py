@@ -842,13 +842,7 @@ class Twitch(object):
                 if read_started is not None
                 else {}
             )
-            # The inventory never lists a watch-earned reward campaign. Its
-            # drops that can be watched for now are cached from the stored
-            # record, or a channel Twitch stopped crediting would never be
-            # noticed for one.
-            for campaign in list(
-                inventory.get("dropCampaignsInProgress", []) or []
-            ) + self.__watch_reward_progress_entries(watchable_now=True):
+            for campaign in inventory.get("dropCampaignsInProgress", []) or []:
                 if not isinstance(campaign, dict):
                     continue
                 game = campaign.get("game") or {}
@@ -919,6 +913,16 @@ class Twitch(object):
                         )
                     )
 
+            # The inventory never lists a watch-earned reward campaign. Its
+            # rows come from the stored records, or a channel Twitch stopped
+            # crediting would never be noticed for one.
+            reward_rows, reward_finished_ids = self.__watch_reward_progress_rows(
+                list(self.__watch_reward_campaigns().values())
+            )
+            for game_slug, rows in reward_rows.items():
+                progress_by_game.setdefault(game_slug, []).extend(rows)
+            finished_ids |= reward_finished_ids
+
             self.drop_inventory_progress = {
                 game_slug: tuple(sorted(progress))
                 for game_slug, progress in progress_by_game.items()
@@ -931,6 +935,105 @@ class Twitch(object):
             }
             self.drop_inventory_finished_ids = frozenset(finished_ids)
             self.drop_inventory_progress_updated_at = time.time()
+
+    def __watch_reward_progress_rows(self, campaigns) -> Tuple[dict, set]:
+        """The progress-cache rows of stored reward campaigns, by game
+        slug, and the IDs of their drops with nothing left to watch.
+
+        Only a drop whose own window is open has a row, which leaves out a
+        repeat waiting for its next one. It has one under every category it
+        counts in: the stall check looks rows up by the watched game."""
+        now = utc_now()
+        accepted_ids = getattr(self, "accepted_drop_ids", None) or ()
+        rows_by_game = {}
+        finished_ids = set()
+        for campaign in campaigns:
+            if self.__is_open_drop_campaign(campaign) is not True:
+                continue
+            for drop in campaign.get("timeBasedDrops") or []:
+                drop_id = str(drop["id"])
+                drop_self = drop.get("self") or {}
+                group = drop["_reward_group"]
+                if (
+                    drop_self.get("isClaimed") is True
+                    or group.get("claimable") is True
+                    or drop_id in accepted_ids
+                ):
+                    finished_ids.add(drop_id)
+                    continue
+                starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
+                ends_at = self.__parse_twitch_datetime(drop.get("endAt"))
+                if (starts_at is not None and starts_at > now) or (
+                    ends_at is not None and ends_at <= now
+                ):
+                    continue
+                required = drop.get("requiredMinutesWatched") or 0
+                current = drop_self.get("currentMinutesWatched") or 0
+                if required <= 0 or current >= required:
+                    continue
+                for category in group.get("categories") or []:
+                    game_slug = self.__slugify(
+                        category.get("displayName") or category.get("name") or ""
+                    )
+                    if game_slug == "":
+                        continue
+                    rows_by_game.setdefault(game_slug, []).append(
+                        (
+                            str(campaign["id"]),
+                            str(campaign.get("name") or "Unknown campaign"),
+                            drop_id,
+                            str(drop.get("name") or "Unknown drop"),
+                            current,
+                            required,
+                            None,
+                        )
+                    )
+        return rows_by_game, finished_ids
+
+    def __publish_watch_reward_progress(self, stored):
+        """Bring the progress cache's rows for a stored reward campaign up
+        to date with a record just stored.
+
+        Only a full inventory read rebuilds the cache, and passes in between
+        keep it marked fresh: with the rows of an older record still in it,
+        the stall check would see a channel that is earning as stalled."""
+        with self.__drop_state_lock("drop_inventory_cache_lock"):
+            if not getattr(self, "drop_inventory_progress_updated_at", 0):
+                # Not built yet; the read that builds it includes the record.
+                return
+            campaign_id = str(stored["id"])
+            progress = getattr(self, "drop_inventory_progress", None) or {}
+            replaced_ids = {
+                row[2]
+                for rows in progress.values()
+                for row in rows
+                if row[0] == campaign_id
+            }
+            rows_by_game, finished_ids = self.__watch_reward_progress_rows([stored])
+            merged = {
+                game: [row for row in rows if row[0] != campaign_id]
+                for game, rows in progress.items()
+            }
+            for game, rows in rows_by_game.items():
+                merged.setdefault(game, []).extend(rows)
+            self.drop_inventory_progress = {
+                game: tuple(sorted(rows)) for game, rows in merged.items() if rows
+            }
+            minutes = {row[2]: row[4] for rows in rows_by_game.values() for row in rows}
+            self.drop_inventory_minutes_by_drop_id = {
+                **{
+                    drop_id: current
+                    for drop_id, current in (
+                        getattr(self, "drop_inventory_minutes_by_drop_id", None) or {}
+                    ).items()
+                    if drop_id not in replaced_ids
+                },
+                **minutes,
+            }
+            self.drop_inventory_finished_ids = (
+                frozenset(getattr(self, "drop_inventory_finished_ids", None) or ())
+                - set(minutes)
+            ) | finished_ids
 
     def __with_inventory_drop_progress(self, campaign: dict) -> dict:
         """Return the campaign with the account's inventory progress applied.
@@ -3181,13 +3284,17 @@ class Twitch(object):
             if self.__is_open_drop_campaign(campaign) is not True:
                 continue
             for drop in campaign.get("timeBasedDrops") or []:
-                starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
-                if (
-                    starts_at is not None
-                    and starts_at > now
-                    and drop["_reward_group"].get("finished") is not True
+                if drop["_reward_group"].get("finished") is True:
+                    continue
+                # The drop's own start, or for a repeat waiting to be claimed
+                # the window that follows it.
+                for value in (
+                    drop.get("startAt"),
+                    drop["_reward_group"].get("next_start"),
                 ):
-                    future_starts.append(starts_at)
+                    starts_at = self.__parse_twitch_datetime(value)
+                    if starts_at is not None and starts_at > now:
+                        future_starts.append(starts_at)
         return min(future_starts) if future_starts else None
 
     @staticmethod
@@ -8850,6 +8957,7 @@ class Twitch(object):
             completed = getattr(self, "completed_drop_campaigns", None) or set()
             if campaign_id in completed:
                 self.completed_drop_campaigns = set(completed) - {campaign_id}
+        self.__publish_watch_reward_progress(stored)
         return stored
 
     @staticmethod
@@ -8904,13 +9012,22 @@ class Twitch(object):
         under its ID.
 
         A claim still on its way is not seen here; claim_drop looks at the
-        stored record once it is accepted."""
+        stored record once it is accepted. Nor is one waited for: listings
+        are read on the thread that sends the minute-watched events, and the
+        claim lock is held for as long as Twitch takes to answer. The next
+        listing reopens what this one could not."""
         reopened = self.__watch_reward_drop_ids_with_work_left(stored) & set(
             getattr(self, "accepted_drop_ids", None) or ()
         )
-        if reopened:
-            with self.__claim_lock():
-                self.__forget_accepted_claims(reopened)
+        if not reopened:
+            return
+        claim_lock = self.__claim_lock()
+        if not claim_lock.acquire(blocking=False):
+            return
+        try:
+            self.__forget_accepted_claims(reopened)
+        finally:
+            claim_lock.release()
 
     def __forget_accepted_claims(self, drop_ids):
         """Called under the claim lock."""
@@ -9207,34 +9324,17 @@ class Twitch(object):
             entry["timeBasedDrops"].append(drop)
         return copy.deepcopy(list(entries.values()))
 
-    def __watch_reward_progress_entries(self, watchable_now=False) -> list:
+    def __watch_reward_progress_entries(self) -> list:
         """The watch-earned reward campaigns as inventory
         dropCampaignsInProgress entries, one per category. The inventory
         never lists them, so the sync reads their progress and claims from
-        these. With watchable_now, only the drops whose own window is open,
-        leaving out a repeat that waits for its next one."""
-        entries = [
+        these."""
+        return [
             {**entry, "self": {"isAccountConnected": True}}
             for campaign in list(self.__watch_reward_campaigns().values())
             if self.__is_open_drop_campaign(campaign) is True
             for entry in self.__watch_reward_category_entries(campaign)
         ]
-        if not watchable_now:
-            return entries
-        now = utc_now()
-
-        def open_now(drop):
-            starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
-            ends_at = self.__parse_twitch_datetime(drop.get("endAt"))
-            return (starts_at is None or starts_at <= now) and (
-                ends_at is None or now < ends_at
-            )
-
-        for entry in entries:
-            entry["timeBasedDrops"] = [
-                drop for drop in entry["timeBasedDrops"] if open_now(drop)
-            ]
-        return [entry for entry in entries if entry["timeBasedDrops"]]
 
     def __is_known_reward_campaign(self, campaign) -> bool:
         """Whether a campaign is known to be subscription/gift/cheer-gated."""

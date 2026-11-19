@@ -205,10 +205,24 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             if campaign_end is None or window_expires < campaign_end:
                 end_at = window_expires.strftime(TWITCH_DATETIME_FORMAT)
 
+    # When the repeat after a claimable one opens, as far as Twitch says:
+    # once claimed, the group has nothing to watch for until then.
+    next_start = None
+    if claimable and grants < times:
+        for upcoming in (next_window, window_expires):
+            if upcoming is not None and upcoming > now:
+                next_start = upcoming.strftime(TWITCH_DATETIME_FORMAT)
+                break
+
     drop_id = str(group["id"])
     name = group.get("name") or campaign["name"]
     if times > 1:
-        drop_id = f"{drop_id}#{grants}"
+        # A group with every repeat counted is the last repeat, earned or
+        # waiting to be claimed, not one more after it.
+        repeat = grants
+        if claimed or (claimable and grants >= times):
+            repeat = max(min(grants, times) - 1, 0)
+        drop_id = f"{drop_id}#{repeat}"
         name = f"{name} ({min(grants, times)}/{times} earned)"
     rewards = group.get("rewards")
     return {
@@ -244,6 +258,7 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             # Nothing more can be earned in the group as Twitch reports it.
             "finished": claimed or expired,
             "grants": grants,
+            "next_start": next_start,
             "categories": categories,
         },
     }
