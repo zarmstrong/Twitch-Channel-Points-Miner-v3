@@ -170,6 +170,31 @@ class GQLOperations:
             "}"
         ),
     }
+    # The reward groups of a sitewide reward campaign (a quest), which names
+    # the categories it counts in. Hand-written: Twitch's web client only has
+    # it as a fragment of campaign-specific operations.
+    RewardCampaignDetails = {
+        "operationName": "RewardCampaignDetails",
+        "query": (
+            "query RewardCampaignDetails($id: ID!) {"
+            "dropsCampaign(id: $id) {"
+            "id name status startAt endAt game { id name } "
+            "rewardGroups {"
+            "id name track lane "
+            "progressCriteria {"
+            "requirementType requirements { minutesWatched subs } "
+            "isRepeatable "
+            "repeatableConfig {"
+            "repeatableTimes resetIntervalSeconds shouldCompleteAllRepeatsToEarn"
+            "} "
+            "channels { id } categories { id displayName }"
+            "} "
+            "rewards { id name distributionType thumbnailURL }"
+            "}"
+            "}"
+            "}"
+        ),
+    }
     DropCurrentSessionContext = {
         "operationName": "DropCurrentSessionContext",
         "variables": {"channelID": "", "channelLogin": ""},

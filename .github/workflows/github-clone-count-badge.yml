@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: github-traffic-badges
@@ -19,74 +19,40 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: gh login
-        run: echo "${{ secrets.SECRET_TOKEN }}" | gh auth login --with-token
+      - name: Fetch the latest clone counts
+        env:
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh api "repos/$REPOSITORY/traffic/clones" > clone.json
 
-      - name: parse latest clone count
+      - name: Download the previous counts from the gist
+        env:
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          curl --user "${{ github.actor }}:${{ secrets.SECRET_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/traffic/clones \
-            > clone.json
-
-      - name: create gist and download previous count
-        id: set_id
-        run: |
-          if [ -n "${{ secrets.GIST_ID }}" ]
-          then
-              echo "GIST_ID found"
-              echo "GIST=${{ secrets.GIST_ID }}" >> "$GITHUB_OUTPUT"
-              curl https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clone.json > clone_before.json
-              if cat clone_before.json | grep '404: Not Found'; then
-                echo "GIST_ID is no longer valid. Update the GIST_ID repository secret."
-                exit 1
-              fi
-          else
-              echo "GIST_ID is not configured. Create a gist and add its ID as the GIST_ID repository secret."
-              exit 1
+          if [ -z "$GIST_ID" ]; then
+            echo "::error::GIST_ID is not configured. Create a gist and add its ID as the GIST_ID repository secret."
+            exit 1
           fi
+          gh api "gists/$GIST_ID" --jq '
+            .files["clone.json"]
+            | if . == null then error("the gist has no clone.json; check the GIST_ID secret")
+              elif .truncated then error("clone.json is too large to read through the API")
+              else .content end' > clone_before.json
 
-      - name: update clone.json
+      - name: Merge the counts
+        run: python3 .github/scripts/merge_traffic_counts.py clones clone.json clone_before.json
+
+      - name: Update the gist with the latest counts
+        env:
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          curl https://raw.githubusercontent.com/MShawon/github-clone-count-badge/master/main.py > main.py
-          python3 main.py
-
-      - name: Update gist with latest count
-        run: |
-          content=$(sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/\"/\\"/g' -e 's/\r//g' "clone.json" | sed -E ':a;N;$!ba;s/\r{0,1}\n/\\n/g')
-          echo '{"description": "${{ github.repository }} clone statistics", "files": {"clone.json": {"content": "'"$content"'"}}}' > post_clone.json
-          curl -s -X PATCH \
-            --user "${{ github.actor }}:${{ secrets.SECRET_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d @post_clone.json https://api.github.com/gists/${{ steps.set_id.outputs.GIST }} > /dev/null 2>&1
-
-          if [ ! -f CLONE.md ]; then
-            shields="https://img.shields.io/badge/dynamic/json?color=success&label=Clone&query=count&url="
-            url="https://gist.githubusercontent.com/${{ github.actor }}/${{ steps.set_id.outputs.GIST }}/raw/clone.json"
-            repo="https://github.com/MShawon/github-clone-count-badge"
-            echo ''> CLONE.md
-            echo '
-            **Markdown**
-
-            ```markdown' >> CLONE.md
-            echo "[![GitHub Clones]($shields$url&logo=github)]($repo)" >> CLONE.md
-            echo '
-            ```
-
-            **HTML**
-            ```html' >> CLONE.md
-            echo "<a href='$repo'><img alt='GitHub Clones' src='$shields$url&logo=github'></a>" >> CLONE.md
-            echo '```' >> CLONE.md
-
-            git add CLONE.md
-            git config --global user.name "GitHub Action"
-            git config --global user.email "action@github.com"
-            git commit -m "create clone count badge"
-          fi
-
-      - name: Push
-        run: |
-          git pull --rebase origin "$GITHUB_REF_NAME"
-          git push origin "HEAD:$GITHUB_REF_NAME"
+          jq -n \
+            --arg description "$REPOSITORY clone statistics" \
+            --rawfile content clone.json \
+            '{description: $description, files: {"clone.json": {content: $content}}}' \
+            | gh api --method PATCH "gists/$GIST_ID" --input - > /dev/null

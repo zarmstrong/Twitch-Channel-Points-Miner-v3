@@ -2054,6 +2054,128 @@ def test_category_search_discovers_channels_for_an_all_channel_campaign(
     assert usernames == ["big", "mid"]
 
 
+@pytest.mark.parametrize(
+    "watch_rewards,catalog_campaigns,expected",
+    [
+        # Any channel of the category counts toward a reward campaign (#348).
+        ({"quest-1": {}}, [], ["big", "mid"]),
+        # An ordinary Drop campaign needs the Drops tag, as before.
+        ({}, [], []),
+        # One the catalog lists beside the reward campaign is searched for
+        # first; with no tagged channel live, the others still earn the reward.
+        ({"quest-1": {}}, [{"id": "gist-1", "channels": []}], ["big", "mid"]),
+    ],
+)
+def test_category_search_ignores_the_drops_tag_for_a_reward_campaign_category(
+    monkeypatch, watch_rewards, catalog_campaigns, expected
+):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300, "mid": 200},
+        allow_listed=(),
+        campaigns=[
+            {"id": "quest-1", "name": "Quest", "all_channels": True, "channels": []}
+        ],
+        # No live channel carries the Drops tag.
+        directory_logins=[],
+    )
+    twitch.watch_reward_campaigns = watch_rewards
+    twitch.twitchdrops_app_campaigns = {"gray-zone-warfare": catalog_campaigns}
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == expected
+    # The channels found are also the ones watched for the reward: the
+    # watcher asks this record, which a search without the tag otherwise
+    # leaves empty.
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", login): (1, 1) for login in expected
+    }
+
+
+def _quest_beside_a_drop_campaign(monkeypatch, directory_logins):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300, "mid": 200, "tagged": 5},
+        allow_listed=(),
+        campaigns=[
+            {"id": "quest-1", "name": "Quest", "all_channels": True, "channels": []},
+            {"id": "drop-1", "name": "Drop", "all_channels": True, "channels": []},
+        ],
+        directory_logins=directory_logins,
+    )
+    twitch.watch_reward_campaigns = {
+        "quest-1": {
+            "id": "quest-1",
+            "_watch_reward": {"categories": [{"id": "gzw-id", "displayName": "GZW"}]},
+        }
+    }
+    return twitch
+
+
+@pytest.mark.parametrize(
+    "directory_logins,expected",
+    [
+        # Drops-tagged channels earn the Drop campaign and the reward both.
+        (["tagged"], ["tagged"]),
+        # None is live: every other channel still earns the reward (#348).
+        ([], ["big", "mid"]),
+    ],
+)
+def test_category_search_falls_back_to_untagged_channels_for_a_reward_campaign(
+    monkeypatch, directory_logins, expected
+):
+    twitch = _quest_beside_a_drop_campaign(monkeypatch, directory_logins)
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == expected
+    assert set(twitch.category_campaign_eligibility) == {
+        ("gray-zone-warfare", login) for login in expected
+    }
+
+
+@pytest.mark.parametrize(
+    "channel_campaign_ids,expected", [(["quest-1"], ["big"]), ([], [])]
+)
+def test_forced_streamer_without_the_drops_tag_is_kept_for_a_reward_campaign(
+    monkeypatch, channel_campaign_ids, expected
+):
+    # The complete Drops directory does not list the channel. It is asked
+    # for its own campaigns instead, and kept when the reward campaign is
+    # among them.
+    twitch = _quest_beside_a_drop_campaign(monkeypatch, directory_logins=[])
+    helix_get = Twitch._Twitch__helix_get
+
+    def with_user_ids(self, *args):
+        response = helix_get(self, *args)
+        for stream in response.get("data") or []:
+            stream.setdefault("user_id", "4242")
+        return response
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", with_user_ids)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_from_channel_id",
+        lambda self, channel_id: (
+            [twitch.watch_reward_campaigns[key] for key in channel_campaign_ids],
+            True,
+            True,
+        ),
+    )
+
+    assert (
+        twitch.get_live_streamers_for_category(
+            "Gray Zone Warfare|big", drops_enabled=True
+        )
+        == expected
+    )
+
+
 def test_category_search_puts_allow_listed_channels_first_for_mixed_campaigns(
     monkeypatch,
 ):
@@ -4820,7 +4942,7 @@ def _helix_twitch(monkeypatch, response_factory):
     twitch.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
     twitch.user_agent = "test-agent"
     monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Twitch.requests.get",
+        "TwitchChannelPointsMiner.classes.HttpSession.get",
         lambda url, **kwargs: response_factory(),
     )
     return twitch
@@ -4882,7 +5004,7 @@ def test_permanent_streams_error_is_an_evaluated_empty_category(monkeypatch):
             return FakeResponse({"data": [{"id": "ow-id", "name": "Overwatch 2"}]})
         return FakeResponse({"error": "Bad Request"}, 400)
 
-    monkeypatch.setattr("TwitchChannelPointsMiner.classes.Twitch.requests.get", get)
+    monkeypatch.setattr("TwitchChannelPointsMiner.classes.HttpSession.get", get)
     monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
 
     assert (
