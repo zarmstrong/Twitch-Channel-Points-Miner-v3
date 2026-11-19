@@ -147,18 +147,23 @@ jobs:
           version="${RELEASE_TAG#v}"
           image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
 
-          # Only a missing release skips the notes. Auth, rate-limit and
-          # network errors fail the step instead of passing as "no release".
-          if ! view_error=$(gh release view "${RELEASE_TAG}" --json tagName 2>&1 >/dev/null); then
-            if [[ "${view_error}" == *"release not found"* ]]; then
+          notes_file=$(mktemp)
+          error_file=$(mktemp)
+          trap 'rm -f "${notes_file}" "${error_file}"' EXIT
+
+          # Only a missing release (HTTP 404) skips the notes. Auth,
+          # rate-limit, server and network errors fail the step instead of
+          # passing as "no release". One REST call, so no other lookup's
+          # "not found" can stand in for its error, as with gh release view.
+          if ! release_notes=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.body // ""' 2>"${error_file}"); then
+            if grep -q '(HTTP 404)' "${error_file}"; then
               echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
               exit 0
             fi
-            echo "::error::Could not read GitHub release ${RELEASE_TAG}: ${view_error}"
+            echo "::error::Could not read GitHub release ${RELEASE_TAG}: $(cat "${error_file}")"
             exit 1
           fi
 
-          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')
           release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
           docker_notes=$(cat <<EOF
           <!-- docker-image:start -->
@@ -172,8 +177,6 @@ jobs:
           <!-- docker-image:end -->
           EOF
           )
-          notes_file=$(mktemp)
-          trap 'rm -f "${notes_file}"' EXIT
           printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
           gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
 

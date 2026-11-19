@@ -105,11 +105,14 @@ test('without a failure, an unfinished release on this commit is published', asy
   assert.equal(core.messages.at(-1)[0], 'notice');
 });
 
-test('without a failure, an unfinished release on another commit is left alone', async () => {
+test('without a failure, an unfinished release on another commit is published', async () => {
+  // An earlier commit's run created it from master's state and failed, and
+  // the release commit's own pending run was replaced by this one.
   const core = fakeCore();
   const github = fakeGithub({ commit: { sha: 'b'.repeat(40) } });
-  assert.equal(await resolve(github, core, { recheck: false }), '');
-  assert.equal(core.outputs.release_ready, 'false');
+  assert.equal(await resolve(github, core, { recheck: false }), '3.21.2');
+  assert.deepEqual(core.outputs, { release_ready: 'true', tag_name: '3.21.2' });
+  assert.equal(core.messages.at(-1)[0], 'notice');
 });
 
 test('after a failure, a finished release on this commit is published again', async () => {

@@ -90,13 +90,12 @@ async function findUnpublishedRelease({
     core.info(`Release ${tag} on this commit is already published; nothing to publish.`);
     return false;
   }
-  // A later push's run can also create the release when the release commit's
-  // own run was still waiting and got replaced (one pending run per
-  // concurrency group). After a failure or re-run, publish it if nobody
-  // finished publishing it. Ordinary pushes leave other commits' releases
-  // alone, so a release whose publishing keeps failing isn't rebuilt on
-  // every push.
-  if (recheck && !finished) {
+  // The release commit's own run can be replaced while it waits (one
+  // pending run per concurrency group), so the run that created the release
+  // may be an earlier commit's run that then failed. Any later run publishes
+  // it while it is unfinished. A release whose publishing keeps failing is
+  // therefore tried again on each push until it succeeds.
+  if (!finished) {
     core.notice(`Release ${tag} on ${commit.sha} has no Docker notes or Windows files yet; publishing it now.`);
     return true;
   }
