@@ -461,28 +461,60 @@ def _import_edit(source, line_offsets, tree, first_use, statements):
     return (import_offset, prefix + "\n".join(statements) + "\n")
 
 
-def _reads_while_running(node, name):
-    """Whether node, a top-level statement, is a simple statement that reads
-    name as it runs, so a binding below it comes too late.
+# A handler for one of these, or for anything that isn't a plain name, may
+# catch the NameError a too-late import raises.
+_NAME_ERROR_CATCHERS = {"NameError", "Exception", "BaseException"}
 
-    Earlier migrations only wrote references into simple statements (the
-    config's assignments and calls). A function or lambda body runs later,
-    and a statement inside try, if or with may be the config's own fallback
-    (`except NameError:`), so those are left as the user wrote them.
+
+def _may_catch_name_error(handler):
+    if handler.type is None:
+        return True
+    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(
+        not isinstance(kind, ast.Name) or kind.id in _NAME_ERROR_CATCHERS
+        for kind in kinds
+    )
+
+
+def _reads_while_running(node, name):
+    """Whether node, a top-level statement, reads name while the module runs,
+    so a binding below it comes too late.
+
+    Earlier migrations wrote references into calls anywhere in the file,
+    including under if, with or a class, and in a function's defaults, which
+    all run as the module loads. A function, lambda or generator body runs
+    later, so it doesn't count. Neither does a try statement whose handlers
+    may catch NameError: that may be the config's own fallback, which a
+    repair would change. Annotations are skipped, since they aren't evaluated
+    under `from __future__ import annotations`.
     """
-    if isinstance(node, ast.AnnAssign):
-        # The annotation is skipped: it isn't evaluated under
-        # `from __future__ import annotations`.
-        stack = [node.target] + ([node.value] if node.value else [])
-    elif isinstance(node, (ast.Assign, ast.AugAssign, ast.Expr)):
-        stack = [node]
-    else:
-        return False
+    stack = [node]
     while stack:
         child = stack.pop()
-        if isinstance(child, ast.Lambda):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             stack.extend(child.args.defaults)
             stack.extend(default for default in child.args.kw_defaults if default)
+            stack.extend(getattr(child, "decorator_list", []))
+            continue
+        if isinstance(child, ast.GeneratorExp):
+            stack.append(child.generators[0].iter)
+            continue
+        if isinstance(child, ast.AnnAssign):
+            stack.append(child.target)
+            if child.value is not None:
+                stack.append(child.value)
+            continue
+        if type(child).__name__ in ("Try", "TryStar") and any(
+            _may_catch_name_error(handler) for handler in child.handlers
+        ):
+            continue
+        if type(child).__name__ in (
+            "TypeAlias",
+            "TypeVar",
+            "ParamSpec",
+            "TypeVarTuple",
+        ):
+            # Evaluated lazily.
             continue
         if (
             isinstance(child, ast.Name)
@@ -501,9 +533,8 @@ def _late_imports(tree):
     Earlier releases added the migration's imports below the last top-level
     import, which could be below the statement they wrote a reference into,
     so the config raised NameError on every start (#327). Such an import is
-    added again above the first simple statement that reads its name as it
-    runs (_reads_while_running); the later one then
-    changes nothing. A name the module binds another way up to that use is
+    added again above the first statement that reads its name while the
+    module runs (_reads_while_running); the later one then changes nothing. A name the module binds another way up to that use is
     left alone; a function's own binding can't shadow the module's import.
     """
     statements = []

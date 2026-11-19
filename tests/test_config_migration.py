@@ -1466,9 +1466,10 @@ _CONFIG_TAIL = (
         # A function body runs only when it's called, after the import.
         "def make_level():\n    return logging.WARNING\n",
         "LEVEL = lambda: logging.WARNING\n",
+        "LEVELS = (logging.INFO for _ in (1,))\n",
         # The config's own fallback: moving the import would change LEVEL.
         "try:\n    LEVEL = logging.INFO\nexcept NameError:\n    LEVEL = 30\n",
-        "if True:\n    LEVEL = logging.INFO\n",
+        "try:\n    LEVEL = logging.INFO\nexcept (ValueError, Exception):\n    LEVEL = 30\n",
     ],
 )
 def test_late_import_repair_leaves_references_that_dont_run_first(use):
@@ -1481,14 +1482,24 @@ def test_late_import_repair_leaves_references_that_dont_run_first(use):
     assert migrated == source
 
 
-def test_late_import_repair_covers_a_lambda_default():
-    # A default is evaluated where the lambda is written.
-    source = (
-        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
-        "LEVEL = (lambda level=logging.INFO: level)()\n"
-        "import logging\n"
-        f"{_CONFIG_TAIL}"
-    )
+@pytest.mark.parametrize(
+    "use",
+    [
+        # Each of these runs as the module loads, where an earlier migration
+        # could have written the reference.
+        "LEVEL = (lambda level=logging.INFO: level)()\n",
+        "def make_level(level=logging.INFO):\n    return level\nLEVEL = make_level()\n",
+        "if True:\n    LEVEL = logging.INFO\n",
+        "class Levels:\n    LEVEL = logging.INFO\nLEVEL = Levels.LEVEL\n",
+        "LEVEL = [logging.INFO for _ in (1,)][0]\n",
+        "try:\n    LEVEL = logging.INFO\nexcept ValueError:\n    LEVEL = 30\n",
+    ],
+)
+def test_late_import_repair_covers_references_that_run_as_the_module_loads(use):
+    # R327-22
+    source = f"CONFIG_VERSION = {CONFIG_VERSION}\n{use}import logging\n{_CONFIG_TAIL}"
+    with pytest.raises(NameError):
+        exec(compile(source, "config.py", "exec", dont_inherit=True), {})
 
     migrated, _, _ = migrate_config_source(source)
 
