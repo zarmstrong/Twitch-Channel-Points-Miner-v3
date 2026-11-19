@@ -29,6 +29,12 @@ jobs:
   deploy-docker:
     name: Deploy Docker Hub
     runs-on: ubuntu-latest
+    # One publish of a version at a time, whether dispatched by hand or called
+    # by a release run: two at once could both find the version missing and
+    # both push it, so the later build would replace the earlier one.
+    concurrency:
+      group: deploy-docker-${{ inputs.ref }}
+      cancel-in-progress: false
     steps:
       - name: Validate release tag
         env:

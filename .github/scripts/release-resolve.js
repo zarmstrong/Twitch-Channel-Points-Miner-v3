@@ -108,7 +108,8 @@ async function findUnpublishedRelease({
   // pending run per concurrency group), so the run that created the release
   // may be an earlier commit's run that then failed. Any later run publishes
   // it while it is unfinished. A part whose publishing keeps failing is
-  // therefore tried again on each push until it succeeds.
+  // therefore tried again on each push until it succeeds, or until the next
+  // release replaces this one in the manifest.
   if (!finished) {
     core.notice(`Release ${tag} on ${commit.sha} is missing its Docker notes or Windows files; publishing them now.`);
     return missingParts(release, tag);
