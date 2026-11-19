@@ -240,6 +240,11 @@ Only update `latest` when the new version should become the default Docker Hub
 release. To publish a version without changing `latest`, remove both `latest`
 tag arguments from the build command and do not push those tags.
 
+The Docker deployment workflow follows the same rule. It always pushes the
+version tag, but moves `latest` and updates the Docker Hub description only
+when the version is the repository's newest plain `MAJOR.MINOR.PATCH` tag. A
+prerelease, or an older version published again, leaves both unchanged.
+
 ### Troubleshooting
 
 - `denied: requested access to the resource is denied`: check the namespace,
