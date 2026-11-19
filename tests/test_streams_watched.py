@@ -25,6 +25,9 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
+from TwitchChannelPointsMiner.classes.entities.ChannelBanStatus import (
+    ChannelBanStatus,
+)
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
@@ -173,9 +176,15 @@ def _run_one_watch_iteration(
     drop_slot_covering_streamer=None,
     category_campaign_eligibility=None,
     on_sleep=None,
+    gql=None,
+    channel_bans=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
+    if gql is not None:
+        twitch.gql = gql
+    if channel_bans is not None:
+        twitch.channel_bans = channel_bans
     twitch.analytics_mutex = Lock()
     twitch.user_agent = "test-agent"
     twitch.completed_drop_campaigns = set(completed_drop_campaigns or [])
@@ -3193,3 +3202,232 @@ def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
         assert "\x1b[" not in message
         assert extra["default_color"] == WATCH_STATUS_COLOR
         assert WATCH_STATUS_COLOR == Fore.GREEN
+
+
+class _FakeBanGQL:
+    """Answers ChannelBanStatus checks from a dict and records each call."""
+
+    def __init__(self, statuses=None, error=None):
+        self.statuses = statuses or {}
+        self.error = error
+        self.calls = []
+
+    def channel_ban_statuses(self, channel_ids):
+        self.calls.append(list(channel_ids))
+        if self.error is not None:
+            raise self.error
+        return {
+            channel_id: self.statuses[channel_id]
+            for channel_id in channel_ids
+            if channel_id in self.statuses
+        }
+
+
+def _with_channel_id(streamer, channel_id):
+    streamer.channel_id = channel_id
+    return streamer
+
+
+NOW = 1_800_000_000.0
+
+
+def test_minute_watcher_skips_a_channel_the_account_is_banned_in(monkeypatch, caplog):
+    gql = _FakeBanGQL(
+        {"1": ChannelBanStatus(True, permanent=True), "2": ChannelBanStatus(False)}
+    )
+    twitch_out = []
+    with caplog.at_level(logging.INFO):
+        posted = _run_one_watch_iteration(
+            monkeypatch,
+            [
+                _with_channel_id(_watch_streamer("banned"), "1"),
+                _with_channel_id(_watch_streamer("allowed"), "2"),
+            ],
+            streams_watched=1,
+            gql=gql,
+            now=NOW,
+            twitch_out=twitch_out,
+        )
+
+    assert posted == ["https://spade.test/allowed"]
+    assert gql.calls == [["1", "2"]]
+    assert (
+        "Skipping banned for points and Drops: the account is banned in this channel"
+        in caplog.text
+    )
+    status, next_check = twitch_out[0].channel_bans["1"]
+    assert status.permanent is True
+    assert next_check == NOW + 6 * 60 * 60
+    assert twitch_out[0].channel_bans["2"][1] == NOW + 30 * 60
+
+
+def test_a_banned_channel_does_not_take_the_drops_slot(monkeypatch):
+    gql = _FakeBanGQL({"1": ChannelBanStatus(True, permanent=True)})
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _with_channel_id(
+                _watch_streamer(
+                    "banned-drops", from_category=True, drops_eligible=True
+                ),
+                "1",
+            ),
+            _with_channel_id(
+                _watch_streamer("open-drops", from_category=True, drops_eligible=True),
+                "2",
+            ),
+        ],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES],
+        gql=gql,
+        now=NOW,
+    )
+
+    assert posted == ["https://spade.test/open-drops"]
+
+
+def test_a_timeout_in_the_future_skips_the_channel_until_it_ends(monkeypatch):
+    timeout = ChannelBanStatus(True, expires_at=NOW + 600)
+    twitch_out = []
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("timed-out"), "1")],
+        streams_watched=1,
+        gql=_FakeBanGQL({"1": timeout}),
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert posted == []
+    # Checked again when the timeout ends.
+    assert twitch_out[0].channel_bans["1"][1] == NOW + 600
+
+
+def test_a_timeout_that_has_ended_no_longer_skips_the_channel(monkeypatch):
+    # The cached timeout ended before its scheduled recheck came round.
+    gql = _FakeBanGQL()
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("was-timed-out"), "1")],
+        streams_watched=1,
+        gql=gql,
+        channel_bans={
+            "1": (ChannelBanStatus(True, expires_at=NOW - 1), NOW + 60),
+        },
+        now=NOW,
+    )
+
+    assert posted == ["https://spade.test/was-timed-out"]
+    assert gql.calls == []
+
+
+@pytest.mark.parametrize(
+    "gql",
+    [_FakeBanGQL(), _FakeBanGQL(error=RuntimeError("boom"))],
+    ids=["no answer", "check raised"],
+)
+def test_a_failed_ban_check_never_skips_a_channel(monkeypatch, gql):
+    twitch_out = []
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("unknown"), "1")],
+        streams_watched=1,
+        gql=gql,
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert posted == ["https://spade.test/unknown"]
+    if gql.error is None:
+        # Unknown, and checked again a few minutes later.
+        assert twitch_out[0].channel_bans["1"] == (None, NOW + 5 * 60)
+
+
+def test_a_failed_recheck_keeps_the_known_ban(monkeypatch):
+    ban = ChannelBanStatus(True, permanent=True)
+    twitch_out = []
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("banned"), "1")],
+        streams_watched=1,
+        gql=_FakeBanGQL(),
+        channel_bans={"1": (ban, NOW - 1)},
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert posted == []
+    assert twitch_out[0].channel_bans["1"] == (ban, NOW + 5 * 60)
+
+
+def test_a_rediscovered_channel_keeps_its_known_ban(monkeypatch):
+    # A new Streamer object for the same channel (category rediscovery) finds
+    # the cached ban and isn't checked again before it is due.
+    gql = _FakeBanGQL()
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("rediscovered"), "1")],
+        streams_watched=1,
+        gql=gql,
+        channel_bans={
+            "1": (ChannelBanStatus(True, permanent=True), NOW + 3600),
+        },
+        now=NOW,
+    )
+
+    assert posted == []
+    assert gql.calls == []
+
+
+def test_a_lifted_ban_is_logged_and_the_channel_watched_again(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO):
+        posted = _run_one_watch_iteration(
+            monkeypatch,
+            [_with_channel_id(_watch_streamer("unbanned"), "1")],
+            streams_watched=1,
+            gql=_FakeBanGQL({"1": ChannelBanStatus(False)}),
+            channel_bans={"1": (ChannelBanStatus(True, permanent=True), NOW)},
+            now=NOW,
+        )
+
+    assert posted == ["https://spade.test/unbanned"]
+    assert "unbanned can be watched again" in caplog.text
+
+
+def test_the_same_ban_is_logged_only_once(monkeypatch, caplog):
+    ban = ChannelBanStatus(True, permanent=True)
+    with caplog.at_level(logging.INFO):
+        _run_one_watch_iteration(
+            monkeypatch,
+            [_with_channel_id(_watch_streamer("banned"), "1")],
+            streams_watched=1,
+            gql=_FakeBanGQL({"1": ChannelBanStatus(True, permanent=True)}),
+            channel_bans={"1": (ban, NOW)},
+            now=NOW,
+        )
+
+    assert "Skipping banned" not in caplog.text
+
+
+def test_ban_checks_skip_offline_channels_and_forget_departed_ones(monkeypatch):
+    offline = _with_channel_id(_watch_streamer("offline"), "2")
+    offline.is_online = False
+    gql = _FakeBanGQL()
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("online"), "1"), offline],
+        streams_watched=1,
+        gql=gql,
+        channel_bans={
+            # Gone from the list: dropped unless a ban still applies.
+            "9": (ChannelBanStatus(False), NOW + 60),
+            "8": (ChannelBanStatus(True, permanent=True), NOW + 60),
+        },
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert gql.calls == [["1"]]
+    assert set(twitch_out[0].channel_bans) == {"1", "8"}

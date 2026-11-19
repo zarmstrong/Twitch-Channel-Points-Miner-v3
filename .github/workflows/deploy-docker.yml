@@ -60,9 +60,13 @@ jobs:
           images: |
             ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
             ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
+          # latest is moved after the push, only for the newest stable
+          # release. metadata-action's default (latest=auto) would add it to
+          # every stable version, including an older one published again.
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.ref }}
-            type=raw,value=latest
 
       - name: Build and push AMD64 and ARM64
         id: docker_build
@@ -75,15 +79,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@v5
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-          repository: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
-          short-description: Automatically earn Twitch channel points, claim Drops, and manage predictions.
-          readme-filepath: ./DOCKERHUB.md
 
       - name: Add Docker image to GitHub release notes
         env:
@@ -118,6 +113,57 @@ jobs:
           trap 'rm -f "${notes_file}"' EXIT
           printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
           gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
+
+      # Checked out after the build, so it isn't part of the build context.
+      # A manually published older release doesn't have these scripts.
+      - name: Checkout release automation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Decide whether latest moves
+        id: latest
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ inputs.ref }}
+        with:
+          script: |
+            const automation = require('./automation/.github/scripts/docker-latest-tag.js');
+            await automation.decideLatestTag({
+              github,
+              context,
+              core,
+              tag: process.env.RELEASE_TAG,
+            });
+
+      # Decided right before retagging, so a newer release published while
+      # this image was building keeps latest.
+      - name: Point latest at this release
+        if: steps.latest.outputs.move_latest == 'true'
+        env:
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in \
+            "${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner" \
+            "${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner-v2"; do
+            docker buildx imagetools create --tag "${image}:latest" "${image}:${RELEASE_TAG}"
+          done
+
+      # The description is the newest release's DOCKERHUB.md.
+      - name: Update Docker Hub description
+        if: steps.latest.outputs.move_latest == 'true'
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+          repository: ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
+          short-description: Automatically earn Twitch channel points, claim Drops, and manage predictions.
+          readme-filepath: ./DOCKERHUB.md
 
       - name: Image digest AMD64 and ARM64
         run: echo ${{ steps.docker_build.outputs.digest }}
