@@ -31,6 +31,8 @@ from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import ReadTimeoutError
+from urllib3.util.retry import Retry
 
 # Seconds a thread's session may sit unused before it's replaced, closing its
 # pooled connections. Servers and load balancers commonly drop idle
@@ -65,13 +67,51 @@ class _RejectAllCookies(CookiePolicy):
         return False
 
 
+class _DroppedConnectionRetry(Retry):
+    """Retry a GET once when its connection drops before the response.
+
+    A server can close a pooled connection after urllib3 checks it and before
+    the request lands. A bare call would have used a fresh connection, so a
+    GET (safe to send again) gets one more try on a new connection. A read
+    timeout is re-raised as it is, as with bare calls: retrying it would
+    double how long a slow GET hangs. POSTs aren't retried here; the GQL and
+    minute-watched callers retry connection errors themselves."""
+
+    def increment(
+        self,
+        method=None,
+        url=None,
+        response=None,
+        error=None,
+        _pool=None,
+        _stacktrace=None,
+    ):
+        if isinstance(error, ReadTimeoutError):
+            raise error.with_traceback(_stacktrace)
+        return super().increment(method, url, response, error, _pool, _stacktrace)
+
+
+def _retries() -> Retry:
+    return _DroppedConnectionRetry(
+        total=1,
+        connect=0,
+        read=1,
+        redirect=0,
+        status=0,
+        other=0,
+        allowed_methods=frozenset({"GET"}),
+        raise_on_redirect=False,
+        raise_on_status=False,
+    )
+
+
 _local = threading.local()
 
 
 def _new_session() -> requests.Session:
     session = requests.Session()
     session.cookies.set_policy(_RejectAllCookies())
-    adapter = HTTPAdapter(pool_maxsize=POOL_MAXSIZE)
+    adapter = HTTPAdapter(pool_maxsize=POOL_MAXSIZE, max_retries=_retries())
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     # Close the pooled sockets as soon as the session is collected, for

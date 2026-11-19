@@ -41,7 +41,8 @@ def make_server(monkeypatch):
     """Start loopback HTTP/1.1 servers that record each request's client
     port, Cookie and Authorization headers, and answer with a Set-Cookie.
     /redirect answers 302 to /next, also with a Set-Cookie. /slow waits
-    SLOW_SECONDS before answering.
+    SLOW_SECONDS before answering. /drop-if-reused closes the connection
+    without an answer when it isn't the connection's first request.
 
     With close_after_response, the server closes each connection after
     answering, without a ``Connection: close`` header, as a server dropping
@@ -59,6 +60,8 @@ def make_server(monkeypatch):
             protocol_version = "HTTP/1.1"
 
             def _answer(self):
+                served = getattr(self, "served", 0)
+                self.served = served + 1
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else b""
                 seen.append(
@@ -73,6 +76,11 @@ def make_server(monkeypatch):
                 )
                 if self.path == "/slow":
                     time.sleep(SLOW_SECONDS)
+                if self.path == "/drop-if-reused" and served:
+                    # Close a kept-alive connection without answering, as a
+                    # server that dropped it just as it was reused would.
+                    self.close_connection = True
+                    return
                 payload = b"ok"
                 if self.path == "/redirect":
                     self.send_response(302)
@@ -385,6 +393,54 @@ def test_read_timeout_on_a_reused_connection_matches_bare_requests(server, get, 
 
     assert _in_thread(requests_around_a_timeout) == 200
     assert [request["path"] for request in seen] == ["/", "/slow", "/"]
+
+
+def test_a_get_whose_reused_connection_drops_is_sent_again_on_a_new_one(server):
+    url, seen = server
+
+    def get_then_get_on_a_dropped_connection():
+        HttpSession.get(url, timeout=5)
+        return HttpSession.get(url + "drop-if-reused", timeout=5).status_code
+
+    assert _in_thread(get_then_get_on_a_dropped_connection) == 200
+    paths = [request["path"] for request in seen]
+    assert paths == ["/", "/drop-if-reused", "/drop-if-reused"]
+    assert seen[0]["port"] == seen[1]["port"] != seen[2]["port"]
+
+
+def test_a_post_whose_reused_connection_drops_is_not_sent_again(server):
+    url, seen = server
+
+    def get_then_post_on_a_dropped_connection():
+        HttpSession.get(url, timeout=5)
+        with pytest.raises(requests.exceptions.ConnectionError):
+            HttpSession.post(url + "drop-if-reused", data=b"x", timeout=5)
+        return HttpSession.post(url, data=b"y", timeout=5).status_code
+
+    assert _in_thread(get_then_post_on_a_dropped_connection) == 200
+    assert [request["path"] for request in seen] == ["/", "/drop-if-reused", "/"]
+
+
+def test_a_get_read_timeout_is_raised_without_a_retry(server):
+    url, seen = server
+
+    def slow_get():
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            HttpSession.get(url + "slow", timeout=(5, SLOW_SECONDS / 4))
+
+    _in_thread(slow_get)
+    assert [request["path"] for request in seen] == ["/slow"]
+
+
+def test_connect_failures_raise_what_bare_requests_raise():
+    def refused(get):
+        with pytest.raises(requests.exceptions.ConnectionError) as raised:
+            get("http://127.0.0.1:9/", timeout=2)
+        return type(raised.value)
+
+    assert _in_thread(lambda: refused(HttpSession.get)) is _in_thread(
+        lambda: refused(requests.get)
+    )
 
 
 def test_a_per_call_authorization_header_is_not_kept_for_the_next_call(server):
