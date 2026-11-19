@@ -813,28 +813,48 @@ class Twitch(object):
         self.drop_progress_last_saved[tracking_key] = minutes_watched
         self.drop_status_last_saved[tracking_key] = status
 
-    def __reward_snapshot_is_stale(self, drop_id, minutes_watched) -> bool:
+    def __reward_snapshot_is_stale(
+        self, drop_id, minutes_watched, status="in_progress"
+    ) -> bool:
         """Whether a progress snapshot of a reward campaign's drop was taken
         from a record older than the stored one. Called with the
         watch-reward lock held.
 
         The stored record is the newest listing, and the only source of a
-        reward drop's minutes. More minutes than it has, on a drop still
-        being watched, are those of a window that has since started over
-        (see __forget_snapshots_of_restarted_drops)."""
+        reward drop's minutes. A snapshot is older than it when it has
+
+        - more minutes, on a drop still being watched: those of a window
+          that has since started over (see
+          __forget_snapshots_of_restarted_drops);
+        - fewer, on a drop since earned: saved now, it would put the
+          reported reward back to in progress;
+        - progress on a repeat before the stored one, which is over."""
         for campaign in list(
             (getattr(self, "watch_reward_campaigns", None) or {}).values()
         ):
             for drop in campaign.get("timeBasedDrops") or []:
-                if str(drop["id"]) != drop_id:
-                    continue
                 group = drop["_reward_group"]
-                return (
-                    group.get("claimable") is not True
-                    and group.get("finished") is not True
-                    and ((drop.get("self") or {}).get("currentMinutesWatched") or 0)
-                    < minutes_watched
-                )
+                if str(drop["id"]) != drop_id:
+                    number = group.get("repeat")
+                    prefix = repeat_drop_id(group["id"], "")
+                    earlier = drop_id[len(prefix) :]
+                    if (
+                        number is not None
+                        and status == "in_progress"
+                        and drop_id.startswith(prefix)
+                        and earlier.isdigit()
+                        and int(earlier) < number
+                    ):
+                        return True
+                    continue
+                drop_self = drop.get("self") or {}
+                watched = drop_self.get("currentMinutesWatched") or 0
+                if group.get("claimable") is True or drop_self.get("isClaimed") is True:
+                    return minutes_watched < watched
+                if group.get("finished") is True:
+                    # Over without being earned: nothing newer is held back.
+                    return False
+                return watched < minutes_watched
         return False
 
     def __save_drop_snapshot_if_new(self, tracking_key, minutes_watched, status, save):
@@ -849,7 +869,7 @@ class Twitch(object):
         minutes back in the report over the new one's."""
         with _watch_reward_lock(self):
             if self.__reward_snapshot_is_stale(
-                str(tracking_key).split("|", 1)[0], minutes_watched
+                str(tracking_key).split("|", 1)[0], minutes_watched, status
             ):
                 return False
             if (
@@ -9321,9 +9341,10 @@ class Twitch(object):
     def __watch_reward_windows_opened(self, campaign) -> list:
         """When the windows opened that the stored campaign's record, read
         before, knows nothing of: the one that follows a repeat waiting to
-        be claimed, and the one a repeat was waiting for (after the repeat
+        be claimed, the one a repeat was waiting for (after the repeat
         before it was earned, or for a window to close whose minutes could
-        not be finished in time)."""
+        not be finished in time), and the one that follows a window a
+        repeat was being watched in."""
         now = utc_now()
         read_at = datetime.fromtimestamp(
             campaign["_watch_reward"].get("read_at") or 0, timezone.utc
@@ -9336,6 +9357,16 @@ class Twitch(object):
                 starts_at = self.__parse_twitch_datetime(drop.get("startAt"))
                 if starts_at is not None and starts_at > read_at:
                     opened.append(starts_at)
+                # A repeat due before the campaign ends is due when its
+                # window closes. Unfinished by then, it starts over in the
+                # next window, which the record says nothing of either.
+                ends_at = self.__parse_twitch_datetime(drop.get("endAt"))
+                if (
+                    drop.get("endAt") != campaign.get("endAt")
+                    and ends_at is not None
+                    and ends_at > read_at
+                ):
+                    opened.append(ends_at)
         return [moment for moment in opened if moment is not None and moment <= now]
 
     def __retry_read_for_opened_window(self, campaign):
@@ -9569,7 +9600,11 @@ class Twitch(object):
         """Claim every reward group of the stored campaign that is waiting
         to be claimed."""
         for drop_dict in campaign.get("timeBasedDrops") or []:
-            drop_self = drop_dict.get("self") or {}
+            # A copy: the record is shared, and a claim accepted on another
+            # thread takes the claim ID out of it. Checked here and read
+            # again below, it could be gone in between and the claim be
+            # sent without one.
+            drop_self = dict(drop_dict.get("self") or {})
             if drop_self.get("isClaimed") is True or not drop_self.get(
                 "dropInstanceID"
             ):
