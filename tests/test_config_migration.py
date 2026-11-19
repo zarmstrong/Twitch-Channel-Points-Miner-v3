@@ -1464,6 +1464,8 @@ def test_invalid_generated_output_does_not_recover_from_a_backup(tmp_path):
         '{\n    "username": "alice",\n    "password": (  # note (\n'
         '        "secret"\n    )\n}',
         '{\n    "username": "alice",\n    "password": ("secret"),\n}',
+        '{\n    "username": "alice",\n    "password": (\n        "secret"  #### ) ##\n'
+        "    \\\n    )\n}",
     ],
 )
 def test_a_parenthesized_password_is_removed_at_the_current_version(
@@ -1493,6 +1495,22 @@ def test_a_parenthesized_password_is_removed_at_the_current_version(
     assert "secret" not in backup.read_text(encoding="utf-8")
     # The saved file needs no further edit, so the next start is a no-op.
     assert migrate_config(config) is False
+
+
+def test_closing_paren_scan_is_linear_on_a_run_of_hashes():
+    # CodeQL: overlapping comment alternatives backtracked exponentially on
+    # a long run of `#` with no `)` after it.
+    import time
+
+    from TwitchChannelPointsMiner import config_migration
+
+    started = time.perf_counter()
+    assert config_migration._CLOSING_PAREN.match("#" * 50000) is None
+    assert config_migration._CLOSING_PAREN.match(" #" + "#" * 50000 + "\n") is None
+    assert time.perf_counter() - started < 1
+    # A `)` inside a comment never counts; the one on the next line does.
+    match = config_migration._CLOSING_PAREN.match("  # ) ##\n  )")
+    assert match is not None and match.end() == len("  # ) ##\n  )")
 
 
 @pytest.mark.parametrize(

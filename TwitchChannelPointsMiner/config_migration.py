@@ -503,6 +503,12 @@ def _entry_start(source, line_offsets, node, index):
     return tail_start + position if position >= 0 else start
 
 
+# Whitespace, line continuations and comments, then a `)`. A comment runs to
+# its line break, so each input has one way to match (no backtracking blowup
+# on a run of `#`): the `)` closing a value always follows on a later line.
+_CLOSING_PAREN = re.compile(r"(?:\s|\\|#[^\r\n]*[\r\n])*\)")
+
+
 def _entry_value_end(source, line_offsets, key, value):
     """Where a dict entry's value ends, including parentheses around it."""
     value_start = _source_offset(line_offsets, value.lineno, value.col_offset)
@@ -513,10 +519,10 @@ def _entry_value_end(source, line_offsets, key, value):
     between = _code_only(source[key_end:value_start])
     opened = between[between.index(":") + 1 :].count("(")
     while opened:
-        closing = re.match(r"(?:\s|\\|#[^\r\n]*)*\)", source[end:])
+        closing = _CLOSING_PAREN.match(source, end)
         if closing is None:
             break
-        end += closing.end()
+        end = closing.end()
         opened -= 1
     return end
 
@@ -1104,11 +1110,75 @@ def _module_scope_nodes(tree):
         if isinstance(node, _NESTED_SCOPES):
             children += [
                 ast.Name(id=name, ctx=ast.Store())
-                for child in ast.walk(node)
-                if isinstance(child, ast.Global)
-                for name in child.names
+                for name in sorted(_assigned_globals(node))
             ]
         stack.extend(children)
+
+
+def _own_scope_nodes(scope):
+    """Yield the nodes that run in scope's own namespace. A nested scope is
+    yielded (its name binds here) but not entered."""
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, _NESTED_SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _names_bound_by(node):
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return [node.id]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [
+            alias.asname or alias.name.split(".")[0]
+            for alias in node.names
+            if alias.name != "*"
+        ]
+    if isinstance(node, ast.ExceptHandler):
+        return [node.name] if node.name else []
+    match_star = getattr(ast, "MatchStar", None)
+    match_as = getattr(ast, "MatchAs", None)
+    match_mapping = getattr(ast, "MatchMapping", None)
+    if (match_star and isinstance(node, match_star)) or (
+        match_as and isinstance(node, match_as)
+    ):
+        return [node.name] if node.name else []
+    if match_mapping and isinstance(node, match_mapping):
+        return [node.rest] if node.rest else []
+    return []
+
+
+def _assigned_globals(scope):
+    """Names that scope, or a scope nested in it, declares `global` and also
+    binds in that same scope. A declaration alone (`global logging` followed
+    only by reads) binds nothing."""
+    names = set()
+    for inner in ast.walk(scope):
+        if not isinstance(inner, _NESTED_SCOPES):
+            continue
+        own = list(_own_scope_nodes(inner))
+        declared = {
+            name for node in own if isinstance(node, ast.Global) for name in node.names
+        }
+        if not declared:
+            continue
+        bound = {name for node in own for name in _names_bound_by(node)}
+        # A walrus in a comprehension binds in the enclosing function.
+        bound |= {
+            node.target.id
+            for comprehension in own
+            if isinstance(
+                comprehension,
+                (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
+            )
+            for node in ast.walk(comprehension)
+            if isinstance(node, ast.NamedExpr)
+        }
+        names |= declared & bound
+    return names
 
 
 def rebound_names(tree, expected=None, module_scope=False):

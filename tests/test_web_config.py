@@ -3610,6 +3610,11 @@ def test_an_edit_is_refused_when_the_config_rebinds_the_name(tmp_path, rebinding
         # Guarded imports of the module itself bind the same thing.
         "try:\n    import logging\nexcept ImportError:\n    pass\n",
         "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import logging\n",
+        # `global` without an assignment in that function binds nothing.
+        "import logging\n\ndef helper(message):\n    global logging\n"
+        "    logging.info(message)\n",
+        "import logging\n\ndef outer():\n    global logging\n"
+        "    def inner():\n        logging = 1\n    return inner\n",
         # A rebinding after MINER_CONFIG runs too late to shadow the edit.
         "",
     ],
@@ -3646,6 +3651,10 @@ def test_an_edit_is_allowed_when_only_other_scopes_bind_the_name(tmp_path, prelu
     "rebinding",
     [
         "def helper():\n    global logging\n    logging = None\n",
+        "def helper():\n    global logging\n    import os as logging\n",
+        "def helper():\n    global logging\n    def logging():\n        pass\n",
+        "def helper():\n    global logging\n    return [(logging := x) for x in ()]\n",
+        "def outer():\n    def inner():\n        global logging\n        del logging\n",
         "try:\n    import logging\nexcept ImportError:\n    logging = None\n",
         "for logging in ():\n    pass\n",
         "LEVELS = [(logging := level) for level in ()]\n",
