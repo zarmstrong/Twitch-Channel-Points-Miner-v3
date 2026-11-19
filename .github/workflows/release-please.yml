@@ -15,13 +15,18 @@ permissions:
 # other's edits. Queue them instead. GitHub keeps one pending run per group,
 # so a newer push replaces an older one still waiting; Release Please works
 # from repository state, so the newer run still creates any pending release.
+# Keyed by ref, so a manual run from another branch (which publishes
+# nothing; see the job conditions) can't replace a waiting master run.
 concurrency:
-  group: release-please-master
+  group: release-please-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release_please:
     name: Create release
+    # Releases come from master only. A manual run from another branch would
+    # read that branch's manifest while Release Please reads master.
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release_retry_2.outputs.release_created || steps.release_retry_1.outputs.release_created || steps.release.outputs.release_created }}
@@ -67,7 +72,7 @@ jobs:
   resolve_release:
     name: Resolve release
     needs: release_please
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/master' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
