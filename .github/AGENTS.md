@@ -26,11 +26,16 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 
 ## Release scripts
 
-`scripts/release-linked-issues.js` closes issues a release ships, and `scripts/release-pull-links.js` relinks PR references in release notes. Each has a `*.test.js` file using Node's built-in test runner:
+- `scripts/release-linked-issues.js` closes issues a release ships.
+- `scripts/release-pull-links.js` relinks PR references in release notes.
+- `scripts/docker-latest-tag.js` decides whether a Docker publish moves `latest` and the Docker Hub description. Only the newest plain `MAJOR.MINOR.PATCH` tag does, so a prerelease or an older release published again leaves them alone. `deploy-docker.yml` checks it out from the workflow's commit, because an older release tag doesn't contain it.
+
+Each has a `*.test.js` file using Node's built-in test runner:
 
 ```
 node .github/scripts/release-linked-issues.test.js
 node .github/scripts/release-pull-links.test.js
+node .github/scripts/docker-latest-tag.test.js
 ```
 
 The scripts receive `github`, `context` and `core` from `actions/github-script`. Tests pass fakes, so they run offline. Add a test with any behaviour change.
