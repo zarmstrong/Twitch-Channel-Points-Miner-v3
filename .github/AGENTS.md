@@ -13,6 +13,7 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
   - A single job can skip itself with `if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}`.
   - A matrix job whose checks are required must keep running and skip its steps instead, as the `pytest` job does. A skipped matrix job never reports its expanded checks (`Python 3.11` and so on), so required checks stay pending.
   - A job that needs another job is skipped when that job fails, and a skipped required check counts as passing. Include `!cancelled()` in its `if:` and fail explicitly, as `windows_installer` does.
+- `actions/build-windows-exe` builds and smoke-tests one Windows executable. `tests.yml` and `release-please.yml` both call it after checking out the source, so change the build steps there, not in a workflow. The release build uses the copy in the released tag.
 - `workflows/release-please.yml` creates releases and publishes the Docker image (through `deploy-docker.yml`) and the Windows files.
 - `workflows/deploy-docker.yml` owns the `<!-- docker-image:start -->` / `<!-- docker-image:end -->` block in release notes. A job that runs alongside it must not write back a copy of the release body it read earlier, or the block can disappear.
 - `workflows/mark-issues-awaiting-release.yml` labels issues fixed on `master` until a release ships them.

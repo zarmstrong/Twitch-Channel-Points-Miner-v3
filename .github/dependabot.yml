@@ -2,8 +2,11 @@ version: 2
 updates:
   # Workflow actions: weekly version updates, titled "ci(deps): ..." so
   # Release Please keeps them out of the changelog.
+  # "/" covers .github/workflows; the second entry covers the local actions.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
     commit-message:
