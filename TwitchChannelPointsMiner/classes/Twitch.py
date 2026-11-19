@@ -9235,12 +9235,13 @@ class Twitch(object):
     @staticmethod
     def __watch_reward_progress_news(previous, stored):
         """What a listing of a reward campaign shows over `previous`, the
-        record it replaces: (earned, line) for each group whose minutes went
-        up, and for each one Twitch counted without a claim.
+        record it replaces: (earned, line) for each group whose minutes
+        started or passed a quarter of the way, and for each one Twitch
+        counted without a claim.
 
-        These groups get their minutes from a channel listing every few
-        minutes, not from the per-minute reports a drop's progress bar is
-        printed from, and a group Twitch counts by itself is never claimed.
+        These groups get their minutes from channel listings, not from the
+        per-minute reports a drop's progress bar is printed from, and a
+        group Twitch counts by itself is never claimed.
         Without these lines the log would not say that a reward campaign is
         being earned, or that it was."""
         if (
@@ -9271,7 +9272,16 @@ class Twitch(object):
             if drop["id"] != was["id"]:
                 continue
             minutes = drop["self"]["currentMinutesWatched"]
-            if minutes > was["self"]["currentMinutesWatched"]:
+            watched = was["self"]["currentMinutesWatched"]
+            required = drop["requiredMinutesWatched"]
+            # As often as a drop's progress bar: on the first minutes, and
+            # on each quarter of the way. A listing arrives every couple of
+            # minutes while the group is watched, wherever the minutes are.
+            if minutes > watched and (
+                watched == 0
+                or required <= 0
+                or minutes * 4 // required > watched * 4 // required
+            ):
                 news.append(
                     (
                         False,

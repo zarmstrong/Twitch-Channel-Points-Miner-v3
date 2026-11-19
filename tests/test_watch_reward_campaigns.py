@@ -3212,30 +3212,50 @@ def remembered_lines(caplog, *group_selves, times=6):
     return [record for record in caplog.records if record.levelno == logging.INFO]
 
 
-def test_minutes_gained_between_two_listings_are_logged(caplog):
-    # A reward group's minutes come from a channel listing every few
-    # minutes, so the progress bar of a drop (printed on a quarter reached
-    # one minute at a time) says nothing about it.
+def test_minutes_passing_a_quarter_are_logged(caplog):
+    # A reward group's minutes come from channel listings, so the progress
+    # bar of a drop (printed on a quarter reached one minute at a time) says
+    # nothing about it.
     records = remembered_lines(
         caplog,
-        progress(minutes=3, window=open_window()),
-        progress(minutes=14, window=open_window()),
+        progress(minutes=12, window=open_window()),
+        progress(minutes=16, window=open_window()),
     )
 
     assert [record.getMessage() for record in records] == [
-        "Launch Celebration - Daily Chest (repeat 1 of 6): 14/60 minutes watched"
+        "Launch Celebration - Daily Chest (repeat 1 of 6): 16/60 minutes watched"
     ]
-    # A line for the console and the log file: one every few minutes is too
-    # many for a notifier.
+    # A line for the console and the log file, not for a notifier.
     assert records[0].skip_telegram is True
 
 
-def test_listing_without_new_minutes_logs_nothing(caplog):
+def test_first_minutes_are_logged(caplog):
     records = remembered_lines(
         caplog,
+        progress(minutes=0, window=open_window()),
+        progress(minutes=2, window=open_window()),
+    )
+
+    assert [record.getMessage() for record in records] == [
+        "Launch Celebration - Daily Chest (repeat 1 of 6): 2/60 minutes watched"
+    ]
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
         # The first listing has nothing to compare with.
-        progress(minutes=14, window=open_window()),
-        progress(minutes=14, window=open_window()),
+        (14, 14),
+        # More minutes within one quarter: a listing arrives every couple
+        # of minutes, and a drop's progress is not reported that often.
+        (16, 28),
+    ],
+)
+def test_listing_within_the_same_quarter_logs_nothing(caplog, before, after):
+    records = remembered_lines(
+        caplog,
+        progress(minutes=before, window=open_window()),
+        progress(minutes=after, window=open_window()),
     )
 
     assert records == []

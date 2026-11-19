@@ -69,10 +69,10 @@ category for an hour on each of six days. The miner then:
 - leaves out the rewards that need a subscription, and any reward on a track
   where your account has to pick a lane;
 - shows each repeat as its own drop, for example `Daily Chest (repeat 3 of 6)`.
-- logs the minutes each time Twitch reports more of them, about every ten
-  minutes, for example `Launch Celebration - Daily Chest (repeat 3 of 6):
-  24/60 minutes watched`, and `Reward earned: ...` when Twitch counts a reward
-  without a claim. The progress bar printed for Drops is not shown for these.
+- logs the minutes when they start and at each quarter of the way, for
+  example `Launch Celebration - Daily Chest (repeat 3 of 6): 31/60 minutes
+  watched`, and `Reward earned: ...` when Twitch counts a reward without a
+  claim. The progress bar printed for Drops is not shown for these.
 
 Any live channel in the category counts, with the Drops tag or without. When
 the category also has a Drop campaign, Drops-enabled channels are picked
