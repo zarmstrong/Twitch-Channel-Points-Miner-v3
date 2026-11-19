@@ -147,8 +147,8 @@ def test_each_thread_gets_its_own_session_and_connection(server):
     sessions = []
 
     def one_request():
-        sessions.append(HttpSession.session())
-        assert HttpSession.session() is sessions[-1]
+        sessions.append(HttpSession.session(url))
+        assert HttpSession.session(url) is sessions[-1]
         return HttpSession.get(url, timeout=5).status_code
 
     assert _in_thread(one_request) == 200
@@ -163,7 +163,7 @@ def test_cookies_are_never_kept_or_sent_back(server):
     def requests_after_a_set_cookie():
         HttpSession.get(url, timeout=5)
         HttpSession.post(url, json={}, timeout=5)
-        return len(HttpSession.session().cookies)
+        return len(HttpSession.session(url).cookies)
 
     assert _in_thread(requests_after_a_set_cookie) == 0
     assert [request["cookie"] for request in seen] == [None, None]
@@ -201,7 +201,8 @@ def test_get_and_post_pass_their_arguments_through(monkeypatch):
             calls.append(("post", url, kwargs))
             return "posted"
 
-    monkeypatch.setattr(HttpSession, "session", FakeSession)
+    fake = FakeSession()
+    monkeypatch.setattr(HttpSession, "_entry", lambda url: [fake, 0.0])
     assert HttpSession.get("https://a", params={"x": 1}, timeout=20) == "got"
     assert HttpSession.post("https://b", data=b"d", headers={"h": "v"}) == "posted"
     assert calls == [
@@ -235,14 +236,14 @@ def test_a_session_idle_for_too_long_is_replaced_with_a_new_connection(
     monkeypatch.setattr(HttpSession, "_clock", lambda: now[0])
 
     def requests_around_an_idle_gap():
-        first = HttpSession.session()
+        first = HttpSession.session(url)
         HttpSession.get(url, timeout=5)
         now[0] += HttpSession.IDLE_SECONDS - 1
         HttpSession.get(url, timeout=5)
-        kept = HttpSession.session()
+        kept = HttpSession.session(url)
         now[0] += HttpSession.IDLE_SECONDS
         HttpSession.post(url, data=b"x", timeout=5)
-        return first, kept, HttpSession.session()
+        return first, kept, HttpSession.session(url)
 
     first, kept, replaced = _in_thread(requests_around_an_idle_gap)
     assert kept is first
@@ -265,18 +266,66 @@ def test_idle_time_counts_from_the_end_of_the_last_request(monkeypatch):
     monkeypatch.setattr(HttpSession, "_new_session", SlowSession)
 
     def slow_request_then_another():
-        first = HttpSession.session()
+        first = HttpSession.session("https://slow")
         HttpSession.get("https://slow")
-        return first, HttpSession.session()
+        return first, HttpSession.session("https://slow")
 
     first, second = _in_thread(slow_request_then_another)
     assert second is first
 
 
+def test_idle_time_is_tracked_per_host(monkeypatch):
+    """Steady requests to one host must not keep another host's idle
+    connection in use past IDLE_SECONDS."""
+    now = [0.0]
+    monkeypatch.setattr(HttpSession, "_clock", lambda: now[0])
+    monkeypatch.setattr(HttpSession, "_new_session", requests.Session)
+
+    def busy_host_and_idle_host():
+        idle = HttpSession.session("https://idle.example")
+        busy = HttpSession.session("https://busy.example")
+        for _ in range(4):
+            now[0] += HttpSession.IDLE_SECONDS / 2
+            assert HttpSession.session("https://busy.example") is busy
+        return idle, HttpSession.session("https://IDLE.example/path")
+
+    idle, again = _in_thread(busy_host_and_idle_host)
+    assert again is not idle
+
+
+def test_hosts_share_nothing_and_idle_ones_are_dropped(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(HttpSession, "_clock", lambda: now[0])
+    closed = []
+
+    class TrackedSession(requests.Session):
+        def close(self):
+            closed.append(self)
+            super().close()
+
+    monkeypatch.setattr(HttpSession, "_new_session", TrackedSession)
+
+    def two_hosts_then_one():
+        a = HttpSession.session("https://a.example/x")
+        b = HttpSession.session("https://b.example")
+        assert HttpSession.session("https://a.example/y") is a
+        assert a is not b
+        now[0] += HttpSession.IDLE_SECONDS
+        HttpSession.session("https://a.example")
+        return a, b, dict(HttpSession._local.sessions)
+
+    a, b, left = _in_thread(two_hosts_then_one)
+    # Both had gone IDLE_SECONDS unused: both closed, only a new a remains.
+    assert closed == [a, b]
+    assert list(left) == ["https://a.example"]
+
+
 def test_sessions_keep_a_small_connection_pool_per_host():
     def adapters():
-        current = HttpSession.session()
-        return [current.get_adapter(url) for url in ("https://a", "http://b")]
+        return [
+            HttpSession.session(url).get_adapter(url)
+            for url in ("https://a", "http://b")
+        ]
 
     for adapter in _in_thread(adapters):
         assert isinstance(adapter, HTTPAdapter)
@@ -292,7 +341,7 @@ def test_a_finished_threads_session_closes_its_connections(monkeypatch):
     refs = []
 
     def make_session():
-        current = HttpSession.session()
+        current = HttpSession.session("https://a")
         refs.append((weakref.ref(current), current.get_adapter("https://a")))
 
     _in_thread(make_session)

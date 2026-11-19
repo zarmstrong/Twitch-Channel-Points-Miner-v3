@@ -11,11 +11,11 @@ own from ``session()``. Don't pass the returned session to another thread.
 A kept-alive connection can be closed by the server while it sits idle in
 the pool. urllib3 notices most of those closes before it reuses the socket,
 but a close that lands just before a request makes that request fail, and
-requests doesn't retry a POST. To keep that window small, a thread's session
-is closed and replaced once it has gone ``IDLE_SECONDS`` without a request,
-before a server or load balancer is likely to drop the idle connection. A
-session's connections are also closed when its thread ends and the session
-is garbage-collected.
+requests doesn't retry a POST. To keep that window small, a thread keeps one
+session per host, and a session is closed and replaced once its host has
+gone ``IDLE_SECONDS`` without a request, before a server or load balancer is
+likely to drop the idle connection. A session's connections are also closed
+when its thread ends and the session is garbage-collected.
 
 Bare calls never carried cookies from one request to the next, and these
 sessions don't either: their cookie jar rejects every cookie. Headers are
@@ -27,6 +27,7 @@ import threading
 import time
 import weakref
 from http.cookiejar import CookiePolicy
+from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -37,9 +38,8 @@ from requests.adapters import HTTPAdapter
 # avoids reusing a socket the other end is about to close.
 IDLE_SECONDS = 30
 
-# Connections kept per host. A thread sends one request at a time, so it only
-# ever needs one; a little headroom costs nothing. requests' default is 10,
-# which matters because spade hosts vary per streamer.
+# Connections kept per pool. A thread sends one request at a time, so it only
+# ever needs one; a little headroom costs nothing. requests' default is 10.
 POOL_MAXSIZE = 2
 
 _clock = time.monotonic
@@ -81,27 +81,50 @@ def _new_session() -> requests.Session:
     return session
 
 
-def session() -> requests.Session:
-    """Return this thread's session, creating it on first use and replacing
-    it after an idle gap of ``IDLE_SECONDS``."""
-    current = getattr(_local, "session", None)
-    if current is not None and _clock() - _local.last_used >= IDLE_SECONDS:
-        current.close()
-        current = None
-    if current is None:
-        current = _new_session()
-        _local.session = current
-    _local.last_used = _clock()
-    return current
+def _origin(url) -> str:
+    parts = urlsplit(str(url))
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def _entry(url) -> list:
+    """Return this thread's ``[session, last_used]`` for ``url``'s host.
+
+    Each host gets its own session, so idle time is per host: a thread that
+    keeps posting to one host doesn't keep another host's idle connection
+    alive. Sessions idle for ``IDLE_SECONDS`` are closed and dropped here,
+    which also stops spade hosts of streamers no longer watched from
+    piling up.
+    """
+    sessions = getattr(_local, "sessions", None)
+    if sessions is None:
+        sessions = _local.sessions = {}
+    now = _clock()
+    for origin, (old, last_used) in list(sessions.items()):
+        if now - last_used >= IDLE_SECONDS:
+            del sessions[origin]
+            old.close()
+    key = _origin(url)
+    entry = sessions.get(key)
+    if entry is None:
+        entry = sessions[key] = [_new_session(), now]
+    entry[1] = now
+    return entry
+
+
+def session(url="") -> requests.Session:
+    """Return this thread's session for ``url``'s host, creating it on first
+    use and replacing it after an idle gap of ``IDLE_SECONDS``."""
+    return _entry(url)[0]
 
 
 def _send(method: str, url, kwargs) -> requests.Response:
+    entry = _entry(url)
     try:
-        return getattr(session(), method)(url, **kwargs)
+        return getattr(entry[0], method)(url, **kwargs)
     finally:
         # Idle time counts from the end of the last request, so a slow
         # response doesn't make its own connection look idle.
-        _local.last_used = _clock()
+        entry[1] = _clock()
 
 
 def get(url, **kwargs) -> requests.Response:
