@@ -1676,20 +1676,22 @@ def test_claim_answered_after_the_next_repeat_was_listed_does_not_hide_it(
     assert gql.claims == ["viewer-1#quest-1#group-watch"] * 2
 
 
-def test_next_window_of_a_waiting_repeat_is_an_upcoming_start():
+def test_window_opening_of_a_waiting_repeat_is_reported_once(monkeypatch):
     twitch = bare_twitch()
-    twitch.twitchdrops_app_upcoming_starts = {}
-    assert twitch.next_upcoming_drop_start() is None
-
+    assert twitch.take_opened_watch_reward_start() is False
     opens = NOW + timedelta(hours=1)
-    twitch._Twitch__remember_watch_reward_campaign(
-        convert(watch_group(progress(grants=1, next_at=stamp(opens))))
-    )
-    assert twitch.next_upcoming_drop_start() == opens
+    waiting = convert(watch_group(progress(grants=1, next_at=stamp(opens))))
 
-    # Not once the campaign is over.
-    twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2020-06-01T00:00:00Z"
-    assert twitch.next_upcoming_drop_start() is None
+    # Listed twice with the same opening.
+    twitch._Twitch__remember_watch_reward_campaign(waiting)
+    twitch._Twitch__remember_watch_reward_campaign(waiting)
+    assert twitch.take_opened_watch_reward_start() is False
+
+    # The window opens between two passes of the main loop: the pass after
+    # it is still told, once.
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: opens + timedelta(seconds=40))
+    assert twitch.take_opened_watch_reward_start() is True
+    assert twitch.take_opened_watch_reward_start() is False
 
 
 def test_listing_claims_on_a_thread_of_its_own(monkeypatch):
@@ -1901,48 +1903,45 @@ def test_finished_group_is_its_last_repeat_not_one_more():
 def test_claimable_repeat_schedules_the_return_for_its_next_window():
     # Claimed during an evaluation, it leaves nothing to watch and so no
     # channel to report the next window: Twitch's word for it is kept.
-    twitch = bare_twitch()
-    twitch.twitchdrops_app_upcoming_starts = {}
     opens = NOW + timedelta(hours=1)
-    claimable = progress(
-        status="CLAIMABLE", minutes=60, window=open_window(), next_at=stamp(opens)
-    )
 
-    [drop] = twitch._Twitch__remember_watch_reward_campaign(
-        convert(watch_group(claimable))
-    )["timeBasedDrops"]
+    def learned(**changes):
+        twitch = bare_twitch()
+        claimable = progress(
+            status="CLAIMABLE", minutes=60, window=open_window(), next_at=stamp(opens)
+        )
+        [drop] = twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(claimable | changes))
+        )["timeBasedDrops"]
+        return drop["_reward_group"]["next_start"], twitch.watch_reward_pending_starts
 
-    assert drop["_reward_group"]["next_start"] == stamp(opens)
-    assert twitch.next_upcoming_drop_start() == opens
-
+    assert learned() == (stamp(opens), {opens})
     # Without a next eligibility time, the window's end is when to look.
-    del claimable["nextEligibleAt"]
-    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
-    assert twitch.next_upcoming_drop_start() == NOW + timedelta(hours=23)
-
+    window_ends = NOW + timedelta(hours=23)
+    assert learned(nextEligibleAt=None) == (stamp(window_ends), {window_ends})
     # The last repeat has no next window.
-    claimable["grantCount"] = 6
-    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
-    assert twitch.next_upcoming_drop_start() is None
+    assert learned(grantCount=6) == (None, set())
 
 
-def test_category_refresh_is_brought_forward_to_a_start_learned_later(monkeypatch):
+def test_category_refresh_runs_when_a_reward_window_has_opened():
     miner = object.__new__(TwitchChannelPointsMiner)
-    starts = []
+    opened = []
     miner.twitch = SimpleNamespace(
-        next_upcoming_drop_start=lambda: starts[0] if starts else None
+        take_opened_watch_reward_start=lambda: bool(opened) and opened.pop()
     )
-    refresh_by = miner._TwitchChannelPointsMiner__refresh_by_next_drop_start
+    refresh_at = miner._TwitchChannelPointsMiner__refresh_for_opened_reward_window
     scheduled = time.time() + 6 * 3600
 
-    assert refresh_by(None) is None
-    assert refresh_by(scheduled) == scheduled
+    assert refresh_at(scheduled) == scheduled
 
-    # A channel listing reports the next window an hour away.
-    starts.append(utc_now() + timedelta(hours=1))
-    assert refresh_by(scheduled) == pytest.approx(time.time() + 3605, abs=5)
-    # A start further off than the refresh changes nothing.
-    assert refresh_by(time.time() + 60) == pytest.approx(time.time() + 60, abs=5)
+    opened.append(True)
+    assert refresh_at(scheduled) <= time.time()
+    assert refresh_at(scheduled) == scheduled
+
+    # Category refreshes are off: the opening is left where it is.
+    opened.append(True)
+    assert refresh_at(None) is None
+    assert opened == [True]
 
 
 def test_record_that_predates_an_opened_window_is_read_again(monkeypatch):
@@ -1981,26 +1980,29 @@ def test_read_for_an_opened_window_is_retried_when_no_channel_answers(monkeypatc
         watch_group(progress(minutes=5, grants=1, window=open_window())),
         silent_channels=("9",),
     )
-    twitch.twitchdrops_app_upcoming_starts = {}
     twitch._Twitch__remember_watch_reward_campaign(
         convert(
             watch_group(progress(status="CLAIMABLE", minutes=60, window=open_window()))
         )
     )
     [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    # The window after the claimed repeat has opened, and its opening was
+    # acted on.
     drop["_reward_group"]["next_start"] = stamp(NOW - timedelta(seconds=30))
-    # Nothing is retried before a read was made for the window: a campaign
-    # none of whose categories is configured never gets one.
-    assert twitch.next_upcoming_drop_start() is None
-    # Nor after a read made before it opened.
-    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
-    details["refresh_attempted_at"] = time.time() - 3600
-    assert twitch.next_upcoming_drop_start() is None
+    twitch.watch_reward_pending_starts = set()
 
     assert evaluate(monkeypatch, twitch, [listing()], channels=("9",))[0] == {}
 
-    retry_in = (twitch.next_upcoming_drop_start() - utc_now()).total_seconds()
-    assert retry_in == pytest.approx(WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5)
+    # Looked for again when the next read is due, not at the ordinary
+    # refresh hours later.
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+    # A read that is not due yet adds no second retry.
+    evaluate(monkeypatch, twitch, [listing()], channels=("9",))
+    assert twitch.watch_reward_pending_starts == {retry_at}
 
 
 def other_campaign(group_self):
@@ -2161,3 +2163,83 @@ def test_window_that_starts_over_is_reported_from_its_own_minutes():
         "other-drop": 30,
     }
     assert twitch.drop_status_last_saved == {}
+
+
+def test_claim_answered_after_the_next_repeat_turned_claimable_is_not_its_claim(
+    monkeypatch,
+):
+    # The answer to a claim is slow. Meanwhile the next repeat is listed in
+    # progress and then claimable, under the drop ID of the one claimed.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = watch_group(
+        progress(status="CLAIMABLE", minutes=60, window=open_window())
+    )
+    gql, _ = channel_listing(claimable)
+    twitch = bare_twitch(gql)
+    accept = gql.claim_drop_rewards
+
+    def slow_claim(instance_id):
+        if not gql.claims:
+            for group_self in (progress(minutes=5, window=open_window()), None):
+                twitch._Twitch__remember_watch_reward_campaign(
+                    convert(watch_group(group_self) if group_self else claimable)
+                )
+        return accept(instance_id)
+
+    gql.claim_drop_rewards = slow_claim
+
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    assert drop["self"]["dropInstanceID"] == "viewer-1#quest-1#group-watch"
+    assert "group-watch#0" not in twitch.accepted_drop_ids
+
+    # So the repeat that turned claimable meanwhile is claimed in its turn.
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+    assert gql.claims == ["viewer-1#quest-1#group-watch"] * 2
+
+
+def test_claim_answered_after_the_same_repeat_was_listed_again_is_accepted(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = watch_group(
+        progress(status="CLAIMABLE", minutes=60, window=open_window())
+    )
+    gql, _ = channel_listing(claimable)
+    twitch = bare_twitch(gql)
+    accept = gql.claim_drop_rewards
+
+    def slow_claim(instance_id):
+        twitch._Twitch__remember_watch_reward_campaign(convert(claimable))
+        return accept(instance_id)
+
+    gql.claim_drop_rewards = slow_claim
+
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+    twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert "group-watch#0" in twitch.accepted_drop_ids
+
+
+def test_claim_thread_leaves_a_campaign_that_is_over_alone(monkeypatch):
+    # Its claim kept failing while it ran; sent again now, it would hold
+    # the claim lock ahead of rewards that can still be had.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2020-06-01T00:00:00Z"
+
+    twitch._Twitch__store_listed_watch_rewards([other_campaign(claimable)])
+
+    assert gql.claims == ["viewer-1#quest-2#group-two"]

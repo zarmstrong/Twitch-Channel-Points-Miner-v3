@@ -2433,6 +2433,8 @@ def _reward_campaign_view(*drop_ids):
     [
         # The followed channel's category counts toward the same group.
         (("group-b",), True),
+        # Or toward that group and another one.
+        (("group-a", "group-b"), True),
         # It counts toward another group of the campaign: the discovered
         # pick's reward would get no progress from it.
         (("group-a",), False),
