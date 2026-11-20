@@ -223,6 +223,9 @@ WATCH_REWARD_LOOKUP_RETRY_SECONDS = 60 * 60
 # the miner watches refreshes it on every campaign check, well inside this.
 WATCH_REWARD_PROGRESS_REFRESH_SECONDS = 10 * 60
 WATCH_REWARD_FINISHED_REFRESH_SECONDS = 60 * 60
+# How long before a reward campaign ends a claim Twitch did not accept is
+# sent once more, when the next try would otherwise come after the end.
+WATCH_REWARD_LAST_CLAIM_SECONDS = 2 * 60
 # How many channels one such read may ask, in all and per category, before
 # it gives up until the next evaluation.
 WATCH_REWARD_REFRESH_CHANNEL_LIMIT = 4
@@ -9288,6 +9291,7 @@ class Twitch(object):
                     )
             self.__note_watch_reward_starts(starts)
             self.__note_read_for_locked_reward_group(stored, read_at)
+            counted = self.__note_earned_reward_rows(previous, stored)
             known[campaign_id] = stored
         # The inventory lists a reward campaign as completed once any of its
         # groups is (a claimed subscription reward, say), and the account-wide
@@ -9301,7 +9305,7 @@ class Twitch(object):
             if campaign_id in completed:
                 self.completed_drop_campaigns = set(completed) - {campaign_id}
         self.__publish_watch_reward_progress(campaign_id)
-        self.__finish_earned_reward_rows(previous, stored)
+        self.__finish_earned_reward_rows(stored, counted)
         # Said outside the lock: a log line can go out to a notifier.
         for earned, line in news:
             if earned:
@@ -9320,15 +9324,12 @@ class Twitch(object):
                 )
         return stored
 
-    def __finish_earned_reward_rows(self, previous, stored):
-        """Mark as earned the report rows of the rewards the stored record
-        shows were earned, over `previous`, the record it replaces.
-
-        A reward Twitch counts by itself is never claimed, so nothing else
-        writes the last row of a repeat: the report would keep it at the
-        minutes of the last listing before the count went up, as in
-        progress, for good. The last repeat and a single reward are written
-        by the next inventory sync, unless the campaign has ended by then.
+    def __note_earned_reward_rows(self, previous, stored) -> dict:
+        """Remember the rewards the record being stored shows were earned,
+        over `previous`, the record it replaces, for the report rows to be
+        marked by (see __finish_earned_reward_rows). Returns the repeats
+        Twitch counted by itself, by drop ID, as they were recorded before.
+        Called with the watch-reward lock held.
 
         Earned are
 
@@ -9347,10 +9348,11 @@ class Twitch(object):
         count that goes up later does not say which of the repeats before
         it was the one earned.
 
-        A row is done once per session, when it could be read and written:
-        a report file that could not is tried again with the next record.
-        A repeat Twitch counted by itself that has no row yet gets one (see
-        __save_earned_reward_row)."""
+        Remembered with the record, under its lock: a snapshot is checked
+        against both under that lock (see __reward_snapshot_is_stale). Were
+        the repeat known as earned only later, a copy of it from before,
+        saved as failed in between, could be written over the row marked
+        as earned."""
         before = {}
         if (
             previous is not None
@@ -9366,9 +9368,7 @@ class Twitch(object):
         # (drop ID, seen earned): not seen, the row is one counted as earned
         # on a first record.
         earned = set()
-        # The repeats Twitch counted by itself, by drop ID, as they were
-        # recorded before.
-        seen_earned = {}
+        counted = {}
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
             was = before.get(group["id"])
@@ -9381,25 +9381,38 @@ class Twitch(object):
                 was["_reward_group"].get("grants") or 0
             ) and not self.__counted_repeat_waits_for_its_claim(drop, was):
                 earned.add((str(was["id"]), True))
-                seen_earned[str(was["id"])] = was
+                counted[str(was["id"])] = was
             if (drop.get("self") or {}).get("isClaimed") is True:
                 earned.add((str(drop["id"]), True))
+        self.watch_reward_earned_rows = frozenset(
+            (getattr(self, "watch_reward_earned_rows", None) or frozenset()) | earned
+        )
+        return counted
+
+    def __finish_earned_reward_rows(self, stored, counted):
+        """Mark as earned the report rows of the rewards the stored records
+        have shown were earned (see __note_earned_reward_rows). `counted`
+        holds the repeats this record shows Twitch counted by itself.
+
+        A reward Twitch counts by itself is never claimed, so nothing else
+        writes the last row of a repeat: the report would keep it at the
+        minutes of the last listing before the count went up, as in
+        progress, for good. The last repeat and a single reward are written
+        by the next inventory sync, unless the campaign has ended by then.
+
+        A row is done once per session, when it could be read and written:
+        a report file that could not is tried again with the next record.
+        A repeat Twitch counted by itself that has no row yet gets one (see
+        __save_earned_reward_row)."""
         mutex = getattr(self, "analytics_mutex", None)
         if mutex is None:
-            # No report to repair; the rows are still known as earned.
-            self.watch_reward_earned_rows = frozenset(
-                (getattr(self, "watch_reward_earned_rows", None) or frozenset())
-                | earned
-            )
+            # No report to repair.
             return
         now_ms = round(time.time() * 1000)
         now_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         try:
             with mutex:
-                known = (
-                    getattr(self, "watch_reward_earned_rows", None) or frozenset()
-                ) | earned
-                self.watch_reward_earned_rows = frozenset(known)
+                known = getattr(self, "watch_reward_earned_rows", None) or frozenset()
                 finished = (
                     getattr(self, "watch_reward_finished_rows", None) or frozenset()
                 )
@@ -9437,7 +9450,7 @@ class Twitch(object):
                 self.watch_reward_finished_rows = frozenset(finished | pending)
             # Outside the report's lock: a row is saved under the
             # watch-reward lock, which is taken before that one.
-            for drop_id, drop in seen_earned.items():
+            for drop_id, drop in counted.items():
                 if (drop_id, True) in pending and drop_id not in rows_found:
                     self.__save_earned_reward_row(stored, drop)
         except (OSError, ValueError) as error:
@@ -10132,7 +10145,9 @@ class Twitch(object):
         A reward waiting to be claimed gives no reason to load a streamer,
         so with nothing else to watch no campaign sync runs to send the
         claim again, and the ordinary category refresh can be hours off:
-        later than the campaign's end."""
+        later than the campaign's end. So is that read, for a campaign
+        about to end: its claim is sent WATCH_REWARD_LAST_CLAIM_SECONDS
+        before the end instead, and every minute from then."""
         stored = self.__watch_reward_campaigns().get(campaign_id)
         if stored is None or self.__is_open_drop_campaign(stored) is not True:
             return
@@ -10142,10 +10157,16 @@ class Twitch(object):
             for drop in stored.get("timeBasedDrops") or []
         ):
             return
-        with _watch_reward_lock(self):
-            self.__note_watch_reward_starts(
-                {utc_now() + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)}
+        now = utc_now()
+        retry_at = now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
+        ends_at = self.__parse_twitch_datetime(stored.get("endAt"))
+        if ends_at is not None and retry_at >= ends_at:
+            retry_at = max(
+                ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
+                now + timedelta(seconds=60),
             )
+        with _watch_reward_lock(self):
+            self.__note_watch_reward_starts({retry_at})
 
     def __category_has_watch_reward(self, twitch_campaigns) -> bool:
         """Whether one of the campaigns a category is searched for is a

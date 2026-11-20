@@ -3813,6 +3813,72 @@ def test_earned_rows_are_finished_by_a_later_record_when_the_report_cannot_be_sa
     assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"
 
 
+def test_repeat_is_known_as_earned_as_soon_as_its_record_is_stored(
+    monkeypatch, tmp_path
+):
+    # The sync holds a copy of the repeat from before it was counted, and
+    # looks at it after its window closed: "failed". Between the record
+    # being stored and the row being marked as earned, that snapshot passed
+    # for a lost repeat's, and written after the mark it undid it for good.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+    save_synced_rows(twitch)
+    saved = []
+
+    def save_copy_as_failed(self, campaign_id):
+        saved.append(
+            twitch._Twitch__save_drop_snapshot_if_new(
+                "group-watch#0|copy", 59, "failed", lambda: None
+            )
+        )
+
+    # What runs between the two.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__publish_watch_reward_progress", save_copy_as_failed
+    )
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    assert saved == [False]
+    assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"
+
+
+@pytest.mark.parametrize(
+    "ends_in, retry_in",
+    [
+        # The usual wait would end after the campaign: its last minutes.
+        (timedelta(minutes=5), timedelta(minutes=3)),
+        # Already inside them: once a minute.
+        (timedelta(seconds=90), timedelta(seconds=60)),
+        (timedelta(hours=1), timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)),
+    ],
+)
+def test_claim_twitch_did_not_accept_is_tried_again_before_the_campaign_ends(
+    monkeypatch, ends_in, retry_in
+):
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(status="CLAIMABLE", minutes=60), times=1)
+    )
+    twitch.gql.claim_drop_rewards = lambda instance_id: SimpleNamespace(
+        status=None, errors=["service unavailable"]
+    )
+    evaluate(monkeypatch, twitch, [listing()])
+    twitch.watch_reward_pending_starts = set()
+    stored = twitch.watch_reward_campaigns["quest-1"]
+    stored["endAt"] = stamp(utc_now() + ends_in)
+
+    twitch._Twitch__retry_unaccepted_reward_claims("quest-1")
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        retry_in.total_seconds(), abs=5
+    )
+    assert retry_at < twitch._Twitch__parse_twitch_datetime(stored["endAt"])
+
+
 def test_claim_twitch_did_not_accept_is_tried_again_without_a_streamer(monkeypatch):
     # Nothing is left to watch, so no campaign sync runs to send the claim
     # again, and the ordinary category refresh can come after the campaign
