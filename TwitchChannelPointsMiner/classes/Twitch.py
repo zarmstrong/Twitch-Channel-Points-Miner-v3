@@ -12906,6 +12906,142 @@ class Twitch(object):
             self.__remove_ineligible_badge_drops(campaigns)
         return campaigns, last_full_success, now
 
+    @staticmethod
+    def __running_campaign_entity(details):
+        """The entity the campaign sync keeps for a campaign's details: None
+        unless the campaign is running, else the campaign with the drops
+        that are inside their own dates. A campaign with no such drop comes
+        back without drops, for the caller to leave out."""
+        campaign = Campaign(details)
+        if campaign.dt_match is not True:
+            return None
+        # Remove all the drops already claimed or with dt not matching
+        campaign.clear_drops()
+        return campaign
+
+    def __add_opened_watch_reward_drops(self, campaigns, refreshed_ids):
+        """Between two refreshes of the campaigns, add what the stored
+        records of the watch-earned reward campaigns have for the sync to
+        watch that `campaigns` lacks, and return the campaigns.
+
+        A refresh leaves out a drop that is outside its dates, and a
+        campaign with no drop inside them: a repeat waiting for its window
+        to open, once the one before it is claimed. The sync between two
+        refreshes only updates the drops a campaign has. A repeat whose
+        window has opened would then go unwatched until the next refresh, up
+        to 15 minutes away, on a channel with nothing else to earn (#371).
+
+        Nothing is asked of Twitch. The record is what a refresh builds a
+        reward campaign from, and what the sync reads its progress from, so
+        a drop added here is the one a refresh made now would hold after
+        its sync: built by the same step and updated the same way.
+
+        Only added to: a drop that is over or claimed is taken out by the
+        sync, and a campaign by the next refresh. (With a repeat added, the
+        campaign loses a drop the record no longer has, which is the repeat
+        before it.) And only for the campaigns a refresh would take without
+        asking: those the last one took (`refreshed_ids`) and those a
+        channel has listed. A campaign that is over, or that Twitch's
+        account-wide listing named as closed, is left as the last refresh
+        had it."""
+        try:
+            return self.__with_opened_watch_reward_drops(campaigns, refreshed_ids)
+        except Exception as error:
+            # The campaigns are every Drop's: they are synced as they were.
+            self.__log_drop_check(
+                f"unable to add the reward campaign repeats that opened: {error}",
+                level=logging.DEBUG,
+            )
+            return campaigns
+
+    def __with_opened_watch_reward_drops(self, campaigns, refreshed_ids):
+        watch_rewards = self.__watch_reward_campaigns()
+        if not watch_rewards:
+            return campaigns
+        advertised = getattr(self, "advertised_drop_campaigns", None) or {}
+        # Each record whole, as a refresh takes it; a stream then gets its
+        # own category's part (see __campaign_for_stream). Copied under the
+        # lock the records are stored under, and worked on outside it.
+        with _watch_reward_lock(self):
+            records = {
+                campaign_id: copy.deepcopy(stored)
+                for campaign_id, stored in watch_rewards.items()
+            }
+        result = list(campaigns)
+        held = {str(campaign.id): index for index, campaign in enumerate(result)}
+        for campaign_id, details in records.items():
+            listed = advertised.get(campaign_id)
+            if campaign_id not in refreshed_ids and not (
+                isinstance(listed, dict)
+                and self.__is_open_drop_campaign(listed) is True
+            ):
+                continue
+            if (
+                self.__is_open_drop_campaign(details) is not True
+                or (details.get("_watch_reward") or {}).get("named_closed") is True
+            ):
+                continue
+            entity = self.__running_campaign_entity(details)
+            if entity is None:
+                continue
+            # What the sync after a refresh makes of it: the record's own
+            # progress, and a claimed drop taken out. Its claims are sent
+            # from the record, not from here.
+            entity.sync_drops(details["timeBasedDrops"], _reward_claim_already_sent)
+            entity.clear_drops()
+            entity.in_inventory = True
+            index = held.get(campaign_id)
+            current = result[index] if index is not None else None
+            if current is not None and not getattr(current, "reward_categories", None):
+                # Built before the record was stored, from Twitch's details
+                # of the campaign as a Drop campaign, which no stream is
+                # matched to. A refresh puts the record's in its place.
+                current = None
+            known = set() if current is None else {drop.id for drop in current.drops}
+            opened = [
+                drop
+                for drop in entity.drops
+                if drop.id not in known
+                # The sync takes a badge the account has out again.
+                and self.__drop_badge_skip_reason(entity, drop) is None
+            ]
+            if not opened:
+                continue
+            if current is None:
+                entity.drops = opened
+                if index is None:
+                    held[campaign_id] = len(result)
+                    result.append(entity)
+                else:
+                    result[index] = entity
+            else:
+                # In the record's order, as a refresh would hold them. The
+                # drops the campaign has stay the objects they are: the
+                # streams' views share them, with their progress. Except
+                # one the record no longer has: it holds one drop for a
+                # group, so the repeat added takes the place of the one
+                # before it, which the campaign may still hold.
+                order = {
+                    drop["id"]: position
+                    for position, drop in enumerate(details["timeBasedDrops"])
+                }
+                current.reward_categories = entity.reward_categories
+                current.reward_drop_category_ids = entity.reward_drop_category_ids
+                current.reward_drop_report_categories = (
+                    entity.reward_drop_report_categories
+                )
+                current.drops = sorted(
+                    [drop for drop in current.drops if drop.id in order] + opened,
+                    key=lambda drop: order[drop.id],
+                )
+            self.__log_drop_check(
+                f"reward campaign {campaign_id}: watching for "
+                + ", ".join(sorted(drop.name for drop in opened))
+                + " from this sync on; opened since the campaigns were refreshed",
+                level=logging.DEBUG,
+            )
+        return result
+
     def sync_campaigns(self, streamers, chunk_size=3):
         # Full dashboard refresh every 15 minutes. A failed refresh keeps the
         # previous campaigns and is retried after CAMPAIGNS_RETRY_SECONDS
@@ -12914,6 +13050,9 @@ class Twitch(object):
         CAMPAIGNS_RETRY_SECONDS = 5 * 60
         next_campaigns_refresh = 0
         campaigns = []
+        # The watch-earned reward campaigns the last refresh took, with or
+        # without a drop to keep (see __add_opened_watch_reward_drops).
+        refreshed_reward_ids = set()
         last_full_success = None
         previous_progress_step = time.monotonic()
         while self.running:
@@ -12995,6 +13134,11 @@ class Twitch(object):
                         )
                         for details in campaigns_details
                     ]
+                    reward_ids = {
+                        str(details.get("id"))
+                        for details in campaigns_details
+                        if is_watch_reward_campaign(details)
+                    }
 
                     # A reward campaign's drops are reported under the
                     # category each counts in, not all under its first.
@@ -13030,12 +13174,11 @@ class Twitch(object):
                     # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
                     for index in range(0, len(campaigns_details)):
                         if campaigns_details[index] is not None:
-                            campaign = Campaign(campaigns_details[index])
-                            if campaign.dt_match is True:
-                                # Remove all the drops already claimed or with dt not matching
-                                campaign.clear_drops()
-                                if campaign.drops != []:
-                                    refreshed_campaigns.append(campaign)
+                            campaign = self.__running_campaign_entity(
+                                campaigns_details[index]
+                            )
+                            if campaign is not None and campaign.drops != []:
+                                refreshed_campaigns.append(campaign)
                         else:
                             continue
                     # Keep what a failed request could not refresh: every
@@ -13050,6 +13193,11 @@ class Twitch(object):
                         and (dashboard_unavailable or campaign.id in failed_detail_ids)
                     ]
                     campaigns = refreshed_campaigns + kept_campaigns
+                    # Without the dashboard, the reward campaigns it named
+                    # last time are kept like the campaigns above.
+                    refreshed_reward_ids = reward_ids | (
+                        refreshed_reward_ids if dashboard_unavailable else set()
+                    )
                     if dashboard_unavailable or failed_detail_ids:
                         logger.warning(
                             "Drops campaign refresh was incomplete; keeping the "
@@ -13058,6 +13206,10 @@ class Twitch(object):
                         )
                     else:
                         next_campaigns_refresh = time.time() + CAMPAIGNS_REFRESH_SECONDS
+                else:
+                    campaigns = self.__add_opened_watch_reward_drops(
+                        campaigns, refreshed_reward_ids
+                    )
 
                 # Divide et impera :)
                 campaigns, last_full_success, previous_progress_step = (
