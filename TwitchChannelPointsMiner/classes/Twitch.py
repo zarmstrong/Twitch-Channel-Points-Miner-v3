@@ -353,6 +353,7 @@ class Twitch(object):
         "watch_reward_opening_unevaluated",
         "watch_reward_finished_rows",
         "watch_reward_earned_rows",
+        "watch_reward_unwritten_rows",
         "accepted_claim_drop_ids",
         "campaign_names",
         "reward_campaign_ids",
@@ -544,6 +545,7 @@ class Twitch(object):
         self.watch_reward_pending_starts = set()
         self.watch_reward_finished_rows = frozenset()
         self.watch_reward_earned_rows = frozenset()
+        self.watch_reward_unwritten_rows = {}
         self.watch_reward_opening_unevaluated = False
         self.campaign_names = {}
         # Campaign IDs confirmed to require a subscription/gift/cheer rather
@@ -9463,8 +9465,9 @@ class Twitch(object):
         a report file that could not is tried again with the next record.
         A repeat Twitch counted by itself that has no row yet gets one (see
         __save_earned_reward_row), also when the report could not be read
-        for the rows it has: the repeat is only at hand now, and its row is
-        written over one the report turns out to have."""
+        for the rows it has: its row is written over one the report turns
+        out to have. A row that could not be written is kept, and written
+        with a later record."""
         mutex = getattr(self, "analytics_mutex", None)
         if mutex is None:
             # No report to repair.
@@ -9528,20 +9531,38 @@ class Twitch(object):
                 level=logging.DEBUG,
             )
         # Outside the report's lock: a row is saved under the watch-reward
-        # lock, which is taken before that one.
+        # lock, which is taken before that one. The rows an earlier record
+        # could not write come first: its repeat is in no later record.
+        with _watch_reward_lock(self):
+            to_write = dict(getattr(self, "watch_reward_unwritten_rows", None) or {})
         for drop_id, drop in counted.items():
-            if drop_id in rows_found:
-                continue
+            if drop_id not in rows_found:
+                to_write[drop_id] = (stored.get("name"), drop)
+        for drop_id, (campaign_name, drop) in to_write.items():
             try:
-                self.__save_earned_reward_row(stored, drop)
+                self.__save_earned_reward_row(campaign_name, drop)
+                written = True
             except (OSError, ValueError) as error:
+                written = False
                 self.__log_drop_check(
                     f"unable to write the report row of earned reward {drop_id}: "
-                    f"{error}",
+                    f"{error}; trying again with the next listing",
                     level=logging.DEBUG,
                 )
+            with _watch_reward_lock(self):
+                unwritten = dict(
+                    getattr(self, "watch_reward_unwritten_rows", None) or {}
+                )
+                if written:
+                    unwritten.pop(drop_id, None)
+                else:
+                    unwritten[drop_id] = (campaign_name, drop)
+                    # Recorded as saved before the write was tried: left
+                    # so, the next try would pass for one already made.
+                    self.__forget_saved_drop_snapshots({drop_id})
+                self.watch_reward_unwritten_rows = unwritten
 
-    def __save_earned_reward_row(self, campaign, drop):
+    def __save_earned_reward_row(self, campaign_name, drop):
         """Write the report row of a reward drop seen earned that has none.
 
         A repeat's row is first written by the minute watcher or the
@@ -9549,11 +9570,8 @@ class Twitch(object):
         miner started with the repeat a few minutes short) had no row to
         mark as earned, and none is written for it later: by then the sync
         reads the repeat after it, and the watcher's copy of this one is
-        older than the record.
-
-        Written once, like any other snapshot: a write that fails is not
-        tried again, since the drop is only at hand with the record that
-        counted it."""
+        older than the record. So the caller keeps the drop when the write
+        fails, and tries again."""
         earned = copy.deepcopy(drop)
         earned["self"] = {
             **(earned.get("self") or {}),
@@ -9563,7 +9581,7 @@ class Twitch(object):
         category = earned["_reward_group"]["categories"][0]
         self.__save_drop_snapshot_from_dict(
             earned,
-            campaign_name_override=campaign.get("name"),
+            campaign_name_override=campaign_name,
             category_name_override=category.get("displayName")
             or category.get("name")
             or "Unknown",
@@ -9784,7 +9802,13 @@ class Twitch(object):
             },
             **{drop_id: now for drop_id in restarted},
         }
-        if not restarted:
+        self.__forget_saved_drop_snapshots(restarted)
+
+    def __forget_saved_drop_snapshots(self, drop_ids):
+        """Forget what was last saved to the report for these drops, so
+        that their next snapshot is saved whatever its minutes. Called with
+        the watch-reward lock held."""
+        if not drop_ids:
             return
         # Keys are the drop ID alone (the watcher's) or start with it and a
         # separator (see __drop_tracking_key).
@@ -9793,7 +9817,7 @@ class Twitch(object):
             getattr(self, "drop_status_last_saved", None),
         ):
             for key in list(saved or {}):
-                if str(key).split("|", 1)[0] in restarted:
+                if str(key).split("|", 1)[0] in drop_ids:
                     saved.pop(key, None)
 
     def __request_watch_reward_groups(self, campaign_id):

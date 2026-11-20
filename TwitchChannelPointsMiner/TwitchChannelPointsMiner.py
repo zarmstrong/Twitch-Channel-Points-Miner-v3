@@ -1439,6 +1439,12 @@ class TwitchChannelPointsMiner:
                 # must not end the main loop; log it and retry on the next pass.
                 self.__save_daily_report_state_safely()
                 try:
+                    # First: a claim it has sent again may be due seconds
+                    # before its campaign ends, and the checks below can
+                    # take longer than that.
+                    next_category_refresh_at = self.__refresh_for_opened_reward_window(
+                        next_category_refresh_at
+                    )
                     self.__send_daily_report_if_due()
                     self.__check_for_update()
                     self.__check_websockets()
@@ -1447,9 +1453,6 @@ class TwitchChannelPointsMiner:
                         refresh_context = time.time()
                         self.__refresh_channel_points_context()
 
-                    next_category_refresh_at = self.__refresh_for_opened_reward_window(
-                        next_category_refresh_at
-                    )
                     if (
                         (categories or self.wildcard_categories)
                         and next_category_refresh_at is not None

@@ -7,6 +7,7 @@ reports no progress on.
 
 import copy
 import importlib
+import inspect
 import json
 import logging
 import time
@@ -2321,6 +2322,24 @@ def test_category_refresh_runs_when_a_reward_window_has_opened():
     assert claim_passes == [True, True]
 
 
+def test_main_loop_answers_a_reward_campaign_before_its_other_checks():
+    # A claim to send again can be due seconds before its campaign ends;
+    # the update check and the channel points refresh can each take longer.
+    # The loop runs inside run(), which no test can drive: its order is read
+    # from the source.
+    loop = inspect.getsource(TwitchChannelPointsMiner.run).split(
+        "if self.__wait_for_next_pass():", 1
+    )[1]
+    answered = loop.index("self.__refresh_for_opened_reward_window(")
+    for check in (
+        "self.__send_daily_report_if_due()",
+        "self.__check_for_update()",
+        "self.__check_websockets()",
+        "self.__refresh_channel_points_context()",
+    ):
+        assert answered < loop.index(check)
+
+
 def main_loop_miner(monkeypatch, pending_starts, wait_seconds=30):
     """A miner whose main loop wait runs on a fake clock, and the seconds
     each of its sleeps was asked for."""
@@ -3731,6 +3750,37 @@ def test_counted_repeat_gets_its_row_although_the_report_could_not_be_read(
     for rows in (report_rows(twitch), report_rows(twitch, tmp_path)):
         row = rows["group-watch#0"]
         assert (row["status"], row["current_minutes_watched"]) == ("captured", 60)
+
+
+def test_counted_repeat_whose_row_could_not_be_written_gets_it_later(
+    monkeypatch, tmp_path
+):
+    # The repeat is in no later record, so nothing else writes its row.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+    counted = convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    real_replace = twitch_module.os.replace
+    failures = [OSError("disk full")]
+
+    def failing_once(source, target):
+        if failures:
+            raise failures.pop()
+        return real_replace(source, target)
+
+    monkeypatch.setattr(twitch_module.os, "replace", failing_once)
+
+    twitch._Twitch__remember_watch_reward_campaign(copy.deepcopy(counted))
+    assert not (tmp_path / "drops_by_category.json").exists()
+
+    twitch._Twitch__remember_watch_reward_campaign(copy.deepcopy(counted))
+
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert (row["status"], row["current_minutes_watched"]) == ("captured", 60)
+    assert row["campaign"] == "Launch Celebration"
+    # Written, it is not kept to be written again.
+    assert twitch.watch_reward_unwritten_rows == {}
 
 
 def all_repeats_group(group_self):
