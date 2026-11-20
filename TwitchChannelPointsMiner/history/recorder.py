@@ -153,6 +153,7 @@ class HistoryRecorder(threading.Thread):
         self._live_streamer_names = set()
         self._streamer_snapshot = None
         self._streamer_state_ready = False
+        self._last_poll_error_at = 0.0
 
     # -- lifecycle ---------------------------------------------------------
     def stop(self):
@@ -178,11 +179,18 @@ class HistoryRecorder(threading.Thread):
             self.poll_once()
         except Exception:
             # A locked, corrupt or temporarily unwritable database must pause
-            # History, never the miner or its existing analytics.
-            logger.warning(
-                "History recorder poll failed; will retry",
-                exc_info=True,
-            )
+            # History, never the miner or its existing analytics.  Keep the
+            # warning rate-limited so a persistent failure does not flood the
+            # miner log every poll interval.
+            now = self.clock()
+            if now - self._last_poll_error_at >= 5 * 60:
+                self._last_poll_error_at = now
+                logger.warning(
+                    "History recorder poll failed; will retry",
+                    exc_info=True,
+                )
+            else:
+                logger.debug("History recorder poll still failing", exc_info=True)
 
     def _initialize_store(self):
         """Retry initialization so a transient lock does not disable History."""
