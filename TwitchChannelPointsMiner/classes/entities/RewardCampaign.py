@@ -188,7 +188,8 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     # status says, before that moment or after it. Its minutes are the
     # claimed repeat's, not the next one's.
     reopens = grants < times and not complete_all and next_window is not None
-    if status in EARNED_GROUP_STATUSES and reopens:
+    earned_before = status in EARNED_GROUP_STATUSES and reopens
+    if earned_before:
         watched = 0
     if status in EARNED_GROUP_STATUSES and not reopens:
         claimed = True
@@ -311,6 +312,9 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             "complete_all": complete_all,
             "name": name,
             "next_start": next_start,
+            # Twitch reports the repeat before this drop's as earned: the
+            # drop stands for the one after it.
+            "earned_before": earned_before,
             "categories": categories,
         },
     }

@@ -8860,7 +8860,9 @@ class Twitch(object):
 
     def __with_stored_watch_rewards(self, campaigns) -> list:
         """`campaigns` followed by the stored reward campaigns that are
-        still running and not among them."""
+        still running and not among them. One Twitch's account-wide listing
+        named as closed is not running, whatever its end date: the record
+        is all that says it counts on this channel."""
         campaigns = list(campaigns or [])
         listed = {
             str(campaign.get("id"))
@@ -8874,6 +8876,7 @@ class Twitch(object):
             )
             if campaign_id not in listed
             and self.__is_open_drop_campaign(stored) is True
+            and (stored.get("_watch_reward") or {}).get("named_closed") is not True
         ]
 
     def __get_reward_campaigns_raw_query(self):
@@ -9354,6 +9357,10 @@ class Twitch(object):
                 )
             ):
                 return previous
+            if previous is not None and self.__lists_an_earned_repeat_as_waiting(
+                previous, stored
+            ):
+                return previous
             if previous is not None:
                 # A channel's listing does not say Twitch opened it again.
                 stored["_watch_reward"]["named_closed"] = (
@@ -9771,6 +9778,47 @@ class Twitch(object):
                     )
                 )
         return news
+
+    def __lists_an_earned_repeat_as_waiting(self, previous, stored) -> bool:
+        """Whether `stored` shows a repeat waiting to be claimed that
+        `previous`, the record it would replace, shows earned: Twitch
+        reported it so, the group's next repeat waits for a window that has
+        not opened, and the count has not gone up since.
+
+        Twitch can answer a later request from an older state, which the
+        order of the requests does not show. Stored, the repeat would be
+        taken for the next one turned claimable: its claim sent again under
+        that one's ID, and Twitch's answer that it was claimed already
+        recorded as the next repeat earned. Once the window has opened the
+        next repeat can be the one waiting, and the record is stored."""
+        now = utc_now()
+        before = {
+            drop["_reward_group"]["id"]: drop
+            for drop in previous.get("timeBasedDrops") or []
+        }
+        for drop in stored.get("timeBasedDrops") or []:
+            group = drop["_reward_group"]
+            earlier = before.get(group["id"])
+            if earlier is None or group.get("claimable") is not True:
+                continue
+            was = earlier["_reward_group"]
+            starts_at = self.__parse_twitch_datetime(earlier.get("startAt"))
+            if (
+                was.get("earned_before") is True
+                and was.get("claimable") is not True
+                and was.get("finished") is not True
+                and starts_at is not None
+                and starts_at > now
+                and group.get("grants", 0) <= was.get("grants", 0)
+            ):
+                self.__log_drop_check(
+                    f"reward campaign '{stored.get('name')}': a listing shows "
+                    f"'{group.get('name')}' waiting to be claimed again before "
+                    "its next window opened; kept the newer record",
+                    level=logging.DEBUG,
+                )
+                return True
+        return False
 
     @staticmethod
     def __keep_repeat_drop_ids(previous, stored):

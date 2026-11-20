@@ -1978,6 +1978,83 @@ def test_repeat_keeps_its_drop_id_when_twitch_counts_it_before_the_claim():
     )
 
 
+def claimed_repeat_twitch(monkeypatch, opens_again):
+    """A Twitch that claimed the first repeat of a group and then read it
+    as claimed, the next to be earned from `opens_again`; with the gql stub
+    and the window the repeat was earned in."""
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    window = open_window()
+    for group_self in (
+        progress(status="CLAIMABLE", minutes=60, grants=1, window=window),
+        progress(
+            status="CLAIMED",
+            minutes=60,
+            grants=1,
+            window=window,
+            next_at=stamp(opens_again),
+        ),
+    ):
+        twitch._Twitch__store_listed_watch_rewards([convert(watch_group(group_self))])
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    # Long after the claim's debounce has run out.
+    twitch.accepted_drop_claims = {}
+    return twitch, gql, window
+
+
+def test_listing_of_a_claimed_repeat_as_waiting_again_is_not_the_next_repeat(
+    monkeypatch,
+):
+    # Twitch answers a later request from before the claim. The next repeat
+    # cannot be earned before its window opens.
+    twitch, gql, window = claimed_repeat_twitch(
+        monkeypatch, datetime.now(timezone.utc) + timedelta(hours=23)
+    )
+    stored = twitch.watch_reward_campaigns["quest-1"]
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            convert(
+                watch_group(
+                    progress(status="CLAIMABLE", minutes=60, grants=1, window=window)
+                )
+            )
+        ]
+    )
+
+    assert twitch.watch_reward_campaigns["quest-1"] is stored
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert twitch.accepted_drop_ids == {"group-watch#0"}
+
+
+def test_repeat_claimable_once_its_window_has_opened_is_stored_and_claimed(
+    monkeypatch,
+):
+    # The window the stored record waited for has opened: the next repeat
+    # can be the one waiting now.
+    twitch, gql, window = claimed_repeat_twitch(
+        monkeypatch, datetime.now(timezone.utc) + timedelta(hours=23)
+    )
+    [waiting] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    waiting["startAt"] = stamp(datetime.now(timezone.utc) - timedelta(minutes=61))
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            convert(
+                watch_group(
+                    progress(status="CLAIMABLE", minutes=60, grants=1, window=window)
+                )
+            )
+        ]
+    )
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"] * 2
+    assert twitch.accepted_drop_ids == {"group-watch#0", "group-watch#1"}
+
+
 def test_claimable_repeat_seen_first_does_not_take_an_older_repeats_id():
     # The stored record is of a repeat claimed long ago; the listing reports
     # a later one claimable. Nothing says they are the same repeat.
@@ -2781,6 +2858,17 @@ def test_drops_listing_while_the_progress_query_is_retired_counts_it_too():
     campaigns, _, _ = twitch._Twitch__get_campaigns_from_channel_id("1")
 
     assert [campaign["id"] for campaign in campaigns] == ["drop-campaign", "quest-1"]
+
+
+def test_drops_listing_leaves_out_a_stored_reward_campaign_named_as_closed():
+    # Twitch's account-wide listing named it as closed ahead of its end
+    # date; only the stored record would say it counts on this channel.
+    twitch = drops_listing_twitch(failing_progress_query)
+    twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]["named_closed"] = True
+
+    campaigns, _, _ = twitch._Twitch__get_campaigns_from_channel_id("1")
+
+    assert [campaign["id"] for campaign in campaigns] == ["drop-campaign"]
 
 
 def test_drops_listing_leaves_out_a_stored_reward_campaign_that_is_over():
