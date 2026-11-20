@@ -814,6 +814,7 @@ class AnalyticsServer(Thread):
         log_poll_interval: int = 5,
         logs_file: str = None,
         trust_proxy_auth: bool = False,
+        allowed_hosts: list = None,
         on_restart=None,
     ):
         super(AnalyticsServer, self).__init__()
@@ -835,6 +836,15 @@ class AnalyticsServer(Thread):
         self.password = password
         self.logs_file = logs_file
         self.trust_proxy_auth = trust_proxy_auth
+        if isinstance(allowed_hosts, str):
+            allowed_hosts = [allowed_hosts]
+        self.allowed_hosts = frozenset(
+            hostname
+            for hostname in (
+                _request_hostname(str(name).strip()) for name in (allowed_hosts or [])
+            )
+            if hostname
+        )
         self.on_restart = on_restart
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
@@ -911,22 +921,26 @@ class AnalyticsServer(Thread):
         def require_authentication():
             # Without a password, a loopback-only dashboard is only reached as
             # localhost; any other Host name means DNS rebinding from a web
-            # page. With a password the rebound page can't authenticate, so
-            # other names (e.g. a reverse proxy keeping the original Host)
-            # are allowed.
+            # page. trust_proxy_auth does not disable this guard: a reverse
+            # proxy that keeps the browser's Host must list that name in
+            # allowed_hosts. With a password the rebound page can't
+            # authenticate, so other names (e.g. a reverse proxy keeping the
+            # original Host) are allowed.
             if (
                 self.password is None
-                and not self.trust_proxy_auth
                 and self.host in LOOPBACK_HOSTS
-                and _request_hostname(request.host) not in LOOPBACK_HOSTS
+                and _request_hostname(request.host)
+                not in LOOPBACK_HOSTS | self.allowed_hosts
             ):
                 return Response(
                     json.dumps(
                         {
                             "error": (
-                                "Unrecognized Host header. Set an analytics "
-                                "username and password to reach the dashboard "
-                                "under another host name."
+                                "Unrecognized Host header. Use a loopback host "
+                                "name, add this host name to "
+                                "ANALYTICS_CONFIG['allowed_hosts'], or set an "
+                                "analytics username and password to reach the "
+                                "dashboard under another host name."
                             )
                         }
                     ),

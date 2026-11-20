@@ -140,6 +140,7 @@ ANALYTICS_CONFIG_DEFAULTS = (
     ("password", "None"),
     ("log_poll_interval", "5"),
     ("trust_proxy_auth", "False"),
+    ("allowed_hosts", "None"),
 )
 
 

@@ -85,10 +85,12 @@ server {
 ```
 
 Set `ANALYTICS_CONFIG={"host": "127.0.0.1", "password": "a-strong-password"}`
-behind that proxy. Restrict the proxy further with a firewall, VPN, or IP
-allowlist where possible. nginx and certificate provisioning must be configured
-for your operating system and domain; the example only shows the relevant proxy
-boundary.
+behind that proxy. If you disable the built-in password with
+`trust_proxy_auth=True`, also set `allowed_hosts` to the proxy's public
+hostname so the loopback DNS-rebinding Host guard keeps working. Restrict the
+proxy further with a firewall, VPN, or IP allowlist where possible. nginx and
+certificate provisioning must be configured for your operating system and
+domain; the example only shows the relevant proxy boundary.
 
 ## Enabling analytics storage
 

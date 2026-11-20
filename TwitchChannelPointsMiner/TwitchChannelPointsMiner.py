@@ -734,6 +734,7 @@ class TwitchChannelPointsMiner:
         password: str = None,
         log_poll_interval: int = 5,
         trust_proxy_auth: bool = False,
+        allowed_hosts: list = None,
     ):
         # Analytics switch
         if Settings.enable_analytics is True:
@@ -750,6 +751,7 @@ class TwitchChannelPointsMiner:
                 log_poll_interval=log_poll_interval,
                 logs_file=self.logs_file,
                 trust_proxy_auth=trust_proxy_auth,
+                allowed_hosts=allowed_hosts,
                 on_restart=lambda: self.twitch.restart_requested.set(),
             )
             http_server.daemon = True

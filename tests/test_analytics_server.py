@@ -347,10 +347,37 @@ def test_trust_proxy_auth_does_not_bypass_a_configured_password():
     assert response.status_code == 401
 
 
-def test_trust_proxy_auth_accepts_traefik_external_host_on_loopback():
-    # Traefik keeps the browser's Host header, while Authelia is the only
-    # authentication layer. The loopback bind must not reject that Host.
+def test_trust_proxy_auth_loopback_bind_rejects_unlisted_host():
+    # trust_proxy_auth does not disable the loopback DNS-rebinding guard: a
+    # rebound page can't make its own Host header match an allowed name.
     server = AnalyticsServer(host="127.0.0.1", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get(
+        "/__host_guard_probe__",
+        headers={
+            "Host": "evil.example:54455",
+            "Origin": "http://evil.example:54455",
+            "X-Forwarded-Host": "evil.example:54455",
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"].startswith("Unrecognized Host header.")
+
+
+@pytest.mark.parametrize("trust_proxy_auth", [False, True])
+def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_auth):
+    # Traefik keeps the browser's Host header, while Authelia is the only
+    # authentication layer. A loopback bind must accept the explicitly
+    # allowlisted host, with or without trust_proxy_auth.
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=trust_proxy_auth,
+        allowed_hosts=["Miner.Example.com:443"],
+    )
 
     response = server.app.test_client().get(
         "/__host_guard_probe__",
