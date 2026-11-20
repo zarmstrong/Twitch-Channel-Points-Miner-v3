@@ -1233,6 +1233,60 @@ def locked_group_twitch(monkeypatch, *groups, moment=None):
     return twitch, stored_at
 
 
+def test_group_that_can_unlock_is_read_for_after_the_last_claim_is_accepted(
+    monkeypatch,
+):
+    # The record goes on saying "claimable" until a listing replaces it, and
+    # with nothing left to watch for none comes before the ordinary refresh.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            convert(
+                watch_group(progress(status="CLAIMABLE", minutes=60), times=1),
+                final_group(),
+            )
+        ]
+    )
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    [read_due] = twitch.watch_reward_pending_starts
+    assert (read_due - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_FINISHED_REFRESH_SECONDS, abs=5
+    )
+
+
+def test_no_read_is_set_for_a_locked_group_while_a_repeat_is_still_to_come(
+    monkeypatch,
+):
+    # The claimed repeat is not its group's last: its next window brings
+    # the miner back.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    window = open_window()
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            convert(
+                watch_group(
+                    progress(status="CLAIMABLE", minutes=60, grants=1, window=window)
+                ),
+                final_group(),
+            )
+        ]
+    )
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert twitch.watch_reward_pending_starts == {NOW + timedelta(hours=23)}
+
+
 def test_group_that_unlocks_after_the_others_finish_is_read_for_within_the_hour(
     monkeypatch,
 ):
@@ -2751,6 +2805,32 @@ def test_claim_thread_sends_no_further_claim_once_the_miner_is_stopping(
     assert twitch.watch_reward_claim_thread is None
 
 
+def test_no_further_group_of_a_campaign_is_claimed_once_the_miner_is_stopping(
+    monkeypatch,
+):
+    # Two groups of one campaign wait to be claimed. Shutdown waits for the
+    # claim being sent, not for one started after it.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    accept = gql.claim_drop_rewards
+
+    def claim_as_the_miner_stops(instance_id):
+        twitch.running = False
+        return accept(instance_id)
+
+    gql.claim_drop_rewards = claim_as_the_miner_stops
+    claimable = progress(status="CLAIMABLE", minutes=60)
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(*two_category_groups(claimable, claimable))]
+    )
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+
+
 def test_slow_thread_does_not_publish_its_older_record_to_the_progress_cache(
     monkeypatch,
 ):
@@ -3830,6 +3910,36 @@ def test_repeats_toward_one_reward_are_captured_with_it_and_not_before(
         "group-watch#0": ("captured", 60),
         "group-watch#1": ("captured", 60),
         "group-watch#2": ("captured", 60),
+    }
+
+
+def test_repeats_toward_one_reward_are_captured_when_its_claim_is_accepted(
+    monkeypatch, tmp_path
+):
+    # No listing need follow the claim: nothing is left to watch for.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    gql, _ = channel_listing()
+    twitch.gql = gql
+
+    def listed(**group_self):
+        twitch._Twitch__store_listed_watch_rewards(
+            [convert(all_repeats_group(progress(window=open_window(), **group_self)))]
+        )
+        save_synced_rows(twitch)
+
+    listed(minutes=59)
+    listed(minutes=58, grants=1)
+    listed(minutes=57, grants=2)
+    assert gql.claims == []
+
+    listed(status="CLAIMABLE", minutes=60, grants=3)
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    rows = report_rows(twitch, tmp_path)
+    assert {drop_id: row["status"] for drop_id, row in rows.items()} == {
+        "group-watch#0": "captured",
+        "group-watch#1": "captured",
+        "group-watch#2": "captured",
     }
 
 

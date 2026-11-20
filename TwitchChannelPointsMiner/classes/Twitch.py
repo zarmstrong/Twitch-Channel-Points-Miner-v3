@@ -10107,7 +10107,7 @@ class Twitch(object):
         hours off, later than the group can still be earned. A campaign
         without such a group is left to the ordinary refresh."""
         if campaign["_watch_reward"].get("locked_groups") is not True or any(
-            drop["_reward_group"].get("finished") is not True
+            self.__reward_group_is_over(drop) is not True
             for drop in campaign.get("timeBasedDrops") or []
         ):
             return
@@ -10118,6 +10118,21 @@ class Twitch(object):
         if ends_at is not None and read_due >= ends_at:
             return
         self.__note_watch_reward_starts({read_due})
+
+    def __reward_group_is_over(self, drop) -> bool:
+        """Whether nothing more can be earned in a stored reward drop's
+        group: Twitch reports it so, or accepted the claim of its last
+        repeat. The record keeps saying "claimable" after that claim, until
+        a listing replaces it."""
+        group = drop["_reward_group"]
+        if group.get("finished") is True:
+            return True
+        number = group.get("repeat")
+        return (
+            group.get("claimable") is True
+            and (number is None or number >= (group.get("times") or 1) - 1)
+            and str(drop["id"]) in (getattr(self, "accepted_drop_ids", None) or ())
+        )
 
     def __store_listed_watch_rewards(self, campaigns, requested=None) -> list:
         """A channel listing's campaigns, with each watch-earned reward
@@ -10225,6 +10240,10 @@ class Twitch(object):
         """Claim every reward group of the stored campaign that is waiting
         to be claimed."""
         for drop_dict in campaign.get("timeBasedDrops") or []:
+            if getattr(self, "running", True) is not True:
+                # Shutting down, which waits for the claim being sent and
+                # no longer than that: the rest is claimed on the next run.
+                return
             # A copy: the record is shared, and a claim accepted on another
             # thread takes the claim ID out of it. Checked here and read
             # again below, it could be gone in between and the claim be
@@ -11269,13 +11288,41 @@ class Twitch(object):
             # miner has left the category. Without its claim ID nothing
             # sends the claim again in the meantime; a listing that still
             # reports it claimable brings the ID back.
-            for campaign in list(
-                (getattr(self, "watch_reward_campaigns", None) or {}).values()
-            ):
-                for stored_drop in campaign.get("timeBasedDrops") or []:
-                    if str(stored_drop.get("id")) == str(drop.id):
+            claimed_in = []
+            with _watch_reward_lock(self):
+                for campaign in list(
+                    (getattr(self, "watch_reward_campaigns", None) or {}).values()
+                ):
+                    for stored_drop in campaign.get("timeBasedDrops") or []:
+                        if str(stored_drop.get("id")) != str(drop.id):
+                            continue
                         stored_drop["self"]["dropInstanceID"] = None
+                        claimed_in.append(campaign)
+                        self.__note_accepted_reward_claim(campaign, stored_drop)
+            # Outside the watch-reward lock, which a row is saved under.
+            for campaign in claimed_in:
+                self.__finish_earned_reward_rows(campaign, {})
         self.__forget_inventory_minutes(drop)
+
+    def __note_accepted_reward_claim(self, campaign, drop):
+        """What follows from Twitch accepting the claim of a stored reward
+        drop, which no record shows until a listing replaces this one: with
+        nothing left to watch for, none may come before the ordinary
+        refresh. Called with the watch-reward lock held.
+
+        - A group Twitch reported no progress on can unlock now: a listing
+          is read for it as after a record that shows the others finished.
+        - The repeats before the last of a group that pays out once are
+          earned with it: their rows are still in progress."""
+        self.__note_read_for_locked_reward_group(campaign, time.time())
+        group = drop["_reward_group"]
+        if group.get("complete_all") is True:
+            self.watch_reward_earned_rows = frozenset(
+                getattr(self, "watch_reward_earned_rows", None) or frozenset()
+            ) | {
+                (repeat_drop_id(group["id"], number), False)
+                for number in range(group.get("repeat") or 0)
+            }
 
     def __finished_drop_ids(self):
         # Without these, a finished drop that a channel still advertises gets
