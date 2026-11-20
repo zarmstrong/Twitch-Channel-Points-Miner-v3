@@ -1554,7 +1554,7 @@ def test_accepted_claim_is_not_sent_again_from_the_stored_record(monkeypatch):
 
     # Long after the claim's debounce has run out.
     twitch.accepted_drop_claims = {}
-    twitch._Twitch__claim_watch_reward_drops(stored)
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline()
     assert len(gql.claims) == 1
 
     # A listing that still reports it claimable brings the claim back.
@@ -1566,10 +1566,10 @@ def test_error_while_claiming_does_not_fail_the_channel_listing(monkeypatch):
     gql, _ = channel_listing(watch_group(progress(status="CLAIMABLE", minutes=60)))
     twitch = bare_twitch(gql)
 
-    def broken_claim(self, campaign):
+    def broken_claim(self, campaign, drop_dict):
         raise OSError("analytics disk full")
 
-    monkeypatch.setattr(Twitch, "_Twitch__claim_watch_reward_drops", broken_claim)
+    monkeypatch.setattr(Twitch, "_Twitch__claim_watch_reward_drop", broken_claim)
 
     campaigns, available, answered = twitch._Twitch__get_campaigns_from_channel_id("1")
 
@@ -2710,7 +2710,7 @@ def test_stored_claim_is_sent_with_its_id_although_another_thread_took_it(
 
     monkeypatch.setattr(twitch_module, "Drop", drop_built_as_the_id_is_taken)
 
-    twitch._Twitch__claim_watch_reward_drops(stored)
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline()
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
 
@@ -3691,6 +3691,122 @@ def test_campaign_a_listing_names_as_closed_is_not_evaluated_from_the_store(
     deadlines, _ = evaluate(monkeypatch, twitch, [listing(status="DISABLED")])
 
     assert deadlines == {}
+
+
+def test_campaign_named_as_closed_stays_out_when_the_next_listing_omits_it(
+    monkeypatch,
+):
+    # Disabled in one listing and left out of the next: the stored record
+    # still says it runs, and a channel may go on listing it.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=12, window=open_window()))
+    )
+    assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
+    assert evaluate(monkeypatch, twitch, [listing(status="DISABLED")])[0] == {}
+
+    assert evaluate(monkeypatch, twitch, [])[0] == {}
+    twitch._Twitch__get_campaigns_from_channel_id("4242")
+    assert evaluate(monkeypatch, twitch, [])[0] == {}
+
+    # Named as open again, it is kept through a listing that omits it.
+    assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
+    assert set(evaluate(monkeypatch, twitch, [])[0]) == {"example-game"}
+
+
+def test_record_is_not_grown_in_place_when_its_campaign_is_named_closed(
+    monkeypatch,
+):
+    # Other threads deep-copy the record without a lock.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=12, window=open_window()))
+    )
+    evaluate(monkeypatch, twitch, [listing()])
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    keys = set(details)
+
+    evaluate(monkeypatch, twitch, [listing(status="DISABLED")])
+
+    assert twitch.watch_reward_campaigns["quest-1"]["_watch_reward"] is details
+    assert details["named_closed"] is True
+    assert set(details) == keys
+
+
+def sync_stored_reward_campaigns(monkeypatch, twitch):
+    """Run the campaign sync over an entity for every stored campaign, with
+    an inventory that lists nothing."""
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_inventory", lambda self: {"dropCampaignsInProgress": []}
+    )
+    monkeypatch.setattr(
+        Twitch, "_Twitch__save_drop_snapshot_from_dict", lambda self, *a, **k: None
+    )
+    twitch._Twitch__sync_campaigns(
+        [
+            Campaign(copy.deepcopy(stored))
+            for stored in twitch.watch_reward_campaigns.values()
+        ]
+    )
+
+
+def test_sync_sends_the_claim_with_the_least_time_left_first(monkeypatch):
+    # The sync goes through the campaigns as they are stored. Its claims do
+    # not: the long-lived one can take over a minute.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    two_waiting_groups_campaign(twitch, second_opens_again_in=10)
+    twitch._Twitch__remember_watch_reward_campaign(third_campaign(claimable, 30))
+
+    sync_stored_reward_campaigns(monkeypatch, twitch)
+
+    assert gql.claims == [
+        "viewer-1#quest-1#group-two",
+        "viewer-1#quest-3#group-three",
+        "viewer-1#quest-1#group-watch",
+    ]
+
+
+def test_sync_sends_a_refused_claim_once(monkeypatch):
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    sent = []
+    refuse = gql.claim_drop_rewards
+
+    def count(instance_id):
+        sent.append(instance_id)
+        return refuse(instance_id)
+
+    gql.claim_drop_rewards = count
+
+    sync_stored_reward_campaigns(monkeypatch, twitch)
+
+    assert len(sent) == 1
+
+
+def test_evaluation_sends_the_claim_with_the_least_time_left_first(monkeypatch):
+    # Evaluated in the order they are stored; the one stored last ends in
+    # half a minute.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=12, window=open_window()))
+    )
+    evaluate(monkeypatch, twitch, [listing()])
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
+    twitch._Twitch__remember_watch_reward_campaign(third_campaign(claimable, 30))
+    twitch.watch_reward_campaigns["quest-2"]["endAt"] = "2099-01-01T00:00:00Z"
+    assert twitch.gql.claims == []
+
+    evaluate(monkeypatch, twitch, [listing()])
+
+    assert twitch.gql.claims == [
+        "viewer-1#quest-3#group-three",
+        "viewer-1#quest-2#group-two",
+    ]
 
 
 def test_claim_thread_counts_the_next_repeat_as_the_end_of_a_waiting_one(
