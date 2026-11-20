@@ -1433,7 +1433,7 @@ class TwitchChannelPointsMiner:
                     + 5,
                 )
             while self.running and self.twitch.running:
-                if self.__wait_for_next_pass(next_category_refresh_at is not None):
+                if self.__wait_for_next_pass():
                     break
                 # One failed pass (e.g. a network error in the category refresh)
                 # must not end the main loop; log it and retry on the next pass.
@@ -1514,25 +1514,22 @@ class TwitchChannelPointsMiner:
             # workers, so keep what was recorded since the last pass.
             self.__save_daily_report_state_safely(retire_all=True)
 
-    def __wait_for_next_pass(self, refreshes_categories) -> bool:
+    def __wait_for_next_pass(self) -> bool:
         """Wait for the main loop's next pass, 20 to 60 seconds away.
         Returns True when a restart was requested meanwhile.
 
-        The wait ends early once a reward campaign calls for a category
-        refresh (see __refresh_for_opened_reward_window), which can be for a
-        claim to send again seconds before its campaign ends, noted while
-        this waits. Not when categories are never refreshed: the call would
-        stay unanswered and end every wait.
+        The wait ends early once a reward campaign calls for the loop (see
+        __refresh_for_opened_reward_window), which can be for a claim to
+        send again seconds before its campaign ends, noted while this
+        waits.
 
         A call is noticed within MAIN_LOOP_REWARD_CHECK_SECONDS. One due
         closer to a campaign's end than that is not answered in time, nor
-        would the refresh it asks for be done by then."""
+        would the claim it asks for be sent by then."""
         ends_at = time.monotonic() + random.uniform(20, 60)
         while True:
             left = ends_at - time.monotonic()
-            if left <= 0 or (
-                refreshes_categories and self.twitch.watch_reward_start_due()
-            ):
+            if left <= 0 or self.twitch.watch_reward_start_due():
                 return False
             if self.twitch.restart_requested.wait(
                 min(left, MAIN_LOOP_REWARD_CHECK_SECONDS)
@@ -1542,12 +1539,18 @@ class TwitchChannelPointsMiner:
     def __refresh_for_opened_reward_window(self, next_category_refresh_at):
         """When the next category refresh is due: as scheduled, or now when
         the window of a reward campaign's repeat has opened since the last
-        pass. The category was left when the repeat before was earned."""
+        pass. The category was left when the repeat before was earned.
+
+        The moment can also be one to send a refused claim again. That is
+        done here, for every stored campaign: the refresh sends it only for
+        a campaign of a configured category, and with category refreshes
+        off there is none."""
+        if self.twitch.take_opened_watch_reward_start() is not True:
+            return next_category_refresh_at
+        self.twitch.claim_waiting_watch_rewards()
         if next_category_refresh_at is None:
             return None
-        if self.twitch.take_opened_watch_reward_start():
-            return min(next_category_refresh_at, time.time())
-        return next_category_refresh_at
+        return min(next_category_refresh_at, time.time())
 
     def __subscribe_user_drop_events(self):
         # Claim drops as soon as Twitch reports them claimable. Only needed when

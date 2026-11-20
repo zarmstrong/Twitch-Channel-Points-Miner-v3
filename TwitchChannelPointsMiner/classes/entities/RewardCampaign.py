@@ -183,7 +183,16 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     claimed = False
     claimable = False
     expired = False
-    if status in EARNED_GROUP_STATUSES:
+    # Twitch names the moment a repeating group can be earned again: a
+    # repeat reported claimed is then not the group's last, whatever its
+    # status says until that moment.
+    reopens = (
+        grants < times
+        and not complete_all
+        and next_window is not None
+        and next_window > now
+    )
+    if status in EARNED_GROUP_STATUSES and not reopens:
         claimed = True
         watched = required
     elif status == "EXPIRED":

@@ -3498,6 +3498,18 @@ class Twitch(object):
                 self.watch_reward_opening_unevaluated = True
         return bool(opened)
 
+    def claim_waiting_watch_rewards(self):
+        """Send the claims of the stored reward campaigns' waiting rewards,
+        on the claim thread. The main loop calls this when a moment noted
+        for it has come, which can be a claim to send again (see
+        __retry_unaccepted_reward_claims). The category refresh made then
+        sends it only for a campaign of a configured category, and none is
+        made without categories: a reward campaign is also earned on a
+        configured streamer's channel."""
+        for campaign in list(self.__watch_reward_campaigns().values()):
+            if self.__is_open_drop_campaign(campaign) is True:
+                self.__claim_watch_reward_drops_soon(campaign)
+
     def watch_reward_start_due(self) -> bool:
         """Whether take_opened_watch_reward_start has a moment to report.
         The main loop asks while it waits between passes: a claim due again
@@ -10226,19 +10238,38 @@ class Twitch(object):
         later than the campaign's end. So is that read, for a campaign
         about to end: its claim is sent WATCH_REWARD_LAST_CLAIM_SECONDS
         before the end instead, every minute from then, and in the last
-        minute halfway to the end, so that a try is always due before it."""
+        minute halfway to the end, so that a try is always due before it.
+
+        The end is the campaign's, or the moment the repeat after a waiting
+        one opens, if that comes first: a repeat may not be there to claim
+        once the next has started."""
         stored = self.__watch_reward_campaigns().get(campaign_id)
         if stored is None or self.__is_open_drop_campaign(stored) is not True:
             return
-        if not any(
-            (drop.get("self") or {}).get("isClaimed") is not True
-            and (drop.get("self") or {}).get("dropInstanceID")
+        waiting = [
+            drop
             for drop in stored.get("timeBasedDrops") or []
-        ):
+            if (drop.get("self") or {}).get("isClaimed") is not True
+            and (drop.get("self") or {}).get("dropInstanceID")
+        ]
+        if not waiting:
             return
         now = utc_now()
         retry_at = now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
-        ends_at = self.__parse_twitch_datetime(stored.get("endAt"))
+        ends = [
+            moment
+            for moment in [
+                self.__parse_twitch_datetime(stored.get("endAt")),
+                *(
+                    self.__parse_twitch_datetime(
+                        drop["_reward_group"].get("next_start")
+                    )
+                    for drop in waiting
+                ),
+            ]
+            if moment is not None and moment > now
+        ]
+        ends_at = min(ends) if ends else None
         if ends_at is not None and retry_at >= ends_at:
             retry_at = max(
                 ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
