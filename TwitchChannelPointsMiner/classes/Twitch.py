@@ -10893,22 +10893,31 @@ class Twitch(object):
         """Note when the stored campaign's claims are next sent again (see
         __retry_unaccepted_reward_claims), counted from now. One moment a
         campaign: the one from its last try. False, and nothing is left
-        noted for it, when no reward of it is waiting to be claimed."""
-        stored = self.__watch_reward_campaigns().get(campaign_id)
-        retry_at = None
-        if stored is not None and self.__is_open_drop_campaign(stored) is True:
-            now = utc_now()
-            waiting, ends_at = self.__waiting_reward_claims(stored, now)
-            if waiting:
-                retry_at = now + timedelta(
-                    seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS
-                )
-                if ends_at is not None and retry_at >= ends_at:
-                    retry_at = max(
-                        ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
-                        now + min(timedelta(seconds=60), (ends_at - now) / 2),
-                    )
+        noted for it, when no reward of it is waiting to be claimed.
+
+        The record is read under the lock the moment is noted under, which
+        is the one a listing stores a record under. Read before it, a
+        record with nothing to claim could be replaced by one with a reward
+        waiting, that reward's claim be refused and its moment noted, all
+        before the lock was had here: the moment would then be taken away
+        for a record that is no longer the stored one, and the thread
+        waiting for it would end with the claim still to send."""
         with _watch_reward_lock(self):
+            stored = self.__watch_reward_campaigns().get(campaign_id)
+            retry_at = None
+            if stored is not None and self.__is_open_drop_campaign(stored) is True:
+                now = utc_now()
+                waiting, ends_at = self.__waiting_reward_claims(stored, now)
+                if waiting:
+                    retry_at = now + timedelta(
+                        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+                    )
+                    if ends_at is not None and retry_at >= ends_at:
+                        retry_at = max(
+                            ends_at
+                            - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
+                            now + min(timedelta(seconds=60), (ends_at - now) / 2),
+                        )
             retries = self.__reward_claim_retries()
             if retry_at is not None:
                 retries[campaign_id] = retry_at

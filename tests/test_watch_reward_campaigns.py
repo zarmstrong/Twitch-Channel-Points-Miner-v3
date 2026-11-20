@@ -5910,6 +5910,57 @@ def test_claim_thread_ends_when_another_gets_the_claim_it_waited_to_send_again(
     assert real_claim_thread.started == [thread]
 
 
+def test_claim_to_send_again_is_not_dropped_for_a_record_replaced_meanwhile(
+    monkeypatch,
+):
+    # The category evaluation, say, finds nothing of the campaign waiting to
+    # be claimed and so has nothing to send again. Before it has acted on
+    # that, a channel listing stores the reward as claimable, its claim is
+    # refused and the moment to send it again is noted. That moment belongs
+    # to the record now stored, not to the one the evaluation read.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=30, window=open_window()), times=1))
+    )
+    assert claim_retries(twitch) == {}
+    claimable = convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))
+    # As a listing stores it: with the ID its claim is sent under.
+    claimable["timeBasedDrops"][0]["self"]["dropInstanceID"] = "claim-id"
+    evaluation = threading.current_thread()
+    listed = threading.Event()
+    seen = []
+
+    def listing_stores_the_reward_and_its_claim_is_refused():
+        with twitch_module._watch_reward_lock(twitch):
+            twitch.watch_reward_campaigns["quest-1"] = claimable
+        seen.append(twitch._Twitch__note_reward_claim_retry("quest-1"))
+        listed.set()
+
+    listing_thread = threading.Thread(
+        target=listing_stores_the_reward_and_its_claim_is_refused
+    )
+    is_open = Twitch._Twitch__is_open_drop_campaign
+
+    def record_is_read(self, campaign):
+        if threading.current_thread() is evaluation and not listing_thread.ident:
+            # The evaluation has its record. The listing gets its turn here
+            # if it can have one: not while the record is being decided on.
+            listing_thread.start()
+            listed.wait(0.2)
+        return is_open(self, campaign)
+
+    monkeypatch.setattr(Twitch, "_Twitch__is_open_drop_campaign", record_is_read)
+
+    assert twitch._Twitch__note_reward_claim_retry("quest-1") is False
+
+    listing_thread.join(timeout=5)
+    assert seen == [True]
+    assert list(claim_retries(twitch)) == ["quest-1"]
+
+
 def test_claim_thread_that_could_not_be_started_does_not_block_the_next_one(
     monkeypatch,
 ):
