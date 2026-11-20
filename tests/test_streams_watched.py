@@ -635,6 +635,51 @@ def test_pending_watch_streak_stays_watched_until_confirmed(monkeypatch):
     assert posted == ["https://spade.test/slow-streak"]
 
 
+def test_minute_watcher_reconciles_a_streak_that_advances_mid_stream(monkeypatch):
+    # The first broadcast of a streak advances the milestone without paying a
+    # WATCH_STREAK bonus, so no points event arrives to clear the pending flag.
+    streamer = _watch_streamer(
+        "mid-stream",
+        watch_streak=True,
+        points=500,
+        points_limit=500,
+        minute_watched=5,
+    )
+    streamer.channel_id = "channel-1"
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.stream.watch_streak_checked_at = 0
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0),
+        expires_at=datetime(2099, 1, 1),
+    )
+    calls = []
+    gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: calls.append("live")
+        or SimpleNamespace(stream=live_stream),
+        get_reward_list=lambda channel_id: calls.append("rewards")
+        or SimpleNamespace(watch_streak_milestone=milestone),
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+        now=1_700_000_000,
+        gql=gql,
+    )
+
+    assert calls == ["live", "rewards"]
+    assert streamer.stream.watch_streak_missing is False
+    # Once the streak is confirmed, the channel no longer bypasses its points
+    # limit, so it does not take a watch slot in this cycle.
+    assert posted == []
+
+
 def test_confirmed_watch_streak_is_no_longer_pending():
     streamer = _watch_streamer("streak", watch_streak=True, minute_watched=30)
     streamer.stream.watch_streak_missing = False

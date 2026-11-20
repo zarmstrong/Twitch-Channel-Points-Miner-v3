@@ -245,6 +245,12 @@ UNLINKED_CLAIM_MISSING_GRACE_SECONDS = 15 * 60
 # advances a multi-broadcast streak after only a few minutes, so watch that
 # window instead of camping the whole stream until the payout on the last one.
 STREAK_ONLY_WATCH_MINUTES = 10
+# The first broadcast of a streak advances the milestone without paying a
+# WATCH_STREAK bonus, so no points event clears the pending flag. Recheck
+# Twitch after this much locally watched time, then on this cooldown, so a
+# milestone that advances mid-broadcast does not stay pending all stream long.
+WATCH_STREAK_RECONCILE_AFTER_MINUTES = 5
+WATCH_STREAK_RECONCILE_INTERVAL_SECONDS = 3 * 60
 
 
 class Twitch(object):
@@ -1869,6 +1875,7 @@ class Twitch(object):
         ):
             return False
 
+        stream.watch_streak_checked_at = time.time()
         logger.debug(
             "[watch-streak] checking Twitch milestone for "
             f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
@@ -1934,6 +1941,38 @@ class Twitch(object):
             f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
         )
         return True
+
+    def _reconcile_due_watch_streaks(self, streamers, now=None):
+        """Recheck pending streaks that have had time to advance mid-broadcast.
+
+        The first broadcast of a streak moves Twitch's milestone forward
+        without paying a WATCH_STREAK bonus, so no points event clears the
+        pending flag. Waiting for that event would keep the channel prioritized
+        for the whole stream. Once enough time has been watched, poll Twitch's
+        milestone on a cooldown until the streak is confirmed or the broadcast
+        ends.
+        """
+        if getattr(self, "gql", None) is None:
+            return
+        current = time.time() if now is None else now
+        for streamer in streamers:
+            if getattr(streamer, "is_online", False) is not True:
+                continue
+            if self._has_pending_watch_streak(streamer) is not True:
+                continue
+            stream = getattr(streamer, "stream", None)
+            if (
+                getattr(stream, "minute_watched", 0)
+                < WATCH_STREAK_RECONCILE_AFTER_MINUTES
+            ):
+                continue
+            checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0
+            if (
+                checked_at
+                and current - checked_at < WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
+            ):
+                continue
+            self.reconcile_watch_streak(streamer)
 
     def __streamer_drops_description(self, streamer):
         if not is_drop_discovered(streamer):
@@ -6755,6 +6794,10 @@ class Twitch(object):
                 # (config reload / category reconciliation), and indexing into a
                 # list that shrinks mid-iteration raises IndexError.
                 streamers_snapshot = list(streamers)
+                # A pending streak can be confirmed mid-broadcast without a
+                # WATCH_STREAK event; clear it before choosing this cycle's
+                # slots so it stops bypassing points_limit and priority order.
+                self._reconcile_due_watch_streaks(streamers_snapshot, now)
                 drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
                     streamers_snapshot,
                     now,

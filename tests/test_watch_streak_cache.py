@@ -11,7 +11,11 @@ from TwitchChannelPointsMiner.WatchStreakCache import (
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.gql.Errors import RetryError
-from TwitchChannelPointsMiner.classes.Twitch import Twitch
+from TwitchChannelPointsMiner.classes.Twitch import (
+    WATCH_STREAK_RECONCILE_AFTER_MINUTES,
+    WATCH_STREAK_RECONCILE_INTERVAL_SECONDS,
+    Twitch,
+)
 from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
 
 
@@ -295,6 +299,52 @@ def test_streak_from_previous_broadcast_stays_pending(tmp_path, caplog):
     assert streamer.stream.watch_streak_missing is True
     assert cache.get("channel", "broadcast-1") is None
     assert "predates broadcast=broadcast-1" in caplog.text
+
+
+def test_mid_stream_reconcile_waits_for_watched_minutes(tmp_path):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.is_online = True
+    streamer.stream.minute_watched = WATCH_STREAK_RECONCILE_AFTER_MINUTES - 0.1
+    calls = []
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        raise AssertionError("watch streak lookup should wait for watched time")
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    twitch._reconcile_due_watch_streaks([streamer], now=2_000_000_000)
+
+    assert calls == []
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_mid_stream_reconcile_observes_the_check_cooldown(tmp_path):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.is_online = True
+    streamer.stream.minute_watched = WATCH_STREAK_RECONCILE_AFTER_MINUTES
+    now = 2_000_000_000
+    streamer.stream.watch_streak_checked_at = (
+        now - WATCH_STREAK_RECONCILE_INTERVAL_SECONDS + 1
+    )
+    calls = []
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        return SimpleNamespace(stream=None)
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    twitch._reconcile_due_watch_streaks([streamer], now=now)
+    assert calls == []
+
+    streamer.stream.watch_streak_checked_at = (
+        now - WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
+    )
+    twitch._reconcile_due_watch_streaks([streamer], now=now)
+    assert calls == ["channel-1"]
 
 
 def test_streak_check_skips_channels_without_streak_tracking(tmp_path):
