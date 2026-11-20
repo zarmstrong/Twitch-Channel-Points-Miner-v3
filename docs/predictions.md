@@ -32,7 +32,7 @@
 - **NUMBER_7**: Always select the 7th option
 - **NUMBER_8**: Always select the 8th option
 
-![Screenshot](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/prediction.png)
+![Screenshot](../assets/prediction.png)
 
 Here is a concrete example:
 

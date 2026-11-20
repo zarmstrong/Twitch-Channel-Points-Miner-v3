@@ -5,7 +5,7 @@
 Before you begin:
 
 - Have you read the [code of conduct](CODE_OF_CONDUCT.md)?
-- Check out the [existing issues](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues) & see if there is already an opened issue.
+- Check out the [existing issues](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues) & see if there is already an opened issue.
 - Use the [build guide](BUILD.md) when producing Windows or Docker artifacts.
 - Follow the [testing guide](tests/README.md) to set up the development environment,
   run the suite, and add regression coverage.
@@ -36,7 +36,7 @@ When you're done making changes, and you'd like to propose them for review, use 
 ### Your PR is merged!
 Congratulations! The whole GitHub community thanks you. :sparkles:
 
-Once your PR is merged, you will be proudly listed as a contributor in the [contributor chart](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/graphs/contributors).
+Once your PR is merged, you will be proudly listed as a contributor in the [contributor chart](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/graphs/contributors).
 
 ### Keep contributing as you use GitHub Docs
 
@@ -57,7 +57,7 @@ Now that you're a part of the GitHub Docs community, you can keep participating 
   - [Suggested changes](#suggested-changes)
 
 ## Types of contributions :memo:
-You can contribute to the Twitch-Channel-Points-Miner-v2 in several ways. Bug reporting, pull request, propose new features, fork, donate, and much more :muscle: .
+You can contribute to the Twitch Channel Points Miner in several ways. Bug reporting, pull request, propose new features, fork, donate, and much more :muscle: .
 
 ### :beetle: Issues
 [Issues](https://docs.github.com/en/github/managing-your-work-on-github/about-issues) are used to report a bug, propose new features, or ask for help. When you open an issue, please use the appropriate template and label.
