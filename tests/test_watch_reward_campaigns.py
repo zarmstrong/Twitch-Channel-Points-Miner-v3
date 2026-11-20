@@ -3331,6 +3331,75 @@ def test_claim_thread_sends_the_claim_with_the_least_time_left_first(monkeypatch
     ]
 
 
+def test_listing_is_stored_whole_before_its_first_claim_is_sent(monkeypatch):
+    # The thread starts with the first claimable campaign of the listing.
+    # Started before the second was stored, it would send the first one's
+    # claim ahead of the one that ends in under a minute.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    lasting = convert(watch_group(claimable)) | {"endAt": "2099-01-01T00:00:00Z"}
+    ending = other_campaign(claimable) | {
+        "endAt": stamp(datetime.now(timezone.utc) + timedelta(seconds=40))
+    }
+
+    twitch._Twitch__store_listed_watch_rewards([lasting, ending])
+
+    assert gql.claims == [
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-1#group-watch",
+    ]
+
+
+def test_repeat_about_to_be_followed_is_claimed_before_the_campaigns_other_groups(
+    monkeypatch,
+):
+    # Two groups of one campaign wait for their claim. The next repeat of
+    # the second opens in under a minute; the first has until the end.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    second = watch_group(claimable) | {"id": "group-two", "name": "Weekly Chest"}
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(claimable), second)
+    )
+    stored = twitch.watch_reward_campaigns["quest-1"]
+    stored["endAt"] = "2099-01-01T00:00:00Z"
+    by_group = {drop["_reward_group"]["id"]: drop for drop in stored["timeBasedDrops"]}
+    by_group["group-watch"]["_reward_group"]["next_start"] = None
+    by_group["group-two"]["_reward_group"]["next_start"] = stamp(
+        datetime.now(timezone.utc) + timedelta(seconds=40)
+    )
+
+    twitch.claim_waiting_watch_rewards()
+
+    assert gql.claims == [
+        "viewer-1#quest-1#group-two",
+        "viewer-1#quest-1#group-watch",
+    ]
+
+
+def test_campaign_a_listing_names_as_closed_is_not_evaluated_from_the_store(
+    monkeypatch,
+):
+    # Stored while it ran, with an end date still ahead. Twitch then lists
+    # it as disabled: that is not a listing that leaves it out.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=12, window=open_window()))
+    )
+    assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
+
+    deadlines, _ = evaluate(monkeypatch, twitch, [listing(status="DISABLED")])
+
+    assert deadlines == {}
+
+
 def test_claim_thread_counts_the_next_repeat_as_the_end_of_a_waiting_one(
     monkeypatch,
 ):

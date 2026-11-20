@@ -2669,6 +2669,7 @@ class Twitch(object):
         )
         raw_query_campaigns, _ = self.__get_reward_campaigns_raw_query()
         campaigns_by_id = {}
+        closed_campaign_ids = set()
         for campaign in dashboard_campaigns + raw_query_campaigns:
             if not isinstance(campaign, dict):
                 continue
@@ -2676,6 +2677,7 @@ class Twitch(object):
             if campaign_id in [None, ""]:
                 continue
             if self.__is_open_drop_campaign(campaign) is not True:
+                closed_campaign_ids.add(str(campaign_id))
                 continue
             campaign_id = str(campaign_id)
             existing = campaigns_by_id.get(campaign_id)
@@ -2762,6 +2764,9 @@ class Twitch(object):
         for campaign_id, stored in list(self.__watch_reward_campaigns().items()):
             if (
                 campaign_id not in campaigns_by_id
+                # Named as closed is not the same as not named: Twitch ended
+                # it ahead of the end date the stored record still has.
+                and campaign_id not in closed_campaign_ids
                 and self.__is_open_drop_campaign(stored) is True
             ):
                 campaigns_by_id[campaign_id] = stored
@@ -10152,11 +10157,16 @@ class Twitch(object):
         is started right away: the next full campaign sync can be minutes
         off, and the campaign may end before it."""
         listed = []
+        stored_now = []
         for campaign in campaigns:
             stored = self.__remember_watch_reward_campaign(campaign, requested)
             listed.append(stored or campaign)
             if stored is not None:
-                self.__claim_watch_reward_drops_soon(stored)
+                stored_now.append(stored)
+        # Once all are stored: the claim thread takes the reward with the
+        # least time left first, of those stored when it starts.
+        for stored in stored_now:
+            self.__claim_watch_reward_drops_soon(stored)
         return listed
 
     def __claim_watch_reward_drops_soon(self, campaign):
@@ -10247,8 +10257,22 @@ class Twitch(object):
 
     def __claim_watch_reward_drops(self, campaign):
         """Claim every reward group of the stored campaign that is waiting
-        to be claimed."""
-        for drop_dict in campaign.get("timeBasedDrops") or []:
+        to be claimed, the one that can be claimed for the shortest time
+        first: a repeat may not be there to claim once the next has started,
+        and a claim ahead of it can take over a minute."""
+        now = utc_now()
+
+        def claimable_until(drop_dict):
+            opens_at = self.__parse_twitch_datetime(
+                (drop_dict.get("_reward_group") or {}).get("next_start")
+            )
+            if opens_at is None or opens_at <= now:
+                return (1, 0)
+            return (0, opens_at.timestamp())
+
+        for drop_dict in sorted(
+            campaign.get("timeBasedDrops") or [], key=claimable_until
+        ):
             if getattr(self, "running", True) is not True:
                 # Shutting down, which waits for the claim being sent and
                 # no longer than that: the rest is claimed on the next run.
