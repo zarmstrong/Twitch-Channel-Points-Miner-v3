@@ -10221,18 +10221,31 @@ class Twitch(object):
             while True:
                 with _watch_reward_lock(self):
                     self.watch_reward_claim_requested = False
-                for campaign in self.__reward_campaigns_by_claim_deadline():
-                    if getattr(self, "running", True) is not True:
-                        # Shutting down, which waits for this thread: what
-                        # is left is claimed from the first listing of the
-                        # next run.
+                tried = set()
+                # Shutting down waits for this thread: what is left then is
+                # claimed from the first listing of the next run.
+                while getattr(self, "running", True) is True:
+                    # Read again after every claim, which can take over a
+                    # minute: a reward listed meanwhile may have less time
+                    # left than the rest. A campaign that is over is left
+                    # out: a claim that kept failing would be sent again
+                    # ahead of every reward that can still be had.
+                    waiting = self.__waiting_reward_claims_by_deadline(
+                        [
+                            campaign
+                            for campaign in list(
+                                self.__watch_reward_campaigns().values()
+                            )
+                            if self.__is_open_drop_campaign(campaign) is True
+                        ],
+                        tried,
+                    )
+                    if not waiting:
                         break
-                    if self.__is_open_drop_campaign(campaign) is not True:
-                        # Over: a claim that kept failing would be sent
-                        # again ahead of every reward that can still be had.
-                        continue
+                    campaign, drop_dict = waiting[0]
+                    tried.add(self.__reward_claim_key(campaign, drop_dict))
                     try:
-                        self.__claim_watch_reward_drops(campaign)
+                        self.__claim_watch_reward_drop(campaign, drop_dict)
                     except Exception as error:
                         # The sync retries the claim.
                         self.__log_drop_check(
@@ -10240,10 +10253,11 @@ class Twitch(object):
                             f"{campaign.get('id')}: {error}",
                             level=logging.DEBUG,
                         )
-                    # Unless the campaign ends before the sync's next pass,
-                    # or the next listing: then it is sent again ahead of
-                    # the end.
-                    self.__retry_unaccepted_reward_claims(str(campaign.get("id")))
+                    if not any(other is campaign for other, _ in waiting[1:]):
+                        # The campaign's last: unless it ends before the
+                        # sync's next pass, or the next listing. Then what
+                        # was not accepted is sent again ahead of the end.
+                        self.__retry_unaccepted_reward_claims(str(campaign.get("id")))
                 with _watch_reward_lock(self):
                     if self.watch_reward_claim_requested is not True:
                         # Checked and cleared under the lock a listing asks
@@ -10258,51 +10272,63 @@ class Twitch(object):
     def __claim_watch_reward_drops(self, campaign):
         """Claim every reward group of the stored campaign that is waiting
         to be claimed, the one that can be claimed for the shortest time
-        first: a repeat may not be there to claim once the next has started,
-        and a claim ahead of it can take over a minute."""
-        now = utc_now()
-
-        def claimable_until(drop_dict):
-            opens_at = self.__parse_twitch_datetime(
-                (drop_dict.get("_reward_group") or {}).get("next_start")
-            )
-            if opens_at is None or opens_at <= now:
-                return (1, 0)
-            return (0, opens_at.timestamp())
-
-        for drop_dict in sorted(
-            campaign.get("timeBasedDrops") or [], key=claimable_until
-        ):
+        first."""
+        for _, drop_dict in self.__waiting_reward_claims_by_deadline([campaign]):
             if getattr(self, "running", True) is not True:
                 # Shutting down, which waits for the claim being sent and
                 # no longer than that: the rest is claimed on the next run.
                 return
-            # A copy: the record is shared, and a claim accepted on another
-            # thread takes the claim ID out of it. Checked here and read
-            # again below, it could be gone in between and the claim be
-            # sent without one.
-            drop_self = dict(drop_dict.get("self") or {})
-            if drop_self.get("isClaimed") is True or not drop_self.get(
-                "dropInstanceID"
-            ):
-                continue
-            categories = drop_dict["_reward_group"].get("categories") or [{}]
-            try:
-                drop = Drop(drop_dict)
-                drop.update(drop_self)
-            except (KeyError, TypeError, ValueError):
-                continue
-            self.claim_drop(
-                drop,
-                campaign_name_override=campaign.get("name"),
-                category_name_override=categories[0].get("displayName") or "Unknown",
+            self.__claim_watch_reward_drop(campaign, drop_dict)
+
+    def __claim_watch_reward_drop(self, campaign, drop_dict):
+        # A copy: the record is shared, and a claim accepted on another
+        # thread takes the claim ID out of it. Checked here and read again
+        # below, it could be gone in between and the claim be sent without
+        # one.
+        drop_self = dict(drop_dict.get("self") or {})
+        if drop_self.get("isClaimed") is True or not drop_self.get("dropInstanceID"):
+            return
+        categories = drop_dict["_reward_group"].get("categories") or [{}]
+        try:
+            drop = Drop(drop_dict)
+            drop.update(drop_self)
+        except (KeyError, TypeError, ValueError):
+            return
+        self.claim_drop(
+            drop,
+            campaign_name_override=campaign.get("name"),
+            category_name_override=categories[0].get("displayName") or "Unknown",
+        )
+
+    @staticmethod
+    def __reward_claim_key(campaign, drop_dict) -> tuple:
+        return (
+            str(campaign.get("id")),
+            str(drop_dict.get("id")),
+            (drop_dict.get("self") or {}).get("dropInstanceID"),
+        )
+
+    def __reward_claim_ends_at(self, stored, drop_dict, now):
+        """The moment a waiting drop of the stored campaign can be claimed
+        until: the campaign's end, or the moment the repeat after it opens,
+        if that comes first (a repeat may not be there to claim once the
+        next has started). None when no such moment is ahead."""
+        ends = [
+            moment
+            for moment in (
+                self.__parse_twitch_datetime(stored.get("endAt")),
+                self.__parse_twitch_datetime(
+                    (drop_dict.get("_reward_group") or {}).get("next_start")
+                ),
             )
+            if moment is not None and moment > now
+        ]
+        return min(ends) if ends else None
 
     def __waiting_reward_claims(self, stored, now) -> tuple:
         """The stored campaign's drops waiting to be claimed, and the moment
-        they can be claimed until: the campaign's end, or the moment the
-        repeat after a waiting one opens, if that comes first. None when no
-        such moment is ahead."""
+        the first of them can be claimed until (see __reward_claim_ends_at).
+        None when no such moment is ahead."""
         waiting = [
             drop
             for drop in stored.get("timeBasedDrops") or []
@@ -10310,36 +10336,38 @@ class Twitch(object):
             and (drop.get("self") or {}).get("dropInstanceID")
         ]
         ends = [
-            moment
-            for moment in [
-                self.__parse_twitch_datetime(stored.get("endAt")),
-                *(
-                    self.__parse_twitch_datetime(
-                        drop["_reward_group"].get("next_start")
-                    )
-                    for drop in waiting
-                ),
-            ]
-            if moment is not None and moment > now
+            ends_at
+            for ends_at in (
+                self.__reward_claim_ends_at(stored, drop, now) for drop in waiting
+            )
+            if ends_at is not None
         ]
-        return waiting, (min(ends) if waiting and ends else None)
+        return waiting, (min(ends) if ends else None)
 
-    def __reward_campaigns_by_claim_deadline(self) -> list:
-        """The stored campaigns, the one whose waiting rewards can be
-        claimed for the shortest time first.
+    def __waiting_reward_claims_by_deadline(self, campaigns, tried=()) -> list:
+        """A (campaign, drop) for every reward of the stored campaigns that
+        is waiting to be claimed and not among the tried, the one that can
+        be claimed for the shortest time first.
 
         A claim Twitch keeps refusing can take over a minute with its
-        retries. Sent in the order the campaigns were stored, it could use
-        up the time a reward of a later one has left."""
+        retries. Sent in the order the rewards were stored, it could use up
+        the time another has left, of the same campaign or a later one."""
         now = utc_now()
-
-        def claimable_until(campaign):
-            waiting, ends_at = self.__waiting_reward_claims(campaign, now)
-            if not waiting:
-                return (2, 0)
-            return (1, 0) if ends_at is None else (0, ends_at.timestamp())
-
-        return sorted(self.__watch_reward_campaigns().values(), key=claimable_until)
+        found = []
+        for campaign in campaigns:
+            for drop_dict in self.__waiting_reward_claims(campaign, now)[0]:
+                if self.__reward_claim_key(campaign, drop_dict) in tried:
+                    continue
+                ends_at = self.__reward_claim_ends_at(campaign, drop_dict, now)
+                found.append(
+                    (
+                        (1, 0) if ends_at is None else (0, ends_at.timestamp()),
+                        campaign,
+                        drop_dict,
+                    )
+                )
+        found.sort(key=lambda entry: entry[0])
+        return [(campaign, drop_dict) for _, campaign, drop_dict in found]
 
     def __retry_unaccepted_reward_claims(self, campaign_id):
         """Have the categories refreshed again when a progress read would
