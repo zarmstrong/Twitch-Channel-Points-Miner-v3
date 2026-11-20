@@ -10,6 +10,7 @@ import importlib
 import inspect
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -3786,6 +3787,90 @@ def test_sync_sends_a_refused_claim_once(monkeypatch):
     sync_stored_reward_campaigns(monkeypatch, twitch)
 
     assert len(sent) == 1
+
+
+class TurnLock:
+    """The claim pass lock, telling when another thread than the test's
+    comes to wait for it."""
+
+    def __init__(self, another_waits):
+        self.lock = threading.RLock()
+        self.another_waits = another_waits
+
+    def __enter__(self):
+        if threading.current_thread() is not threading.main_thread():
+            self.another_waits.set()
+        self.lock.acquire()
+
+    def __exit__(self, *error):
+        self.lock.release()
+
+
+def test_claimer_that_waited_for_anothers_claim_chooses_when_its_turn_comes(
+    monkeypatch,
+):
+    # The sync, say, comes to claim while the claim thread waits for the
+    # answer to a slow claim, which Twitch then refuses. A reward ending in
+    # half a minute was listed meanwhile: it goes before a second try of the
+    # slow one.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2099-01-01T00:00:00Z"
+
+    another_ready = threading.Event()
+    turn = TurnLock(another_ready)
+    monkeypatch.setattr(
+        twitch_module, "_watch_reward_claim_pass_lock", lambda twitch: turn, False
+    )
+    choose = Twitch._Twitch__waiting_reward_claims_by_deadline
+
+    def choose_and_tell(self, campaigns, tried=()):
+        chosen = choose(self, campaigns, tried)
+        if threading.current_thread() is not threading.main_thread():
+            another_ready.set()
+        return chosen
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__waiting_reward_claims_by_deadline", choose_and_tell
+    )
+    another = threading.Thread(
+        target=twitch._Twitch__claim_waiting_watch_rewards_by_deadline, daemon=True
+    )
+    # This claimer leaves the reward listed meanwhile to the other.
+    left_to_the_other = set()
+    sent = []
+    accept = gql.claim_drop_rewards
+
+    def refuse_the_first(instance_id):
+        sent.append(instance_id)
+        if len(sent) > 1:
+            return accept(instance_id)
+        another.start()
+        assert another_ready.wait(timeout=5)
+        listed = twitch._Twitch__remember_watch_reward_campaign(
+            third_campaign(claimable, 30)
+        )
+        left_to_the_other.add(
+            twitch._Twitch__reward_claim_key(listed, listed["timeBasedDrops"][0])
+        )
+        return SimpleNamespace(status=None, errors=["service unavailable"])
+
+    gql.claim_drop_rewards = refuse_the_first
+
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline(left_to_the_other)
+    another.join(timeout=5)
+
+    assert not another.is_alive()
+    assert sent == [
+        "viewer-1#quest-1#group-watch",
+        "viewer-1#quest-3#group-three",
+        "viewer-1#quest-1#group-watch",
+    ]
 
 
 def test_evaluation_sends_the_claim_with_the_least_time_left_first(monkeypatch):

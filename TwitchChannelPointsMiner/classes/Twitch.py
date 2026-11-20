@@ -163,6 +163,17 @@ def _reward_claim_already_sent(drop, **kwargs) -> bool:
     return False
 
 
+_WATCH_REWARD_CLAIM_PASS_FALLBACK_LOCK = RLock()
+
+
+def _watch_reward_claim_pass_lock(twitch):
+    # Same defensive getattr as below: some tests build Twitch via __new__.
+    return (
+        getattr(twitch, "watch_reward_claim_pass_lock", None)
+        or _WATCH_REWARD_CLAIM_PASS_FALLBACK_LOCK
+    )
+
+
 def _watch_reward_lock(twitch):
     # Same defensive getattr as below: some tests build Twitch via __new__.
     return getattr(twitch, "watch_reward_lock", None) or _WATCH_REWARD_FALLBACK_LOCK
@@ -361,6 +372,7 @@ class Twitch(object):
         "watch_reward_lock",
         "watch_reward_lookup_failures",
         "watch_reward_claim_thread",
+        "watch_reward_claim_pass_lock",
         "watch_reward_claim_requested",
         "watch_reward_pending_starts",
         "watch_reward_opening_unevaluated",
@@ -554,6 +566,10 @@ class Twitch(object):
         # not repeated on every refresh.
         self.watch_reward_lookup_failures = {}
         self.watch_reward_claim_thread = None
+        # Held from choosing a waiting reward to the answer to its claim
+        # (see __claim_waiting_watch_rewards_by_deadline). Taken before the
+        # claim lock, never while holding it or the watch-reward lock.
+        self.watch_reward_claim_pass_lock = RLock()
         self.watch_reward_claim_requested = False
         self.watch_reward_pending_starts = set()
         self.watch_reward_finished_rows = frozenset()
@@ -10356,32 +10372,39 @@ class Twitch(object):
         # that: what is left is claimed from the first listing of the next
         # run.
         while getattr(self, "running", True) is True:
-            # Read again after every claim, which can take over a minute: a
-            # reward listed meanwhile may have less time left than the rest.
-            # A campaign that is over is left out: a claim that kept failing
-            # would be sent again ahead of every reward that can still be
-            # had.
-            waiting = self.__waiting_reward_claims_by_deadline(
-                [
-                    campaign
-                    for campaign in list(self.__watch_reward_campaigns().values())
-                    if self.__is_open_drop_campaign(campaign) is True
-                ],
-                tried,
-            )
-            if not waiting:
-                break
-            campaign, drop_dict = waiting[0]
-            tried.add(self.__reward_claim_key(campaign, drop_dict))
-            try:
-                self.__claim_watch_reward_drop(campaign, drop_dict)
-            except Exception as error:
-                # The next sync or listing sends the claim again.
-                self.__log_drop_check(
-                    "unable to claim the rewards of campaign "
-                    f"{campaign.get('id')}: {error}",
-                    level=logging.DEBUG,
+            # One sender at a time chooses and claims. Chosen while another
+            # was still waiting for its answer, a claim would go out behind
+            # that one whatever was listed meanwhile: a second try of the
+            # same slow claim, say, ahead of a reward about to end.
+            with _watch_reward_claim_pass_lock(self):
+                if getattr(self, "running", True) is not True:
+                    break
+                # Read again after every claim, which can take over a
+                # minute: a reward listed meanwhile may have less time left
+                # than the rest. A campaign that is over is left out: a
+                # claim that kept failing would be sent again ahead of every
+                # reward that can still be had.
+                waiting = self.__waiting_reward_claims_by_deadline(
+                    [
+                        campaign
+                        for campaign in list(self.__watch_reward_campaigns().values())
+                        if self.__is_open_drop_campaign(campaign) is True
+                    ],
+                    tried,
                 )
+                if not waiting:
+                    break
+                campaign, drop_dict = waiting[0]
+                tried.add(self.__reward_claim_key(campaign, drop_dict))
+                try:
+                    self.__claim_watch_reward_drop(campaign, drop_dict)
+                except Exception as error:
+                    # The next sync or listing sends the claim again.
+                    self.__log_drop_check(
+                        "unable to claim the rewards of campaign "
+                        f"{campaign.get('id')}: {error}",
+                        level=logging.DEBUG,
+                    )
             if not any(other is campaign for other, _ in waiting[1:]):
                 # The campaign's last: unless it ends before the sync's next
                 # pass, or the next listing. Then what was not accepted is
