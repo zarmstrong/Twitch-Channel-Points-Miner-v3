@@ -844,6 +844,8 @@ class Twitch(object):
           sync and the watcher renew their copies within it, and minutes
           the watcher learns ahead of the next listing are progress, not an
           older copy;
+        - "failed", on a drop the record has still to be earned by a
+          deadline to come: its own deadline was that of a window before;
         - fewer, or the same as progress still, on a drop since earned:
           saved now, it would put the reported reward back to in progress
           (the minute watcher reports a drop as in progress until its own
@@ -889,6 +891,13 @@ class Twitch(object):
                 if group.get("finished") is True:
                     # Over without being earned: nothing newer is held back.
                     return False
+                if status == "failed":
+                    # The copy's deadline has passed, and the record has the
+                    # drop still to be earned: the copy is of a window
+                    # before this one, whatever its minutes.
+                    ends_at = self.__parse_twitch_datetime(drop.get("endAt"))
+                    if ends_at is not None and ends_at > utc_now():
+                        return True
                 restarted_at = (
                     campaign["_watch_reward"].get("restarted_at") or {}
                 ).get(drop_id)

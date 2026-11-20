@@ -2979,6 +2979,32 @@ def test_snapshot_from_before_a_window_started_over_is_not_saved():
     )
 
 
+def test_failed_snapshot_of_the_window_before_does_not_replace_the_new_one():
+    # The sync copied the record at 5 minutes. Listings since took the
+    # window to 40, saw it start over, and have the new one at 6. Looked at
+    # now, the copy's deadline has passed: "failed", with fewer minutes than
+    # the record, which the check for an older window's minutes lets by.
+    twitch = snapshot_twitch()
+    for minutes in (5, 40, 6):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(progress(minutes=minutes, window=open_window())))
+        )
+
+    def save(minutes, status):
+        return twitch._Twitch__save_drop_snapshot_if_new(
+            "group-watch#0|art", minutes, status, lambda: None
+        )
+
+    assert save(6, "in_progress") is True
+    assert save(5, "failed") is False
+    assert twitch.drop_status_last_saved == {"group-watch#0|art": "in_progress"}
+
+    # The record's own deadline passed with nothing newer listed: failed.
+    [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    drop["endAt"] = stamp(utc_now() - timedelta(minutes=1))
+    assert save(6, "failed") is True
+
+
 def test_copy_from_before_a_window_started_over_stays_out_over_later_listings():
     twitch = snapshot_twitch()
     for minutes in (40, 5, 6, 7):
