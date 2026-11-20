@@ -56,6 +56,9 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 miner_module = importlib.import_module(
     "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
 )
+# The claim thread's wait for a claim it is to send again, which the tests
+# that run the thread inline replace (see claims_run_inline).
+REAL_CLAIM_RETRY_WAIT = Twitch._Twitch__wait_for_reward_claim_retry
 
 # The real clock: the Twitch-level tests convert through the channel listing,
 # which reads it. Windows and waits below are hours away, so a test taking a
@@ -98,6 +101,37 @@ class HeldThread(InlineThread):
 def claims_run_inline(monkeypatch):
     monkeypatch.setattr(InlineThread, "started", [])
     monkeypatch.setattr(twitch_module, "Thread", InlineThread)
+    # Run inline, the claim thread cannot wait for the moment a refused
+    # claim is due again: it ends there, as it does when the miner stops,
+    # and leaves the moment noted (see claim_again_when_due).
+    monkeypatch.setattr(
+        twitch_module.Twitch,
+        "_Twitch__wait_for_reward_claim_retry",
+        lambda self, retry_at, wake: False,
+    )
+
+
+def claim_on_the_claim_thread(twitch):
+    """Ask the claim thread for a pass over the waiting rewards, as a
+    channel listing does for the campaigns it stores."""
+    for campaign in list(twitch.watch_reward_campaigns.values()):
+        twitch._Twitch__claim_watch_reward_drops_soon(campaign)
+
+
+def claim_retries(twitch) -> dict:
+    """When the claim thread sends each campaign's claims again."""
+    return getattr(twitch, "watch_reward_claim_retries", None) or {}
+
+
+def claim_again_when_due(twitch):
+    """The claim thread once the moment has come for every claim it is to
+    send again."""
+    assert claim_retries(twitch)
+    for campaign_id in twitch.watch_reward_claim_retries:
+        twitch.watch_reward_claim_retries[campaign_id] = utc_now() - timedelta(
+            seconds=1
+        )
+    twitch._Twitch__claim_stored_watch_reward_drops()
 
 
 def stamp(moment):
@@ -2495,38 +2529,33 @@ def test_past_window_end_stands_in_for_a_missing_next_eligibility_time():
 
 
 def test_category_refresh_runs_when_a_reward_window_has_opened():
+    # The stand-in has nothing to claim with: the main loop sends no claim
+    # for the moment. A refused one is the claim thread's to send again.
     miner = object.__new__(TwitchChannelPointsMiner)
     opened = []
-    claim_passes = []
     miner.twitch = SimpleNamespace(
         take_opened_watch_reward_start=lambda: bool(opened) and opened.pop(),
-        claim_waiting_watch_rewards=lambda: claim_passes.append(True),
     )
     refresh_at = miner._TwitchChannelPointsMiner__refresh_for_opened_reward_window
     scheduled = time.time() + 6 * 3600
 
     assert refresh_at(scheduled) == scheduled
-    assert claim_passes == []
 
     opened.append(True)
     assert refresh_at(scheduled) <= time.time()
     assert refresh_at(scheduled) == scheduled
-    # The moment may be one to send a refused claim again, of a campaign
-    # the refresh does not look at.
-    assert claim_passes == [True]
 
     # Category refreshes are off (only streamers are configured, whose
-    # channels earn a reward campaign too): the claims are sent all the
-    # same, and the moment is not left to end every wait of the loop.
+    # channels earn a reward campaign too): the moment is not left to end
+    # every wait of the loop.
     opened.append(True)
     assert refresh_at(None) is None
     assert opened == []
-    assert claim_passes == [True, True]
 
 
 def test_main_loop_answers_a_reward_campaign_before_its_other_checks():
-    # A claim to send again can be due seconds before its campaign ends;
-    # the update check and the channel points refresh can each take longer.
+    # A window can open in its campaign's last minutes; the update check
+    # and the channel points refresh can each take that long.
     # The loop runs inside run(), which no test can drive: its order is read
     # from the source.
     loop = inspect.getsource(TwitchChannelPointsMiner.run).split(
@@ -2572,8 +2601,8 @@ def main_loop_miner(monkeypatch, pending_starts, wait_seconds=30):
 
 
 def test_main_loop_wait_ends_when_a_reward_campaign_calls_for_a_refresh(monkeypatch):
-    # A claim Twitch refused seconds before its campaign's end is due again
-    # in less than the loop's wait, and is noted while the loop waits.
+    # A window that opens in less than the loop's wait is learned of from a
+    # channel listing, while the loop waits.
     miner, slept = main_loop_miner(monkeypatch, [])
     wait = miner._TwitchChannelPointsMiner__wait_for_next_pass
     sleep = miner.twitch.restart_requested.wait
@@ -3396,7 +3425,7 @@ def test_claims_keep_their_order_across_a_change_of_the_clocks(monkeypatch):
         with monkeypatch.context() as local_time:
             local_time.setenv("TZ", "America/Denver")
             time.tzset()
-            twitch.claim_waiting_watch_rewards()
+            claim_on_the_claim_thread(twitch)
     finally:
         time.tzset()
 
@@ -3647,7 +3676,7 @@ def test_claim_thread_sends_the_claim_with_the_least_time_left_first(monkeypatch
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-2#group-two",
@@ -3701,7 +3730,7 @@ def test_repeat_about_to_be_followed_is_claimed_before_the_campaigns_other_group
         datetime.now(timezone.utc) + timedelta(seconds=40)
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-1#group-two",
@@ -3748,7 +3777,7 @@ def test_claims_are_ordered_by_time_left_across_campaigns(monkeypatch):
     two_waiting_groups_campaign(twitch, second_opens_again_in=10)
     twitch._Twitch__remember_watch_reward_campaign(third_campaign(claimable, 30))
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-1#group-two",
@@ -3770,7 +3799,7 @@ def test_claim_in_a_campaign_named_as_closed_is_sent_after_the_others(monkeypatc
     twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
     twitch.watch_reward_campaigns["quest-3"]["_watch_reward"]["named_closed"] = True
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-2#group-two",
@@ -3796,7 +3825,7 @@ def test_reward_listed_during_a_claim_is_claimed_next_when_it_has_less_time(
         return accept(instance_id)
 
     gql.claim_drop_rewards = claim_while_another_is_listed
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-1#group-watch",
@@ -3819,7 +3848,7 @@ def test_refused_claim_is_sent_once_in_a_pass_of_the_claim_thread(monkeypatch):
         return refuse(instance_id)
 
     gql.claim_drop_rewards = count
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert len(sent) == 1
 
@@ -4062,7 +4091,7 @@ def test_claim_thread_counts_the_next_repeat_as_the_end_of_a_waiting_one(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-2#group-two",
@@ -5196,13 +5225,13 @@ def test_claim_twitch_did_not_accept_is_tried_again_before_the_campaign_ends(
         status=None, errors=["service unavailable"]
     )
     evaluate(monkeypatch, twitch, [listing()])
-    twitch.watch_reward_pending_starts = set()
     stored = twitch.watch_reward_campaigns["quest-1"]
     stored["endAt"] = stamp(utc_now() + ends_in)
 
     twitch._Twitch__retry_unaccepted_reward_claims("quest-1")
 
-    [retry_at] = twitch.watch_reward_pending_starts
+    # One moment a campaign: the one counted from its last try.
+    [retry_at] = claim_retries(twitch).values()
     assert (retry_at - utc_now()).total_seconds() == pytest.approx(
         retry_in.total_seconds(), abs=3
     )
@@ -5223,20 +5252,39 @@ def test_claim_twitch_did_not_accept_is_tried_again_without_a_streamer(monkeypat
 
     evaluate(monkeypatch, twitch, [listing()])
 
-    # Noted for the listing's claim and for the evaluation's own.
-    assert twitch.watch_reward_pending_starts
-    for retry_at in twitch.watch_reward_pending_starts:
-        assert (retry_at - utc_now()).total_seconds() == pytest.approx(
-            WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
-        )
+    # Noted for the claim thread, once for the campaign, and not as a
+    # moment that calls for the main loop.
+    [retry_at] = claim_retries(twitch).values()
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+    assert not getattr(twitch, "watch_reward_pending_starts", None)
 
-    # Accepted, it leaves nothing to come back for.
-    twitch.watch_reward_pending_starts = set()
+    # Accepted when the thread sends it again, it leaves nothing to come
+    # back for.
+    twitch.gql.claim_drop_rewards = working_claim
+    claim_again_when_due(twitch)
+
+    assert twitch.gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert claim_retries(twitch) == {}
+
+
+def test_claim_the_evaluation_gets_accepted_leaves_no_retry(monkeypatch):
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(status="CLAIMABLE", minutes=60), times=1)
+    )
+    working_claim = twitch.gql.claim_drop_rewards
+    twitch.gql.claim_drop_rewards = lambda instance_id: SimpleNamespace(
+        status=None, errors=["service unavailable"]
+    )
+    evaluate(monkeypatch, twitch, [listing()])
+    assert claim_retries(twitch)
+
     twitch.gql.claim_drop_rewards = working_claim
     evaluate(monkeypatch, twitch, [listing()])
 
     assert twitch.gql.claims == ["viewer-1#quest-1#group-watch"]
-    assert twitch.watch_reward_pending_starts == set()
+    assert claim_retries(twitch) == {}
 
 
 def test_claim_a_listing_sent_that_twitch_did_not_accept_is_tried_again(monkeypatch):
@@ -5261,16 +5309,15 @@ def test_claim_a_listing_sent_that_twitch_did_not_accept_is_tried_again(monkeypa
 
     twitch._Twitch__store_listed_watch_rewards([claimable])
 
-    [retry_at] = twitch.watch_reward_pending_starts
+    [retry_at] = claim_retries(twitch).values()
     assert utc_now() < retry_at < ends_at
 
     # Accepted, there is nothing to come back for.
-    twitch.watch_reward_pending_starts = set()
     gql.claim_drop_rewards = accept
     twitch._Twitch__store_listed_watch_rewards([copy.deepcopy(claimable)])
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
-    assert twitch.watch_reward_pending_starts == set()
+    assert claim_retries(twitch) == {}
 
 
 def refused_claim_twitch(monkeypatch, claimable):
@@ -5310,10 +5357,13 @@ def test_refused_claim_is_tried_again_before_the_next_repeat_opens(monkeypatch):
         ),
     )
 
-    # The opening itself, and the claim before it.
-    retries = twitch.watch_reward_pending_starts - {opens}
-    assert len(retries) == 1
-    assert utc_now() < min(retries) < opens
+    # The claim again before the opening, on the claim thread. The opening
+    # itself is the main loop's, for the category refresh.
+    [retry_at] = claim_retries(twitch).values()
+    assert utc_now() < retry_at < opens
+    assert twitch.watch_reward_pending_starts == {opens}
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: opens + timedelta(seconds=1))
+    assert twitch.take_opened_watch_reward_start() is True
 
 
 def test_waiting_claims_are_sent_again_without_a_category_refresh(monkeypatch):
@@ -5325,13 +5375,14 @@ def test_waiting_claims_are_sent_again_without_a_category_refresh(monkeypatch):
     )
     gql.claim_drop_rewards = gql.accept
 
-    twitch.claim_waiting_watch_rewards()
+    claim_again_when_due(twitch)
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
     assert "group-watch" in twitch.accepted_drop_ids
 
-    # Nothing is waiting any more.
-    twitch.claim_waiting_watch_rewards()
+    # Nothing is waiting any more, and no moment is left to wait for.
+    assert claim_retries(twitch) == {}
+    claim_on_the_claim_thread(twitch)
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
 
 
@@ -5345,9 +5396,11 @@ def test_waiting_claim_of_a_campaign_that_is_over_is_not_sent_again(monkeypatch)
         utc_now() - timedelta(minutes=1)
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_again_when_due(twitch)
 
     assert gql.claims == []
+    # Nor is its moment kept, to keep a thread waiting for nothing.
+    assert claim_retries(twitch) == {}
 
 
 def test_row_of_a_repeat_lost_waiting_to_be_claimed_is_not_finished(
@@ -5529,16 +5582,332 @@ def test_claim_thread_that_could_not_be_started_has_the_claim_sent_again(
     )
 
     assert gql.claims == []
-    [retry_at] = twitch.watch_reward_pending_starts
+    [retry_at] = claim_retries(twitch).values()
     assert (retry_at - utc_now()).total_seconds() == pytest.approx(
         WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
     )
 
-    # Which is when the main loop has the waiting claims sent.
+    # No thread waits for that moment, so the main loop looks for it. Not
+    # due yet, it starts nothing.
     monkeypatch.setattr(twitch_module, "Thread", InlineThread)
-    twitch.claim_waiting_watch_rewards()
+    twitch.start_unattended_watch_reward_claims()
+    assert gql.claims == []
+
+    # When it is, the loop has a thread started, which sends the claims.
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    twitch.start_unattended_watch_reward_claims()
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert claim_retries(twitch) == {}
+
+
+def test_claim_due_again_is_put_off_when_no_thread_can_be_started_for_it(
+    monkeypatch,
+):
+    # Left due, it would have the main loop ask for a thread on every look.
+    class NoThreadLeft(InlineThread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    gql.claim_drop_rewards = gql.accept
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    monkeypatch.setattr(twitch_module, "Thread", NoThreadLeft)
+
+    twitch.start_unattended_watch_reward_claims()
+
+    assert gql.claims == []
+    assert twitch.watch_reward_claim_thread is None
+    [retry_at] = claim_retries(twitch).values()
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+
+def miner_between_passes(monkeypatch, twitch):
+    """A miner around the Twitch given, whose wait for the next pass of
+    its main loop is over at once."""
+    miner = object.__new__(TwitchChannelPointsMiner)
+    miner.twitch = twitch
+    twitch.restart_requested = SimpleNamespace(wait=lambda seconds: False)
+    monkeypatch.setattr(
+        miner_module, "random", SimpleNamespace(uniform=lambda low, high: 0.01)
+    )
+    return miner
+
+
+def test_main_loop_has_a_thread_started_for_a_claim_due_with_none_to_send_it(
+    monkeypatch,
+):
+    # No thread could be had when the moment was noted, or the one that
+    # waited is gone. The loop is the one thread sure to be there.
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    gql.claim_drop_rewards = gql.accept
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    assert twitch.watch_reward_claim_thread is None
+    miner = miner_between_passes(monkeypatch, twitch)
+
+    assert miner._TwitchChannelPointsMiner__wait_for_next_pass() is False
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+
+
+def test_main_loop_wait_survives_an_error_looking_for_a_claim_due_again(
+    monkeypatch, caplog
+):
+    def fail(self):
+        raise KeyError("timeBasedDrops")
+
+    monkeypatch.setattr(Twitch, "start_unattended_watch_reward_claims", fail)
+    miner = miner_between_passes(monkeypatch, bare_twitch())
+
+    with caplog.at_level(logging.ERROR):
+        assert miner._TwitchChannelPointsMiner__wait_for_next_pass() is False
+
+    assert "reward campaign claim to send again" in caplog.text
+
+
+def test_main_loop_leaves_a_claim_due_again_to_the_thread_that_waits_for_it(
+    monkeypatch,
+):
+    # The claim thread is there, about to send it: the loop neither sends
+    # the claim itself nor takes the moment as a call for a category
+    # refresh, which would send it once more.
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    gql.claim_drop_rewards = gql.accept
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    twitch.watch_reward_claim_thread = HeldThread(target=None)
+    started = list(InlineThread.started)
+    miner = miner_between_passes(monkeypatch, twitch)
+
+    assert miner._TwitchChannelPointsMiner__wait_for_next_pass() is False
+    scheduled = time.time() + 3600
+    refresh_at = miner._TwitchChannelPointsMiner__refresh_for_opened_reward_window
+    assert refresh_at(scheduled) == scheduled
+
+    assert twitch.watch_reward_start_due() is False
+    assert gql.claims == []
+    assert InlineThread.started == started
+    assert list(claim_retries(twitch)) == ["quest-1"]
+
+
+def test_no_thread_is_started_for_a_claim_to_send_again_once_the_miner_stops(
+    monkeypatch,
+):
+    twitch, _ = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    started = list(InlineThread.started)
+    twitch.running = False
+
+    twitch._Twitch__retry_unaccepted_reward_claims("quest-1")
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    twitch.start_unattended_watch_reward_claims()
+
+    assert InlineThread.started == started
+
+
+def eventually(condition, seconds=5.0) -> bool:
+    """Whether the condition comes true within the seconds given. For what
+    another thread is about to do."""
+    until = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() >= until:
+            return False
+        time.sleep(0.002)
+    return True
+
+
+@pytest.fixture
+def real_claim_thread(monkeypatch):
+    """Claims run on a real thread, which waits for the moments it is to
+    send a refused claim again. `ahead` moves the miner's clock on to bring
+    such a moment about; `started` holds the threads started; `twitches`
+    are stopped when the test is over."""
+    clock = SimpleNamespace(ahead=timedelta(0), started=[], twitches=[])
+
+    class CountedThread(threading.Thread):
+        def start(self):
+            clock.started.append(self)
+            super().start()
+
+    monkeypatch.setattr(twitch_module, "Thread", CountedThread)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__wait_for_reward_claim_retry", REAL_CLAIM_RETRY_WAIT
+    )
+    # How often the waiting thread reads the clock.
+    monkeypatch.setattr(twitch_module, "WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS", 0.005)
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: utc_now() + clock.ahead)
+    yield clock
+    for twitch in clock.twitches:
+        twitch.running = False
+    for thread in clock.started:
+        thread.join(timeout=5)
+
+
+def refusing_gql():
+    """A gql stub that refuses every claim, and the claims it was sent.
+    gql.accept is a claim that goes through."""
+    gql, _ = channel_listing()
+    gql.accept = gql.claim_drop_rewards
+    sent = []
+
+    def refuse(instance_id):
+        sent.append(instance_id)
+        return SimpleNamespace(status=None, errors=["service unavailable"])
+
+    gql.claim_drop_rewards = refuse
+    return gql, sent
+
+
+def waiting_claim_thread(monkeypatch, clock):
+    """A Twitch whose claim thread has had the claim of quest-1 refused and
+    is to send it again, with the gql stub and the claims sent so far."""
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, sent = refusing_gql()
+    twitch = bare_twitch(gql)
+    clock.twitches.append(twitch)
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))]
+    )
+    assert eventually(lambda: len(sent) == 1 and claim_retries(twitch))
+    return twitch, gql, sent
+
+
+def test_claim_thread_sends_a_refused_claim_again_with_no_main_loop_to_ask(
+    monkeypatch, real_claim_thread
+):
+    # No main loop runs here: it may be busy for longer than the reward
+    # has left. The thread that sent the claim waits for the moment itself.
+    twitch, _, sent = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS - 30
+    )
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert len(sent) == 1
+
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS + 1
+    )
+    assert eventually(lambda: len(sent) == 2)
+    assert sent == ["viewer-1#quest-1#group-watch"] * 2
+
+    # Refused again, it is waited for again, by the same thread. The main
+    # loop was never called for.
+    assert eventually(lambda: bool(claim_retries(twitch)))
+    assert thread.is_alive()
+    assert real_claim_thread.started == [thread]
+    assert not getattr(twitch, "watch_reward_pending_starts", None)
+
+
+def test_claim_thread_is_started_to_wait_for_a_claim_another_had_refused(
+    monkeypatch, real_claim_thread
+):
+    # The campaign sync's pass, say, on its own thread. The claim thread it
+    # starts waits for the moment: it does not send the claim again at once.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, sent = refusing_gql()
+    twitch = bare_twitch(gql)
+    real_claim_thread.twitches.append(twitch)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))
+    )
+
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline()
+
+    [thread] = real_claim_thread.started
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert len(sent) == 1
+
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS + 1
+    )
+    assert eventually(lambda: len(sent) == 2)
+
+
+def test_stopping_ends_a_claim_thread_that_waits_to_send_a_claim_again(
+    monkeypatch, real_claim_thread
+):
+    # The shutdown joins the thread before it saves the report for the
+    # last time: it is not kept waiting for a moment minutes off.
+    twitch, _, sent = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+    assert thread.is_alive()
+
+    twitch.running = False
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert twitch.watch_reward_claim_thread is None
+    # Nor is the claim sent when its moment comes.
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS + 1
+    )
+    twitch.start_unattended_watch_reward_claims()
+    assert len(sent) == 1
+    assert real_claim_thread.started == [thread]
+
+
+def test_reward_listed_while_the_claim_thread_waits_is_claimed_at_once(
+    monkeypatch, real_claim_thread
+):
+    # The thread waits ten minutes to send a refused claim again. A reward
+    # a channel lists meanwhile is not held up behind that.
+    twitch, gql, _ = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+    gql.claim_drop_rewards = gql.accept
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+
+    twitch._Twitch__store_listed_watch_rewards([other_campaign(claimable)])
+
+    # The pass it asks for sends every waiting claim.
+    assert eventually(lambda: len(gql.claims) == 2)
+    assert set(gql.claims) == {
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-1#group-watch",
+    }
+    assert real_claim_thread.ahead == timedelta(0)
+    # With nothing left to claim or to send again, the thread ends.
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert twitch.watch_reward_claim_thread is None
+    assert claim_retries(twitch) == {}
+    assert real_claim_thread.started == [thread]
+
+
+def test_claim_thread_ends_when_another_gets_the_claim_it_waited_to_send_again(
+    monkeypatch, real_claim_thread
+):
+    twitch, gql, _ = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+    gql.claim_drop_rewards = gql.accept
+
+    # The campaign sync's pass, say.
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline()
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert twitch.watch_reward_claim_thread is None
+    assert real_claim_thread.started == [thread]
 
 
 def test_claim_thread_that_could_not_be_started_does_not_block_the_next_one(
