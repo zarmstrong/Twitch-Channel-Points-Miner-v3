@@ -22,9 +22,10 @@ Priorities can be combined in order. Avoid contradictory fallback rules such as
 `ORDER` and `POINTS_ASCENDING` in the same list.
 
 Set `points_limit` in `StreamerSettings` to stop watching a streamer once its
-channel-points balance reaches that value. A pending watch streak can temporarily
-bypass the limit so its reward is not missed. Set `favorite=True` per streamer
-and include `Priority.FAVORITE` to reserve watch slots for favorites first.
+channel-points balance reaches that value. A pending watch streak can bypass the
+limit until Twitch confirms the streak, so its reward is not missed. Set
+`favorite=True` per streamer and include `Priority.FAVORITE` to reserve watch
+slots for favorites first.
 
 See [Watch streaks](watch-streak.md) for the pending-streak checks, logical
 streams, and the `streak_only` option.

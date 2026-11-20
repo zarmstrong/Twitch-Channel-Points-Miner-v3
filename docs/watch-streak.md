@@ -3,11 +3,16 @@
 [Back to the README](../README.md)
 
 The miner prioritizes a streamer with a pending watch streak so the streak is
-not missed. A pending streak can temporarily bypass `points_limit`.
+not missed. A pending streak can bypass `points_limit` until Twitch confirms the
+streak.
 
 Before treating a streak as pending, the miner checks Twitch's milestone for the
 current broadcast. A streak already awarded before startup, or on a first visit,
-is therefore not farmed again.
+is therefore not farmed again. The first broadcast of a streak advances the
+milestone without paying bonus points, so Twitch sends no `WATCH_STREAK` event
+for it. While a streak is pending, the miner rechecks the milestone after about
+five watched minutes and then every few minutes, so the channel stops holding a
+watch slot once the streak is confirmed.
 
 ## Logical streams
 
@@ -43,5 +48,8 @@ Set an integer to override the per-broadcast window in minutes:
 ```python
 StreamerSettings(streak_only=5)
 ```
+
+The dashboard shows this as `Streak only (5 min)` and keeps the custom window
+when you save other settings there. Unticking the box turns the option off.
 
 `streak_only` defaults to `False`.
