@@ -854,7 +854,12 @@ class Twitch(object):
         for campaign in list(
             (getattr(self, "watch_reward_campaigns", None) or {}).values()
         ):
-            for drop in campaign.get("timeBasedDrops") or []:
+            # A group the listing leaves out for now is known as it was last
+            # listed: an older copy of it is no newer for that.
+            for drop in [
+                *(campaign.get("timeBasedDrops") or []),
+                *(campaign["_watch_reward"].get("earlier_drops") or {}).values(),
+            ]:
                 group = drop["_reward_group"]
                 if str(drop["id"]) != drop_id:
                     number = group.get("repeat")
@@ -9417,9 +9422,15 @@ class Twitch(object):
                     getattr(self, "watch_reward_finished_rows", None) or frozenset()
                 )
                 pending = known - finished
-                if not pending:
-                    return
-                rows_found = set()
+                state = getattr(self, "drop_report_state", None) or {}
+                # The drops with a row. Another thread's record may have had
+                # this one's rows marked already: it knows which rows are
+                # earned, not the repeats this record saw counted.
+                rows_found = {
+                    str(row.get("drop_id") or "")
+                    for row in list(state.values())
+                    if isinstance(row, dict)
+                }
 
                 def finish(row) -> bool:
                     if not isinstance(row, dict):
@@ -9444,14 +9455,15 @@ class Twitch(object):
                     row["percentage_progress"] = 100
                     return True
 
-                for row in (getattr(self, "drop_report_state", None) or {}).values():
-                    finish(row)
-                self.__finish_report_file_rows(finish)
-                self.watch_reward_finished_rows = frozenset(finished | pending)
+                if pending:
+                    for row in list(state.values()):
+                        finish(row)
+                    self.__finish_report_file_rows(finish)
+                    self.watch_reward_finished_rows = frozenset(finished | pending)
             # Outside the report's lock: a row is saved under the
             # watch-reward lock, which is taken before that one.
             for drop_id, drop in counted.items():
-                if (drop_id, True) in pending and drop_id not in rows_found:
+                if drop_id not in rows_found:
                     self.__save_earned_reward_row(stored, drop)
         except (OSError, ValueError) as error:
             # The record is stored all the same, and these rows are looked

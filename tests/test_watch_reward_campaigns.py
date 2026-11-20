@@ -3846,6 +3846,62 @@ def test_repeat_is_known_as_earned_as_soon_as_its_record_is_stored(
     assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"
 
 
+def test_counted_repeat_gets_its_row_when_another_record_had_the_rows_marked(
+    monkeypatch, tmp_path
+):
+    # Two threads store listings. The other one's record, stored between
+    # this one being stored and its rows being marked, marks every row
+    # known as earned, and knows nothing of the repeat this one saw counted
+    # before it had a row.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+
+    def other_record_marks_the_rows(self, campaign_id):
+        twitch.watch_reward_finished_rows = twitch.watch_reward_earned_rows
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__publish_watch_reward_progress", other_record_marks_the_rows
+    )
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"
+
+
+def test_older_copy_of_a_group_the_listing_leaves_out_is_not_saved(
+    monkeypatch, tmp_path
+):
+    # Twitch stops reporting progress on the group for a while. The sync's
+    # copy of its earned repeat, from before it was counted, would be saved
+    # as failed over the earned row, which is marked only once.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    other = watch_group(progress(minutes=5), times=1, categories=[OTHER_CATEGORY])
+    other["id"] = "group-other"
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(minutes=60, grants=1, window=open_window()),
+    ):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self), other)
+        )
+    stored = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(None), other)
+    )
+    assert [drop["id"] for drop in stored["timeBasedDrops"]] == ["group-other"]
+    assert report_rows(twitch, tmp_path)["group-watch#0"]["status"] == "captured"
+
+    def save(status):
+        return twitch._Twitch__save_drop_snapshot_if_new(
+            "group-watch#0|copy", 59, status, lambda: None
+        )
+
+    assert save("failed") is False
+    assert save("in_progress") is False
+
+
 @pytest.mark.parametrize(
     "ends_in, retry_in",
     [
