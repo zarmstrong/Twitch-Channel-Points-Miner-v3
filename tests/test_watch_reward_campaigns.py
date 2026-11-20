@@ -3908,7 +3908,9 @@ def test_older_copy_of_a_group_the_listing_leaves_out_is_not_saved(
         # The usual wait would end after the campaign: its last minutes.
         (timedelta(minutes=5), timedelta(minutes=3)),
         # Already inside them: once a minute.
-        (timedelta(seconds=90), timedelta(seconds=60)),
+        (timedelta(seconds=150), timedelta(seconds=60)),
+        # In the last minute a minute's wait would end after it too.
+        (timedelta(seconds=40), timedelta(seconds=20)),
         (timedelta(hours=1), timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)),
     ],
 )
@@ -3930,7 +3932,7 @@ def test_claim_twitch_did_not_accept_is_tried_again_before_the_campaign_ends(
 
     [retry_at] = twitch.watch_reward_pending_starts
     assert (retry_at - utc_now()).total_seconds() == pytest.approx(
-        retry_in.total_seconds(), abs=5
+        retry_in.total_seconds(), abs=3
     )
     assert retry_at < twitch._Twitch__parse_twitch_datetime(stored["endAt"])
 

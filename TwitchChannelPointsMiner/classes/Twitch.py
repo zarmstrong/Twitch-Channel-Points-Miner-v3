@@ -10159,7 +10159,8 @@ class Twitch(object):
         claim again, and the ordinary category refresh can be hours off:
         later than the campaign's end. So is that read, for a campaign
         about to end: its claim is sent WATCH_REWARD_LAST_CLAIM_SECONDS
-        before the end instead, and every minute from then."""
+        before the end instead, every minute from then, and in the last
+        minute halfway to the end, so that a try is always due before it."""
         stored = self.__watch_reward_campaigns().get(campaign_id)
         if stored is None or self.__is_open_drop_campaign(stored) is not True:
             return
@@ -10175,7 +10176,7 @@ class Twitch(object):
         if ends_at is not None and retry_at >= ends_at:
             retry_at = max(
                 ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
-                now + timedelta(seconds=60),
+                now + min(timedelta(seconds=60), (ends_at - now) / 2),
             )
         with _watch_reward_lock(self):
             self.__note_watch_reward_starts({retry_at})
