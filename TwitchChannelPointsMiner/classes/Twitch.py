@@ -233,6 +233,12 @@ WATCH_REWARD_REFRESH_CHANNEL_LIMIT = 4
 # name is still watched for after the last channel listing that reported it.
 WATCH_REWARD_UNLISTED_SECONDS = 30 * 60
 WATCH_REWARD_REFRESH_CHANNELS_PER_CATEGORY = 2
+# How many times in a row the read of a reward campaign whose progress was
+# never read is made again WATCH_REWARD_PROGRESS_REFRESH_SECONDS after one no
+# channel answered, before it is left to the ordinary category refresh. Each
+# costs a category refresh, and channels may keep leaving the campaign out
+# for as long as it runs (one the account already finished, say).
+WATCH_REWARD_UNREAD_RETRIES = 3
 # How long after a reward drop's window started over a progress snapshot with
 # more minutes than the stored record is taken for a copy from before it. The
 # minute watcher's copy is only renewed by a full inventory sync, so this has
@@ -10028,6 +10034,7 @@ class Twitch(object):
         offset = (details.get("refresh_offset") or 0) % max(len(categories), 1)
         categories = categories[offset:] + categories[:offset]
         queried = 0
+        lookup_failed = False
         for tried, category in enumerate(
             categories[:WATCH_REWARD_REFRESH_CHANNEL_LIMIT], start=1
         ):
@@ -10046,6 +10053,7 @@ class Twitch(object):
                     directory_slug, directory_slug, drops_tag=False
                 )
             except CategoryLookupFailedException:
+                lookup_failed = True
                 continue
             game = (
                 (response.get("data") or {}).get("game")
@@ -10099,13 +10107,35 @@ class Twitch(object):
                 ):
                     return refreshed
         self.__retry_read_for_opened_window(campaign)
+        current = known.get(campaign_id, campaign)
         with _watch_reward_lock(self):
             # No channel answered, so no new record was stored to have the
             # next read made.
             self.__note_read_for_locked_reward_group(
-                known.get(campaign_id, campaign), details["refresh_attempted_at"]
+                current, details["refresh_attempted_at"]
             )
-        return known.get(campaign_id, campaign)
+            unread = current["_watch_reward"].get("progress_known") is not True and (
+                queried or lookup_failed
+            )
+            if unread:
+                details["unread_retries"] = (details.get("unread_retries") or 0) + 1
+            if unread and details["unread_retries"] <= WATCH_REWARD_UNREAD_RETRIES:
+                # Never read yet, though channels are live there or could
+                # not be looked up: another may report it at the next read.
+                # Until one does nothing is watched for the campaign, so
+                # nothing but the ordinary refresh, hours off, would try.
+                # With no channel live the category is left to that refresh,
+                # like one with a Drop campaign.
+                self.__note_watch_reward_starts(
+                    {
+                        datetime.fromtimestamp(
+                            details["refresh_attempted_at"]
+                            + WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
+                            timezone.utc,
+                        ).replace(tzinfo=None)
+                    }
+                )
+        return current
 
     def __note_read_for_locked_reward_group(self, campaign, since):
         """Have the categories refreshed again

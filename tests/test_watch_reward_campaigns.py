@@ -42,6 +42,7 @@ from TwitchChannelPointsMiner.classes.Twitch import (
     DROP_FULL_INVENTORY_SYNC_SECONDS,
     WATCH_REWARD_FINISHED_REFRESH_SECONDS,
     WATCH_REWARD_PROGRESS_REFRESH_SECONDS,
+    WATCH_REWARD_UNREAD_RETRIES,
     WATCH_REWARD_STALE_COPY_SECONDS,
     WATCH_REWARD_UNLISTED_SECONDS,
     Twitch,
@@ -2493,6 +2494,64 @@ def test_record_that_predates_an_opened_window_is_read_again(monkeypatch):
 
     assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
     assert listing_calls == ["4242"]
+
+
+def test_first_read_no_channel_answered_is_made_again_when_the_next_is_due(
+    monkeypatch,
+):
+    # Seen for the first time, and the channels asked list nothing. Nothing
+    # is watched for the campaign until one reports it, so no listing comes
+    # along either, and the ordinary category refresh can be hours off.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=5)), silent_channels={"1", "2", "3"}
+    )
+    twitch.watch_reward_pending_starts = set()
+
+    assert evaluate(monkeypatch, twitch, [listing()], channels=("1", "2", "3"))[0] == {}
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+    # A read that is not due yet adds no second retry.
+    evaluate(monkeypatch, twitch, [listing()], channels=("1", "2", "3"))
+    assert twitch.watch_reward_pending_starts == {retry_at}
+
+
+def test_first_read_is_not_made_again_early_for_as_long_as_the_campaign_runs(
+    monkeypatch,
+):
+    # Channels may leave a campaign out for good (one the account already
+    # finished looks no different), and each early read costs a category
+    # refresh: after a few it is left to the ordinary one.
+    twitch, _, listing_calls = evaluation_twitch(
+        watch_group(progress(minutes=5)), silent_channels={"1", "2", "3"}
+    )
+    details = None
+    noted = []
+    for _ in range(WATCH_REWARD_UNREAD_RETRIES + 2):
+        twitch.watch_reward_pending_starts = set()
+        evaluate(monkeypatch, twitch, [listing()], channels=("1", "2", "3"))
+        noted.append(len(twitch.watch_reward_pending_starts))
+        details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+        details["refresh_attempted_at"] -= 3600
+
+    assert noted == [1] * WATCH_REWARD_UNREAD_RETRIES + [0, 0]
+    # The ordinary refresh still reads it.
+    assert len(listing_calls) > 2 * WATCH_REWARD_UNREAD_RETRIES
+
+
+def test_first_read_with_no_channel_live_is_left_to_the_ordinary_refresh(
+    monkeypatch,
+):
+    twitch, _, listing_calls = evaluation_twitch(watch_group(progress(minutes=5)))
+    twitch.watch_reward_pending_starts = set()
+
+    assert evaluate(monkeypatch, twitch, [listing()], channels=())[0] == {}
+
+    assert listing_calls == []
+    assert twitch.watch_reward_pending_starts == set()
 
 
 def test_read_for_an_opened_window_is_retried_when_no_channel_answers(monkeypatch):
