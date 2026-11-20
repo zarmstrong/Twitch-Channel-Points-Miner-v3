@@ -852,10 +852,12 @@ class Twitch(object):
           older copy;
         - "failed", on a drop the record has still to be earned by a
           deadline to come: its own deadline was that of a window before;
-        - fewer, or the same as progress still, on a drop since earned:
-          saved now, it would put the reported reward back to in progress
-          (the minute watcher reports a drop as in progress until its own
-          copy is told of the claim);
+        - fewer, or the same as anything but captured, on a drop since
+          earned: saved now, it would put the reported reward back to in
+          progress (the minute watcher reports a drop as in progress until
+          its own copy is told of the claim), or to failed (a copy from
+          before a subscription it also needed was made, looked at after
+          its deadline);
         - progress on a repeat before the stored one, which is over, or
           "failed" on one that was earned: from a copy taken before it was
           counted and looked at after its window closed. A repeat lost
@@ -893,7 +895,7 @@ class Twitch(object):
                 drop_self = drop.get("self") or {}
                 watched = drop_self.get("currentMinutesWatched") or 0
                 if group.get("claimable") is True or drop_self.get("isClaimed") is True:
-                    return status == "in_progress" or minutes_watched < watched
+                    return status != "captured" or minutes_watched < watched
                 if group.get("finished") is True:
                     # Over without being earned: nothing newer is held back.
                     return False
@@ -10046,6 +10048,8 @@ class Twitch(object):
             details["refresh_offset"] = offset + tried
             directory_slug = self.__get_game_directory_slug(category["id"])
             if not directory_slug:
+                # The request for it failed, as far as can be told here.
+                lookup_failed = True
                 continue
             try:
                 # Any channel in the category counts, with the Drops tag or
@@ -10390,13 +10394,10 @@ class Twitch(object):
                 if self.__reward_claim_key(campaign, drop_dict) in tried:
                     continue
                 ends_at = self.__reward_claim_ends_at(campaign, drop_dict, now)
-                found.append(
-                    (
-                        (1, 0) if ends_at is None else (0, ends_at.timestamp()),
-                        campaign,
-                        drop_dict,
-                    )
-                )
+                # Compared as they are: the moments are UTC without a
+                # timezone, which timestamp() would read as local time, out
+                # of order across a change of the clocks.
+                found.append((ends_at or datetime.max, campaign, drop_dict))
         found.sort(key=lambda entry: entry[0])
         return [(campaign, drop_dict) for _, campaign, drop_dict in found]
 

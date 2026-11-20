@@ -3183,6 +3183,71 @@ def test_counted_repeat_of_a_pay_once_group_leaves_the_next_its_minutes_to_earn(
         assert drop["_reward_group"]["claimable"] is False
 
 
+def test_failed_snapshot_of_a_drop_since_earned_is_not_saved():
+    # The reward also needed a subscription. The sync copied it with the
+    # minutes in and the subscription unmet, and looks at its copy after
+    # the deadline: "failed", with the minutes the earned record has.
+    twitch = snapshot_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(status="CLAIMED"), times=1))
+    )
+
+    assert not twitch._Twitch__save_drop_snapshot_if_new(
+        "group-watch|art", 60, "failed", lambda: None
+    )
+    assert twitch._Twitch__save_drop_snapshot_if_new(
+        "group-watch|art", 60, "captured", lambda: None
+    )
+
+
+def test_first_read_is_made_again_when_a_categorys_directory_name_is_not_had(
+    monkeypatch,
+):
+    # The request for the name the directory goes by failed: no channel
+    # could be asked, which is not the same as none being live.
+    twitch, _, _ = evaluation_twitch(watch_group(progress(minutes=5)))
+    evaluate(monkeypatch, twitch, [listing()], channels=())
+    stored = twitch.watch_reward_campaigns["quest-1"]
+    stored["_watch_reward"]["refresh_attempted_at"] -= 3600
+    twitch.watch_reward_pending_starts = set()
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_game_directory_slug", lambda self, game_id: None
+    )
+
+    twitch._Twitch__refresh_watch_reward_progress(stored, {"example-game"})
+
+    assert len(twitch.watch_reward_pending_starts) == 1
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset")
+def test_claims_keep_their_order_across_a_change_of_the_clocks(monkeypatch):
+    # Twitch's moments are UTC. Read as local time, 02:50 falls in the hour
+    # the clocks skip in Denver that night and lands after 03:10.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
+    twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2027-03-14T03:10:00Z"
+    twitch.watch_reward_campaigns["quest-2"]["endAt"] = "2027-03-14T02:50:00Z"
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: datetime(2027, 3, 14, 2, 0))
+    try:
+        with monkeypatch.context() as local_time:
+            local_time.setenv("TZ", "America/Denver")
+            time.tzset()
+            twitch.claim_waiting_watch_rewards()
+    finally:
+        time.tzset()
+
+    assert gql.claims == [
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-1#group-watch",
+    ]
+
+
 def test_snapshot_of_a_group_that_is_over_is_saved_with_the_minutes_it_got_to():
     # Nothing is watched for it any more, so no newer minutes are held back.
     twitch = snapshot_twitch()
