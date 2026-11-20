@@ -9295,6 +9295,7 @@ class Twitch(object):
                 "refresh_attempted_at": 0,
                 "refresh_offset": 0,
                 "refresh_channels_unanswered": frozenset(),
+                "unread_retries": 0,
                 "categories_checked_at": None,
                 "restarted_at": {},
                 "earlier_drops": {},

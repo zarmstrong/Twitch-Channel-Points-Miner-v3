@@ -3149,6 +3149,40 @@ def test_stored_record_is_never_grown_in_place(monkeypatch):
     assert details["categories_checked_at"] and details["refresh_attempted_at"]
 
 
+def test_record_never_read_is_not_grown_in_place_by_a_read_no_channel_answers(
+    monkeypatch,
+):
+    # The same for the count of the reads made early for it.
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(minutes=5)), silent_channels={"1", "2", "3"}
+    )
+    evaluate(monkeypatch, twitch, [listing()], channels=())
+    details = twitch.watch_reward_campaigns["quest-1"]["_watch_reward"]
+    assert details["progress_known"] is False
+    keys = set(details)
+
+    details["refresh_attempted_at"] -= 3600
+    evaluate(monkeypatch, twitch, [listing()], channels=("1", "2", "3"))
+
+    assert twitch.watch_reward_campaigns["quest-1"]["_watch_reward"] is details
+    assert details["unread_retries"] == 1
+    assert set(details) == keys
+
+
+def test_counted_repeat_of_a_pay_once_group_leaves_the_next_its_minutes_to_earn():
+    # Twitch names neither a window nor when the group can be earned again,
+    # and still shows the minutes of the repeat it counted.
+    for status in ("IN_PROGRESS", "CLAIMABLE"):
+        [drop] = convert(
+            all_repeats_group(progress(status=status, minutes=60, grants=1))
+        )["timeBasedDrops"]
+
+        assert drop["id"] == "group-watch#1"
+        assert drop["self"]["currentMinutesWatched"] == 0
+        assert drop["self"]["isClaimed"] is False
+        assert drop["_reward_group"]["claimable"] is False
+
+
 def test_snapshot_of_a_group_that_is_over_is_saved_with_the_minutes_it_got_to():
     # Nothing is watched for it any more, so no newer minutes are held back.
     twitch = snapshot_twitch()

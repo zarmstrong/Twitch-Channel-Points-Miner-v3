@@ -227,6 +227,12 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             campaign_end = _parse_datetime(end_at)
             if campaign_end is None or window_expires < campaign_end:
                 end_at = window_expires.strftime(TWITCH_DATETIME_FORMAT)
+    elif complete_all and watched >= required:
+        # A group that pays out once every repeat is in, with repeats still
+        # to come and no window named to wait out: the minutes are those of
+        # the repeat counted last. Left in, the next repeat would read as
+        # earned by them, and as nothing left to watch for.
+        watched = 0
 
     # When the repeat after a claimable one opens, as far as Twitch says:
     # once claimed, the group has nothing to watch for until then. A moment
