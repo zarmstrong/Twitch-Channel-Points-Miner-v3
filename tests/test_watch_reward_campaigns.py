@@ -1358,10 +1358,37 @@ def test_locked_group_is_not_read_for_after_the_campaign_ends(monkeypatch):
         monkeypatch,
         watch_group(progress(status="CLAIMED", grants=6)),
         final_group(),
-        moment=ends_at - timedelta(minutes=30),
+        moment=ends_at - timedelta(minutes=5),
     )
 
     assert not twitch.watch_reward_pending_starts
+
+
+def test_locked_group_is_read_for_sooner_when_the_campaign_ends_within_the_hour(
+    monkeypatch,
+):
+    # The last of the other groups is earned 45 minutes before the end, and
+    # the group it unlocks takes 15: the read an hour on would be too late.
+    ends_at = datetime.strptime(END_AT, "%Y-%m-%dT%H:%M:%SZ")
+    stored_at = ends_at - timedelta(minutes=45)
+    groups = (watch_group(progress(status="CLAIMED", grants=6)), final_group())
+    twitch, _, listing_calls = evaluation_twitch(*groups)
+    clock = [stored_at]
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: clock[0])
+    monkeypatch.setattr(
+        twitch_module.time,
+        "time",
+        lambda: clock[0].replace(tzinfo=timezone.utc).timestamp(),
+    )
+    twitch._Twitch__remember_watch_reward_campaign(convert(*groups))
+
+    read_due = stored_at + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
+    assert twitch.watch_reward_pending_starts == {read_due}
+
+    # And the read is made then, not held back for the hour.
+    clock[0] = read_due + timedelta(seconds=1)
+    evaluate(monkeypatch, twitch, [listing()])
+    assert listing_calls == ["4242"]
 
 
 def test_locked_groups_category_is_kept_so_its_unlock_is_noticed(monkeypatch):
@@ -1631,6 +1658,12 @@ def test_user_id_failure_does_not_lose_the_channel_listing():
     # Stored without a claim ID, so nothing is claimed until a later listing.
     assert campaign["timeBasedDrops"][0]["self"]["dropInstanceID"] is None
     assert gql.claims == []
+    # Which is read for when the next read is due: nothing is watched for a
+    # reward waiting to be claimed, so none would come by itself.
+    [read_due] = twitch.watch_reward_pending_starts
+    assert (read_due - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
 
 
 def test_progress_read_tries_only_a_few_of_a_campaigns_many_categories(monkeypatch):

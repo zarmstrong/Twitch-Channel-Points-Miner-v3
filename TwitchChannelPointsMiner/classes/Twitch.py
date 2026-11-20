@@ -9356,6 +9356,18 @@ class Twitch(object):
                     starts.add(
                         now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
                     )
+            if user_id is None and any(
+                drop["_reward_group"].get("claimable") is True
+                for drop in stored.get("timeBasedDrops") or []
+            ):
+                # A reward to claim, stored without the claim ID made from
+                # the account's user ID. Nothing is claimed without one and
+                # a reward waiting to be claimed is no reason to watch, so
+                # no listing would come to fill it in before the ordinary
+                # refresh: read again when the next read is due.
+                starts.add(
+                    now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
+                )
             self.__note_watch_reward_starts(starts)
             self.__note_read_for_locked_reward_group(stored, read_at)
             counted = self.__note_earned_reward_rows(previous, stored)
@@ -9997,14 +10009,18 @@ class Twitch(object):
             drop["_reward_group"].get("finished") is True
             for drop in campaign.get("timeBasedDrops") or []
         )
+        if finished and details.get("locked_groups") is True:
+            # Sooner when the campaign ends before the hour is up.
+            read_after = self.__locked_group_read_seconds(
+                campaign, details.get("read_at") or 0
+            )
+        elif finished:
+            read_after = WATCH_REWARD_FINISHED_REFRESH_SECONDS
+        else:
+            read_after = WATCH_REWARD_PROGRESS_REFRESH_SECONDS
         if (
             details.get("progress_known") is True
-            and (time.time() - (details.get("read_at") or 0))
-            < (
-                WATCH_REWARD_FINISHED_REFRESH_SECONDS
-                if finished
-                else WATCH_REWARD_PROGRESS_REFRESH_SECONDS
-            )
+            and (time.time() - (details.get("read_at") or 0)) < read_after
             # However recent, a record that still shows a repeat waiting to
             # be claimed after the next window opened says nothing about that
             # window.
@@ -10161,12 +10177,26 @@ class Twitch(object):
         ):
             return
         read_due = datetime.fromtimestamp(
-            since + WATCH_REWARD_FINISHED_REFRESH_SECONDS, timezone.utc
+            since + self.__locked_group_read_seconds(campaign, since), timezone.utc
         ).replace(tzinfo=None)
         ends_at = self.__parse_twitch_datetime(campaign.get("endAt"))
         if ends_at is not None and read_due >= ends_at:
             return
         self.__note_watch_reward_starts({read_due})
+
+    def __locked_group_read_seconds(self, campaign, since) -> int:
+        """How long after `since` (a timestamp) a campaign with nothing
+        left to watch for is read again for a group that can unlock:
+        WATCH_REWARD_FINISHED_REFRESH_SECONDS, or as soon as a progress read
+        when the campaign ends before that. A group unlocked in the
+        campaign's last hour would not be seen in time otherwise."""
+        long_read = datetime.fromtimestamp(
+            since + WATCH_REWARD_FINISHED_REFRESH_SECONDS, timezone.utc
+        ).replace(tzinfo=None)
+        ends_at = self.__parse_twitch_datetime(campaign.get("endAt"))
+        if ends_at is not None and long_read >= ends_at:
+            return WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+        return WATCH_REWARD_FINISHED_REFRESH_SECONDS
 
     def __reward_group_is_over(self, drop) -> bool:
         """Whether nothing more can be earned in a stored reward drop's
