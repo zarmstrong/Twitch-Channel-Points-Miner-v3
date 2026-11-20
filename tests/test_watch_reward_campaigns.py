@@ -2386,6 +2386,8 @@ def test_main_loop_answers_a_reward_campaign_before_its_other_checks():
     )[1]
     answered = loop.index("self.__refresh_for_opened_reward_window(")
     for check in (
+        # Written to disk and synced: slow on a stalled volume.
+        "self.__save_daily_report_state_safely()",
         "self.__send_daily_report_if_due()",
         "self.__check_for_update()",
         "self.__check_websockets()",
@@ -3301,6 +3303,63 @@ def test_claim_thread_leaves_a_campaign_that_is_over_alone(monkeypatch):
     twitch._Twitch__store_listed_watch_rewards([other_campaign(claimable)])
 
     assert gql.claims == ["viewer-1#quest-2#group-two"]
+
+
+def test_claim_thread_sends_the_claim_with_the_least_time_left_first(monkeypatch):
+    # The campaign stored first has days left and a claim Twitch keeps
+    # refusing, which can take over a minute with its retries; the other
+    # ends in under one.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
+    soon = datetime.now(timezone.utc) + timedelta(seconds=40)
+    twitch.watch_reward_campaigns["quest-1"]["endAt"] = "2099-01-01T00:00:00Z"
+    twitch.watch_reward_campaigns["quest-2"]["endAt"] = soon.strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    twitch.claim_waiting_watch_rewards()
+
+    assert gql.claims == [
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-1#group-watch",
+    ]
+
+
+def test_claim_thread_counts_the_next_repeat_as_the_end_of_a_waiting_one(
+    monkeypatch,
+):
+    # A repeat may not be there to claim once the next has started, which
+    # comes before the end of the campaign stored ahead of it.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(convert(watch_group(claimable)))
+    twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
+    now = datetime.now(timezone.utc)
+    for campaign_id, seconds in (("quest-1", 3600), ("quest-2", 7200)):
+        twitch.watch_reward_campaigns[campaign_id]["endAt"] = (
+            now + timedelta(seconds=seconds)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    [waiting] = twitch.watch_reward_campaigns["quest-2"]["timeBasedDrops"]
+    waiting["_reward_group"]["next_start"] = (now + timedelta(seconds=40)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    twitch.claim_waiting_watch_rewards()
+
+    assert gql.claims == [
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-1#group-watch",
+    ]
 
 
 def test_known_campaign_is_evaluated_when_a_listing_omits_its_requirements(

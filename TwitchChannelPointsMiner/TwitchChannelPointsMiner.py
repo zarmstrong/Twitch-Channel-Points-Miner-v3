@@ -1437,14 +1437,20 @@ class TwitchChannelPointsMiner:
                     break
                 # One failed pass (e.g. a network error in the category refresh)
                 # must not end the main loop; log it and retry on the next pass.
-                self.__save_daily_report_state_safely()
                 try:
                     # First: a claim it has sent again may be due seconds
-                    # before its campaign ends, and the checks below can
-                    # take longer than that.
+                    # before its campaign ends, and the report state's write
+                    # to disk and the checks below can take longer than that.
                     next_category_refresh_at = self.__refresh_for_opened_reward_window(
                         next_category_refresh_at
                     )
+                except Exception:
+                    logger.error(
+                        "Error in the main loop, retrying on the next pass",
+                        exc_info=True,
+                    )
+                self.__save_daily_report_state_safely()
+                try:
                     self.__send_daily_report_if_due()
                     self.__check_for_update()
                     self.__check_websockets()

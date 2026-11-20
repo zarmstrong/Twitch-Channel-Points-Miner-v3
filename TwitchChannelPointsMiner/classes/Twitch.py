@@ -10211,7 +10211,7 @@ class Twitch(object):
             while True:
                 with _watch_reward_lock(self):
                     self.watch_reward_claim_requested = False
-                for campaign in list(self.__watch_reward_campaigns().values()):
+                for campaign in self.__reward_campaigns_by_claim_deadline():
                     if getattr(self, "running", True) is not True:
                         # Shutting down, which waits for this thread: what
                         # is left is claimed from the first listing of the
@@ -10274,6 +10274,49 @@ class Twitch(object):
                 category_name_override=categories[0].get("displayName") or "Unknown",
             )
 
+    def __waiting_reward_claims(self, stored, now) -> tuple:
+        """The stored campaign's drops waiting to be claimed, and the moment
+        they can be claimed until: the campaign's end, or the moment the
+        repeat after a waiting one opens, if that comes first. None when no
+        such moment is ahead."""
+        waiting = [
+            drop
+            for drop in stored.get("timeBasedDrops") or []
+            if (drop.get("self") or {}).get("isClaimed") is not True
+            and (drop.get("self") or {}).get("dropInstanceID")
+        ]
+        ends = [
+            moment
+            for moment in [
+                self.__parse_twitch_datetime(stored.get("endAt")),
+                *(
+                    self.__parse_twitch_datetime(
+                        drop["_reward_group"].get("next_start")
+                    )
+                    for drop in waiting
+                ),
+            ]
+            if moment is not None and moment > now
+        ]
+        return waiting, (min(ends) if waiting and ends else None)
+
+    def __reward_campaigns_by_claim_deadline(self) -> list:
+        """The stored campaigns, the one whose waiting rewards can be
+        claimed for the shortest time first.
+
+        A claim Twitch keeps refusing can take over a minute with its
+        retries. Sent in the order the campaigns were stored, it could use
+        up the time a reward of a later one has left."""
+        now = utc_now()
+
+        def claimable_until(campaign):
+            waiting, ends_at = self.__waiting_reward_claims(campaign, now)
+            if not waiting:
+                return (2, 0)
+            return (1, 0) if ends_at is None else (0, ends_at.timestamp())
+
+        return sorted(self.__watch_reward_campaigns().values(), key=claimable_until)
+
     def __retry_unaccepted_reward_claims(self, campaign_id):
         """Have the categories refreshed again when a progress read would
         next be due, if a reward of the stored campaign is still waiting to
@@ -10293,30 +10336,11 @@ class Twitch(object):
         stored = self.__watch_reward_campaigns().get(campaign_id)
         if stored is None or self.__is_open_drop_campaign(stored) is not True:
             return
-        waiting = [
-            drop
-            for drop in stored.get("timeBasedDrops") or []
-            if (drop.get("self") or {}).get("isClaimed") is not True
-            and (drop.get("self") or {}).get("dropInstanceID")
-        ]
+        now = utc_now()
+        waiting, ends_at = self.__waiting_reward_claims(stored, now)
         if not waiting:
             return
-        now = utc_now()
         retry_at = now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
-        ends = [
-            moment
-            for moment in [
-                self.__parse_twitch_datetime(stored.get("endAt")),
-                *(
-                    self.__parse_twitch_datetime(
-                        drop["_reward_group"].get("next_start")
-                    )
-                    for drop in waiting
-                ),
-            ]
-            if moment is not None and moment > now
-        ]
-        ends_at = min(ends) if ends else None
         if ends_at is not None and retry_at >= ends_at:
             retry_at = max(
                 ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
