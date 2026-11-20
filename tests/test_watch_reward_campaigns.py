@@ -6,6 +6,7 @@ reports no progress on.
 """
 
 import copy
+import importlib
 import json
 import logging
 import time
@@ -44,7 +45,14 @@ from TwitchChannelPointsMiner.classes.Twitch import (
     WATCH_REWARD_UNLISTED_SECONDS,
     Twitch,
 )
-from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+    MAIN_LOOP_REWARD_CHECK_SECONDS,
+    TwitchChannelPointsMiner,
+)
+
+miner_module = importlib.import_module(
+    "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
+)
 
 # The real clock: the Twitch-level tests convert through the channel listing,
 # which reads it. Windows and waits below are hours away, so a test taking a
@@ -2250,6 +2258,82 @@ def test_category_refresh_runs_when_a_reward_window_has_opened():
     assert opened == [True]
 
 
+def main_loop_miner(monkeypatch, pending_starts, wait_seconds=30):
+    """A miner whose main loop wait runs on a fake clock, and the seconds
+    each of its sleeps was asked for."""
+    miner = object.__new__(TwitchChannelPointsMiner)
+    miner.twitch = bare_twitch()
+    miner.twitch.watch_reward_pending_starts = set(pending_starts)
+    clock = [1000.0]
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+        return False
+
+    miner.twitch.restart_requested = SimpleNamespace(wait=sleep)
+    # The module's own names only: the real clock is left to everything else.
+    monkeypatch.setattr(
+        miner_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(
+        miner_module,
+        "random",
+        SimpleNamespace(uniform=lambda low, high: wait_seconds),
+    )
+    return miner, slept
+
+
+def test_main_loop_wait_ends_when_a_reward_campaign_calls_for_a_refresh(monkeypatch):
+    # A claim Twitch refused seconds before its campaign's end is due again
+    # in less than the loop's wait, and is noted while the loop waits.
+    miner, slept = main_loop_miner(monkeypatch, [])
+    wait = miner._TwitchChannelPointsMiner__wait_for_next_pass
+    sleep = miner.twitch.restart_requested.wait
+
+    def sleep_then_note(seconds):
+        if len(slept) == 1:
+            miner.twitch.watch_reward_pending_starts.add(utc_now())
+        return sleep(seconds)
+
+    miner.twitch.restart_requested = SimpleNamespace(wait=sleep_then_note)
+
+    assert wait(True) is False
+
+    assert slept == [MAIN_LOOP_REWARD_CHECK_SECONDS] * 2
+
+
+def test_main_loop_wait_runs_its_time_without_a_refresh_to_make(monkeypatch):
+    # Nothing due yet: the wait is the usual one.
+    miner, slept = main_loop_miner(monkeypatch, [utc_now() + timedelta(hours=1)])
+    wait = miner._TwitchChannelPointsMiner__wait_for_next_pass
+
+    assert wait(True) is False
+    assert sum(slept) == pytest.approx(30)
+
+    # Categories are never refreshed: a moment due stays where it is (see
+    # test_category_refresh_runs_when_a_reward_window_has_opened), and must
+    # not end every wait at once.
+    miner.twitch.watch_reward_pending_starts = {utc_now() - timedelta(seconds=1)}
+    slept.clear()
+
+    assert wait(False) is False
+    assert sum(slept) == pytest.approx(30)
+
+    # Refreshed, it is answered on the pass this returns to at once.
+    slept.clear()
+    assert wait(True) is False
+    assert slept == []
+
+
+def test_main_loop_wait_reports_a_requested_restart(monkeypatch):
+    miner, _ = main_loop_miner(monkeypatch, [])
+    miner.twitch.restart_requested = SimpleNamespace(wait=lambda seconds: True)
+
+    assert miner._TwitchChannelPointsMiner__wait_for_next_pass(True) is True
+
+
 def test_record_that_predates_an_opened_window_is_read_again(monkeypatch):
     # Listed and claimed minutes before the next window: when the refresh
     # scheduled for that window comes, the record is recent, and still shows
@@ -3443,6 +3527,47 @@ def test_synced_row_of_a_repeat_is_named_for_the_repeat(monkeypatch, tmp_path):
     assert row["item_name"] == "Daily Chest (repeat 1 of 6)"
     assert row["benefit"] == "Chest"
     assert (row["current_minutes_watched"], row["status"]) == (20, "in_progress")
+
+
+def test_watcher_reports_a_window_that_started_over_by_its_own_deadline(
+    monkeypatch, tmp_path
+):
+    # The campaign's entities were built during a window that then closed at
+    # 40 of 60 minutes. The next one opened, under the same drop ID, before
+    # they were built again: the sync gives them its minutes, and the minute
+    # watcher reports from them.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__get_inventory", lambda self: {"dropCampaignsInProgress": []}
+    )
+    stored = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=40, window=open_window())))
+    )
+    campaign = Campaign(copy.deepcopy(stored))
+    [drop] = campaign.drops
+    # The first window's deadline, since passed.
+    drop.end_at = utc_now() - timedelta(minutes=5)
+
+    def watch_a_minute():
+        twitch._Twitch__sync_campaigns([campaign])
+        return twitch._Twitch__save_watched_drop_progress_if_new(
+            drop,
+            lambda: twitch._Twitch__save_drop_progress_analytics(
+                drop, campaign=campaign, streamer_username="streamer"
+            ),
+        )
+
+    new_window = open_window()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=3, window=new_window)))
+    )
+    assert watch_a_minute() is not None
+
+    row = report_rows(twitch, tmp_path)["group-watch#0"]
+    assert row["streamer"] == "streamer"
+    assert row["current_minutes_watched"] == 3
+    assert row["drop_end_at"] == new_window["expiresAt"]
+    assert row["failed_to_achieve"] is False
 
 
 def test_repeat_whose_window_has_not_opened_gets_no_row(monkeypatch, tmp_path):

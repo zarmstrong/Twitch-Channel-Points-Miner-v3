@@ -290,6 +290,9 @@ CATEGORY_LOOKUP_FAILURE_LIMIT = 3
 # minutes, which would retire a channel still earning a Drop during a brief
 # outage.
 BADGE_LOOKUP_FAILURE_LIMIT = 12
+# How often the main loop, waiting for its next pass, asks whether a reward
+# campaign has called for a category refresh meanwhile.
+MAIN_LOOP_REWARD_CHECK_SECONDS = 5
 
 
 def _load_daily_report_state(path):
@@ -1430,7 +1433,7 @@ class TwitchChannelPointsMiner:
                     + 5,
                 )
             while self.running and self.twitch.running:
-                if self.twitch.restart_requested.wait(random.uniform(20, 60)):
+                if self.__wait_for_next_pass(next_category_refresh_at is not None):
                     break
                 # One failed pass (e.g. a network error in the category refresh)
                 # must not end the main loop; log it and retry on the next pass.
@@ -1510,6 +1513,27 @@ class TwitchChannelPointsMiner:
             # A requested restart leaves through here without stopping the
             # workers, so keep what was recorded since the last pass.
             self.__save_daily_report_state_safely(retire_all=True)
+
+    def __wait_for_next_pass(self, refreshes_categories) -> bool:
+        """Wait for the main loop's next pass, 20 to 60 seconds away.
+        Returns True when a restart was requested meanwhile.
+
+        The wait ends early once a reward campaign calls for a category
+        refresh (see __refresh_for_opened_reward_window), which can be for a
+        claim to send again seconds before its campaign ends, noted while
+        this waits. Not when categories are never refreshed: the call would
+        stay unanswered and end every wait."""
+        ends_at = time.monotonic() + random.uniform(20, 60)
+        while True:
+            left = ends_at - time.monotonic()
+            if left <= 0 or (
+                refreshes_categories and self.twitch.watch_reward_start_due()
+            ):
+                return False
+            if self.twitch.restart_requested.wait(
+                min(left, MAIN_LOOP_REWARD_CHECK_SECONDS)
+            ):
+                return True
 
     def __refresh_for_opened_reward_window(self, next_category_refresh_at):
         """When the next category refresh is due: as scheduled, or now when

@@ -3493,6 +3493,18 @@ class Twitch(object):
                 self.watch_reward_opening_unevaluated = True
         return bool(opened)
 
+    def watch_reward_start_due(self) -> bool:
+        """Whether take_opened_watch_reward_start has a moment to report.
+        The main loop asks while it waits between passes: a claim due again
+        in a campaign's last minute would be past the campaign's end after
+        the full wait."""
+        now = utc_now()
+        with _watch_reward_lock(self):
+            return any(
+                moment <= now
+                for moment in getattr(self, "watch_reward_pending_starts", None) or ()
+            )
+
     def retry_unevaluated_watch_reward_opening(self):
         """Called after a category refresh. If one was made for an opened
         window and evaluated no campaigns (the inventory did not load, or
@@ -7291,9 +7303,15 @@ class Twitch(object):
                     # between streams. A Drop campaign is earned whole. A
                     # reward campaign's stream holds only the groups its
                     # category counts toward, so two streams of one campaign
-                    # can earn different rewards: each group is a part.
+                    # can earn different rewards: each group is a part. Only
+                    # the groups watching can add to now: one that is
+                    # earned, or waits for a subscription, is no reward
+                    # another stream of the campaign would be missing.
                     if getattr(campaign, "reward_categories", None) and campaign.drops:
-                        return [(campaign.id, drop.id) for drop in campaign.drops]
+                        return [
+                            (campaign.id, drop.id)
+                            for drop in campaign.watchable_drops()
+                        ]
                     return [campaign.id]
 
                 @functools.lru_cache(maxsize=None)
