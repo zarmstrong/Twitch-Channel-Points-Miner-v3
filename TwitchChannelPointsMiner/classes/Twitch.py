@@ -10885,7 +10885,12 @@ class Twitch(object):
         it when the claim was sent by another (the campaign sync, the
         category evaluation). Left to the main loop, the claim would wait
         for whatever that is busy with: a report written to a stalled disk,
-        or a category refresh, can take longer than the reward has left."""
+        or a category refresh, can take longer than the reward has left.
+
+        One wait the thread shares with every other: it takes the
+        watch-reward lock to read these moments, and a row of the report is
+        written under that lock (see __save_drop_snapshot_if_new). A write
+        stalled there holds the claim up for as long."""
         if self.__note_reward_claim_retry(campaign_id) is True:
             self.__start_reward_claim_thread()
 
