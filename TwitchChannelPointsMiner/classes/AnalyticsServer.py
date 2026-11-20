@@ -1,4 +1,5 @@
 import errno
+import ipaddress
 import json
 import logging
 import os
@@ -167,6 +168,24 @@ def _request_hostname(host_header):
         return (urlsplit(f"//{host_header}").hostname or "").lower()
     except ValueError:
         return ""
+
+
+def _allowed_hostname(entry):
+    """Host name for one ANALYTICS_CONFIG["allowed_hosts"] entry, or "".
+
+    Accepts what users paste besides a bare name: a port, a full URL such as
+    "https://miner.example.com/", and a bare IPv6 address.
+    """
+    entry = str(entry).strip()
+    if "://" in entry:
+        try:
+            return (urlsplit(entry).hostname or "").lower()
+        except ValueError:
+            return ""
+    try:
+        return str(ipaddress.ip_address(entry))
+    except ValueError:
+        return _request_hostname(entry)
 
 
 def _is_cross_site_request():
@@ -838,13 +857,20 @@ class AnalyticsServer(Thread):
         self.trust_proxy_auth = trust_proxy_auth
         if isinstance(allowed_hosts, str):
             allowed_hosts = [allowed_hosts]
-        self.allowed_hosts = frozenset(
-            hostname
-            for hostname in (
-                _request_hostname(str(name).strip()) for name in (allowed_hosts or [])
-            )
-            if hostname
-        )
+        hostnames = set()
+        for entry in allowed_hosts or []:
+            hostname = _allowed_hostname(entry)
+            if hostname:
+                hostnames.add(hostname)
+            else:
+                # Without this, a typo only shows up as a 403 on the proxy.
+                logger.warning(
+                    "Ignoring ANALYTICS_CONFIG['allowed_hosts'] entry %r: it is "
+                    "not a host name.",
+                    entry,
+                    extra={"emoji": ":warning:"},
+                )
+        self.allowed_hosts = frozenset(hostnames)
         self.on_restart = on_restart
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 

@@ -392,6 +392,57 @@ def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_aut
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ("miner.example.com", "miner.example.com"),
+        (" Miner.Example.com:8443 ", "miner.example.com"),
+        ("https://miner.example.com", "miner.example.com"),
+        ("HTTPS://Miner.Example.com:443/dashboard/", "miner.example.com"),
+        ("::1", "::1"),
+        ("[::1]:54455", "::1"),
+        ("2001:DB8::1", "2001:db8::1"),
+        ("192.0.2.10", "192.0.2.10"),
+    ],
+)
+def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
+    server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset({expected})
+
+
+def test_allowed_hosts_url_entry_admits_its_host_not_the_scheme():
+    # "https://miner.example.com" used to parse to the host name "https", so
+    # the real host got a 403.
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=["https://miner.example.com"],
+    )
+    client = server.app.test_client()
+
+    allowed = client.get("/__host_guard_probe__", headers={"Host": "miner.example.com"})
+    rejected = client.get("/__host_guard_probe__", headers={"Host": "https"})
+
+    assert allowed.status_code == 404
+    assert rejected.status_code == 403
+
+
+@pytest.mark.parametrize("entry", ["", "   ", "https://", "[not-an-ip]"])
+def test_allowed_hosts_warns_about_and_skips_unusable_entries(entry, caplog):
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(
+            host="127.0.0.1",
+            password=None,
+            allowed_hosts=[entry, "miner.example.com"],
+        )
+
+    assert server.allowed_hosts == frozenset({"miner.example.com"})
+    assert "allowed_hosts" in caplog.text
+    assert repr(entry) in caplog.text
+
+
 def test_trust_proxy_auth_rejects_cross_site_post():
     server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
 
