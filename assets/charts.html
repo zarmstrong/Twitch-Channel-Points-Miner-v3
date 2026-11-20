@@ -111,6 +111,7 @@
         }
     </script>
     <link href="{{url_for('static', filename='style.css', v=assetVersion)}}" rel="stylesheet" />
+    <link href="{{url_for('static', filename='history.css', v=assetVersion)}}" rel="stylesheet" />
 
 </head>
 
@@ -523,6 +524,7 @@
 </script>
 <script type="text/javascript" src="{{url_for('static', filename='tail_buffer.js', v=assetVersion)}}"></script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js', v=assetVersion)}}"></script>
+<script type="text/javascript" src="{{url_for('static', filename='history.js', v=assetVersion)}}"></script>
 <script>
     if (typeof window.jQuery === 'undefined' || typeof window.ApexCharts === 'undefined') {
         var missingDependencies = [];
