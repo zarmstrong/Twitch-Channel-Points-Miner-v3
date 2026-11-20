@@ -3652,6 +3652,98 @@ def test_repeat_twitch_counted_before_its_row_was_written_gets_one(
     )
 
 
+def test_counted_repeat_gets_its_row_although_the_report_could_not_be_read(
+    monkeypatch, tmp_path
+):
+    # The repeat is only at hand with the record that shows it counted: left
+    # for the next record, as the rows to mark are, it would get no row.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+
+    def unreadable(finish):
+        raise OSError("report in use")
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__finish_report_file_rows", staticmethod(unreadable)
+    )
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    for rows in (report_rows(twitch), report_rows(twitch, tmp_path)):
+        row = rows["group-watch#0"]
+        assert (row["status"], row["current_minutes_watched"]) == ("captured", 60)
+
+
+def all_repeats_group(group_self):
+    """A group of three repeats that pays out once, with the last."""
+    group = watch_group(group_self, times=3)
+    group["progressCriteria"]["repeatableConfig"][
+        "shouldCompleteAllRepeatsToEarn"
+    ] = True
+    return group
+
+
+def test_repeats_toward_one_reward_are_captured_with_it_and_not_before(
+    monkeypatch, tmp_path
+):
+    # A repeat counted before the last earns nothing yet: "captured" would
+    # show a reward the account does not have.
+    twitch = report_twitch(monkeypatch, tmp_path)
+
+    def listed(**group_self):
+        stored = twitch._Twitch__remember_watch_reward_campaign(
+            convert(all_repeats_group(progress(window=open_window(), **group_self)))
+        )
+        save_synced_rows(twitch)
+        return stored["timeBasedDrops"][0]["id"]
+
+    def rows_by_id():
+        saved = report_rows(twitch, tmp_path)
+        assert saved == report_rows(twitch)
+        return {
+            drop_id: (row["status"], row["current_minutes_watched"])
+            for drop_id, row in saved.items()
+        }
+
+    assert listed(minutes=59) == "group-watch#0"
+    assert listed(minutes=3, grants=1) == "group-watch#1"
+    # Its minutes are in, and it is left in progress.
+    assert rows_by_id() == {
+        "group-watch#0": ("in_progress", 60),
+        "group-watch#1": ("in_progress", 3),
+    }
+
+    assert listed(minutes=5, grants=2) == "group-watch#2"
+    assert rows_by_id()["group-watch#1"] == ("in_progress", 60)
+
+    assert listed(status="CLAIMED", minutes=60, grants=3) == "group-watch#2"
+    assert rows_by_id() == {
+        "group-watch#0": ("captured", 60),
+        "group-watch#1": ("captured", 60),
+        "group-watch#2": ("captured", 60),
+    }
+
+
+def test_repeat_toward_one_reward_counted_before_its_row_gets_none(
+    monkeypatch, tmp_path
+):
+    # A row written for it would be one of an earned reward.
+    twitch = report_twitch(monkeypatch, tmp_path)
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(minutes=3, grants=1, window=open_window()),
+    ):
+        twitch._Twitch__remember_watch_reward_campaign(
+            convert(all_repeats_group(group_self))
+        )
+
+    assert report_rows(twitch) == {}
+
+
 def test_repeat_waiting_to_be_claimed_gets_no_row_as_earned(monkeypatch, tmp_path):
     twitch = report_twitch(monkeypatch, tmp_path)
     twitch._Twitch__remember_watch_reward_campaign(

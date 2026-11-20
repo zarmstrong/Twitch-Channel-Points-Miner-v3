@@ -901,7 +901,10 @@ class Twitch(object):
         """Whether the reward drop is known as earned in this session: a
         stored record has shown it (see __finish_earned_reward_rows), or
         Twitch accepted its claim. A repeat Twitch counts before its claim
-        is earned by the claim alone: no record shows it earned after."""
+        is earned by the claim alone: no record shows it earned after. A
+        repeat counted toward a reward that comes with the last one is
+        known here too: its minutes are in, which is all this is asked
+        for."""
         return drop_id in (getattr(self, "accepted_drop_ids", None) or ()) or any(
             earned_id == drop_id
             for earned_id, _ in getattr(self, "watch_reward_earned_rows", None) or ()
@@ -9377,6 +9380,11 @@ class Twitch(object):
           failed may be a repeat lost waiting to be claimed, which the
           count does not tell from an earned one.
 
+        A group that pays out once every repeat is in has earned nothing
+        until the last: a repeat counted before that is remembered as
+        counted, which fills in its row's minutes and leaves it in
+        progress. Its rows are earned together, with the reward.
+
         Not every repeat numbered below the current one: the number also
         moves on from a lost repeat (see __keep_repeat_drop_ids), and a
         count that goes up later does not say which of the repeats before
@@ -9399,25 +9407,37 @@ class Twitch(object):
                     for drop in previous.get("timeBasedDrops") or []
                 },
             }
-        # (drop ID, seen earned): not seen, the row is one counted as earned
-        # on a first record.
+        # (drop ID, seen earned): True when a record showed it; False for a
+        # row taken as earned from the count alone, on a first record or
+        # with the last repeat of a group that pays out once; None for a
+        # repeat counted toward such a group's reward, not earned yet.
         earned = set()
         counted = {}
         for drop in stored.get("timeBasedDrops") or []:
             group = drop["_reward_group"]
             was = before.get(group["id"])
+            grants = group.get("grants") or 0
+            toward_one_reward = group.get("complete_all") is True
+            unearned = toward_one_reward and grants < (group.get("times") or 1)
             if was is None:
-                for number in range(
-                    min(group.get("repeat") or 0, group.get("grants") or 0)
-                ):
-                    earned.add((repeat_drop_id(group["id"], number), False))
-            elif (group.get("grants") or 0) > (
+                for number in range(min(group.get("repeat") or 0, grants)):
+                    earned.add(
+                        (
+                            repeat_drop_id(group["id"], number),
+                            None if unearned else False,
+                        )
+                    )
+            elif grants > (
                 was["_reward_group"].get("grants") or 0
             ) and not self.__counted_repeat_waits_for_its_claim(drop, was):
-                earned.add((str(was["id"]), True))
-                counted[str(was["id"])] = was
+                earned.add((str(was["id"]), None if unearned else True))
+                if not unearned:
+                    counted[str(was["id"])] = was
             if (drop.get("self") or {}).get("isClaimed") is True:
                 earned.add((str(drop["id"]), True))
+                if toward_one_reward:
+                    for number in range(group.get("repeat") or 0):
+                        earned.add((repeat_drop_id(group["id"], number), False))
         self.watch_reward_earned_rows = frozenset(
             (getattr(self, "watch_reward_earned_rows", None) or frozenset()) | earned
         )
@@ -9437,13 +9457,19 @@ class Twitch(object):
         A row is done once per session, when it could be read and written:
         a report file that could not is tried again with the next record.
         A repeat Twitch counted by itself that has no row yet gets one (see
-        __save_earned_reward_row)."""
+        __save_earned_reward_row), also when the report could not be read
+        for the rows it has: the repeat is only at hand now, and its row is
+        written over one the report turns out to have."""
         mutex = getattr(self, "analytics_mutex", None)
         if mutex is None:
             # No report to repair.
             return
         now_ms = round(time.time() * 1000)
         now_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        # The drops with a row. Another thread's record may have had this
+        # one's rows marked already: it knows which rows are earned, not the
+        # repeats this record saw counted.
+        rows_found = set()
         try:
             with mutex:
                 known = getattr(self, "watch_reward_earned_rows", None) or frozenset()
@@ -9452,14 +9478,11 @@ class Twitch(object):
                 )
                 pending = known - finished
                 state = getattr(self, "drop_report_state", None) or {}
-                # The drops with a row. Another thread's record may have had
-                # this one's rows marked already: it knows which rows are
-                # earned, not the repeats this record saw counted.
-                rows_found = {
+                rows_found.update(
                     str(row.get("drop_id") or "")
                     for row in list(state.values())
                     if isinstance(row, dict)
-                }
+                )
 
                 def finish(row) -> bool:
                     if not isinstance(row, dict):
@@ -9468,13 +9491,15 @@ class Twitch(object):
                     rows_found.add(drop_id)
                     if row.get("status") == "captured":
                         return False
-                    if (drop_id, True) not in pending and not (
-                        (drop_id, False) in pending
-                        and row.get("status") == "in_progress"
-                    ):
+                    in_progress = row.get("status") == "in_progress"
+                    earned = (drop_id, True) in pending or (
+                        (drop_id, False) in pending and in_progress
+                    )
+                    if not earned and not ((drop_id, None) in pending and in_progress):
                         return False
-                    row["status"] = "captured"
-                    row["failed_to_achieve"] = False
+                    if earned:
+                        row["status"] = "captured"
+                        row["failed_to_achieve"] = False
                     row["x"] = now_ms
                     row["datetime"] = now_dt
                     row["current_minutes_watched"] = max(
@@ -9489,11 +9514,6 @@ class Twitch(object):
                         finish(row)
                     self.__finish_report_file_rows(finish)
                     self.watch_reward_finished_rows = frozenset(finished | pending)
-            # Outside the report's lock: a row is saved under the
-            # watch-reward lock, which is taken before that one.
-            for drop_id, drop in counted.items():
-                if drop_id not in rows_found:
-                    self.__save_earned_reward_row(stored, drop)
         except (OSError, ValueError) as error:
             # The record is stored all the same, and these rows are looked
             # at again with the next one: the caller reads some errors as a
@@ -9502,6 +9522,19 @@ class Twitch(object):
                 f"unable to mark earned reward rows in the report: {error}",
                 level=logging.DEBUG,
             )
+        # Outside the report's lock: a row is saved under the watch-reward
+        # lock, which is taken before that one.
+        for drop_id, drop in counted.items():
+            if drop_id in rows_found:
+                continue
+            try:
+                self.__save_earned_reward_row(stored, drop)
+            except (OSError, ValueError) as error:
+                self.__log_drop_check(
+                    f"unable to write the report row of earned reward {drop_id}: "
+                    f"{error}",
+                    level=logging.DEBUG,
+                )
 
     def __save_earned_reward_row(self, campaign, drop):
         """Write the report row of a reward drop seen earned that has none.

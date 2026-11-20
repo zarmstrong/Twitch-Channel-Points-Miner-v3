@@ -1522,7 +1522,11 @@ class TwitchChannelPointsMiner:
         refresh (see __refresh_for_opened_reward_window), which can be for a
         claim to send again seconds before its campaign ends, noted while
         this waits. Not when categories are never refreshed: the call would
-        stay unanswered and end every wait."""
+        stay unanswered and end every wait.
+
+        A call is noticed within MAIN_LOOP_REWARD_CHECK_SECONDS. One due
+        closer to a campaign's end than that is not answered in time, nor
+        would the refresh it asks for be done by then."""
         ends_at = time.monotonic() + random.uniform(20, 60)
         while True:
             left = ends_at - time.monotonic()
