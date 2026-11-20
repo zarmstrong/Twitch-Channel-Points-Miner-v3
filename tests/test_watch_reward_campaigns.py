@@ -3814,6 +3814,24 @@ def test_failed_snapshot_of_a_lost_repeat_is_saved_and_of_an_earned_one_is_not()
         earned._Twitch__remember_watch_reward_campaign(convert(watch_group(group_self)))
     assert save(earned, "failed") is False
 
+    # Counted by Twitch before the miner claimed it: no record shows the
+    # count go up after the claim, which alone says the repeat was earned.
+    claimed = snapshot_twitch()
+    for group_self in (
+        progress(minutes=59, window=open_window()),
+        progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window()),
+    ):
+        stored = claimed._Twitch__remember_watch_reward_campaign(
+            convert(watch_group(group_self))
+        )
+    assert stored["timeBasedDrops"][0]["id"] == "group-watch#0"
+    claimed._Twitch__mark_drop_accepted(Drop(stored["timeBasedDrops"][0]))
+    stored = claimed._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=3, grants=1, window=open_window())))
+    )
+    assert stored["timeBasedDrops"][0]["id"] == "group-watch#1"
+    assert save(claimed, "failed") is False
+
 
 def test_reward_group_that_still_needs_a_subscription_has_no_progress_row():
     # A row says the group is being earned by watching, which keeps the
@@ -4076,10 +4094,12 @@ def test_claim_twitch_did_not_accept_is_tried_again_without_a_streamer(monkeypat
 
     evaluate(monkeypatch, twitch, [listing()])
 
-    [retry_at] = twitch.watch_reward_pending_starts
-    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
-        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
-    )
+    # Noted for the listing's claim and for the evaluation's own.
+    assert twitch.watch_reward_pending_starts
+    for retry_at in twitch.watch_reward_pending_starts:
+        assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+            WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+        )
 
     # Accepted, it leaves nothing to come back for.
     twitch.watch_reward_pending_starts = set()
@@ -4087,6 +4107,40 @@ def test_claim_twitch_did_not_accept_is_tried_again_without_a_streamer(monkeypat
     evaluate(monkeypatch, twitch, [listing()])
 
     assert twitch.gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert twitch.watch_reward_pending_starts == set()
+
+
+def test_claim_a_listing_sent_that_twitch_did_not_accept_is_tried_again(monkeypatch):
+    # Found waiting to be claimed by a watched channel's listing, 40 seconds
+    # before the campaign ends. The sync's next pass and the next listing
+    # can both come after the end.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    accept = gql.claim_drop_rewards
+    gql.claim_drop_rewards = lambda instance_id: SimpleNamespace(
+        status=None, errors=["service unavailable"]
+    )
+    ends_at = utc_now() + timedelta(seconds=40)
+    claimable = campaign_from_reward_groups(
+        reward_campaign(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))
+        | {"endAt": stamp(ends_at)},
+        now=NOW,
+    )
+
+    twitch._Twitch__store_listed_watch_rewards([claimable])
+
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert utc_now() < retry_at < ends_at
+
+    # Accepted, there is nothing to come back for.
+    twitch.watch_reward_pending_starts = set()
+    gql.claim_drop_rewards = accept
+    twitch._Twitch__store_listed_watch_rewards([copy.deepcopy(claimable)])
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
     assert twitch.watch_reward_pending_starts == set()
 
 

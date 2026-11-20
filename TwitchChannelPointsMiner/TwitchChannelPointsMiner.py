@@ -2017,6 +2017,7 @@ class TwitchChannelPointsMiner:
                     limit=self.badge_drop_streamer_limit,
                     sort_by=self.badge_drop_category_sort,
                     respect_campaign_restrictions=False,
+                    include_watch_rewards=False,
                 )
             except Exception as error:
                 record_failure(game_slug, error)
@@ -2036,6 +2037,7 @@ class TwitchChannelPointsMiner:
                     limit=30,
                     sort_by=self.badge_drop_category_sort,
                     restricted_campaigns=restricted_campaigns,
+                    include_watch_rewards=False,
                 )
             except Exception as error:
                 record_failure(game_slug, error)

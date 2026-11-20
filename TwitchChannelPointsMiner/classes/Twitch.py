@@ -898,9 +898,11 @@ class Twitch(object):
         return False
 
     def __is_reward_row_known_earned(self, drop_id) -> bool:
-        """Whether a stored record has shown the reward drop earned in this
-        session (see __finish_earned_reward_rows)."""
-        return any(
+        """Whether the reward drop is known as earned in this session: a
+        stored record has shown it (see __finish_earned_reward_rows), or
+        Twitch accepted its claim. A repeat Twitch counts before its claim
+        is earned by the claim alone: no record shows it earned after."""
+        return drop_id in (getattr(self, "accepted_drop_ids", None) or ()) or any(
             earned_id == drop_id
             for earned_id, _ in getattr(self, "watch_reward_earned_rows", None) or ()
         )
@@ -5049,6 +5051,7 @@ class Twitch(object):
         respect_campaign_restrictions: bool = True,
         restricted_campaigns=None,
         ignore_drops_tag: bool = False,
+        include_watch_rewards: bool = True,
     ) -> List[str]:
         if not category:
             return []
@@ -5137,10 +5140,17 @@ class Twitch(object):
         # Any channel of the category counts toward a reward campaign, with
         # the Drops tag or without: such a category is searched like one with
         # Drops turned off, yet its channels are still watched for the reward.
+        # Not when the search is for a Drop campaign of the caller's own
+        # (include_watch_rewards is False: a badge Drop, which the account's
+        # campaign list need not name): only a Drops-tagged channel earns
+        # that one, whatever else the category runs.
         watch_rewards_only = drops_enabled is True and (
             ignore_drops_tag
-            or self.__category_runs_only_watch_rewards(
-                active_twitch_campaigns, fallback_catalog_campaigns
+            or (
+                include_watch_rewards
+                and self.__category_runs_only_watch_rewards(
+                    active_twitch_campaigns, fallback_catalog_campaigns
+                )
             )
         )
         if watch_rewards_only:
@@ -5149,7 +5159,8 @@ class Twitch(object):
         # channels earn both and are searched for first; without any, the
         # others still earn the reward.
         has_watch_reward = (
-            restricted_campaigns is None
+            include_watch_rewards
+            and restricted_campaigns is None
             and self.__category_has_watch_reward(active_twitch_campaigns)
         )
         max_results = max(limit, 1)
@@ -10131,6 +10142,10 @@ class Twitch(object):
                             f"{campaign.get('id')}: {error}",
                             level=logging.DEBUG,
                         )
+                    # Unless the campaign ends before the sync's next pass,
+                    # or the next listing: then it is sent again ahead of
+                    # the end.
+                    self.__retry_unaccepted_reward_claims(str(campaign.get("id")))
                 with _watch_reward_lock(self):
                     if self.watch_reward_claim_requested is not True:
                         # Checked and cleared under the lock a listing asks
