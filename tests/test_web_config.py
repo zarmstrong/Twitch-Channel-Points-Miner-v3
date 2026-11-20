@@ -414,6 +414,42 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
         assert stat.S_IMODE(config.stat().st_mode) == 0o640
 
 
+def test_managed_web_config_preserves_an_integer_streak_only_window(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"streak_only": 5},
+        },
+    )
+
+    assert result["streamers"][0]["settings"]["streak_only"] == 5
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].settings.streak_only == 5
+
+
+def test_managed_web_config_rejects_an_invalid_streak_only_window(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"streak_only": 0},
+            },
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
 def test_managed_web_config_updates_categories_when_replace_is_ebusy(
     tmp_path, monkeypatch
 ):

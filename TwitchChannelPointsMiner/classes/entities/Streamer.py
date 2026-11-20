@@ -133,7 +133,7 @@ class StreamerSettings(object):
         claim_drops: bool = None,
         claim_moments: bool = None,
         watch_streak: bool = None,
-        streak_only: bool = None,
+        streak_only: bool | int = None,
         favorite: bool = None,
         points_limit: int = None,
         community_goals: bool = None,

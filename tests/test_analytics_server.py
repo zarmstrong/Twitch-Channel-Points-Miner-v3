@@ -971,6 +971,25 @@ def test_config_ui_exposes_requested_management_controls():
     assert "Sortable.create" in script
 
 
+def test_config_ui_preserves_an_integer_streak_only_window():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+
+    render_streamers = script.split("function renderConfiguredStreamers", 1)[1].split(
+        "function renderConfiguredCategories", 1
+    )[0]
+    assert "Number.isInteger(value)" in render_streamers
+    assert ".data('configured-value', value)" in render_streamers
+    assert "(${value} min)" in render_streamers
+
+    save_streamer = script.split("function saveStreamerSettings", 1)[1].split(
+        "function saveCategorySettings", 1
+    )[0]
+    assert "Number.isInteger(configuredValue)" in save_streamer
+    assert "checked === Boolean(configuredValue)" in save_streamer
+    assert "settings[name] = configuredValue;" in save_streamer
+
+
 def test_web_config_lists_support_drag_and_drop_reordering():
     root = Path(__file__).resolve().parents[1]
     template = (root / "assets" / "charts.html").read_text(encoding="utf-8")

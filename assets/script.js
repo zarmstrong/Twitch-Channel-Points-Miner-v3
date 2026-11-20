@@ -1396,8 +1396,19 @@ function renderConfiguredStreamers(streamers) {
             ['claim_moments', 'Claim moments'],
             ['streak_only', 'Streak only']
         ].forEach(function (setting) {
-            var label = $('<label>').addClass('checkbox config-checkbox').text(` ${setting[1]}`);
-            label.prepend($('<input>').attr('type', 'checkbox').attr('data-setting', setting[0]).prop('checked', settings[setting[0]] === true));
+            var value = settings[setting[0]];
+            var labelText = setting[1];
+            // streak_only may be an integer custom window in config.py. Show
+            // it as checked and keep the configured value for saveStreamerSettings.
+            if (setting[0] === 'streak_only' && Number.isInteger(value) && value > 0) {
+                labelText += ` (${value} min)`;
+            }
+            var label = $('<label>').addClass('checkbox config-checkbox').text(` ${labelText}`);
+            label.prepend($('<input>')
+                .attr('type', 'checkbox')
+                .attr('data-setting', setting[0])
+                .data('configured-value', value)
+                .prop('checked', setting[0] === 'streak_only' ? Boolean(value) : value === true));
             controls.append(label);
         });
         var chat = $('<select>').attr('data-setting', 'chat');
@@ -1594,7 +1605,20 @@ function saveStreamerSettings() {
     var pointsValue = item.find('[data-setting="points_limit"]').val();
     var settings = { points_limit: pointsValue === '' ? null : Number(pointsValue) };
     item.find('input[type="checkbox"][data-setting]').each(function () {
-        settings[$(this).data('setting')] = $(this).prop('checked');
+        var input = $(this);
+        var name = input.data('setting');
+        var configuredValue = input.data('configured-value');
+        var checked = input.prop('checked');
+        // An untouched integer streak_only keeps its custom window instead of
+        // being rewritten to true/false just because another setting changed.
+        if (name === 'streak_only'
+            && Number.isInteger(configuredValue)
+            && configuredValue > 0
+            && checked === Boolean(configuredValue)) {
+            settings[name] = configuredValue;
+        } else {
+            settings[name] = checked;
+        }
     });
     settings.chat = item.find('[data-setting="chat"]').val();
     var username = item.attr('data-username');
