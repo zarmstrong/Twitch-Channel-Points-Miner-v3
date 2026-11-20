@@ -362,6 +362,12 @@ def campaign_from_reward_groups(campaign, now: Optional[datetime] = None):
     categories = [first] + [
         category for category in categories.values() if category["id"] != first["id"]
     ]
+    # A group watching could earn that Twitch reports no progress on, while
+    # it does on others: one left out above until something unlocks it.
+    locked = progress_known and any(
+        not isinstance(group.get("self"), dict) and _watch_group_categories(group)
+        for group in groups
+    )
     return {
         **base,
         "status": "ACTIVE",
@@ -373,6 +379,7 @@ def campaign_from_reward_groups(campaign, now: Optional[datetime] = None):
         WATCH_REWARD_KEY: {
             "categories": categories,
             "progress_known": progress_known,
+            "locked_groups": locked,
         },
     }
 

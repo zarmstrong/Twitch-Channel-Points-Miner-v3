@@ -9,7 +9,7 @@ import copy
 import json
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -1210,6 +1210,94 @@ def test_progress_read_starts_over_once_every_channel_was_asked(monkeypatch):
         return list(listing_calls)
 
     assert [read(), read(), read()] == [["1", "2"], ["3"], ["1", "2"]]
+
+
+def locked_group_twitch(monkeypatch, *groups, moment=None):
+    """A Twitch at `moment` (NOW when not given) that stored a listing of the
+    groups, and the time it was stored at."""
+    moment = moment or NOW
+    stored_at = moment.replace(tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: moment)
+    monkeypatch.setattr(twitch_module.time, "time", lambda: stored_at)
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(convert(*groups))
+    return twitch, stored_at
+
+
+def test_group_that_unlocks_after_the_others_finish_is_read_for_within_the_hour(
+    monkeypatch,
+):
+    # Every other group is finished, so no window is waited for and nothing
+    # is watched in the category: only the ordinary refresh, hours off, read
+    # a channel listing again, which can be after the group's deadline.
+    twitch, stored_at = locked_group_twitch(
+        monkeypatch, watch_group(progress(status="CLAIMED", grants=6)), final_group()
+    )
+
+    read_due = NOW + timedelta(seconds=WATCH_REWARD_FINISHED_REFRESH_SECONDS)
+    assert twitch.watch_reward_pending_starts == {read_due}
+    assert twitch.take_opened_watch_reward_start() is False
+
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: read_due)
+    assert twitch.take_opened_watch_reward_start() is True
+    # The read made then is due: the record is as old as a finished
+    # campaign's may get.
+    monkeypatch.setattr(
+        twitch_module.time,
+        "time",
+        lambda: stored_at + WATCH_REWARD_FINISHED_REFRESH_SECONDS,
+    )
+    asked = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_game_directory_slug",
+        lambda self, game_id: asked.append(game_id),
+    )
+    twitch._Twitch__refresh_watch_reward_progress(
+        twitch.watch_reward_campaigns["quest-1"]
+    )
+    assert asked == ["777"]
+    # No channel answered: asked again an hour on, not left to the ordinary
+    # refresh.
+    assert twitch.watch_reward_pending_starts == {
+        read_due + timedelta(seconds=WATCH_REWARD_FINISHED_REFRESH_SECONDS)
+    }
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        # Nothing left out: Twitch reports on every group.
+        [watch_group(progress(status="CLAIMED", grants=6))],
+        # A repeat still to watch: its listings are read while it is.
+        [
+            watch_group(progress(minutes=10, window=open_window())),
+            final_group(),
+        ],
+    ],
+)
+def test_campaign_without_a_locked_group_to_wait_for_is_not_read_for(
+    monkeypatch, groups
+):
+    twitch, _ = locked_group_twitch(monkeypatch, *groups)
+
+    assert not [
+        moment
+        for moment in twitch.watch_reward_pending_starts
+        if moment == NOW + timedelta(seconds=WATCH_REWARD_FINISHED_REFRESH_SECONDS)
+    ]
+
+
+def test_locked_group_is_not_read_for_after_the_campaign_ends(monkeypatch):
+    ends_at = datetime.strptime(END_AT, "%Y-%m-%dT%H:%M:%SZ")
+    twitch, _ = locked_group_twitch(
+        monkeypatch,
+        watch_group(progress(status="CLAIMED", grants=6)),
+        final_group(),
+        moment=ends_at - timedelta(minutes=30),
+    )
+
+    assert not twitch.watch_reward_pending_starts
 
 
 def test_locked_groups_category_is_kept_so_its_unlock_is_noticed(monkeypatch):
@@ -3395,6 +3483,65 @@ def test_row_of_a_repeat_twitch_counted_without_a_claim_is_finished(
             100,
         )
         assert row["failed_to_achieve"] is False
+
+
+@pytest.mark.parametrize("analytics", [True, False])
+def test_repeat_twitch_counted_before_its_row_was_written_gets_one(
+    monkeypatch, tmp_path, analytics
+):
+    # Started a minute short of the repeat: Twitch counted it before the
+    # sync or the minute watcher wrote its row. There was none to mark as
+    # earned, and none was written later, so the reward never showed.
+    twitch = report_twitch(monkeypatch, tmp_path, analytics=analytics)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+    assert report_rows(twitch) == {}
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=60, grants=1, window=open_window())))
+    )
+
+    for rows in [report_rows(twitch)] + (
+        [report_rows(twitch, tmp_path)] if analytics else []
+    ):
+        assert list(rows) == ["group-watch#0"]
+        row = rows["group-watch#0"]
+        assert (row["status"], row["item_name"], row["category"]) == (
+            "captured",
+            "Daily Chest (repeat 1 of 6)",
+            "Example Game",
+        )
+        assert (row["current_minutes_watched"], row["percentage_progress"]) == (
+            60,
+            100,
+        )
+        assert row["campaign"] == "Launch Celebration"
+        assert row["failed_to_achieve"] is False
+    # The watcher's copy of the repeat is older than the record now.
+    assert (
+        twitch._Twitch__save_drop_snapshot_if_new(
+            "group-watch#0|late", 60, "in_progress", lambda: None
+        )
+        is False
+    )
+
+
+def test_repeat_waiting_to_be_claimed_gets_no_row_as_earned(monkeypatch, tmp_path):
+    twitch = report_twitch(monkeypatch, tmp_path)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=59, window=open_window())))
+    )
+
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(
+            watch_group(
+                progress(status="CLAIMABLE", minutes=60, grants=1, window=open_window())
+            )
+        )
+    )
+
+    assert report_rows(twitch) == {}
 
 
 def test_row_left_in_progress_by_an_earlier_session_is_finished(monkeypatch, tmp_path):
