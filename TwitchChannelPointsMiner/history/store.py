@@ -347,12 +347,13 @@ class HistoryStore(object):
         backup = base
         suffix = 1
         while any(
-            os.path.exists(backup + extension) for extension in ("", "-wal", "-shm")
+            os.path.exists(backup + extension)
+            for extension in ("", "-wal", "-shm", "-journal")
         ):
             backup = f"{base}-{suffix}"
             suffix += 1
 
-        for extension in ("", "-wal", "-shm"):
+        for extension in ("", "-wal", "-shm", "-journal"):
             source = self.path + extension
             if os.path.exists(source):
                 os.replace(source, backup + extension)
