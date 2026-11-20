@@ -15,7 +15,7 @@ from pathlib import Path
 
 _LINE_PATTERN = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
-CONFIG_VERSION = 12
+CONFIG_VERSION = 13
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -139,6 +139,7 @@ ANALYTICS_CONFIG_DEFAULTS = (
     ("days_ago", "7"),
     ("password", "None"),
     ("log_poll_interval", "5"),
+    ("history_retention_days", "730"),
 )
 
 

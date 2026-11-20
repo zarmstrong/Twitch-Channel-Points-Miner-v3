@@ -675,6 +675,21 @@ def delete_streamer_analytics(streamer):
 
     logger.info(f"Deleted analytics data in '{filename}'")
     response_cache.clear()
+
+    # The optional History tab keeps its own durable copy of point, watch and
+    # live-session data, so "delete analytics data" must clear that too.
+    try:
+        from TwitchChannelPointsMiner.history import get_store
+
+        store = get_store()
+        if store is not None:
+            store.delete_streamer(filename[: -len(".json")])
+    except Exception:
+        logger.warning(
+            "Unable to delete optional streamer history",
+            exc_info=True,
+        )
+
     return Response(status=204)
 
 
@@ -894,6 +909,16 @@ class AnalyticsServer(Thread):
             template_folder=get_assets_folder(),
             static_folder=get_assets_folder(),
         )
+
+        try:
+            from TwitchChannelPointsMiner.history.web import register_history
+
+            register_history(self.app)
+        except Exception:
+            logger.warning(
+                "Unable to register the optional History API",
+                exc_info=True,
+            )
 
         @self.app.before_request
         def require_authentication():

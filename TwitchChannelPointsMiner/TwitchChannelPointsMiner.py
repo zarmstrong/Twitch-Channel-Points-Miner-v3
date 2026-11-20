@@ -30,6 +30,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
     discovery_sources,
+    is_drop_discovered,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import (
     CategoryLookupFailedException,
@@ -733,9 +734,29 @@ class TwitchChannelPointsMiner:
         days_ago: int = 7,
         password: str = None,
         log_poll_interval: int = 5,
+        history_retention_days: int = 730,
     ):
         # Analytics switch
         if Settings.enable_analytics is True:
+            try:
+                from TwitchChannelPointsMiner.history import start_history
+
+                start_history(
+                    self.username,
+                    online_streamers=lambda: list(self.streamers),
+                    drop_streamers=lambda: [
+                        streamer.username
+                        for streamer in self.streamers
+                        if is_drop_discovered(streamer)
+                    ],
+                    retention_days=history_retention_days,
+                )
+            except Exception:
+                logger.warning(
+                    "Unable to start the optional History recorder",
+                    exc_info=True,
+                )
+
             from TwitchChannelPointsMiner.classes.AnalyticsServer import AnalyticsServer
 
             days_ago = days_ago if days_ago <= 365 * 15 else 365 * 15

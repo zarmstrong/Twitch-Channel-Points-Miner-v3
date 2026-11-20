@@ -1485,6 +1485,7 @@ def enable_analytics_dashboard(
     refresh=5,
     days_ago=7,
     log_poll_interval=5,
+    history_retention_days=730,
 ):
     """Turn on the analytics dashboard for an *existing* configuration.
 
@@ -1523,6 +1524,7 @@ def enable_analytics_dashboard(
         f"    'days_ago': {days_ago},\n"
         f"    'password': {password!r},\n"
         f"    'log_poll_interval': {log_poll_interval},\n"
+        f"    'history_retention_days': {history_retention_days},\n"
         "}"
     )
     _replace_config_node(config_path, analytics_config_node, rendered)

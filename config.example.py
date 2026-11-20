@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 12
+CONFIG_VERSION = 13
 
 import logging
 from colorama import Fore
@@ -366,4 +366,5 @@ ANALYTICS_CONFIG = None
 #     'days_ago': 7,                            # Initial chart history range
 #     'password': None,                         # Required when binding to a non-loopback host
 #     'log_poll_interval': 5,                   # Log viewer polling interval in seconds (1-180)
+#     'history_retention_days': 730,            # Keep raw History rows this long; 0 keeps them forever
 # }
