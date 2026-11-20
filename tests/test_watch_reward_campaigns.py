@@ -2160,6 +2160,26 @@ def test_repeat_twitch_reports_claimed_is_not_the_last_when_it_names_the_next():
     assert drop["_reward_group"]["finished"] is False
     assert twitch.watch_reward_pending_starts == {opens}
 
+    # The moment has passed and Twitch has yet to say anything else: the
+    # same repeat, open now, and not one more that was claimed.
+    just_past = progress(
+        status="CLAIMED",
+        minutes=60,
+        grants=1,
+        window={
+            "startedAt": stamp(NOW - timedelta(hours=24)),
+            "expiresAt": stamp(NOW - timedelta(seconds=20)),
+        },
+        next_at=stamp(NOW - timedelta(seconds=20)),
+    )
+    [drop] = twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(just_past))
+    )["timeBasedDrops"]
+    assert (drop["id"], drop["startAt"]) == ("group-watch#1", START_AT)
+    assert drop["self"]["isClaimed"] is False
+    assert drop["self"]["currentMinutesWatched"] == 0
+    assert drop["_reward_group"]["finished"] is False
+
     # The last repeat has no next one, whatever moment comes with it.
     [last] = convert(
         watch_group(progress(status="CLAIMED", grants=6, next_at=stamp(opens)))
@@ -3978,6 +3998,35 @@ def test_reward_group_that_still_needs_a_subscription_has_no_progress_row():
     assert [row[2] for row in rows["example-game"]] == ["group-watch#0"]
 
 
+@pytest.mark.parametrize(
+    "ends_in, status, failed",
+    [
+        (timedelta(hours=1), "in_progress", False),
+        # Its minutes were in; the subscription it also needs was not.
+        (timedelta(hours=-1), "failed", True),
+    ],
+)
+def test_reward_that_needed_a_subscription_too_is_failed_once_its_time_is_up(
+    monkeypatch, tmp_path, ends_in, status, failed
+):
+    twitch = report_twitch(monkeypatch, tmp_path)
+    needs_subs = watch_group(progress(minutes=60), times=1)
+    needs_subs["progressCriteria"]["requirements"]["subs"] = 2
+    [drop] = convert(needs_subs)["timeBasedDrops"]
+    drop["endAt"] = stamp(utc_now() + ends_in)
+
+    twitch._Twitch__save_drop_snapshot_from_dict(
+        drop,
+        campaign_name_override="Launch Celebration",
+        category_name_override="Example Game",
+    )
+
+    for rows in (report_rows(twitch), report_rows(twitch, tmp_path)):
+        row = rows["group-watch"]
+        assert (row["status"], row["failed_to_achieve"]) == (status, failed)
+        assert row["current_minutes_watched"] == 60
+
+
 def test_close_of_the_window_a_repeat_is_watched_in_is_waited_for():
     # Unfinished when its window closes, the repeat starts over in the next
     # one. With its channels offline by then, nothing else would look at the
@@ -4505,6 +4554,38 @@ def test_row_of_a_repeat_waiting_to_be_claimed_is_left_to_its_claim(
 
     row = report_rows(twitch, tmp_path)["group-watch#0"]
     assert (row["status"], row["current_minutes_watched"]) == ("in_progress", 52)
+
+
+def test_claim_thread_that_could_not_be_started_has_the_claim_sent_again(
+    monkeypatch,
+):
+    # No other listing need come before the campaign ends.
+    class NoThreadLeft(InlineThread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    monkeypatch.setattr(twitch_module, "Thread", NoThreadLeft)
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))]
+    )
+
+    assert gql.claims == []
+    [retry_at] = twitch.watch_reward_pending_starts
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+    # Which is when the main loop has the waiting claims sent.
+    monkeypatch.setattr(twitch_module, "Thread", InlineThread)
+    twitch.claim_waiting_watch_rewards()
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
 
 
 def test_claim_thread_that_could_not_be_started_does_not_block_the_next_one(

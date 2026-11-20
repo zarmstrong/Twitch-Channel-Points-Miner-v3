@@ -1575,14 +1575,12 @@ class Twitch(object):
             campaign_name=campaign_name_override,
             category_name=category_name_override,
         )
+        # Not done by its deadline, whether the minutes or a subscription
+        # were short.
         status = (
             "captured"
             if is_done is True
-            else (
-                "failed"
-                if is_expired and drop.current_minutes_watched < drop.minutes_required
-                else "in_progress"
-            )
+            else ("failed" if is_expired else "in_progress")
         )
 
         effective_status = status_override or status
@@ -1667,12 +1665,7 @@ class Twitch(object):
                     status = (
                         "captured"
                         if is_done is True
-                        else (
-                            "failed"
-                            if is_expired
-                            and drop.current_minutes_watched < drop.minutes_required
-                            else "in_progress"
-                        )
+                        else ("failed" if is_expired else "in_progress")
                     )
                     variant_saved = False
                     for variant in self.__drop_variant_entries_from_drop(drop):
@@ -10162,6 +10155,8 @@ class Twitch(object):
                 "the next channel listing tries again",
                 level=logging.DEBUG,
             )
+            # Or the main loop, should the campaign end before one comes.
+            self.__retry_unaccepted_reward_claims(str(campaign.get("id")))
 
     def __claim_stored_watch_reward_drops(self):
         try:
@@ -10981,10 +10976,15 @@ class Twitch(object):
                 else None
             ),
             "failed_to_achieve": (
-                status != "captured"
-                and getattr(drop, "end_at", None) is not None
-                and utc_now() > drop.end_at
-                and drop.current_minutes_watched < drop.minutes_required
+                # Reported failed with its minutes in: the subscription it
+                # also needed was not made by its deadline.
+                status_override == "failed"
+                or (
+                    status != "captured"
+                    and getattr(drop, "end_at", None) is not None
+                    and utc_now() > drop.end_at
+                    and drop.current_minutes_watched < drop.minutes_required
+                )
             ),
             "item_art_url": (
                 item_art_url_override
