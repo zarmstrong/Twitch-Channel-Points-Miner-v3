@@ -2013,7 +2013,8 @@ def test_listing_of_a_claimed_repeat_as_waiting_again_is_not_the_next_repeat(
     twitch, gql, window = claimed_repeat_twitch(
         monkeypatch, datetime.now(timezone.utc) + timedelta(hours=23)
     )
-    stored = twitch.watch_reward_campaigns["quest-1"]
+    [waiting] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    assert waiting["id"] == "group-watch#1"
 
     twitch._Twitch__store_listed_watch_rewards(
         [
@@ -2025,9 +2026,44 @@ def test_listing_of_a_claimed_repeat_as_waiting_again_is_not_the_next_repeat(
         ]
     )
 
-    assert twitch.watch_reward_campaigns["quest-1"] is stored
+    assert twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"] == [waiting]
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
     assert twitch.accepted_drop_ids == {"group-watch#0"}
+
+
+def test_group_claimable_in_an_answer_with_an_older_state_of_another_is_claimed(
+    monkeypatch,
+):
+    # The answer shows the claimed repeat waiting again, and a second group
+    # that has its minutes in since: that one is not held back with it.
+    twitch, gql, window = claimed_repeat_twitch(
+        monkeypatch, datetime.now(timezone.utc) + timedelta(hours=23)
+    )
+    [waiting] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    second = watch_group(progress(status="CLAIMABLE", minutes=60, window=window)) | {
+        "id": "group-two",
+        "name": "Weekly Chest",
+    }
+
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            convert(
+                watch_group(
+                    progress(status="CLAIMABLE", minutes=60, grants=1, window=window)
+                ),
+                second,
+            )
+        ]
+    )
+
+    stored = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    assert stored[0] == waiting
+    assert stored[0] is not waiting
+    assert gql.claims == [
+        "viewer-1#quest-1#group-watch",
+        "viewer-1#quest-1#group-two",
+    ]
+    assert "group-watch#1" not in twitch.accepted_drop_ids
 
 
 def test_repeat_claimable_once_its_window_has_opened_is_stored_and_claimed(
@@ -3718,6 +3754,27 @@ def test_claims_are_ordered_by_time_left_across_campaigns(monkeypatch):
         "viewer-1#quest-1#group-two",
         "viewer-1#quest-3#group-three",
         "viewer-1#quest-1#group-watch",
+    ]
+
+
+def test_claim_in_a_campaign_named_as_closed_is_sent_after_the_others(monkeypatch):
+    # Twitch may still accept it, or refuse it for over a minute: the
+    # campaign that runs is not made to wait for that, with more time left.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__remember_watch_reward_campaign(third_campaign(claimable, 30))
+    twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
+    twitch.watch_reward_campaigns["quest-3"]["_watch_reward"]["named_closed"] = True
+
+    twitch.claim_waiting_watch_rewards()
+
+    assert gql.claims == [
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-3#group-three",
     ]
 
 

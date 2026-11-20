@@ -9357,11 +9357,8 @@ class Twitch(object):
                 )
             ):
                 return previous
-            if previous is not None and self.__lists_an_earned_repeat_as_waiting(
-                previous, stored
-            ):
-                return previous
             if previous is not None:
+                self.__keep_earned_repeats_listed_as_waiting(previous, stored)
                 # A channel's listing does not say Twitch opened it again.
                 stored["_watch_reward"]["named_closed"] = (
                     previous["_watch_reward"].get("named_closed") is True
@@ -9779,24 +9776,28 @@ class Twitch(object):
                 )
         return news
 
-    def __lists_an_earned_repeat_as_waiting(self, previous, stored) -> bool:
-        """Whether `stored` shows a repeat waiting to be claimed that
-        `previous`, the record it would replace, shows earned: Twitch
-        reported it so, the group's next repeat waits for a window that has
-        not opened, and the count has not gone up since.
+    def __keep_earned_repeats_listed_as_waiting(self, previous, stored):
+        """Give `stored`, a record not yet published, the drop `previous`
+        (the record it replaces) has for every group it shows waiting to be
+        claimed with a repeat `previous` shows earned: Twitch reported it
+        so, the group's next repeat waits for a window that has not opened,
+        and the count has not gone up since.
 
         Twitch can answer a later request from an older state, which the
         order of the requests does not show. Stored, the repeat would be
         taken for the next one turned claimable: its claim sent again under
         that one's ID, and Twitch's answer that it was claimed already
         recorded as the next repeat earned. Once the window has opened the
-        next repeat can be the one waiting, and the record is stored."""
+        next repeat can be the one waiting, and the group is stored as
+        listed. The record's other groups are stored as listed either way:
+        one of them may have turned claimable in the same answer."""
         now = utc_now()
         before = {
             drop["_reward_group"]["id"]: drop
             for drop in previous.get("timeBasedDrops") or []
         }
-        for drop in stored.get("timeBasedDrops") or []:
+        drops = stored.get("timeBasedDrops") or []
+        for index, drop in enumerate(drops):
             group = drop["_reward_group"]
             earlier = before.get(group["id"])
             if earlier is None or group.get("claimable") is not True:
@@ -9814,11 +9815,10 @@ class Twitch(object):
                 self.__log_drop_check(
                     f"reward campaign '{stored.get('name')}': a listing shows "
                     f"'{group.get('name')}' waiting to be claimed again before "
-                    "its next window opened; kept the newer record",
+                    "its next window opened; kept what was stored for it",
                     level=logging.DEBUG,
                 )
-                return True
-        return False
+                drops[index] = copy.deepcopy(earlier)
 
     @staticmethod
     def __keep_repeat_drop_ids(previous, stored):
@@ -10541,9 +10541,21 @@ class Twitch(object):
                 # Compared as they are: the moments are UTC without a
                 # timezone, which timestamp() would read as local time, out
                 # of order across a change of the clocks.
-                found.append((ends_at or datetime.max, campaign, drop_dict))
-        found.sort(key=lambda entry: entry[0])
-        return [(campaign, drop_dict) for _, campaign, drop_dict in found]
+                found.append(
+                    (
+                        # Last, whatever time it has left: Twitch may still
+                        # accept the claim of a reward earned in a campaign
+                        # it has since named as closed, but not at the cost
+                        # of one in a campaign that runs.
+                        (campaign.get("_watch_reward") or {}).get("named_closed")
+                        is True,
+                        ends_at or datetime.max,
+                        campaign,
+                        drop_dict,
+                    )
+                )
+        found.sort(key=lambda entry: entry[:2])
+        return [(campaign, drop_dict) for _, _, campaign, drop_dict in found]
 
     def __retry_unaccepted_reward_claims(self, campaign_id):
         """Have the categories refreshed again when a progress read would
