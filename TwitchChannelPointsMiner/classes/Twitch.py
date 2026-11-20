@@ -1532,6 +1532,12 @@ class Twitch(object):
         if drop.has_preconditions_met is False:
             return
 
+        # A drop is reported by its minutes, so one waiting to be claimed
+        # reads as captured before its claim is accepted. That goes for a
+        # reward group too: the record cannot tell a reward claimed outside
+        # the miner from one lost unclaimed (the next repeat follows either
+        # with the same count), and a row that waited for the miner's own
+        # claim would stay in progress for good after the former.
         is_done = drop.is_claimed is True or (
             drop.current_minutes_watched >= drop.minutes_required
             # Its minutes alone do not earn a drop that also needs a
@@ -9451,7 +9457,11 @@ class Twitch(object):
         miner started with the repeat a few minutes short) had no row to
         mark as earned, and none is written for it later: by then the sync
         reads the repeat after it, and the watcher's copy of this one is
-        older than the record."""
+        older than the record.
+
+        Written once, like any other snapshot: a write that fails is not
+        tried again, since the drop is only at hand with the record that
+        counted it."""
         earned = copy.deepcopy(drop)
         earned["self"] = {
             **(earned.get("self") or {}),
