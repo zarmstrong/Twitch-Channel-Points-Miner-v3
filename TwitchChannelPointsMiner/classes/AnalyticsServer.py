@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import secrets
-import socket
 import time
 import unicodedata
 from datetime import datetime
@@ -172,6 +171,39 @@ _IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}\.?")
 _HOSTNAME_RE = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?\.?")
 
 
+def _parse_ipv4_numbers(hostname):
+    """Dotted IPv4 text for "192.168.257", "0300.0250.1.1" or "0x", else None.
+
+    The WHATWG URL rules browsers use: one to four numbers, each decimal,
+    0-prefixed octal or 0x hexadecimal ("0x" alone is 0), with the last number
+    filling the remaining bytes, and one trailing dot dropped.
+    """
+    parts = hostname.split(".")
+    if parts[-1] == "" and len(parts) > 1:
+        parts.pop()
+    if len(parts) > 4:
+        return None
+    numbers = []
+    for part in parts:
+        try:
+            if part[:2] in ("0x", "0X"):
+                numbers.append(int(part[2:] or "0", 16))
+            elif len(part) > 1 and part[0] == "0":
+                numbers.append(int(part, 8))
+            else:
+                numbers.append(int(part, 10))
+        except ValueError:
+            return None
+    if any(number > 255 for number in numbers[:-1]):
+        return None
+    if numbers[-1] >= 256 ** (5 - len(numbers)):
+        return None
+    value = numbers[-1]
+    for position, number in enumerate(numbers[:-1]):
+        value += number << (8 * (3 - position))
+    return str(ipaddress.IPv4Address(value))
+
+
 def _canonical_hostname(hostname):
     """Lowercase host in one spelling: IP addresses compressed, names as IDNA.
 
@@ -180,43 +212,39 @@ def _canonical_hostname(hostname):
     matches the "xn--mnchen-3ya.example.com" that HTTP clients send.
     """
     hostname = (hostname or "").lower()
-    if not hostname.isascii():
-        # UTS 46 mapping, as browsers apply it before sending the Host header:
-        # full-width letters and ligatures fold to plain ones, and the
-        # ideographic full stops separate labels.
-        hostname = unicodedata.normalize("NFKC", hostname).lower()
-        for stop in "\u3002\uff0e\uff61":
-            hostname = hostname.replace(stop, ".")
-        # ... and soft hyphens, zero-width spaces and variation selectors are
-        # dropped.
-        hostname = _IDNA_IGNORED_RE.sub("", hostname)
     if not hostname:
         return ""
+    if not hostname.isascii():
+        try:
+            import idna
+
+            # UTS 46 mapping and Punycode as browsers do it (non-transitional,
+            # so "ß" stays), not the stdlib "idna" codec, which folds it
+            # into "ss" and would allow a different domain.
+            hostname = idna.encode(hostname, uts46=True, transitional=False).decode(
+                "ascii"
+            )
+        except (ImportError, UnicodeError):
+            # idna.IDNAError is a UnicodeError. Without the package (requests
+            # depends on it, so it is normally there) or for a name it
+            # refuses, use an approximation of the same mapping.
+            hostname = _approximate_uts46(hostname)
     try:
         return str(ipaddress.ip_address(hostname))
     except ValueError:
         pass
     if _IPV4_NUMBERS_RE.fullmatch(hostname):
-        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address,
-        # and drop a trailing dot.
-        try:
-            return socket.inet_ntoa(socket.inet_aton(hostname.rstrip(".")))
-        except OSError:
-            return hostname
-    if hostname.isascii():
-        return hostname
-    try:
-        import idna
+        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address.
+        return _parse_ipv4_numbers(hostname) or hostname
+    return hostname
 
-        return idna.encode(hostname, uts46=True, transitional=False).decode("ascii")
-    except (ImportError, UnicodeError):
-        # idna.IDNAError is a UnicodeError. Without the package (requests
-        # depends on it, so it is normally there) or for a name it refuses,
-        # fall back to the plain mapping below.
-        pass
-    # Punycode each non-ASCII label as browsers do (UTS 46, non-transitional),
-    # not with the stdlib "idna" codec, which folds "ß" into "ss" and would
-    # allow a different domain.
+
+def _approximate_uts46(hostname):
+    """Fold, strip and Punycode a non-ASCII name without the idna package."""
+    hostname = unicodedata.normalize("NFKC", hostname).lower()
+    for stop in "\u3002\uff0e\uff61":
+        hostname = hostname.replace(stop, ".")
+    hostname = _IDNA_IGNORED_RE.sub("", hostname)
     labels = []
     for label in unicodedata.normalize("NFC", hostname).split("."):
         if label.isascii():

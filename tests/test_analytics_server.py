@@ -3,6 +3,7 @@ import errno
 import logging
 import os
 import re
+import sys
 import time
 from io import BytesIO
 from pathlib import Path
@@ -417,6 +418,10 @@ def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_aut
         ("https://miner.example/path\\file", "miner.example"),
         ("localhost.", "localhost."),
         ("https://192.0.2.10./", "192.0.2.10"),
+        ("https://0x/", "0.0.0.0"),
+        ("https://0x.0x.0x.0x/", "0.0.0.0"),
+        ("https://0xc0.0xa8.0x101/", "192.168.1.1"),
+        ("https://\u03f2.example/", "xn--4xa.example"),
         ("https://\u1fb2.example/", "xn--uxa303l.example"),
     ],
 )
@@ -474,6 +479,23 @@ def test_allowed_hosts_warning_does_not_log_the_entry(caplog):
     assert "allowed_hosts" in caplog.text
     assert "dummy-password" not in caplog.text
     assert "dummy-api-key" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ("https://faß.example/", "xn--fa-hia.example"),
+        ("https://miner\u3002example.com/", "miner.example.com"),
+        ("https://mi\u00adner.example/", "miner.example"),
+        ("https://\uff4diner.example.com/", "miner.example.com"),
+    ],
+)
+def test_allowed_hosts_names_without_the_idna_package(entry, expected, monkeypatch):
+    monkeypatch.setitem(sys.modules, "idna", None)
+
+    server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset({expected})
 
 
 def test_allowed_hosts_url_entry_admits_its_host_not_the_scheme():
