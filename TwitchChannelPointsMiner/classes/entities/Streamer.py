@@ -108,6 +108,24 @@ def is_drop_discovered(streamer):
 # it is reentrant because toggle_chat() calls leave_chat().
 _chat_lifecycle_lock = RLock()
 
+# One reentrant lock per channel, held across a stream-info refresh and the
+# online/offline change it leads to, and by the websocket's stream-down. The
+# main loop, the minute watcher and the websockets all refresh streamers, and
+# overlapping refreshes could apply their replies in another order than Twitch
+# answered them. Keyed by username, so a reloaded Streamer object for the same
+# channel shares it; module-level for the same reason as the chat lock.
+_streamer_state_locks = {}
+_streamer_state_locks_guard = Lock()
+
+
+def streamer_state_lock(username):
+    """Return the lock that serializes this channel's online state."""
+    with _streamer_state_locks_guard:
+        lock = _streamer_state_locks.get(username)
+        if lock is None:
+            lock = _streamer_state_locks[username] = RLock()
+        return lock
+
 
 class StreamerSettings(object):
     __slots__ = [

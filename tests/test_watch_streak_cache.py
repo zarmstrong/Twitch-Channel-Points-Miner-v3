@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -1440,30 +1441,6 @@ def test_failed_final_streak_only_check_is_retried(tmp_path, monkeypatch):
     assert calls == ["live", "live"]
 
 
-def test_an_older_stream_response_does_not_replace_a_newer_one():
-    # Two refreshes overlap around a restart: B's response is applied first,
-    # then A's, requested earlier, arrives late and must not put A back.
-    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
-
-    stream = Stream()
-    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
-    stream.update("broadcast-1", seen_live_at=1_999_999_000, **kwargs)
-    older = stream.begin_refresh()
-    newer = stream.begin_refresh()
-    # The older request's reply is slow: minutes, not seconds.
-    assert stream.update(
-        "broadcast-2", seen_live_at=2_000_000_600, refresh_seq=newer, **kwargs
-    )
-    assert (
-        stream.update(
-            "broadcast-1", seen_live_at=2_000_000_000, refresh_seq=older, **kwargs
-        )
-        is False
-    )
-
-    assert stream.live_snapshot() == ("broadcast-2", 2_000_000_600)
-
-
 def test_stream_refresh_still_applies_after_the_clock_steps_back():
     from TwitchChannelPointsMiner.classes.entities.Stream import Stream
 
@@ -1472,42 +1449,46 @@ def test_stream_refresh_still_applies_after_the_clock_steps_back():
     stream.update("broadcast-1", seen_live_at=2_000_003_600, **kwargs)
 
     # The wall clock was an hour fast and got corrected.
-    assert stream.update("broadcast-1", seen_live_at=2_000_000_000, **kwargs)
+    stream.update("broadcast-1", seen_live_at=2_000_000_000, **kwargs)
     assert stream.live_snapshot() == ("broadcast-1", 2_000_000_000)
 
 
-def test_slow_refresh_reply_does_not_undo_a_newer_refresh(monkeypatch):
-    # The first refresh's reply is slow; a second refresh starts and applies
-    # B meanwhile. The first reply, still showing A, must not put A back.
-    clock = [2_000_000_000.0]
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+def _held_by_another_thread(username):
+    """Whether another thread holds the channel's state lock right now."""
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        streamer_state_lock,
     )
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
-        lambda: clock[0],
-    )
+
+    lock = streamer_state_lock(username)
+    result = []
+
+    def probe():
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        result.append(acquired)
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join(timeout=5)
+    assert result, "probe thread did not finish"
+    return result[0] is False
+
+
+def test_refresh_holds_the_channel_state_lock_during_the_request(monkeypatch):
+    # Refreshes from the main loop, the minute watcher and the websockets
+    # must not overlap: overlapping replies could apply in another order
+    # than Twitch answered them.
     streamer = make_streamer("channel")
     streamer.settings.claim_drops = False
     twitch = Twitch.__new__(Twitch)
     twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
-    # The miner was watching A when the stream moved to B.
-    streamer.stream.update(
-        "broadcast-1", title="title", game={}, tags=[], viewers_count=1
-    )
-    clock[0] += 5 * 60
-    replies = []
+    held = []
 
     def get_stream_info(self, target):
-        replies.append(1)
-        if len(replies) == 1:
-            clock[0] += 5 * 60
-            twitch.update_stream(target)
-            broadcast_id = "broadcast-1"
-        else:
-            broadcast_id = "broadcast-2"
+        held.append(_held_by_another_thread("channel"))
         return {
-            "stream": {"id": broadcast_id, "tags": [], "viewersCount": 1},
+            "stream": {"id": "broadcast-1", "tags": [], "viewersCount": 1},
             "broadcastSettings": {"title": "title", "game": {}},
         }
 
@@ -1515,152 +1496,107 @@ def test_slow_refresh_reply_does_not_undo_a_newer_refresh(monkeypatch):
 
     twitch.update_stream(streamer)
 
-    assert streamer.stream.broadcast_id == "broadcast-2"
+    assert held == [True]
+    assert not _held_by_another_thread("channel")
 
 
-def test_older_request_that_reached_twitch_later_still_shows_the_new_broadcast(
-    monkeypatch,
-):
-    # The first request stalls before reaching Twitch. A second one returns
-    # A; the first then reaches Twitch after a restart and returns B, which
-    # is newer even though its request was made first.
+def test_missed_offline_transition_holds_the_channel_state_lock(tmp_path, monkeypatch):
+    # A websocket stream-down for B must not land between the refresh that
+    # found B and the synthetic offline/online pair, which would put the
+    # ended broadcast back online.
     clock = [2_000_000_000.0]
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    streamer, _ = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    twitch, _ = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-2", gap_seconds=60 * 60
     )
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
-        lambda: clock[0],
-    )
-    streamer = make_streamer("channel")
-    streamer.settings.claim_drops = False
-    twitch = Twitch.__new__(Twitch)
-    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
-    replies = []
+    held = []
+    set_online = Streamer.set_online
 
-    def get_stream_info(self, target):
-        replies.append(1)
-        if len(replies) == 1:
-            clock[0] += 5 * 60
-            twitch.update_stream(target)
-            broadcast_id = "broadcast-2"
-        else:
-            broadcast_id = "broadcast-1"
-        return {
-            "stream": {"id": broadcast_id, "tags": [], "viewersCount": 1},
-            "broadcastSettings": {"title": "title", "game": {}},
-        }
+    def recording_set_online(self, *args, **kwargs):
+        held.append(_held_by_another_thread("channel"))
+        return set_online(self, *args, **kwargs)
 
-    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
+    monkeypatch.setattr(Streamer, "set_online", recording_set_online)
 
-    twitch.update_stream(streamer)
+    twitch.check_streamer_online(streamer)
 
     assert streamer.stream.broadcast_id == "broadcast-2"
+    assert held == [True]
 
 
-def test_a_late_reply_does_not_bring_back_a_broadcast_already_left():
-    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
-
-    stream = Stream()
-    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
-    stream.update("broadcast-1", **kwargs)
-    older = stream.begin_refresh()
-    newer = stream.begin_refresh()
-    assert stream.update("broadcast-2", refresh_seq=newer, **kwargs)
-
-    assert stream.update("broadcast-1", refresh_seq=older, **kwargs) is False
-    assert stream.broadcast_id == "broadcast-2"
-
-
-def test_a_late_reply_with_an_older_unseen_broadcast_is_dropped():
-    # Neither broadcast was seen before (two first refreshes at startup):
-    # Twitch's increasing broadcast IDs order them.
-    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
-
-    stream = Stream()
-    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
-    older = stream.begin_refresh()
-    newer = stream.begin_refresh()
-    assert stream.update("315000000002", refresh_seq=newer, **kwargs)
-
-    assert stream.update("315000000001", refresh_seq=older, **kwargs) is False
-    assert stream.update("315000000003", refresh_seq=older, **kwargs)
-    assert stream.broadcast_id == "315000000003"
-
-
-def test_a_live_reply_older_than_an_accepted_offline_reply_is_dropped():
-    # The older request saw a short broadcast the miner never saw; a later
-    # request already showed the stream offline, so that broadcast is over.
-    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
-
-    stream = Stream()
-    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
-    older = stream.begin_refresh()
-    newer = stream.begin_refresh()
-    assert stream.accept_offline_reply(newer)
-
-    assert stream.update("broadcast-1", refresh_seq=older, **kwargs) is False
-    assert stream.broadcast_id is None
-
-
-def test_offline_reply_older_than_a_live_one_does_not_mark_the_stream_offline(
-    monkeypatch,
-):
-    # An earlier query saw the offline interval; its reply arrives after a
-    # second refresh showed broadcast B live and the streamer went online.
+def test_offline_reply_is_applied_under_the_channel_state_lock(monkeypatch):
+    # Another thread's refresh can't show the stream live between this
+    # thread's offline reply and its set_offline().
     from TwitchChannelPointsMiner.classes.Exceptions import (
         StreamerIsOfflineException,
     )
 
-    clock = [2_000_000_000.0]
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
-    )
-    monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
-        lambda: clock[0],
-    )
     streamer = make_streamer("channel")
-    streamer.settings.claim_drops = False
     streamer.is_online = True
     twitch = Twitch.__new__(Twitch)
+    held = []
+
+    def offline_update_stream(self, target):
+        raise StreamerIsOfflineException
+
+    set_offline = Streamer.set_offline
+
+    def recording_set_offline(self, *args, **kwargs):
+        held.append(_held_by_another_thread("channel"))
+        return set_offline(self, *args, **kwargs)
+
+    monkeypatch.setattr(Twitch, "update_stream", offline_update_stream)
+    monkeypatch.setattr(Streamer, "set_offline", recording_set_offline)
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.is_online is False
+    assert held == [True]
+
+
+def test_a_refresh_waits_for_another_threads_refresh_of_the_same_channel(
+    monkeypatch,
+):
+    # The first refresh is waiting on Twitch when a second thread starts
+    # one. The second must not send its request until the first is applied.
+    streamer = make_streamer("channel")
+    streamer.settings.claim_drops = False
+    twitch = Twitch.__new__(Twitch)
     twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
-    replies = []
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    requests_sent = []
 
     def get_stream_info(self, target):
-        replies.append(1)
-        if len(replies) == 1:
-            clock[0] += 5 * 60
-            twitch.update_stream(target)
-            raise StreamerIsOfflineException
+        requests_sent.append(threading.current_thread().name)
+        if threading.current_thread().name == "first":
+            first_inside.set()
+            assert release_first.wait(timeout=5)
         return {
-            "stream": {"id": "broadcast-2", "tags": [], "viewersCount": 1},
+            "stream": {"id": "broadcast-1", "tags": [], "viewersCount": 1},
             "broadcastSettings": {"title": "title", "game": {}},
         }
 
     monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
-
-    twitch.update_stream(streamer)
-
-    assert streamer.is_online is True
-    assert streamer.stream.broadcast_id == "broadcast-2"
-
-
-def test_an_offline_reply_still_raises_when_it_is_the_newest(monkeypatch):
-    from TwitchChannelPointsMiner.classes.Exceptions import (
-        StreamerIsOfflineException,
+    first = threading.Thread(
+        target=twitch.update_stream, args=(streamer,), name="first"
     )
+    second = threading.Thread(
+        target=twitch.update_stream, args=(streamer,), name="second"
+    )
+    first.start()
+    assert first_inside.wait(timeout=5)
+    second.start()
+    # The second thread is blocked on the lock, not inside the request.
+    assert _held_by_another_thread("channel")
+    assert requests_sent == ["first"]
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
 
-    streamer = make_streamer("channel")
-    twitch = Twitch.__new__(Twitch)
-
-    def get_stream_info(self, target):
-        raise StreamerIsOfflineException
-
-    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
-
-    with pytest.raises(StreamerIsOfflineException):
-        twitch.update_stream(streamer)
+    assert not first.is_alive() and not second.is_alive()
+    # The first reply was applied, so the second found nothing to refresh.
+    assert requests_sent == ["first"]
 
 
 def test_slow_check_of_the_old_broadcast_does_not_mark_the_new_one_checked(

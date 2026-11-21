@@ -13,7 +13,10 @@ from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoa
 from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPrediction
 from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
-from TwitchChannelPointsMiner.classes.entities.Streamer import is_drop_discovered
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    is_drop_discovered,
+    streamer_state_lock,
+)
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
@@ -399,8 +402,12 @@ class WebSocketsPool:
                         if message.type == "stream-up":
                             streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            if streamer.is_online is True:
-                                streamer.set_offline()
+                            # Waits for a refresh in progress on another
+                            # thread, which would otherwise put the ended
+                            # broadcast back online after this.
+                            with streamer_state_lock(streamer.username):
+                                if streamer.is_online is True:
+                                    streamer.set_offline()
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():
                                 ws.twitch.check_streamer_online(streamer)

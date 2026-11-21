@@ -111,6 +111,41 @@ def test_on_message_keeps_its_streamer_when_the_list_changes_mid_message(
     logger.error.assert_not_called()
 
 
+def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
+    # A refresh in progress on another thread would otherwise put the ended
+    # broadcast back online after the stream-down marked it offline.
+    import threading
+
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        streamer_state_lock,
+    )
+
+    target = FakeStreamer("lock-target", "2")
+    held = []
+
+    def probe():
+        acquired = streamer_state_lock("lock-target").acquire(blocking=False)
+        if acquired:
+            streamer_state_lock("lock-target").release()
+        held.append(not acquired)
+
+    def set_offline():
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(timeout=5)
+        target.calls.append("set_offline")
+
+    target.set_offline = set_offline
+
+    WebSocketsPool.on_message(
+        _websocket([target]),
+        _pubsub("video-playback-by-id", "2", {"type": "stream-down"}),
+    )
+
+    assert target.calls == ["set_offline"]
+    assert held == [True]
+
+
 GOAL = {
     "id": "goal-1",
     "title": "Goal",

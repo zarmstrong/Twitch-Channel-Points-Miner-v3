@@ -16,6 +16,7 @@ import string
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import choice, token_hex
@@ -59,6 +60,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_sources,
     is_category_tier,
     is_drop_discovered,
+    streamer_state_lock,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import (
     CategoryLookupFailedException,
@@ -1799,26 +1801,27 @@ class Twitch(object):
         self.update_client_version()
 
     # === STREAMER / STREAM / INFO === #
+    @staticmethod
+    def _streamer_state_lock(streamer):
+        """The lock that serializes this streamer's refreshes and online
+        state (see streamer_state_lock())."""
+        username = getattr(streamer, "username", None)
+        if username is None:
+            return nullcontext()
+        return streamer_state_lock(username)
+
     def update_stream(self, streamer):
+        with self._streamer_state_lock(streamer):
+            self._update_stream_locked(streamer)
+
+    def _update_stream_locked(self, streamer):
         if streamer.stream.update_required() is True:
             # The response proves the stream was live at some point after the
             # request went out, so the request time is a safe "seen live".
-            begin_refresh = getattr(streamer.stream, "begin_refresh", None)
-            refresh_seq = begin_refresh() if callable(begin_refresh) else None
             requested_at = time.time()
-            try:
-                stream_info = self.get_stream_info(streamer)
-            except StreamerIsOfflineException:
-                # Another thread's newer request may already have shown the
-                # stream live: this reply then describes the time before it
-                # went live and must not mark it offline.
-                accept_offline = getattr(streamer.stream, "accept_offline_reply", None)
-                if callable(accept_offline) and not accept_offline(refresh_seq):
-                    return
-                raise
+            stream_info = self.get_stream_info(streamer)
             if stream_info is not None:
                 streamer.stream.update(
-                    refresh_seq=refresh_seq,
                     seen_live_at=requested_at,
                     broadcast_id=stream_info["stream"]["id"],
                     title=stream_info["broadcastSettings"]["title"],
@@ -1933,6 +1936,13 @@ class Twitch(object):
         }
 
     def check_streamer_online(self, streamer):
+        # Held from the refresh through the online/offline change it leads to,
+        # so another thread's refresh or a websocket stream-down can't land in
+        # between and be undone by a decision made on older information.
+        with self._streamer_state_lock(streamer):
+            self._check_streamer_online_locked(streamer)
+
+    def _check_streamer_online_locked(self, streamer):
         if time.time() < streamer.offline_at + 60:
             return
 
