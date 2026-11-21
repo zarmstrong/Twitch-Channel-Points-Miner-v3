@@ -613,6 +613,9 @@ class Twitch(object):
         self.completed_badge_campaign_unsignable_warned_at = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
+        # A restart requested from the dashboard ends a TV login that is
+        # still waiting for the user to enter the activation code.
+        self.twitch_login.stop_event = self.restart_requested
         self.stream_segment_watchers = {}
         # channel_id -> (ChannelBanStatus or None while unknown, next check
         # time). Only the minute watcher reads and writes it.
@@ -1772,6 +1775,10 @@ class Twitch(object):
         )
         return saved
 
+    def __restart_pending(self):
+        restart_requested = getattr(self, "restart_requested", None)
+        return restart_requested is not None and restart_requested.is_set()
+
     def __client_id(self):
         """The client ID that issued the login token (TV, or Android when
         android_login is on); Twitch rejects a token sent with another."""
@@ -1781,6 +1788,9 @@ class Twitch(object):
         if not os.path.isfile(self.cookies_file):
             if self.twitch_login.login_flow():
                 self.twitch_login.save_cookies(self.cookies_file)
+            elif self.__restart_pending():
+                # The login was stopped for a restart; run() returns next.
+                return
             elif self.__client_id() == ANDROID_CLIENT_ID:
                 # Unlike the TV flow, nothing here can wait for the user:
                 # without a token every request would fail.

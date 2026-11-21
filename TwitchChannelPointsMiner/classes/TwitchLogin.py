@@ -140,6 +140,7 @@ class TwitchLogin(object):
         "user_id",
         "email",
         "cookies",
+        "stop_event",
     ]
 
     def __init__(self, client_id, device_id, username, user_agent):
@@ -160,6 +161,18 @@ class TwitchLogin(object):
         self.email = None
 
         self.cookies = []
+        # Set by Twitch to its restart_requested Event: a restart requested
+        # while the TV flow waits for the user ends the flow.
+        self.stop_event = None
+
+    def __stop_requested(self, timeout=0):
+        """Wait up to timeout seconds; True as soon as a restart is requested."""
+        stop_event = getattr(self, "stop_event", None)
+        if stop_event is None:
+            if timeout:
+                sleep(timeout)
+            return False
+        return stop_event.wait(timeout)
 
     def login_flow(self):
         if self.client_id == ANDROID_CLIENT_ID:
@@ -174,6 +187,9 @@ class TwitchLogin(object):
             ),
         }
         while True:
+            if self.__stop_requested():
+                logger.info("Stopping the TV login: the miner is restarting")
+                return False
             logger.info("Trying the TV login method..")
 
             login_response = self.send_oauth_request(
@@ -216,7 +232,9 @@ class TwitchLogin(object):
 
                 while True:
                     # sleep first, not like the user is gonna enter the code *that* fast
-                    sleep(interval)
+                    if self.__stop_requested(interval):
+                        logger.info("Stopping the TV login: the miner is restarting")
+                        return False
                     login_response = self.send_oauth_request(
                         "https://id.twitch.tv/oauth2/token", post_data
                     )
