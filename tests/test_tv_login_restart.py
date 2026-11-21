@@ -177,3 +177,41 @@ def test_tv_login_request_failing_without_a_restart_still_raises(monkeypatch):
 
     with pytest.raises(ConnectionError):
         login.login_flow()
+
+
+def _twitch_with_login(tmp_path, save_cookies):
+    twitch = Twitch.__new__(Twitch)
+    twitch.cookies_file = str(tmp_path / "missing-cookies.json")
+    twitch.restart_requested = threading.Event()
+    twitch.twitch_login = SimpleNamespace(
+        login_flow=lambda: True, save_cookies=save_cookies
+    )
+    return twitch
+
+
+def test_failed_cookie_save_after_a_restart_does_not_crash_the_login(
+    monkeypatch, tmp_path
+):
+    def save_cookies(path):
+        twitch.restart_requested.set()
+        raise PermissionError("read-only cookies folder")
+
+    twitch = _twitch_with_login(tmp_path, save_cookies)
+    refreshed = []
+    monkeypatch.setattr(
+        Twitch, "update_client_version", lambda self: refreshed.append(True)
+    )
+
+    twitch.login()
+
+    assert refreshed == []
+
+
+def test_failed_cookie_save_without_a_restart_still_raises(tmp_path):
+    def save_cookies(path):
+        raise PermissionError("read-only cookies folder")
+
+    twitch = _twitch_with_login(tmp_path, save_cookies)
+
+    with pytest.raises(PermissionError):
+        twitch.login()

@@ -1787,7 +1787,16 @@ class Twitch(object):
     def login(self):
         if not os.path.isfile(self.cookies_file):
             if self.twitch_login.login_flow():
-                self.twitch_login.save_cookies(self.cookies_file)
+                try:
+                    self.twitch_login.save_cookies(self.cookies_file)
+                except Exception:
+                    # A restart landing during the last request must not turn
+                    # a failed save into a crash; the runner restarts and the
+                    # next start logs in again.
+                    if not self.__restart_pending():
+                        raise
+                    logger.exception("Could not save the login before restarting")
+                    return
             elif self.__restart_pending():
                 # The login was stopped for a restart; run() returns next.
                 return
