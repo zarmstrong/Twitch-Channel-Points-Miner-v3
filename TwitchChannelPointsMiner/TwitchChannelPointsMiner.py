@@ -1438,9 +1438,9 @@ class TwitchChannelPointsMiner:
                 # One failed pass (e.g. a network error in the category refresh)
                 # must not end the main loop; log it and retry on the next pass.
                 try:
-                    # First: a claim it has sent again may be due seconds
-                    # before its campaign ends, and the report state's write
-                    # to disk and the checks below can take longer than that.
+                    # First: a repeat's window may have opened in its
+                    # campaign's last minutes, and the report state's write
+                    # to disk and the checks below can take that long.
                     next_category_refresh_at = self.__refresh_for_opened_reward_window(
                         next_category_refresh_at
                     )
@@ -1528,15 +1528,25 @@ class TwitchChannelPointsMiner:
         Returns True when a restart was requested meanwhile.
 
         The wait ends early once a reward campaign calls for the loop (see
-        __refresh_for_opened_reward_window), which can be for a claim to
-        send again seconds before its campaign ends, noted while this
-        waits.
+        __refresh_for_opened_reward_window): the window of a repeat has
+        opened, which can be noted while this waits. A call is noticed
+        within MAIN_LOOP_REWARD_CHECK_SECONDS.
 
-        A call is noticed within MAIN_LOOP_REWARD_CHECK_SECONDS. One due
-        closer to a campaign's end than that is not answered in time, nor
-        would the claim it asks for be sent by then."""
+        A refused claim is not among those calls. The claim thread sends it
+        again itself, when it is due, whatever this loop is busy with. Only
+        when no thread could be started for it does the loop come into it:
+        as often as it looks for a call it has one started (see
+        Twitch.start_unattended_watch_reward_claims)."""
         ends_at = time.monotonic() + random.uniform(20, 60)
         while True:
+            try:
+                self.twitch.start_unattended_watch_reward_claims()
+            except Exception:
+                # As for a failed pass: it must not end the main loop.
+                logger.error(
+                    "Error looking for a reward campaign claim to send again",
+                    exc_info=True,
+                )
             left = ends_at - time.monotonic()
             if left <= 0 or self.twitch.watch_reward_start_due():
                 return False
@@ -1550,13 +1560,12 @@ class TwitchChannelPointsMiner:
         the window of a reward campaign's repeat has opened since the last
         pass. The category was left when the repeat before was earned.
 
-        The moment can also be one to send a refused claim again. That is
-        done here, for every stored campaign: the refresh sends it only for
-        a campaign of a configured category, and with category refreshes
-        off there is none."""
+        No claim is sent for the moment: a refused one is sent again by the
+        claim thread (see Twitch.__retry_unaccepted_reward_claims). With
+        category refreshes off the moment is taken all the same, so that it
+        does not end every wait of the loop."""
         if self.twitch.take_opened_watch_reward_start() is not True:
             return next_category_refresh_at
-        self.twitch.claim_waiting_watch_rewards()
         if next_category_refresh_at is None:
             return None
         return min(next_category_refresh_at, time.time())
