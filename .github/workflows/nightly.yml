@@ -1,0 +1,307 @@
+name: Nightly build
+
+# Builds the newest commit on master once a day and publishes it on a
+# channel of its own: the Docker tag `nightly` and a rolling GitHub
+# prerelease, also tagged `nightly`, holding the portable Windows build.
+# Stable releases are untouched: Docker's `latest`, the Docker Hub
+# description and the release the miner's update check reports all still
+# come from release-please.yml.
+
+on:
+  schedule:
+    # 06:17 UTC. Off the hour, when scheduled runs start late least often.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the build. Leave off for a dry run that only builds.
+        type: boolean
+        default: false
+      force:
+        description: Publish even when master hasn't changed since the last nightly build.
+        type: boolean
+        default: false
+  # A dry run for pull requests that change the nightly build itself.
+  pull_request:
+    paths:
+      - .github/workflows/nightly.yml
+      - .github/scripts/nightly-plan.js
+      - .github/scripts/nightly-release.js
+      - .github/scripts/nightly_version.py
+
+permissions:
+  contents: read
+
+# One nightly build at a time, so two runs can't publish out of order. Pull
+# requests get a group each, where a newer push replaces the run before it.
+concurrency:
+  group: nightly-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'zacharmstrong' }}
+
+jobs:
+  plan:
+    name: Plan nightly build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      publish: ${{ steps.decide.outputs.publish }}
+      release_tag: ${{ steps.decide.outputs.release_tag }}
+      version: ${{ steps.version.outputs.version }}
+      date: ${{ steps.version.outputs.date }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Publishes only what the scheduled run, or a manual run that asks
+      # for it, builds from master, and only when the Tests run for that
+      # commit passed and something was merged since the last nightly build.
+      # Everything else is a dry run. See nightly-plan.js.
+      - name: Decide whether to build and publish
+        id: decide
+        uses: actions/github-script@v9
+        env:
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          FORCE_INPUT: ${{ inputs.force }}
+          HAS_DOCKER_CREDENTIALS: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_TOKEN != '' }}
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-plan.js');
+            await automation.planNightly({
+              github,
+              context,
+              core,
+              sha: context.sha,
+              publishRequested: process.env.PUBLISH_INPUT === 'true',
+              force: process.env.FORCE_INPUT === 'true',
+              hasDockerCredentials: process.env.HAS_DOCKER_CREDENTIALS === 'true',
+            });
+
+      - name: Compute nightly version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          date=$(date -u +%Y%m%d)
+          version=$(python3 .github/scripts/nightly_version.py compute --date "${date}" --sha "${GITHUB_SHA}")
+          echo "Nightly version: ${version}"
+          echo "date=${date}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build_windows:
+    name: Build portable Windows executable
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Stamp nightly version
+        shell: pwsh
+        env:
+          NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python .github/scripts/nightly_version.py stamp $env:NIGHTLY_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Portable only. The installer shares its AppId with the stable
+      # release, so a nightly installer would replace a stable install.
+      - name: Build and smoke-test executable
+        uses: ./.github/actions/build-windows-exe
+        with:
+          flavor: portable
+
+      # The same file name every night, so a link to the download keeps
+      # working. The version is inside the build, not in the name.
+      - name: Package executable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/TwitchChannelPointsMiner-Portable.exe" -DestinationPath "dist/TwitchChannelPointsMiner-Portable-nightly.zip" -Force
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-windows-portable
+          path: dist/TwitchChannelPointsMiner-Portable-nightly.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # First publishing step: records in the nightly release which run is
+  # publishing which commit, before anything is pushed. See nightly-release.js.
+  begin_publish:
+    name: Start publishing
+    needs: [plan, build_windows]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout nightly automation
+        uses: actions/checkout@v7
+        with:
+          # Without cone mode, only this directory is checked out.
+          sparse-checkout: /.github/scripts/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Record the build being published
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.beginPublishing({ github, context, core, sha: context.sha });
+
+  # Waits for the Windows build, so Docker's nightly tag never moves on a
+  # night the Windows build failed. A dry run has no begin_publish to wait
+  # for; a publishing run needs it to have succeeded.
+  docker:
+    name: Build Docker image
+    needs: [plan, build_windows, begin_publish]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.plan.outputs.build == 'true' &&
+        needs.build_windows.result == 'success' &&
+        (needs.begin_publish.result == 'success' ||
+          (needs.plan.outputs.publish != 'true' && needs.begin_publish.result == 'skipped'))
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Stamp nightly version
+        env:
+          NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 .github/scripts/nightly_version.py stamp "${NIGHTLY_VERSION}"
+
+      # Only the published image is built for ARM64, which needs emulation.
+      - name: Set up QEMU
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        if: needs.plan.outputs.publish == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # Only the nightly tag: never latest, and no tag per night to pile up.
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner
+            ${{ env.DOCKERHUB_NAMESPACE }}/twitch-channel-points-miner-v2
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=nightly
+          labels: |
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+
+      # "Re-run failed jobs" on an earlier night's run re-runs neither the
+      # plan nor begin_publish. Only the run the release records may push.
+      - name: Check this run is still the one publishing
+        if: needs.plan.outputs.publish == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.assertPublishing({ github, context, core, sha: context.sha });
+
+      # A dry run builds AMD64 only and pushes nothing.
+      - name: Build Docker image
+        id: docker_build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ needs.plan.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ needs.plan.outputs.publish == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          cache-from: type=gha
+          cache-to: ${{ needs.plan.outputs.publish == 'true' && 'type=gha,mode=max' || '' }}
+
+  # Last publishing step. One release, updated in place, so watchers aren't
+  # notified every night. It is always a prerelease: GitHub never reports
+  # one as the latest release, which is what the miner's update check reads,
+  # and the release automation skips prereleases.
+  publish_release:
+    name: Update nightly prerelease
+    needs: [plan, docker]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.docker.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout nightly automation
+        uses: actions/checkout@v7
+        with:
+          # Without cone mode, only this directory is checked out.
+          sparse-checkout: /.github/scripts/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Check this run is still the one publishing
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.assertPublishing({ github, context, core, sha: context.sha });
+
+      - name: Download portable zip
+        uses: actions/download-artifact@v8
+        with:
+          name: nightly-windows-portable
+          path: dist
+
+      # --clobber removes the old file before it uploads the new one. If
+      # the upload fails, the release keeps its "being published" note, so
+      # the next run publishes again.
+      - name: Replace the Windows download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload nightly dist/TwitchChannelPointsMiner-Portable-nightly.zip \
+            --clobber --repo "${GITHUB_REPOSITORY}"
+
+      # Moves the nightly tag, then replaces the notes, which removes the
+      # "being published" note.
+      - name: Finish publishing
+        uses: actions/github-script@v9
+        env:
+          NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
+          BUILD_DATE: ${{ needs.plan.outputs.date }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.finishPublishing({
+              github,
+              context,
+              core,
+              sha: context.sha,
+              version: process.env.NIGHTLY_VERSION,
+              date: process.env.BUILD_DATE,
+              releaseTag: process.env.RELEASE_TAG,
+              image: `${process.env.DOCKERHUB_NAMESPACE}/twitch-channel-points-miner`,
+            });

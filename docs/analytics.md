@@ -27,7 +27,7 @@ and HTTPS guidance described below.
 
 | Light theme | Dark theme |
 | ----------- | ---------- |
-| ![Light theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-light.png) | ![Dark theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-dark.png) |
+| ![Light theme](../assets/chart-analytics-light.png) | ![Dark theme](../assets/chart-analytics-dark.png) |
 
 Enable storage with `MINER_CONFIG["enable_analytics"] = True` and configure the
 server through `ANALYTICS_CONFIG`. The chart refreshes every `refresh` minutes.
