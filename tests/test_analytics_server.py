@@ -405,6 +405,9 @@ def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_aut
         ("192.0.2.10", "192.0.2.10"),
         ("2001:db8:0:0:0:0:0:1", "2001:db8::1"),
         ("https://münchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://faß.example/", "xn--fa-hia.example"),
+        ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://%6Diner.example.com/", "miner.example.com"),
     ],
 )
 def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
@@ -420,6 +423,8 @@ def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
         ("2001:db8::1", "[2001:db8:0:0:0:0:0:1]"),
         ("::ffff:192.0.2.10", "[::ffff:c000:20a]"),
         ("https://münchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://%6Diner.example.com/", "miner.example.com"),
     ],
 )
 def test_allowed_hosts_entry_admits_the_host_a_client_sends(entry, host_header):
@@ -434,6 +439,20 @@ def test_allowed_hosts_entry_admits_the_host_a_client_sends(entry, host_header):
     response = client.get("/__host_guard_probe__", headers={"Host": host_header})
 
     assert response.status_code == 404
+
+
+def test_allowed_hosts_entry_does_not_admit_the_idna_2003_spelling():
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=["faß.example"],
+    )
+    client = server.app.test_client()
+
+    response = client.get("/__host_guard_probe__", headers={"Host": "fass.example"})
+
+    assert response.status_code == 403
 
 
 def test_allowed_hosts_warning_does_not_log_the_entry(caplog):

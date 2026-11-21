@@ -5,10 +5,11 @@ import logging
 import os
 import secrets
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread, Timer
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from flask import Flask, Response, cli, g, render_template, request
 
@@ -176,10 +177,21 @@ def _canonical_hostname(hostname):
         return str(ipaddress.ip_address(hostname))
     except ValueError:
         pass
-    try:
-        return hostname.encode("idna").decode("ascii").lower()
-    except UnicodeError:
+    if hostname.isascii():
         return hostname
+    # Punycode each non-ASCII label as browsers do (UTS 46, non-transitional),
+    # not with the stdlib "idna" codec, which folds "ß" into "ss" and would
+    # allow a different domain.
+    labels = []
+    for label in unicodedata.normalize("NFC", hostname).split("."):
+        if label.isascii():
+            labels.append(label)
+            continue
+        try:
+            labels.append("xn--" + label.encode("punycode").decode("ascii"))
+        except UnicodeError:
+            return hostname
+    return ".".join(labels)
 
 
 def _request_hostname(host_header):
@@ -199,7 +211,8 @@ def _allowed_hostname(entry):
     entry = str(entry).strip()
     if "://" in entry:
         try:
-            return _canonical_hostname(urlsplit(entry).hostname)
+            # Clients percent-decode the host of a URL.
+            return _canonical_hostname(unquote(urlsplit(entry).hostname or ""))
         except ValueError:
             return ""
     try:
