@@ -618,7 +618,7 @@ class HistoryRecorder(threading.Thread):
             return float(timestamp) < math.floor(cutoff) + 1
         return float(timestamp) < cutoff
 
-    def _retention_cutoff(self, now):
+    def _retention_cutoff(self, now, window=True):
         """Return the time before which cached data must not be imported.
 
         That is the current retention window, or the oldest data an earlier,
@@ -631,7 +631,7 @@ class HistoryRecorder(threading.Thread):
             days = float(self.retention_days or 0)
         except (TypeError, ValueError):
             days = 0
-        if days > 0:
+        if window and days > 0:
             cutoffs.append(float(now) - (days * 24 * 60 * 60))
         if self._retention_watermark is not None:
             cutoffs.append(self._retention_watermark)
@@ -872,6 +872,8 @@ class HistoryRecorder(threading.Thread):
 
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
+        # Watched again, so an earlier close that failed no longer applies.
+        active.pop("closing_at", None)
         delta = max(0.0, float(now) - float(active["last_tick"]))
         delta = min(delta, MAX_WATCH_TICK_SECONDS)
         if delta > 0:
@@ -887,6 +889,10 @@ class HistoryRecorder(threading.Thread):
         active = self._active_watch.get(streamer)
         if active is None:
             return
+        if active.get("closing_at") is not None:
+            # An earlier close failed after crediting the watch up to its end;
+            # retrying with a later time would credit time not watched.
+            ended_at = min(float(ended_at), active["closing_at"])
         if credit and float(ended_at) > float(active["last_tick"]):
             # The watch lasted until the snapshot that ended it was written;
             # count that final interval too.
@@ -895,6 +901,7 @@ class HistoryRecorder(threading.Thread):
                 return
         # Forget the session only once it is closed, so a failed write is
         # retried on the next poll instead of leaving it open in the database.
+        active["closing_at"] = float(ended_at)
         self.store.end_watch_session(active["id"], ended_at=ended_at)
         self._active_watch.pop(streamer, None)
 
@@ -1146,7 +1153,7 @@ class HistoryRecorder(threading.Thread):
             # This process already ended the broadcast; an open cache entry
             # must not reopen it, or recreate it once retention pruned it.
             ended_at = max(started_at, self._online_ended[key])
-        cutoff = self._retention_cutoff(now)
+        cutoff = self._retention_cutoff(now, window=not self._maybe_live(item))
         if cutoff is not None and ended_at is not None and ended_at < cutoff:
             # Retention already pruned this row (or will); importing it again
             # would count it a second time in the permanent daily rollups.
@@ -1168,6 +1175,18 @@ class HistoryRecorder(threading.Thread):
             # reports the broadcast as online.
             self._online_live_keys.discard(key)
 
+    def _maybe_live(self, item):
+        """True for a cache entry whose broadcast may still be live.
+
+        Such an entry is imported even when it is older than the retention
+        window: the live snapshot may reopen it, and retention keeps a live
+        stream's rows.  Only data older than the watermark, which an earlier
+        pass may already have pruned and counted, is skipped.
+        """
+
+        key = (item["streamer"], item["broadcast_id"])
+        return item["ended_at"] is None and key not in self._online_ended
+
     def _record_cached_streak(self, item, now):
         if not item.get("claimed") or item.get("claimed_at") is None:
             return
@@ -1177,7 +1196,7 @@ class HistoryRecorder(threading.Thread):
             return
         if self._deleted_since(item["streamer"], claimed_at):
             return
-        cutoff = self._retention_cutoff(now)
+        cutoff = self._retention_cutoff(now, window=not self._maybe_live(item))
         if cutoff is not None and claimed_at < cutoff:
             # See _store_cached_session: the pruned event must not be counted
             # again in the rollups.
@@ -1366,11 +1385,11 @@ class HistoryRecorder(threading.Thread):
 
     def _ingest_series(self, streamer, entries, source, stat, state):
         pending, consumed, last_x, rewound = _pending_entries(entries, state)
-        # An older copy of the file put back does not continue the last
-        # imported balance; its entries are already recorded.
-        last_balance = state.get("last_balance") if state and not rewound else None
+        pending = self._unimported(pending, state, rewound)
+        last_balance = state.get("last_balance") if state else None
         if last_balance is None and pending:
             last_balance = self._baseline_balance(streamer, pending[0][0] / 1000.0)
+        pruned_before = self._pruned_before(state)
 
         rows = []
         for x, occurrence, entry in pending:
@@ -1388,8 +1407,12 @@ class HistoryRecorder(threading.Thread):
             delta = balance - int(last_balance)
             # Entries from before a delete still move the running balance, so
             # the first change after the delete gets the right delta.
-            if delta != 0 and not self._deleted_since(
-                streamer, x / 1000.0, whole_seconds=True
+            # Changes older than the retention watermark may have been pruned
+            # already and are counted in the kept rollups.
+            if (
+                delta != 0
+                and not self._deleted_since(streamer, x / 1000.0, whole_seconds=True)
+                and (pruned_before is None or x / 1000.0 >= pruned_before)
             ):
                 rows.append(
                     (
@@ -1418,6 +1441,31 @@ class HistoryRecorder(threading.Thread):
             points=rows,
         )
 
+    def _pruned_before(self, state):
+        """Return the time before which a file's entries may be pruned rows.
+
+        Only a file imported before can hold them; a file never imported
+        (a newly tracked streamer's) was never counted in the rollups.
+        """
+
+        if state is None:
+            return None
+        return self._retention_cutoff(self.clock(), window=False)
+
+    @staticmethod
+    def _unimported(pending, state, rewound):
+        """Drop entries of an older copy of a file that were imported before.
+
+        The older copy's entries are already recorded (or pruned and counted
+        in the rollups), and they must not move the running balance back:
+        the next entry the miner appends continues from the newest balance.
+        """
+
+        if not rewound:
+            return pending
+        last_x = state.get("last_x")
+        return [item for item in pending if item[0] > last_x]
+
     def _baseline_balance(self, streamer, first_timestamp):
         """Use the stored balance only when it predates the import window."""
 
@@ -1429,10 +1477,15 @@ class HistoryRecorder(threading.Thread):
         return None
 
     def _ingest_annotations(self, streamer, entries, source, stat, state):
-        pending, consumed, last_x, _rewound = _pending_entries(entries, state)
+        pending, consumed, last_x, rewound = _pending_entries(entries, state)
+        pending = self._unimported(pending, state, rewound)
+        pruned_before = self._pruned_before(state)
         rows = []
         for x, occurrence, entry in pending:
             if self._deleted_since(streamer, x / 1000.0, whole_seconds=True):
+                continue
+            if pruned_before is not None and x / 1000.0 < pruned_before:
+                # See _ingest_series: possibly pruned and counted already.
                 continue
             label = ""
             event_type = "points"

@@ -2729,3 +2729,139 @@ def test_older_copy_of_an_analytics_file_adds_no_spend(recorder):
     window = recorder.store.overview(days=1, now=recorder.clock.value)["window"]
     assert window["points_gained"] == 100
     assert window["points_spent"] == 0
+
+
+def test_retried_watch_close_keeps_the_first_end(recorder, monkeypatch):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 1
+    recorder._poll_now_watching()
+    original = recorder.store.end_watch_session
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "end_watch_session", locked)
+    _write_json(path, [], NOW + 61)
+    clock.value = NOW + 61
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._poll_now_watching()
+
+    monkeypatch.setattr(recorder.store, "end_watch_session", original)
+    _write_json(path, [], NOW + 91)
+    clock.value = NOW + 91
+    recorder._poll_now_watching()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+        "sessions"
+    ][0]
+    assert session["watch_seconds"] == 60
+    assert session["ended_at"] == NOW + 61
+
+
+def test_change_after_an_older_copy_continues_the_newest_balance(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+        {"x": int((NOW + 120) * 1000), "y": 1100, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 121)
+    recorder.clock.value = NOW + 130
+    recorder.poll_once()
+
+    restored = series[:2]
+    _write_json(path, {"series": restored, "annotations": []}, NOW + 140)
+    recorder.clock.value = NOW + 150
+    recorder.poll_once()
+    restored.append({"x": int((NOW + 180) * 1000), "y": 1150, "z": "Watch"})
+    _write_json(path, {"series": restored, "annotations": []}, NOW + 181)
+    recorder.clock.value = NOW + 190
+    recorder.poll_once()
+
+    window = recorder.store.overview(days=1, now=recorder.clock.value)["window"]
+    assert window["points_gained"] == 150
+    assert window["points_spent"] == 0
+
+
+def test_older_copy_after_retention_does_not_recount_pruned_points(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    old = NOW - 3 * 24 * 60 * 60
+    series = [
+        {"x": int(old * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((old + 60) * 1000), "y": 1050, "z": "Watch"},
+        {"x": int((old + 120) * 1000), "y": 1100, "z": "Watch"},
+    ]
+    path = analytics / "bob.json"
+    _write_json(path, {"series": series, "annotations": []}, old + 121)
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        retention_days=1,
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        daily = store.daily(days=3650, now=clock.value)
+        assert sum(row["points_gained"] for row in daily) == 100
+
+        _write_json(path, {"series": series[:2], "annotations": []}, NOW + 10)
+        clock.value = NOW + 20
+        recorder.poll_once()
+
+        daily = store.daily(days=3650, now=clock.value)
+        assert sum(row["points_gained"] for row in daily) == 100
+    finally:
+        recorder._shutdown()
+
+
+def test_startup_keeps_the_claim_of_a_broadcast_live_past_retention(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    started = NOW - 2 * 24 * 60 * 60
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": started,
+                "claimed": True,
+                "claimed_at": started + 60,
+            }
+        ),
+        NOW - 10,
+    )
+    store = HistoryStore(analytics / "history.sqlite3")
+    snapshot = [
+        # The miner started recently, so online_at is when it saw bob online.
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW - 60}
+    ]
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        retention_days=1,
+        online_streamers=lambda: [dict(item, is_online=True) for item in snapshot],
+    )
+    recorder._prepare()
+    try:
+        clock.value = NOW + 30
+        recorder.poll_once()
+
+        item = store.streamers(days=1, now=clock.value)[0]
+        assert item["live_stream"]["broadcast_id"] == "b1"
+        assert item["live_streak_at"] == started + 60
+    finally:
+        recorder._shutdown()
