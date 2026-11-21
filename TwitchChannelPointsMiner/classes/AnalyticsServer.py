@@ -6,7 +6,6 @@ import os
 import re
 import secrets
 import time
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread, Timer
@@ -164,9 +163,6 @@ def _secret_matches(supplied, expected):
     )
 
 
-_IDNA_IGNORED_RE = re.compile(
-    "[\u00ad\u034f\u180b-\u180d\u200b\u2060\ufe00-\ufe0f\ufeff]"
-)
 _IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}\.?")
 _HOSTNAME_RE = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?\.?")
 
@@ -227,8 +223,9 @@ def _canonical_hostname(hostname):
         except (ImportError, UnicodeError):
             # idna.IDNAError is a UnicodeError. Without the package (requests
             # depends on it, so it is normally there) or for a name it
-            # refuses, use an approximation of the same mapping.
-            hostname = _approximate_uts46(hostname)
+            # refuses, give up: an approximate mapping could admit a
+            # different domain than the one configured.
+            return ""
     try:
         return str(ipaddress.ip_address(hostname))
     except ValueError:
@@ -237,24 +234,6 @@ def _canonical_hostname(hostname):
         # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address.
         return _parse_ipv4_numbers(hostname) or hostname
     return hostname
-
-
-def _approximate_uts46(hostname):
-    """Fold, strip and Punycode a non-ASCII name without the idna package."""
-    hostname = unicodedata.normalize("NFKC", hostname).lower()
-    for stop in "\u3002\uff0e\uff61":
-        hostname = hostname.replace(stop, ".")
-    hostname = _IDNA_IGNORED_RE.sub("", hostname)
-    labels = []
-    for label in unicodedata.normalize("NFC", hostname).split("."):
-        if label.isascii():
-            labels.append(label)
-            continue
-        try:
-            labels.append("xn--" + label.encode("punycode").decode("ascii"))
-        except UnicodeError:
-            return hostname
-    return ".".join(labels)
 
 
 def _request_hostname(host_header):
