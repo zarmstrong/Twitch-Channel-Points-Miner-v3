@@ -678,6 +678,15 @@ def delete_streamer_analytics(streamer):
         logger.warning("Unable to load the optional History module", exc_info=True)
         delete_streamer_history = None
     if delete_streamer_history is None:
+        if os.path.isfile(os.path.join(Settings.analytics_path, "history.sqlite3")):
+            # History exists but cannot be cleared here; keep the JSON too.
+            return Response(
+                json.dumps(
+                    {"error": "Unable to delete streamer history. Try again shortly."}
+                ),
+                status=503,
+                mimetype="application/json",
+            )
         with ANALYTICS_FILE_MUTEX:
             remove_file()
     else:

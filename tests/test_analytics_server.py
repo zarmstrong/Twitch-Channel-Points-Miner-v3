@@ -1444,3 +1444,28 @@ def test_history_ignores_only_streamers_tracked_just_for_drops(monkeypatch):
     assert started["streamers_ready"]() is False
     miner.daily_report_balances_loaded = True
     assert started["streamers_ready"]() is True
+
+
+def test_analytics_delete_keeps_the_file_when_history_cannot_load(
+    monkeypatch, tmp_path
+):
+    import sys
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "alice.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "history.sqlite3").write_bytes(b"")
+    # The History package cannot be imported (for example, no sqlite3).
+    monkeypatch.setitem(sys.modules, "TwitchChannelPointsMiner.history", None)
+
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 503
+    assert (tmp_path / "alice.json").exists()
+
+    (tmp_path / "history.sqlite3").unlink()
+    response = server_module.delete_streamer_analytics("alice")
+    assert response.status_code == 204
+    assert not (tmp_path / "alice.json").exists()

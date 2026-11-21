@@ -2292,3 +2292,99 @@ def test_watch_started_before_its_broadcast_row_is_linked_later(tmp_path):
         assert watch["broadcast_id"] == "b1"
     finally:
         recorder._shutdown()
+
+
+def test_shutdown_credits_the_last_snapshot(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 20)
+    clock.value = NOW + 30
+    recorder.poll_once()
+    # The miner refreshes the snapshot, then stops before the next poll.
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 35)
+    clock.value = NOW + 36
+    recorder._shutdown()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+        "sessions"
+    ][0]
+    assert session["watch_seconds"] >= 15
+    assert session["active"] is False
+
+
+def test_removed_streamer_keeps_what_it_earned_before(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    path = analytics / "bob.json"
+    series = [
+        {"x": int(NOW * 1000), "y": 1000},
+        {"x": int((NOW + 10) * 1000), "y": 1050},
+    ]
+    _write_json(path, {"series": series}, NOW + 11)
+    snapshot = [{"username": "bob"}]
+    clock = FakeClock(NOW + 20)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        series.append({"x": int((NOW + 30) * 1000), "y": 1060})
+        _write_json(path, {"series": series}, NOW + 31)
+        snapshot.clear()  # removed from the config before the next poll
+        clock.value = NOW + 35
+        recorder.poll_once()
+
+        assert store.overview(days=1, now=clock.value)["window"]["points_gained"] == 60
+    finally:
+        recorder._shutdown()
+
+
+def test_backfill_imports_cached_broadcasts_without_a_cache_change(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": NOW,
+                "ended_at": NOW + 600,
+            }
+        ),
+        NOW + 600,
+    )
+    _write_json(
+        analytics / "bob.json",
+        {
+            "series": [
+                {"x": int(NOW * 1000), "y": 1},
+                {"x": int((NOW + 5) * 1000), "y": 2},
+            ]
+        },
+        NOW + 10,
+    )
+    clock = FakeClock(NOW + 700)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        streams = store.sessions(kind="stream", days=1, now=clock.value)["sessions"]
+        assert [item["broadcast_id"] for item in streams] == ["b1"]
+    finally:
+        recorder._shutdown()

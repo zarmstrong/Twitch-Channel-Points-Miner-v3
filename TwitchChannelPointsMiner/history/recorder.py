@@ -447,6 +447,14 @@ class HistoryRecorder(threading.Thread):
 
     def _shutdown(self):
         now = self.clock()
+        if self._run_id is not None:
+            try:
+                # Take in the miner's last snapshot, which confirms the
+                # watches up to when it was written.
+                with self._lock:
+                    self._poll_now_watching(now)
+            except Exception:
+                logger.debug("Unable to read the last watch snapshot", exc_info=True)
         for streamer in list(self._active_watch):
             try:
                 self._close_watch(streamer, self._active_watch[streamer]["last_tick"])
@@ -1231,10 +1239,15 @@ class HistoryRecorder(threading.Thread):
             # belong to a configured streamer's history.
             return True
         configured = None if force else self._configured_streamers()
-        if configured is not None and streamer not in configured:
-            # Leftover JSON from a channel the miner no longer tracks, for
-            # example one farmed for Drops before History was enabled, would
-            # otherwise be imported as a configured streamer's history.
+        if (
+            configured is not None
+            and streamer not in configured
+            and streamer not in self._tracked_streamers
+        ):
+            # Leftover JSON from a channel History never tracked, for example
+            # one farmed for Drops before History was enabled, would otherwise
+            # be imported as a configured streamer's history.  A streamer
+            # removed from the config keeps importing what it earned before.
             return True
         try:
             stat = os.stat(path)
@@ -1261,7 +1274,11 @@ class HistoryRecorder(threading.Thread):
             return False
         if not isinstance(payload, dict):
             return False
-        self._tracked_streamers.add(streamer)
+        if streamer not in self._tracked_streamers:
+            self._tracked_streamers.add(streamer)
+            # The cache was read before this streamer was tracked; import its
+            # cached broadcasts now instead of waiting for the cache to change.
+            self._import_cached_sessions(streamer, self.clock())
 
         if not series_fresh:
             self._ingest_series(
