@@ -184,6 +184,17 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ needs.plan.outputs.version }}
 
+      # "Re-run failed jobs" on an earlier night's run keeps that run's plan,
+      # so its check for a newer nightly build doesn't run again. Check here,
+      # right before publishing.
+      - name: Check no newer nightly build was published
+        if: needs.plan.outputs.publish == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-plan.js');
+            await automation.assertNotSuperseded({ github, context, core, sha: context.sha });
+
       # A dry run builds AMD64 only and pushes nothing.
       - name: Build Docker image
         id: docker_build
@@ -205,6 +216,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout nightly automation
+        uses: actions/checkout@v7
+        with:
+          # Without cone mode, only this directory is checked out.
+          sparse-checkout: /.github/scripts/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # "Re-run failed jobs" on an earlier night's run keeps that run's plan,
+      # so its check for a newer nightly build doesn't run again. Check here,
+      # right before publishing.
+      - name: Check no newer nightly build was published
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-plan.js');
+            await automation.assertNotSuperseded({ github, context, core, sha: context.sha });
+
       - name: Download portable zip
         uses: actions/download-artifact@v8
         with:
@@ -214,8 +243,10 @@ jobs:
       # One release, updated in place, so watchers aren't notified every
       # night. It is always a prerelease: GitHub never reports one as the
       # latest release, which is what the miner's update check reads, and
-      # the release automation skips prereleases. The tag moves last, so a
-      # run that fails part-way is built again the next night.
+      # the release automation skips prereleases. The tag moves last. A run
+      # that fails before that, or leaves the release without its file, is
+      # built again the next night: the plan skips a commit only when the
+      # tag is on it and the release has the file.
       - name: Update the nightly prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -255,14 +286,22 @@ jobs:
             echo '```'
           } > "${notes_file}"
 
-          if gh release view nightly --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload nightly "${ZIP_PATH}" --clobber --repo "${GITHUB_REPOSITORY}"
-            gh release edit nightly --repo "${GITHUB_REPOSITORY}" \
-              --title "${title}" --notes-file "${notes_file}" --prerelease --latest=false
-          else
-            gh release create nightly "${ZIP_PATH}" --repo "${GITHUB_REPOSITORY}" \
+          # Created without the file, so it is published at once. Created
+          # with one, gh makes a draft first, and a run that died then would
+          # leave a draft behind.
+          if ! gh release view nightly --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create nightly --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" --title "${title}" --notes-file "${notes_file}" \
               --prerelease --latest=false
           fi
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" \
-            -f sha="${GITHUB_SHA}" -F force=true --silent
+          gh release upload nightly "${ZIP_PATH}" --clobber --repo "${GITHUB_REPOSITORY}"
+          # --draft=false also publishes a draft that an earlier run left.
+          gh release edit nightly --repo "${GITHUB_REPOSITORY}" \
+            --title "${title}" --notes-file "${notes_file}" \
+            --draft=false --prerelease --latest=false
+          # Move the tag, or create it when the release had lost it.
+          if ! gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" \
+            -f sha="${GITHUB_SHA}" -F force=true --silent; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/nightly" -f sha="${GITHUB_SHA}" --silent
+          fi

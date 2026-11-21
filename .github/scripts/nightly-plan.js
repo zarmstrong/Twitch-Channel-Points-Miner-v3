@@ -6,6 +6,8 @@
 
 const PUBLISH_REF = 'refs/heads/master';
 const NIGHTLY_TAG = 'nightly';
+// The file nightly.yml uploads to the nightly release.
+const NIGHTLY_ASSET = 'TwitchChannelPointsMiner-Portable-nightly.zip';
 const TESTS_WORKFLOW = 'tests.yml';
 
 // The commit a tag points to, or null when the tag doesn't exist.
@@ -16,6 +18,22 @@ async function tagCommit(github, owner, repo, tag) {
   } catch (error) {
     // 422 is how the API answers for a ref that doesn't resolve to a commit.
     if (error.status === 404 || error.status === 422) return null;
+    throw error;
+  }
+}
+
+// True when the nightly release is published and has its download. The tag
+// alone can't tell: a run that failed while replacing the file leaves the
+// tag on its commit with nothing to download.
+async function nightlyReleaseComplete(github, owner, repo) {
+  try {
+    // Drafts are not found by tag, so a half-created release counts as missing.
+    const { data } = await github.rest.repos.getReleaseByTag({ owner, repo, tag: NIGHTLY_TAG });
+    return (data.assets || []).some(
+      (asset) => asset.name === NIGHTLY_ASSET && asset.state === 'uploaded',
+    );
+  } catch (error) {
+    if (error.status === 404) return false;
     throw error;
   }
 }
@@ -49,6 +67,11 @@ async function contains(github, owner, repo, head, sha) {
     owner, repo, basehead: `${sha}...${head}`, per_page: 1, page: 1,
   });
   return data.status === 'ahead' || data.status === 'identical';
+}
+
+// True when the nightly build at `nightly` already contains `sha` and more.
+async function isOlderThan(github, owner, repo, sha, nightly) {
+  return Boolean(nightly) && nightly !== sha && (await contains(github, owner, repo, nightly, sha));
 }
 
 // Whether this run publishes, and why not when it doesn't.
@@ -94,10 +117,10 @@ async function planNightly({
       build = false;
       reason = `Skipped: the Tests run for ${sha} is ${tests}, not success.`;
       core.warning(reason);
-    } else if (nightly === sha && !force) {
+    } else if (nightly === sha && !force && (await nightlyReleaseComplete(github, owner, repo))) {
       build = false;
       reason = `Skipped: the last nightly build was already made from ${sha}.`;
-    } else if (nightly && nightly !== sha && (await contains(github, owner, repo, nightly, sha))) {
+    } else if (await isOlderThan(github, owner, repo, sha, nightly)) {
       // A re-run of an earlier night's run must not move nightly backwards.
       build = false;
       reason = `Skipped: the last nightly build (${nightly}) is newer than ${sha}.`;
@@ -116,7 +139,24 @@ async function planNightly({
   return { build, publish: build && publish, reason, releaseTag };
 }
 
+// Run by each job that publishes, just before it does. The plan's answer
+// can be stale by then: "Re-run failed jobs" on an earlier night's run keeps
+// the plan job's outputs, so the plan's own check doesn't run again.
+async function assertNotSuperseded({ github, context, core, sha }) {
+  const { owner, repo } = context.repo;
+  const nightly = await tagCommit(github, owner, repo, NIGHTLY_TAG);
+  if (await isOlderThan(github, owner, repo, sha, nightly)) {
+    core.setFailed(
+      `The nightly build is already at ${nightly}, which is newer than ${sha}. ` +
+      'This run is out of date and publishes nothing.',
+    );
+    return false;
+  }
+  return true;
+}
+
 module.exports = {
+  assertNotSuperseded,
   planNightly,
   publishDecision,
 };
