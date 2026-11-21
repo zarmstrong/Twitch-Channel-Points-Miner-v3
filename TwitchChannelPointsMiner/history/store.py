@@ -913,6 +913,15 @@ class HistoryStore(object):
             )
             return cursor.rowcount > 0
 
+    def open_streams(self):
+        """Return ``(streamer, broadcast_id)`` of every broadcast still open."""
+
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                "SELECT streamer, broadcast_id FROM streams WHERE ended_at IS NULL"
+            ).fetchall()
+        return [(row["streamer"], row["broadcast_id"]) for row in rows]
+
     def open_broadcast(self, streamer):
         streamer = _clean_streamer(streamer)
         if not streamer:

@@ -2668,3 +2668,64 @@ def test_shutdown_imports_changes_written_after_the_last_poll(recorder):
     recorder._shutdown()
 
     assert recorder.store.latest_point("bob")["balance"] == 1075
+
+
+def test_streamer_removed_before_it_was_seen_live_is_not_live(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    # bob went online and was removed from the config before History polled.
+    snapshot = [
+        {"username": "carol", "broadcast_id": "c1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 10)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        _write_json(
+            cache,
+            _cache_payload(
+                {"streamer_login": "bob", "broadcast_id": "b1", "started_at": NOW}
+            ),
+            NOW + 20,
+        )
+        clock.value = NOW + 30
+        recorder.poll_once()
+        clock.value = NOW + 1000
+        recorder.poll_once()
+
+        assert store.open_broadcast("bob") is None
+        assert store.overview(days=1, now=clock.value)["live_streams"] == 0
+    finally:
+        recorder._shutdown()
+
+
+def test_older_copy_of_an_analytics_file_adds_no_spend(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+        {"x": int((NOW + 120) * 1000), "y": 1100, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 121)
+    recorder.clock.value = NOW + 130
+    recorder.poll_once()
+
+    # An older backup of the file is put back.
+    _write_json(path, {"series": series[:2], "annotations": []}, NOW + 140)
+    recorder.clock.value = NOW + 150
+    recorder.poll_once()
+
+    window = recorder.store.overview(days=1, now=recorder.clock.value)["window"]
+    assert window["points_gained"] == 100
+    assert window["points_spent"] == 0

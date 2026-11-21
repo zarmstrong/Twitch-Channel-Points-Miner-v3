@@ -151,9 +151,12 @@ def _pending_entries(entries, state):
     writes wall-clock seconds, which repeat within one second and go backwards
     when the host clock is corrected.
 
-    Returns ``(pending, consumed, last_x)`` where ``pending`` holds
+    Returns ``(pending, consumed, last_x, rewound)`` where ``pending`` holds
     ``(x, occurrence, entry)`` in file order; ``occurrence`` numbers entries
     that share one ``x`` so identical changes within a second stay apart.
+    ``rewound`` is True when the file is read from its start and begins no
+    later than the cursor, such as an older backup put back.  A file the miner
+    started again after a delete begins later and continues the old balance.
     """
 
     raw = entries if isinstance(entries, list) else []
@@ -171,6 +174,7 @@ def _pending_entries(entries, state):
 
     last_x = state.get("last_x") if state else None
     consumed = state.get("consumed") if state else 0
+    rewound = False
     if state is not None and consumed is None:
         # A version 1 cursor only stored the newest x.
         pending = [item for item in valid if last_x is None or item[1] > last_x]
@@ -182,10 +186,11 @@ def _pending_entries(entries, state):
             # from the start.  Dedupe keys and delete cutoffs keep already
             # recorded data from being counted twice.
             consumed = 0
+            rewound = bool(valid) and last_x is not None and valid[0][1] <= last_x
         pending = [item for item in valid if item[0] >= consumed]
     if valid:
         last_x = valid[-1][1]
-    return [item[1:] for item in pending], len(raw), last_x
+    return [item[1:] for item in pending], len(raw), last_x, rewound
 
 
 class HistoryRecorder(threading.Thread):
@@ -964,7 +969,11 @@ class HistoryRecorder(threading.Thread):
         # A broadcast this process saw online that is no longer reported, for
         # example because the streamer was removed from the config, would
         # otherwise stay live: nothing else writes its end.
-        for streamer, broadcast_id in self._online_live_keys - current:
+        # The snapshot lists every streamer the miner follows, so any other
+        # broadcast still open is over too, including one imported from the
+        # streak cache of a streamer removed before this process saw it live.
+        stale = (self._online_live_keys | set(self.store.open_streams())) - current
+        for streamer, broadcast_id in stale:
             self.store.end_stream_session(streamer, broadcast_id, ended_at=now)
             self._online_ended[(streamer, broadcast_id)] = float(now)
         self._online_live_keys &= current
@@ -1356,8 +1365,10 @@ class HistoryRecorder(threading.Thread):
         )
 
     def _ingest_series(self, streamer, entries, source, stat, state):
-        pending, consumed, last_x = _pending_entries(entries, state)
-        last_balance = state.get("last_balance") if state else None
+        pending, consumed, last_x, rewound = _pending_entries(entries, state)
+        # An older copy of the file put back does not continue the last
+        # imported balance; its entries are already recorded.
+        last_balance = state.get("last_balance") if state and not rewound else None
         if last_balance is None and pending:
             last_balance = self._baseline_balance(streamer, pending[0][0] / 1000.0)
 
@@ -1418,7 +1429,7 @@ class HistoryRecorder(threading.Thread):
         return None
 
     def _ingest_annotations(self, streamer, entries, source, stat, state):
-        pending, consumed, last_x = _pending_entries(entries, state)
+        pending, consumed, last_x, _rewound = _pending_entries(entries, state)
         rows = []
         for x, occurrence, entry in pending:
             if self._deleted_since(streamer, x / 1000.0, whole_seconds=True):
