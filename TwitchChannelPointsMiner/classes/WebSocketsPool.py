@@ -28,24 +28,27 @@ from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_ava
 logger = logging.getLogger(__name__)
 
 
+def _sent_at(message):
+    """Twitch's send time of a PubSub message in epoch seconds, or None."""
+    try:
+        return parser.parse(message.timestamp).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _stream_down_predates_online(message, streamer):
-    """Whether Twitch sent this stream-down before the miner last marked the
-    streamer online, so it is about an earlier broadcast.
+    """Whether Twitch sent this stream-down before it showed the streamer's
+    current broadcast live, so it is about an earlier broadcast.
 
     A stream-down delayed in delivery, or waiting for a refresh that found
     the next broadcast, would otherwise take that next broadcast offline.
-    Compares Twitch's server time with the local clock: with the local clock
-    ahead, a real stream-down right after the miner went online can be
-    ignored too, and the next online check finds the stream offline instead.
+    One that is wrongly ignored (see Streamer.sent_before_online()) is
+    caught by the next online check instead.
     """
-    online_at = getattr(streamer, "online_at", 0) or 0
-    if online_at <= 0:
-        return False
-    try:
-        sent_at = parser.parse(message.timestamp).timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return sent_at < online_at
+    sent_before_online = getattr(streamer, "sent_before_online", None)
+    return (
+        callable(sent_before_online) and sent_before_online(_sent_at(message)) is True
+    )
 
 
 class WebSocketsPool:
@@ -405,7 +408,9 @@ class WebSocketsPool:
                                     "event": Events.get(f"GAIN_FOR_{reason_code}"),
                                 },
                             )
-                            streamer.update_history(reason_code, earned)
+                            streamer.update_history(
+                                reason_code, earned, awarded_at=_sent_at(message)
+                            )
                             # Analytics switch
                             if Settings.enable_analytics is True:
                                 streamer.persistent_annotations(

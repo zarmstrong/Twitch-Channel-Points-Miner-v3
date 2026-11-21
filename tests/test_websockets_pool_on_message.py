@@ -147,7 +147,7 @@ def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
 
 
 @pytest.mark.parametrize(
-    ("online_at", "expected_calls"),
+    ("online_seen_live_at", "expected_calls"),
     [
         pytest.param(1700000000.0 + 30, [], id="sent-before-online"),
         pytest.param(1700000000.0 - 30, ["set_offline"], id="sent-after-online"),
@@ -155,12 +155,17 @@ def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
     ],
 )
 def test_stream_down_sent_before_the_streamer_went_online_is_ignored(
-    logger, online_at, expected_calls
+    logger, online_seen_live_at, expected_calls
 ):
     # A's stream-down was delayed (or waited for a refresh that found B and
-    # set B online). Twitch sent it before B went online, so it isn't B's.
+    # set B online). Twitch sent it before it showed B live, so it isn't B's.
+    from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+
     target = FakeStreamer("predates-target", "2")
-    target.online_at = online_at
+    target.online_seen_live_at = online_seen_live_at
+    target.sent_before_online = lambda sent_at: Streamer.sent_before_online(
+        target, sent_at
+    )
 
     WebSocketsPool.on_message(
         _websocket([target]),
@@ -168,6 +173,36 @@ def test_stream_down_sent_before_the_streamer_went_online_is_ignored(
     )
 
     assert target.calls == expected_calls
+
+
+def test_points_earned_passes_twitch_send_time_with_the_award(logger, monkeypatch):
+    # The award's send time tells a late award for an earlier broadcast
+    # from one for the broadcast now online.
+    monkeypatch.setattr(f"{POOL_MODULE}.Settings.enable_analytics", False)
+    monkeypatch.setattr(f"{POOL_MODULE}.is_drop_discovered", lambda streamer: False)
+    target = FakeStreamer("award-target", "2")
+    awards = []
+    target.update_history = lambda *args, **kwargs: awards.append((args, kwargs))
+
+    WebSocketsPool.on_message(
+        _websocket([target]),
+        _pubsub(
+            "community-points-user-v1",
+            "2",
+            {
+                "type": "points-earned",
+                "data": {
+                    "timestamp": "2023-11-14T22:13:20.000000Z",
+                    "balance": {"balance": 1450, "channel_id": "2"},
+                    "point_gain": {"total_points": 450, "reason_code": "WATCH_STREAK"},
+                },
+            },
+        ),
+    )
+
+    assert awards == [
+        (("WATCH_STREAK", 450), {"awarded_at": 1700000000.0}),
+    ]
 
 
 GOAL = {
