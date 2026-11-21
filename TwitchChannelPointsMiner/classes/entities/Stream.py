@@ -152,6 +152,17 @@ class Stream(object):
             self.watch_slot_minutes = 0
             self.__watch_slot_timestamp = 0
 
+    def credit_watch_streak(self):
+        """Clear the pending streak for an award; return its broadcast.
+
+        The broadcast is the one this streak state belongs to, read in the
+        same locked step as the clear, so a reset for the next broadcast
+        can't land in between and receive this award.
+        """
+        with _WATCH_STREAK_LOCK:
+            self.watch_streak_missing = False
+            return self.watch_streak_broadcast_id or self.broadcast_id
+
     def confirm_watch_streak_for(self, broadcast_id):
         """Clear the pending streak if it still belongs to broadcast_id.
 
@@ -188,14 +199,20 @@ class Stream(object):
         return max(self.minute_watched or 0, self.watch_slot_minutes or 0)
 
     def hold_watch_slot(self):
-        """Count time in a watch slot; called each cycle the stream has one."""
+        """Count time in a watch slot; called each cycle the stream has one.
+
+        Wall-clock time, unlike minute_watched: a slow cycle still held the
+        slot for all of it. Counting a stall can only end the cap early.
+        """
         with _WATCH_STREAK_LOCK:
             now = time.time()
-            if self.__watch_slot_timestamp != 0:
-                self.watch_slot_minutes += self.__step_minutes(
-                    now, self.__watch_slot_timestamp
-                )
+            self.__count_watch_slot_step(now)
             self.__watch_slot_timestamp = now
+
+    def __count_watch_slot_step(self, now):
+        if self.__watch_slot_timestamp != 0:
+            elapsed = max(now - self.__watch_slot_timestamp, 0)
+            self.watch_slot_minutes += round(elapsed / 60, 5)
 
     def pause_minute_watched(self):
         """Stop counting: the stream is out of a watch slot.
@@ -209,10 +226,7 @@ class Stream(object):
             now = time.time()
             self.__count_minute_watched_step(now)
             self.__minute_watched_timestamp = 0
-            if self.__watch_slot_timestamp != 0:
-                self.watch_slot_minutes += self.__step_minutes(
-                    now, self.__watch_slot_timestamp
-                )
+            self.__count_watch_slot_step(now)
             self.__watch_slot_timestamp = 0
 
     def update_minute_watched(self):

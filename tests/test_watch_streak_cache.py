@@ -1257,3 +1257,56 @@ def test_slot_time_counts_the_last_cycle_and_skips_time_out_of_a_slot(monkeypatc
     stream.hold_watch_slot()
 
     assert stream.watch_slot_minutes == pytest.approx(40 / 60, abs=1e-4)
+
+
+def test_gap_just_under_thirty_minutes_is_not_trusted_across_clocks(tmp_path):
+    # Twitch's start time against this machine's end time: a host clock two
+    # minutes fast turns a real 31-minute gap into 29 measured minutes.
+    start = 2_000_000_000.0
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+
+    assert (
+        cache.claimed_at_for_logical_stream(
+            "channel", "broadcast-2", started_at=start + 1000 + 29 * 60
+        )
+        is None
+    )
+    assert cache.claimed_at_for_logical_stream(
+        "channel", "broadcast-2", started_at=start + 1000 + 27 * 60
+    ) == (start + 60)
+
+
+def test_slot_time_counts_slow_cycles_in_full(monkeypatch):
+    # Slow refreshes stretch each cycle to five minutes; the channel held the
+    # slot for all twenty.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    stream = stream_module.Stream()
+    stream.hold_watch_slot()
+    for _ in range(4):
+        clock[0] += 5 * 60
+        stream.hold_watch_slot()
+
+    assert stream.watch_slot_minutes == pytest.approx(20, abs=1e-3)
+    assert stream.watch_streak_minutes() == pytest.approx(20, abs=1e-3)
+
+
+def test_award_credit_belongs_to_the_tracked_broadcast():
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    stream.broadcast_id = "broadcast-1"
+    stream.init_watch_streak()
+    # A refresh shows B before the transition: the award is still A's.
+    stream.broadcast_id = "broadcast-2"
+
+    assert stream.credit_watch_streak() == "broadcast-1"
+    assert stream.watch_streak_missing is False
+
+    stream.init_watch_streak()
+    assert stream.credit_watch_streak() == "broadcast-2"

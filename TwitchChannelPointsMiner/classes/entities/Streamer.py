@@ -404,15 +404,16 @@ class Streamer(object):
         self.history[reason_code]["amount"] += earned
 
         if reason_code == "WATCH_STREAK":
-            self.stream.watch_streak_missing = False
+            # Credited to the broadcast the streak state belongs to: a refresh
+            # may already show the next broadcast's ID before the miner runs
+            # its transition, and this award can't be for that one yet.
+            credit = getattr(self.stream, "credit_watch_streak", None)
+            if callable(credit):
+                broadcast_id = credit()
+            else:
+                self.stream.watch_streak_missing = False
+                broadcast_id = self.stream.broadcast_id
             if self.watch_streak_cache is not None:
-                # The broadcast the streak state belongs to: a refresh may
-                # already show the next broadcast's ID before the miner runs
-                # its transition, and this award can't be for that one yet.
-                broadcast_id = (
-                    getattr(self.stream, "watch_streak_broadcast_id", None)
-                    or self.stream.broadcast_id
-                )
                 self.watch_streak_cache.mark_claimed(self.username, broadcast_id)
             logger.info(
                 "[watch-streak] "

@@ -8,7 +8,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
+from TwitchChannelPointsMiner.constants import (
+    WATCH_STREAK_CLOCK_SKEW_SECONDS,
+    WATCH_STREAK_STREAM_GAP_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +208,9 @@ class WatchStreakCache:
                 # ensure() closes a session the miner never saw go offline at
                 # the new broadcast's start time. Never infer a continuation
                 # from that unknown gap; only an observed end is trustworthy.
-                if gap <= 0 or gap >= WATCH_STREAK_STREAM_GAP_SECONDS:
+                if gap <= 0 or gap >= (
+                    WATCH_STREAK_STREAM_GAP_SECONDS - WATCH_STREAK_CLOCK_SKEW_SECONDS
+                ):
                     break
                 if previous.claimed:
                     return (
