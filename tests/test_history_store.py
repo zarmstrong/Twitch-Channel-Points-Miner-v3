@@ -619,3 +619,22 @@ def test_streamer_live_since_yesterday_is_listed_for_today(store):
     assert [item["streamer"] for item in listed] == ["alice"]
     assert listed[0]["live_stream"]["broadcast_id"] == "b1"
     assert listed[0]["points_gained"] == 0
+
+
+def test_retention_keeps_the_streak_claim_of_a_broadcast_still_live(store):
+    store.upsert_stream_session("alice", "b1", NOW, last_seen_at=NOW)
+    store.record_event(
+        "alice",
+        NOW + 60,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": NOW},
+    )
+    later = NOW + 2 * 24 * 60 * 60
+    store.touch_open_streams(later)
+
+    store.apply_retention(now=later, retention_days=1)
+
+    item = store.streamers(days=1, now=later)[0]
+    assert item["live_stream"] is not None
+    assert item["live_streak_at"] == NOW + 60

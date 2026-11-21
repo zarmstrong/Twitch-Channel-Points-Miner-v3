@@ -237,6 +237,10 @@ class HistoryRecorder(threading.Thread):
         self._cached_stream_sessions = []
         self._cache_startup_closed = set()
         self._online_live_keys = set()
+        # Broadcasts this process ended because they left the live snapshot,
+        # mapped to that end.  Their streak-cache entries can stay open (for
+        # example after the streamer is removed from the config).
+        self._online_ended = {}
         self._online_details = {}
         self._drop_farmed = set()
         self._live_streamer_names = set()
@@ -555,6 +559,11 @@ class HistoryRecorder(threading.Thread):
             self._cache_startup_closed = {
                 key for key in self._cache_startup_closed if key[0] != streamer
             }
+            self._online_ended = {
+                key: value
+                for key, value in self._online_ended.items()
+                if key[0] != streamer
+            }
             if remove_source is not None:
                 remove_source()
                 # The miner starts a new file with its next change.  Read
@@ -761,8 +770,9 @@ class HistoryRecorder(threading.Thread):
             if streamer not in self._tracked_streamers:
                 # First watch: import its cached broadcasts before resuming
                 # one, so the watch below is linked to the live broadcast.
-                self._tracked_streamers.add(streamer)
+                # Tracked only once that succeeded, so a failure is retried.
                 self._import_cached_sessions(streamer, now)
+                self._tracked_streamers.add(streamer)
             self._resume_cached_live_stream(streamer, now)
             game = entry.get("game") or None
             broadcast_id = self.store.open_broadcast(streamer)
@@ -897,6 +907,7 @@ class HistoryRecorder(threading.Thread):
                         timestamp=now,
                         game=entry["game"],
                         title=entry["title"],
+                        clear_game=entry["game"] is None,
                     )
                     self._online_details[key] = details
                 continue
@@ -923,6 +934,7 @@ class HistoryRecorder(threading.Thread):
             # The snapshot proves the broadcast is live, so the startup guard
             # must not close the cached session again.
             self._cache_startup_closed.discard(key)
+            self._online_ended.pop(key, None)
             self._online_live_keys.add(key)
             self._online_details[key] = details
         # A broadcast this process saw online that is no longer reported, for
@@ -930,6 +942,7 @@ class HistoryRecorder(threading.Thread):
         # otherwise stay live: nothing else writes its end.
         for streamer, broadcast_id in self._online_live_keys - current:
             self.store.end_stream_session(streamer, broadcast_id, ended_at=now)
+            self._online_ended[(streamer, broadcast_id)] = float(now)
         self._online_live_keys &= current
         self._online_details = {
             key: value
@@ -960,13 +973,16 @@ class HistoryRecorder(threading.Thread):
             title = streamer.get("title")
             is_online = streamer.get("is_online", True)
         else:
+            # The miner sets the broadcast id, then online_at, then
+            # is_online.  Reading is_online first means a True value comes
+            # with the id and start time of the same broadcast.
+            is_online = getattr(streamer, "is_online", True)
             stream = getattr(streamer, "stream", None)
             username = getattr(streamer, "username", None)
             broadcast_id = getattr(stream, "broadcast_id", None)
             started_at = getattr(streamer, "online_at", None)
             game = getattr(stream, "game", None)
             title = getattr(stream, "title", None)
-            is_online = getattr(streamer, "is_online", True)
         if is_online is not True:
             return None
         username = _clean_streamer(username)
@@ -1093,6 +1109,10 @@ class HistoryRecorder(threading.Thread):
             self._cache_startup_closed.add(key)
         elif ended_at is None and key in self._cache_startup_closed:
             ended_at = started_at
+        elif ended_at is None and key in self._online_ended:
+            # This process already ended the broadcast; an open cache entry
+            # must not reopen it, or recreate it once retention pruned it.
+            ended_at = max(started_at, self._online_ended[key])
         cutoff = self._retention_cutoff(now)
         if cutoff is not None and ended_at is not None and ended_at < cutoff:
             # Retention already pruned this row (or will); importing it again
@@ -1275,10 +1295,12 @@ class HistoryRecorder(threading.Thread):
         if not isinstance(payload, dict):
             return False
         if streamer not in self._tracked_streamers:
-            self._tracked_streamers.add(streamer)
             # The cache was read before this streamer was tracked; import its
             # cached broadcasts now instead of waiting for the cache to change.
+            # The streamer counts as tracked only once that succeeded, so a
+            # failed backfill is retried on the next poll.
             self._import_cached_sessions(streamer, self.clock())
+            self._tracked_streamers.add(streamer)
 
         if not series_fresh:
             self._ingest_series(

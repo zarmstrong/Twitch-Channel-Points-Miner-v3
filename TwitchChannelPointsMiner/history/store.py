@@ -823,7 +823,15 @@ class HistoryStore(object):
             )
             return int(existing["id"])
 
-    def update_open_stream_details(self, streamer, timestamp, game=None, title=None):
+    def update_open_stream_details(
+        self, streamer, timestamp, game=None, title=None, clear_game=False
+    ):
+        """Update the open broadcast's title and category.
+
+        ``None`` keeps the stored value unless ``clear_game`` is set, which
+        records that the broadcast no longer has a category.
+        """
+
         streamer = _clean_streamer(streamer)
         if not streamer:
             return
@@ -832,7 +840,7 @@ class HistoryStore(object):
                 """
                 UPDATE streams SET
                     last_seen_at = MAX(last_seen_at, ?),
-                    game = COALESCE(?, game),
+                    game = CASE WHEN ? THEN ? ELSE COALESCE(?, game) END,
                     title = COALESCE(?, title)
                 WHERE id = (
                     SELECT id FROM streams
@@ -840,7 +848,7 @@ class HistoryStore(object):
                     ORDER BY started_at DESC LIMIT 1
                 )
                 """,
-                (float(timestamp), game, title, streamer),
+                (float(timestamp), 1 if clear_game else 0, game, game, title, streamer),
             )
 
     def touch_open_streams(self, timestamp):
@@ -1305,7 +1313,22 @@ class HistoryStore(object):
         with self._write_connection() as connection:
             for name, statement in (
                 ("points", "DELETE FROM points WHERE ts < ?"),
-                ("events", "DELETE FROM events WHERE ts < ?"),
+                (
+                    "events",
+                    # The streak claim of a broadcast still live is kept, so
+                    # the current stream keeps showing its claimed streak.
+                    f"""
+                    DELETE FROM events WHERE ts < ? AND NOT (
+                        type = 'watch_streak' AND EXISTS (
+                            SELECT 1 FROM streams
+                            WHERE streams.streamer = events.streamer
+                              AND streams.ended_at IS NULL
+                              AND events.ts >= streams.started_at
+                                  - {float(WATCH_STREAK_STREAM_GAP_SECONDS)}
+                        )
+                    )
+                    """,
+                ),
                 (
                     "watch_sessions",
                     """

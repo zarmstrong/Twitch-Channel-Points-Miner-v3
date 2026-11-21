@@ -2388,3 +2388,168 @@ def test_backfill_imports_cached_broadcasts_without_a_cache_change(tmp_path):
         assert [item["broadcast_id"] for item in streams] == ["b1"]
     finally:
         recorder._shutdown()
+
+
+def test_open_cache_entry_of_a_removed_streamer_is_not_live_again(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        retention_days=1,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    # Removing bob from the config does not end his streak-cache entry.
+    payload = _cache_payload(
+        {"streamer_login": "bob", "broadcast_id": "b1", "started_at": NOW}
+    )
+    try:
+        _write_json(cache, payload, NOW + 20)
+        recorder.poll_once()
+        snapshot.clear()
+        clock.value = NOW + 60
+        recorder.poll_once()
+
+        # Retention prunes the closed row, then the cache is rewritten.
+        clock.value = NOW + 2 * 24 * 60 * 60
+        recorder.poll_once()
+        _write_json(cache, payload, clock.value + 1)
+        clock.value += 15
+        recorder.poll_once()
+
+        overview = store.overview(days=30, now=clock.value)
+        assert overview["live_streams"] == 0
+        assert store.sessions(kind="stream", days=30, now=clock.value)["total"] == 0
+    finally:
+        recorder._shutdown()
+
+
+def test_live_snapshot_read_during_set_online_keeps_one_broadcast(tmp_path):
+    from types import SimpleNamespace
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+
+    class Streamer:
+        # The miner already stored the new broadcast id; set_online runs on
+        # another thread while History reads online_at.
+        def __init__(self):
+            self.username = "bob"
+            self.stream = SimpleNamespace(broadcast_id="b2", game=None, title=None)
+            self.is_online = False
+            self._online_at = NOW - 3600
+            self._raced = False
+
+        @property
+        def online_at(self):
+            value = self._online_at
+            if not self._raced:
+                self._raced = True
+                self._online_at = NOW
+                self.is_online = True
+            return value
+
+    streamer = Streamer()
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: [streamer],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        clock.value = NOW + 60
+        recorder.poll_once()
+
+        live = store.streamers(days=1, now=clock.value)[0]["live_stream"]
+        assert live["broadcast_id"] == "b2"
+        assert live["started_at"] == NOW
+    finally:
+        recorder._shutdown()
+
+
+def test_failed_first_backfill_is_retried(recorder, monkeypatch):
+    _write_json(
+        recorder.streak_cache_path,
+        _cache_payload(
+            {"streamer_login": "bob", "broadcast_id": "b1", "started_at": NOW}
+        ),
+        NOW + 10,
+    )
+    recorder._ingest_streak_cache(NOW + 20)
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 61)
+    original = recorder.store.upsert_stream_session
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "upsert_stream_session", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._ingest_analytics(NOW + 62)
+
+    monkeypatch.setattr(recorder.store, "upsert_stream_session", original)
+    recorder._ingest_analytics(NOW + 75)
+
+    assert recorder.store.sessions(kind="stream", days=1, now=NOW + 75)["total"] == 1
+    assert recorder.store.latest_point("bob")["balance"] == 1050
+
+
+def test_cleared_live_category_is_recorded(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    entry = {
+        "username": "bob",
+        "broadcast_id": "b1",
+        "online_at": NOW,
+        "is_online": True,
+        "title": "Morning",
+        "game": "Chess",
+    }
+    snapshot = [entry]
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        snapshot[0] = dict(entry, game={})
+        clock.value = NOW + 60
+        recorder.poll_once()
+
+        live = store.streamers(days=1, now=clock.value)[0]["live_stream"]
+        assert (live["title"], live["game"]) == ("Morning", None)
+    finally:
+        recorder._shutdown()
