@@ -47,6 +47,8 @@ class Stream(object):
         "__minute_watched_timestamp",
         "__refresh_requested",
         "__refresh_applied",
+        "__offline_refresh_applied",
+        "__retired_broadcast_ids",
         "__watch_slot_timestamp",
     ]
 
@@ -73,6 +75,10 @@ class Stream(object):
         # after a newer one was applied can be recognized.
         self.__refresh_requested = 0
         self.__refresh_applied = 0
+        # The newest request whose reply showed the stream offline.
+        self.__offline_refresh_applied = 0
+        # Broadcasts this stream has moved on from, newest last.
+        self.__retired_broadcast_ids = ()
         # The broadcast a missed-offline transition was last claimed for.
         self.watch_streak_transition_to = None
 
@@ -88,6 +94,33 @@ class Stream(object):
             self.__refresh_requested += 1
             return self.__refresh_requested
 
+    def accept_offline_reply(self, refresh_seq):
+        """Record an offline reply; return False for a stale one.
+
+        An offline reply to a request made before a live reply that was
+        already applied is older news: the stream went live after it.
+        """
+        if refresh_seq is None:
+            return True
+        with _WATCH_STREAK_LOCK:
+            if refresh_seq < self.__refresh_applied:
+                return False
+            self.__refresh_applied = refresh_seq
+            self.__offline_refresh_applied = refresh_seq
+            return True
+
+    @staticmethod
+    def __started_before(broadcast_id, other_id):
+        """Whether broadcast_id is known to be older than other_id.
+
+        Twitch numbers broadcasts in increasing order, which orders two
+        broadcasts neither of which a reply has shown before.
+        """
+        try:
+            return int(broadcast_id) < int(other_id)
+        except (TypeError, ValueError):
+            return False
+
     def update(
         self,
         broadcast_id,
@@ -102,8 +135,14 @@ class Stream(object):
 
         Several threads refresh a stream and their responses can arrive out
         of order. A reply to a request made before the one already applied
-        (refresh_seq from begin_refresh()) is older news: it could put the
-        previous broadcast back after the next one started, so it is dropped.
+        (refresh_seq from begin_refresh()) is older news when it shows the
+        broadcast already applied or one the stream has moved on from: it
+        could put the previous broadcast back after the next one started, so
+        it is dropped. Request order is not the order Twitch answered in,
+        though: an older request can reach Twitch later and see a broadcast
+        no reply has shown yet. That one is newer and is applied, unless an
+        offline reply to a later request was accepted since or its ID is
+        lower than the applied one's.
         """
         now = time.time()
         # When Twitch last showed this stream live: the caller's request time
@@ -116,13 +155,22 @@ class Stream(object):
         # ID with another's time and two responses can't interleave.
         with _WATCH_STREAK_LOCK:
             if refresh_seq is not None:
-                if refresh_seq < self.__refresh_applied:
+                if refresh_seq < self.__refresh_applied and (
+                    refresh_seq < self.__offline_refresh_applied
+                    or broadcast_id == self.broadcast_id
+                    or broadcast_id in self.__retired_broadcast_ids
+                    or self.__started_before(broadcast_id, self.broadcast_id)
+                ):
                     return False
-                self.__refresh_applied = refresh_seq
+                self.__refresh_applied = max(self.__refresh_applied, refresh_seq)
             if broadcast_id != self.broadcast_id:
                 # What Twitch advertised on the last broadcast proves nothing
                 # about this one.
                 self.channel_campaign_ids = []
+                if self.broadcast_id not in (None, ""):
+                    self.__retired_broadcast_ids = (
+                        self.__retired_broadcast_ids + (self.broadcast_id,)
+                    )[-8:]
             self.title = title.strip()
             self.game = game
             self.tags = tags

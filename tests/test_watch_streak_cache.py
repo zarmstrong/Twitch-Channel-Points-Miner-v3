@@ -1447,6 +1447,7 @@ def test_an_older_stream_response_does_not_replace_a_newer_one():
 
     stream = Stream()
     kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
+    stream.update("broadcast-1", seen_live_at=1_999_999_000, **kwargs)
     older = stream.begin_refresh()
     newer = stream.begin_refresh()
     # The older request's reply is slow: minutes, not seconds.
@@ -1490,6 +1491,11 @@ def test_slow_refresh_reply_does_not_undo_a_newer_refresh(monkeypatch):
     streamer.settings.claim_drops = False
     twitch = Twitch.__new__(Twitch)
     twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+    # The miner was watching A when the stream moved to B.
+    streamer.stream.update(
+        "broadcast-1", title="title", game={}, tags=[], viewers_count=1
+    )
+    clock[0] += 5 * 60
     replies = []
 
     def get_stream_info(self, target):
@@ -1510,6 +1516,151 @@ def test_slow_refresh_reply_does_not_undo_a_newer_refresh(monkeypatch):
     twitch.update_stream(streamer)
 
     assert streamer.stream.broadcast_id == "broadcast-2"
+
+
+def test_older_request_that_reached_twitch_later_still_shows_the_new_broadcast(
+    monkeypatch,
+):
+    # The first request stalls before reaching Twitch. A second one returns
+    # A; the first then reaches Twitch after a restart and returns B, which
+    # is newer even though its request was made first.
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    streamer = make_streamer("channel")
+    streamer.settings.claim_drops = False
+    twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+    replies = []
+
+    def get_stream_info(self, target):
+        replies.append(1)
+        if len(replies) == 1:
+            clock[0] += 5 * 60
+            twitch.update_stream(target)
+            broadcast_id = "broadcast-2"
+        else:
+            broadcast_id = "broadcast-1"
+        return {
+            "stream": {"id": broadcast_id, "tags": [], "viewersCount": 1},
+            "broadcastSettings": {"title": "title", "game": {}},
+        }
+
+    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
+
+    twitch.update_stream(streamer)
+
+    assert streamer.stream.broadcast_id == "broadcast-2"
+
+
+def test_a_late_reply_does_not_bring_back_a_broadcast_already_left():
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
+    stream.update("broadcast-1", **kwargs)
+    older = stream.begin_refresh()
+    newer = stream.begin_refresh()
+    assert stream.update("broadcast-2", refresh_seq=newer, **kwargs)
+
+    assert stream.update("broadcast-1", refresh_seq=older, **kwargs) is False
+    assert stream.broadcast_id == "broadcast-2"
+
+
+def test_a_late_reply_with_an_older_unseen_broadcast_is_dropped():
+    # Neither broadcast was seen before (two first refreshes at startup):
+    # Twitch's increasing broadcast IDs order them.
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
+    older = stream.begin_refresh()
+    newer = stream.begin_refresh()
+    assert stream.update("315000000002", refresh_seq=newer, **kwargs)
+
+    assert stream.update("315000000001", refresh_seq=older, **kwargs) is False
+    assert stream.update("315000000003", refresh_seq=older, **kwargs)
+    assert stream.broadcast_id == "315000000003"
+
+
+def test_a_live_reply_older_than_an_accepted_offline_reply_is_dropped():
+    # The older request saw a short broadcast the miner never saw; a later
+    # request already showed the stream offline, so that broadcast is over.
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
+    older = stream.begin_refresh()
+    newer = stream.begin_refresh()
+    assert stream.accept_offline_reply(newer)
+
+    assert stream.update("broadcast-1", refresh_seq=older, **kwargs) is False
+    assert stream.broadcast_id is None
+
+
+def test_offline_reply_older_than_a_live_one_does_not_mark_the_stream_offline(
+    monkeypatch,
+):
+    # An earlier query saw the offline interval; its reply arrives after a
+    # second refresh showed broadcast B live and the streamer went online.
+    from TwitchChannelPointsMiner.classes.Exceptions import (
+        StreamerIsOfflineException,
+    )
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    streamer = make_streamer("channel")
+    streamer.settings.claim_drops = False
+    streamer.is_online = True
+    twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+    replies = []
+
+    def get_stream_info(self, target):
+        replies.append(1)
+        if len(replies) == 1:
+            clock[0] += 5 * 60
+            twitch.update_stream(target)
+            raise StreamerIsOfflineException
+        return {
+            "stream": {"id": "broadcast-2", "tags": [], "viewersCount": 1},
+            "broadcastSettings": {"title": "title", "game": {}},
+        }
+
+    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
+
+    twitch.update_stream(streamer)
+
+    assert streamer.is_online is True
+    assert streamer.stream.broadcast_id == "broadcast-2"
+
+
+def test_an_offline_reply_still_raises_when_it_is_the_newest(monkeypatch):
+    from TwitchChannelPointsMiner.classes.Exceptions import (
+        StreamerIsOfflineException,
+    )
+
+    streamer = make_streamer("channel")
+    twitch = Twitch.__new__(Twitch)
+
+    def get_stream_info(self, target):
+        raise StreamerIsOfflineException
+
+    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
+
+    with pytest.raises(StreamerIsOfflineException):
+        twitch.update_stream(streamer)
 
 
 def test_slow_check_of_the_old_broadcast_does_not_mark_the_new_one_checked(

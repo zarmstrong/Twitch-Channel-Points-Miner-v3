@@ -1806,7 +1806,16 @@ class Twitch(object):
             begin_refresh = getattr(streamer.stream, "begin_refresh", None)
             refresh_seq = begin_refresh() if callable(begin_refresh) else None
             requested_at = time.time()
-            stream_info = self.get_stream_info(streamer)
+            try:
+                stream_info = self.get_stream_info(streamer)
+            except StreamerIsOfflineException:
+                # Another thread's newer request may already have shown the
+                # stream live: this reply then describes the time before it
+                # went live and must not mark it offline.
+                accept_offline = getattr(streamer.stream, "accept_offline_reply", None)
+                if callable(accept_offline) and not accept_offline(refresh_seq):
+                    return
+                raise
             if stream_info is not None:
                 streamer.stream.update(
                     refresh_seq=refresh_seq,
