@@ -6,6 +6,7 @@ reports no progress on.
 """
 
 import copy
+import functools
 import importlib
 import inspect
 import json
@@ -3507,23 +3508,223 @@ def test_progress_snapshot_of_a_repeat_before_the_stored_one_is_not_saved():
     assert save("group-watch#x") is True
 
 
-def test_snapshot_is_written_under_the_lock_records_are_stored_under():
+def test_snapshot_is_written_in_order_without_the_lock_records_are_read_under():
     # Approved before a listing reports the window started over and written
     # after it, an older copy's minutes would replace the new window's in
-    # the report. A listing waits for the write instead.
+    # the report: the write is made under the report-order lock, which a
+    # listing takes too. Not under the lock the records are read under,
+    # which a stalled write would keep from the claim thread.
     twitch = snapshot_twitch()
-    lock = twitch_module._watch_reward_lock(twitch)
+    records = twitch_module._watch_reward_lock(twitch)
+    order = twitch_module._drop_report_order_lock(twitch)
     held = []
     drop = SimpleNamespace(id="drop-1", current_minutes_watched=3)
 
+    def save():
+        held.append((order.locked(), records.locked()))
+
     assert twitch._Twitch__save_drop_snapshot_if_new(
-        "drop-1|art", 3, "in_progress", lambda: held.append(lock.locked())
+        "drop-1|art", 3, "in_progress", save
     )
-    assert twitch._Twitch__save_watched_drop_progress_if_new(
-        drop, lambda: held.append(lock.locked())
-    ) == (-1)
-    assert held == [True, True]
-    assert lock.locked() is False
+    assert twitch._Twitch__save_watched_drop_progress_if_new(drop, save) == (-1)
+    assert held == [(True, False), (True, False)]
+    assert (order.locked(), records.locked()) == (False, False)
+
+    # Nor is either kept by a write that fails.
+    def fail():
+        raise OSError("disk full")
+
+    drop.current_minutes_watched = 4
+    with pytest.raises(OSError):
+        twitch._Twitch__save_drop_snapshot_if_new("drop-1|art", 4, "in_progress", fail)
+    with pytest.raises(OSError):
+        twitch._Twitch__save_watched_drop_progress_if_new(drop, fail)
+    assert (order.locked(), records.locked()) == (False, False)
+
+
+class StalledWrite:
+    """A report row whose write does not return until the test lets it:
+    started on a thread of its own with one of the two methods that save
+    a row. `writing` is set once the write has begun."""
+
+    def __init__(self, twitch, watcher, drop_id="other-drop", minutes=3):
+        self.writing = threading.Event()
+        self.finish = threading.Event()
+        self.written = []
+        if watcher:
+            drop = SimpleNamespace(id=drop_id, current_minutes_watched=minutes)
+            target = functools.partial(
+                twitch._Twitch__save_watched_drop_progress_if_new, drop, self.save
+            )
+        else:
+            target = functools.partial(
+                twitch._Twitch__save_drop_snapshot_if_new,
+                f"{drop_id}|art",
+                minutes,
+                "in_progress",
+                self.save,
+            )
+        self.minutes = minutes
+        self.thread = threading.Thread(target=target, daemon=True)
+
+    def save(self):
+        self.writing.set()
+        self.finish.wait(timeout=30)
+        self.written.append(self.minutes)
+
+    def start(self):
+        self.thread.start()
+        assert self.writing.wait(timeout=5)
+
+    def end(self):
+        self.finish.set()
+        self.thread.join(timeout=5)
+        assert not self.thread.is_alive()
+
+
+def own_locks(twitch):
+    # Its own, not the ones every Twitch built without __init__ shares: a
+    # thread a failed test leaves waiting would hold up the tests after it.
+    twitch.watch_reward_lock = threading.Lock()
+    twitch.drop_report_order_lock = threading.Lock()
+    return twitch
+
+
+@pytest.mark.parametrize("watcher", [False, True])
+def test_stalled_report_write_does_not_keep_a_claim_from_being_sent_again(
+    monkeypatch, watcher
+):
+    # Twitch refused the claim, and it is due again shortly before the
+    # campaign ends. A row of the report, of any drop, is being written to a
+    # disk that does not answer: the main loop still sees the moment has
+    # come, and the claim thread still sends the claim.
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    own_locks(twitch)
+    twitch.drop_progress_last_saved = {}
+    twitch.drop_status_last_saved = {}
+    assert twitch.watch_reward_pending_starts
+    twitch.watch_reward_pending_starts = {utc_now() - timedelta(seconds=1)}
+    sent = threading.Event()
+
+    def accept(instance_id):
+        answer = gql.accept(instance_id)
+        sent.set()
+        return answer
+
+    gql.claim_drop_rewards = accept
+    monkeypatch.setattr(twitch_module, "Thread", threading.Thread)
+    seen = []
+
+    def main_loop_pass():
+        seen.append(twitch.watch_reward_start_due())
+        seen.append(twitch.take_opened_watch_reward_start())
+        twitch.claim_waiting_watch_rewards()
+
+    main_loop = threading.Thread(target=main_loop_pass, daemon=True)
+    write = StalledWrite(twitch, watcher)
+    write.start()
+    try:
+        main_loop.start()
+        main_loop.join(timeout=5)
+        claimed_meanwhile = sent.wait(timeout=5)
+        still_writing = write.written == []
+    finally:
+        write.end()
+    claim_thread = twitch.watch_reward_claim_thread
+    if claim_thread is not None:
+        claim_thread.join(timeout=5)
+
+    assert seen == [True, True]
+    assert claimed_meanwhile and still_writing
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert twitch.watch_reward_claim_thread is None
+
+
+class OrderLock:
+    """The report-order lock, telling when a thread comes to wait for it
+    while another holds it."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.waited_for = threading.Event()
+
+    def __enter__(self):
+        if not self.lock.acquire(blocking=False):
+            self.waited_for.set()
+            self.lock.acquire()
+
+    def __exit__(self, *error):
+        self.lock.release()
+
+    def locked(self):
+        return self.lock.locked()
+
+
+def started_over_listing(twitch):
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, window=open_window())))
+    )
+
+
+def earned_listing(twitch):
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=5, grants=1, window=open_window())))
+    )
+
+
+def accepted_claim(twitch):
+    twitch._Twitch__mark_drop_accepted(SimpleNamespace(id="group-watch#0"))
+
+
+@pytest.mark.parametrize("watcher", [False, True])
+@pytest.mark.parametrize(
+    "change, minutes_after",
+    [(started_over_listing, 5), (earned_listing, 5), (accepted_claim, 40)],
+)
+def test_row_decided_before_a_record_changed_is_written_before_it_does(
+    watcher, change, minutes_after
+):
+    # The sync or the minute watcher has a copy of the record at 40 minutes
+    # and is writing its row. A listing that finds the window started over
+    # (or the reward earned), and a claim Twitch accepts, wait for the write:
+    # they change what the row was decided on, and what follows from them in
+    # the report must come after it.
+    twitch = own_locks(snapshot_twitch())
+    twitch.drop_report_order_lock = OrderLock()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=40, window=open_window())))
+    )
+    [drop] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    key = "group-watch#0" if watcher else "group-watch#0|art"
+    write = StalledWrite(twitch, watcher, drop_id="group-watch#0", minutes=40)
+    changed = threading.Thread(target=change, args=(twitch,), daemon=True)
+    write.start()
+    try:
+        changed.start()
+        waited = twitch.drop_report_order_lock.waited_for.wait(timeout=5)
+        [unchanged] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+        saved_meanwhile = dict(twitch.drop_progress_last_saved)
+        # What the claim thread and the main loop read is not held up.
+        records_free = not twitch.watch_reward_lock.locked()
+    finally:
+        write.end()
+    changed.join(timeout=5)
+
+    assert not changed.is_alive()
+    assert waited and records_free
+    assert unchanged is drop and saved_meanwhile == {key: 40}
+    assert write.written == [40]
+    [stored] = twitch.watch_reward_campaigns["quest-1"]["timeBasedDrops"]
+    assert stored["self"]["currentMinutesWatched"] == minutes_after
+    if change is started_over_listing:
+        # Forgotten after the write, so the new window's minutes are saved.
+        assert twitch.drop_progress_last_saved == {}
+        assert twitch._Twitch__save_drop_snapshot_if_new(
+            "group-watch#0|art", 5, "in_progress", lambda: None
+        )
 
 
 def category_retry_twitch(group_self, end_at=END_AT):
