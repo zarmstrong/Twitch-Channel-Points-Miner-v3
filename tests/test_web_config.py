@@ -1,12 +1,15 @@
 import ast
 import errno
 import json
+import logging
 import math
 import os
 import stat
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+
+import sys
 
 import pytest
 from flask import Flask
@@ -35,6 +38,9 @@ from TwitchChannelPointsMiner.config_editor import (
 )
 from TwitchChannelPointsMiner.logger import LoggerSettings
 from TwitchChannelPointsMiner.runner import _config_digest, _load_config
+from TwitchChannelPointsMiner.config_migration import (
+    CONFIG_VERSION as MIGRATION_CONFIG_VERSION,
+)
 
 
 def write_config(path):
@@ -3244,26 +3250,31 @@ def test_removal_is_refused_when_the_file_cant_be_tokenized(tmp_path, monkeypatc
     assert config.read_bytes() == before
 
 
-def test_import_is_not_added_above_a_future_import(tmp_path):
+def test_import_is_added_below_a_future_import(tmp_path):
+    # #327: the import used to go above the __future__ import, which made
+    # the edit fail to compile and be refused.
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
     source = config.read_text(encoding="utf-8").replace(
         "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n", ""
     )
     config.write_text("from __future__ import annotations\n" + source, encoding="utf-8")
-    before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="would not parse"):
-        update_managed_web_config(
-            config,
-            {
-                "action": "update_streamer",
-                "username": "one",
-                "settings": {"chat": "NEVER"},
-            },
-        )
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    )
 
-    assert config.read_bytes() == before
+    lines = config.read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == [
+        "from __future__ import annotations",
+        "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
+    ]
+    compile(config.read_bytes(), "config.py", "exec", dont_inherit=True)
 
 
 @pytest.mark.parametrize(
@@ -3365,3 +3376,590 @@ def test_streamer_edits_keep_crlf_line_breaks(tmp_path, payload):
     assert b"\n" in written
     assert written.count(b"\n") == written.count(b"\r\n")
     assert b"\r\r" not in written
+
+
+SOURCE_IMPORT = "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "#!/usr/bin/env python3\n",
+        "# -*- coding: utf-8 -*-\n",
+        "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n",
+        '"""Alice\'s miner."""\n',
+        '#!/usr/bin/env python3\n"""Alice\'s miner."""\nfrom __future__ import annotations\n',
+    ],
+)
+def test_config_import_goes_below_the_module_header(header):
+    # #327: the import went on line 1 (line 2 after a "coding" line), pushing
+    # a shebang off line 1 and a docstring out of first place.
+    source = (header + "STREAMERS = []\n").encode("utf-8")
+
+    updated = config_editor._with_config_import(source, SOURCE_IMPORT)
+
+    assert updated == (header + SOURCE_IMPORT + "\nSTREAMERS = []\n").encode("utf-8")
+    compile(updated, "config.py", "exec", dont_inherit=True)
+
+
+def test_a_comment_mentioning_coding_is_not_an_encoding_declaration():
+    source = b"# Notes on decoding the settings below\nSTREAMERS = []\n"
+
+    updated = config_editor._with_config_import(source, SOURCE_IMPORT)
+
+    assert updated.splitlines()[0] == SOURCE_IMPORT.encode("utf-8")
+
+
+def test_a_commented_out_import_does_not_count_as_imported():
+    # #327: a commented-out copy of the line passed the old text check, so
+    # the next edit wrote StreamerSource.* without an import (NameError).
+    source = ("# " + SOURCE_IMPORT + "\nSTREAMERS = []\n").encode("utf-8")
+
+    updated = config_editor._with_config_import(source, SOURCE_IMPORT)
+
+    assert (SOURCE_IMPORT + "\n").encode("utf-8") in updated.splitlines(keepends=True)
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        SOURCE_IMPORT,
+        "from TwitchChannelPointsMiner.classes.Settings import Priority, StreamerSource",
+        "from TwitchChannelPointsMiner.classes.Settings import *",
+    ],
+)
+def test_an_existing_import_is_not_added_again(existing):
+    source = (existing + "\nSTREAMERS = []\n").encode("utf-8")
+
+    assert config_editor._with_config_import(source, SOURCE_IMPORT) == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"from os.path import *\nimport logging\nMINER_CONFIG = {}\n",
+        # R327-21: on the same line, after a `;`, it still runs later.
+        b"from os.path import *; import logging\nMINER_CONFIG = {}\n",
+    ],
+)
+def test_an_exact_import_below_a_wildcard_binds_the_name_again(source):
+    # R327-18: the wildcard might bind logging, but the import below it runs
+    # later and binds the module before MINER_CONFIG uses it.
+    assert (
+        config_editor._with_config_import(source, "import logging", ("MINER_CONFIG",))
+        == source
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"import logging\nfrom os.path import *\nMINER_CONFIG = {}\n",
+        b"from os.path import *\nMINER_CONFIG = {}\nimport logging\n",
+    ],
+)
+def test_a_wildcard_after_the_last_import_above_the_edit_is_refused(source):
+    with pytest.raises(ConfigEditError, match="may bind logging itself"):
+        config_editor._with_config_import(source, "import logging", ("MINER_CONFIG",))
+
+
+def test_an_aliased_import_does_not_bind_the_name_an_edit_writes():
+    source = (SOURCE_IMPORT + " as SS\nSTREAMERS = []\n").encode("utf-8")
+
+    updated = config_editor._with_config_import(source, SOURCE_IMPORT)
+
+    assert updated.splitlines()[0] == SOURCE_IMPORT.encode("utf-8")
+
+
+def test_config_import_keeps_crlf_line_breaks():
+    source = b'"""Doc."""\r\nSTREAMERS = []\r\n'
+
+    updated = config_editor._with_config_import(source, SOURCE_IMPORT)
+
+    assert (
+        updated
+        == b'"""Doc."""\r\n' + SOURCE_IMPORT.encode() + b"\r\nSTREAMERS = []\r\n"
+    )
+
+
+def test_config_import_refuses_a_config_that_does_not_parse(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text("STREAMERS = [\n", encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="does not parse"):
+        config_editor._ensure_config_import(config, SOURCE_IMPORT)
+
+    assert config.read_text(encoding="utf-8") == "STREAMERS = [\n"
+
+
+# The current CONFIG_VERSION, so _load_config doesn't migrate the file too.
+LATE_IMPORT_CONFIG = f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n" + """\
+import logging
+from TwitchChannelPointsMiner.logger import LoggerSettings
+
+MINER_CONFIG = {
+    "username": "example",
+    "logger_settings": LoggerSettings(console_level=logging.INFO),
+}
+STREAMERS = ["one", "two"]
+{late_import}
+MINE_CONFIG = {"categories": []}
+ANALYTICS_CONFIG = None
+"""
+
+
+def test_an_import_below_the_edited_streamers_does_not_count(tmp_path):
+    # R327-01: the import sits below STREAMERS, so Streamer(...) written into
+    # STREAMERS would run before it and fail with NameError at startup.
+    config = tmp_path / "config.py"
+    config.write_text(
+        LATE_IMPORT_CONFIG.replace(
+            "{late_import}",
+            (
+                "from TwitchChannelPointsMiner.classes.entities.Streamer import (\n"
+                "    Streamer,\n"
+                "    StreamerSettings,\n"
+                ")"
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": True},
+        },
+    )
+
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].username == "one"
+
+
+def test_an_import_below_the_edited_miner_config_does_not_count(tmp_path):
+    # R327-01, for an import added before its edit: StreamerSource is
+    # imported only below MINER_CONFIG, which the edit writes it into.
+    config = tmp_path / "config.py"
+    config.write_text(
+        LATE_IMPORT_CONFIG.replace(
+            "{late_import}",
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
+        ),
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {"action": "update_sources", "values": {"wildcard_categories": True}},
+    )
+
+    loaded = _load_config(config)
+    assert (
+        StreamerSource.WILDCARD_CATEGORIES
+        in loaded.MINER_CONFIG["streamer_source_priority"]
+    )
+
+
+@pytest.mark.parametrize(
+    "header", ['"""Doc."""; ', "from __future__ import annotations; "]
+)
+def test_config_import_goes_before_a_statement_sharing_the_header_line(header):
+    # R327-02: a statement after `;` on the header's last line still runs
+    # after the import.
+    source = (header + "STREAMERS = [Streamer('one')]\n").encode("utf-8")
+
+    updated = config_editor._with_config_import(
+        source,
+        "from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer",
+    )
+
+    namespace = {}
+    exec(compile(updated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["STREAMERS"][0].username == "one"
+    if header.startswith('"""'):
+        assert ast.get_docstring(ast.parse(updated)) == "Doc."
+
+
+@pytest.mark.parametrize(
+    "header",
+    ['"""Doc.""" \\\n\n', '"""Doc.""" \\\n# note\n'],
+)
+def test_an_import_goes_below_lines_a_backslash_joins_to_the_docstring(
+    tmp_path, header
+):
+    config = tmp_path / "config.py"
+    config.write_text(
+        header + f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "example"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "RANDOM"}}
+    )
+
+    updated = config.read_text(encoding="utf-8")
+    assert ast.get_docstring(ast.parse(updated)) == "Doc."
+    assert _load_config(config).MINER_CONFIG["username"] == "example"
+
+
+def test_an_import_after_a_continued_docstring_line_is_saved(tmp_path):
+    # R327-05: the first statement shares the docstring's logical line past a
+    # backslash continuation. The import goes right before that statement,
+    # ending the logical line, instead of splitting it.
+    config = tmp_path / "config.py"
+    config.write_text(
+        '"""Doc."""; \\\n'
+        '    MINER_CONFIG = {"username": "example"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "RANDOM"}}
+    )
+
+    updated = config.read_text(encoding="utf-8")
+    assert ast.get_docstring(ast.parse(updated)) == "Doc."
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["username"] == "example"
+
+
+@pytest.mark.parametrize("late_import", ["", "import logging"])
+def test_logging_levels_are_written_with_an_import_above_them(tmp_path, late_import):
+    # R327-09: the level is written as logging.<LEVEL>, so logging must be
+    # imported above MINER_CONFIG, even when it is missing or imported later.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "example",\n'
+        '    "logger_settings": LoggerSettings(),\n'
+        "}\n"
+        'STREAMERS = ["one"]\n'
+        f"{late_import}\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+    )
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+@pytest.mark.parametrize("rebinding", ["logging = None", "def logging(): pass"])
+def test_an_edit_is_refused_when_the_config_rebinds_the_name(tmp_path, rebinding):
+    # R327-16: logging is imported but then rebound, so logging.WARNING
+    # written into MINER_CONFIG would fail at startup. Refuse, unsaved.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{rebinding}\n"
+        "\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "example",\n'
+        '    "logger_settings": LoggerSettings(),\n'
+        "}\n"
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="may bind logging itself"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+    assert [path.name for path in tmp_path.iterdir()] == ["config.py"]
+
+
+@pytest.mark.parametrize(
+    "prelude",
+    [
+        # A function's own import, parameter or loop target is local to it.
+        "import logging\n\ndef helper():\n    import logging\n    return logging\n",
+        "def helper():\n    import logging\n    return logging\n",
+        "def helper(logging):\n    return logging\n",
+        "def helper():\n    for logging in ():\n        pass\n",
+        "helper = lambda logging: logging\n",
+        "LEVELS = [logging for logging in ()]\n",
+        # Guarded imports of the module itself bind the same thing.
+        "try:\n    import logging\nexcept ImportError:\n    pass\n",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import logging\n",
+        # `global` without an assignment in that function binds nothing.
+        "import logging\n\ndef helper(message):\n    global logging\n"
+        "    logging.info(message)\n",
+        "import logging\n\ndef outer():\n    global logging\n"
+        "    def inner():\n        logging = 1\n    return inner\n",
+        # An annotation without a value declares the name, binds nothing.
+        "import logging\n\nlogging: object\n",
+        # A walrus inside a lambda binds in the lambda.
+        "import logging\n\nHELPERS = [lambda: (logging := 1) for _ in ()]\n",
+        # A rebinding after MINER_CONFIG runs too late to shadow the edit.
+        "",
+    ],
+)
+def test_an_edit_is_allowed_when_only_other_scopes_bind_the_name(tmp_path, prelude):
+    config = tmp_path / "config.py"
+    late = "logging = None\n" if not prelude else ""
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{prelude}"
+        "\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "example",\n'
+        '    "logger_settings": LoggerSettings(),\n'
+        "}\n"
+        f"{late}"
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+    )
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+# Python 3.14 defers annotations and rejects a walrus inside one.
+ANNOTATION_WALRUS = pytest.mark.skipif(
+    sys.version_info >= (3, 14), reason="a walrus in an annotation is a SyntaxError"
+)
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "def helper():\n    global logging\n    logging = None\n",
+        "def helper():\n    global logging\n    import os as logging\n",
+        "def helper():\n    global logging\n    def logging():\n        pass\n",
+        "def helper():\n    global logging\n    return [(logging := x) for x in ()]\n",
+        "def outer():\n    def inner():\n        global logging\n        del logging\n",
+        # A nested def's defaults and decorators run in the enclosing function.
+        "def helper():\n    global logging\n"
+        "    def inner(value=(logging := None)):\n        pass\n",
+        "def helper():\n    global logging\n"
+        "    @(logging := lambda f: f)\n    def inner():\n        pass\n",
+        "def helper():\n    global logging\n"
+        "    class Inner((logging := object)):\n        pass\n",
+        # Annotations run when the def runs (without postponed annotations).
+        pytest.param(
+            "def helper(value: (logging := None)):\n    pass\n",
+            marks=ANNOTATION_WALRUS,
+        ),
+        pytest.param(
+            "def helper() -> (logging := None):\n    pass\n",
+            marks=ANNOTATION_WALRUS,
+        ),
+        pytest.param(
+            "def helper(*args: (logging := None)):\n    pass\n",
+            marks=ANNOTATION_WALRUS,
+        ),
+        "LEVELS = [[(logging := level) for level in ()] for _ in ()]\n",
+        # A lambda's defaults run in the comprehension, which binds here.
+        "HELPERS = [lambda level=(logging := None): level for _ in (1,)]\n",
+        "try:\n    import logging\nexcept ImportError:\n    logging = None\n",
+        "for logging in ():\n    pass\n",
+        "LEVELS = [(logging := level) for level in ()]\n",
+    ],
+)
+def test_an_edit_is_refused_for_a_module_level_rebinding_in_any_statement(
+    tmp_path, rebinding
+):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{rebinding}"
+        'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}\n'
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="may bind logging itself"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "header, newline",
+    [
+        ('"""Dökümän."""; ', "\n"),
+        ("# -*- coding: utf-8 -*-\r\n", "\r\n"),
+    ],
+)
+def test_an_import_is_added_below_a_bom_non_ascii_or_crlf_header(
+    tmp_path, header, newline
+):
+    config = tmp_path / "config.py"
+    body = newline.join(
+        [
+            "from TwitchChannelPointsMiner.logger import LoggerSettings",
+            'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}',
+            'STREAMERS = ["one"]',
+            'MINE_CONFIG = {"categories": []}',
+            "ANALYTICS_CONFIG = None",
+            "",
+        ]
+    )
+    config.write_bytes(
+        (f"{header}CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}{newline}{body}").encode(
+            "utf-8"
+        )
+    )
+
+    update_managed_web_config(
+        config,
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+    )
+
+    # The import goes below the header (the editor saves CRLF files with
+    # LF line endings, as it did before).
+    written = config.read_text(encoding="utf-8")
+    assert written.startswith(header.rstrip("\r\n") + ("\n" if "\n" in header else ""))
+    assert written.split("CONFIG_VERSION")[0].endswith("import logging\n")
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+def test_an_import_is_added_below_a_coding_line_after_a_bom():
+    encoded = "\ufeff# -*- coding: utf-8 -*-\nX = 1\n".encode("utf-8")
+
+    updated = config_editor._with_config_import(encoded, "import logging")
+
+    assert updated == "\ufeff# -*- coding: utf-8 -*-\nimport logging\nX = 1\n".encode(
+        "utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    "imports",
+    [
+        # R327-17: this binds the Streamer module, not the class.
+        "from TwitchChannelPointsMiner.classes.entities import Streamer\n",
+        # The right import, then one that replaces it.
+        "from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer\n"
+        "from TwitchChannelPointsMiner.classes.entities import Streamer\n",
+    ],
+)
+def test_an_edit_is_refused_when_another_import_binds_the_name(tmp_path, imports):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{imports}"
+        "\n"
+        'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}\n'
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="may bind Streamer itself"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"favorite": True},
+            },
+        )
+
+    assert config.read_bytes() == before
+    assert [path.name for path in tmp_path.iterdir()] == ["config.py"]
+
+
+def test_an_edit_is_refused_when_a_wildcard_from_elsewhere_may_bind_the_name(
+    tmp_path,
+):
+    # R327-19: the entities package's wildcard binds its loaded Streamer
+    # submodule, which would replace the inserted Streamer class import.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "from TwitchChannelPointsMiner.classes.entities import *\n"
+        "\n"
+        'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}\n'
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="may bind Streamer itself"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"favorite": True},
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_a_wildcard_from_the_expected_module_still_allows_the_edit(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {MIGRATION_CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "from TwitchChannelPointsMiner.classes.entities.Streamer import *\n"
+        "\n"
+        'MINER_CONFIG = {"username": "example", "logger_settings": LoggerSettings()}\n'
+        'STREAMERS = ["one"]\n'
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"favorite": True},
+        },
+    )
+
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].settings.favorite is True
+    assert loaded.STREAMERS[0].username == "one"

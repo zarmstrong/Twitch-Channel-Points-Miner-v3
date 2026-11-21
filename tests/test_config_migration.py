@@ -1,9 +1,14 @@
+import ast
+import difflib
 import errno
 import hashlib
 import inspect
+import logging
 import os
 import platform
+import re
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +23,7 @@ from TwitchChannelPointsMiner.config_migration import (
     MINER_CONFIG_DEFAULTS,
     STREAMER_SETTINGS_DEFAULTS,
     ConfigMigrationError,
+    GeneratedConfigError,
     convert_runner,
     convert_runner_source,
     migrate_config,
@@ -766,6 +772,24 @@ def test_migrate_config_recovers_invalid_previous_migration_from_backup(tmp_path
     assert backup.read_text(encoding="utf-8") == CONFIG
 
 
+def test_migrate_config_recovers_a_file_only_the_compiler_rejects(tmp_path):
+    # Older migrations could write CONFIG_VERSION above a __future__ import.
+    # ast.parse accepts that file and compile() rejects it; it's invalid
+    # input, not invalid output, so it's still recovered from the backup.
+    config = tmp_path / "config.py"
+    backup = tmp_path / "config.py.v0.bak"
+    config.write_text(
+        "CONFIG_VERSION = 1\nfrom __future__ import annotations\nMINER_CONFIG = {}\n",
+        encoding="utf-8",
+    )
+    backup.write_text(CONFIG, encoding="utf-8")
+
+    assert migrate_config(config) is True
+
+    assert config.read_text(encoding="utf-8") == migrate_config_source(CONFIG)[0]
+    assert backup.read_text(encoding="utf-8") == CONFIG
+
+
 def test_migrate_config_rewrites_invalid_file_from_current_version_backup(tmp_path):
     config = tmp_path / "config.py"
     backup = tmp_path / "config.py.v0.bak"
@@ -1299,3 +1323,829 @@ ANALYTICS_CONFIG = None
 
     assert "emoji" not in migrated
     assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
+
+
+def test_missing_imports_go_above_the_first_statement_that_uses_them():
+    # #327: `import logging` used to go after the last top-level import,
+    # below the LoggerSettings(...) call that now uses logging.INFO, so the
+    # migrated config failed with NameError on every start.
+    source = """\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+LOGGER = LoggerSettings(save=False)
+import os
+MINER_CONFIG = {"username": "alice", "logger_settings": LOGGER}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    lines = migrated.splitlines()
+    logger_line = next(
+        index for index, line in enumerate(lines) if line.startswith("LOGGER = ")
+    )
+    assert lines.index("import logging") < logger_line
+    assert namespace["LOGGER"].console_level == logging.INFO
+
+
+def test_unversioned_config_keeps_its_docstring_and_future_import_first():
+    # #327: CONFIG_VERSION used to go above both, a SyntaxError for the
+    # __future__ import and no longer a docstring.
+    source = '''\
+"""Alice's miner."""
+from __future__ import annotations
+from TwitchChannelPointsMiner.logger import LoggerSettings
+MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings(save=False)}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+'''
+
+    migrated, version, _ = migrate_config_source(source)
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), {})
+
+    assert version == 0
+    lines = migrated.splitlines()
+    assert lines[:3] == [
+        '"""Alice\'s miner."""',
+        "from __future__ import annotations",
+        f"CONFIG_VERSION = {CONFIG_VERSION}",
+    ]
+    assert ast.get_docstring(ast.parse(migrated)) == "Alice's miner."
+
+
+def test_unversioned_config_keeps_its_shebang_and_encoding_lines_first():
+    source = """\
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+MINER_CONFIG = {"username": "alice"}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), {})
+
+    lines = migrated.splitlines()
+    assert lines[:2] == ["#!/usr/bin/env python3", "# -*- coding: utf-8 -*-"]
+    # Imports and CONFIG_VERSION both go below them, not between them.
+    assert lines.index(f"CONFIG_VERSION = {CONFIG_VERSION}") > 1
+    assert all(not line.startswith(("import ", "from ")) for line in lines[:2])
+
+
+def test_missing_imports_go_above_a_decorated_function_that_uses_them():
+    # R327-03: a decorated def starts at its first decorator, which is where
+    # the migrated LoggerSettings(...) runs.
+    source = """\
+CONFIG_VERSION = 2
+from TwitchChannelPointsMiner.logger import LoggerSettings
+def keep(settings):
+    return lambda function: function
+@keep(LoggerSettings(save=False))
+def unused():
+    pass
+import os
+MINER_CONFIG = {"username": "alice"}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+"""
+
+    migrated, _, _ = migrate_config_source(source)
+
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), {})
+    lines = migrated.splitlines()
+    assert lines.index("import logging") < lines.index("def keep(settings):")
+
+
+@pytest.mark.parametrize(
+    "header", ['"""Doc."""; ', "from __future__ import annotations; "]
+)
+def test_migration_inserts_before_a_statement_sharing_the_header_line(header):
+    # R327-02: MINER_CONFIG shares the header's last line, so CONFIG_VERSION
+    # and the imports it needs go before it on that line, not below it.
+    source = (
+        header
+        + "MINER_CONFIG = {'username': 'alice', 'priority': []}\n"
+        + "STREAMERS = []\nMINE_CONFIG = {}\nANALYTICS_CONFIG = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    if header.startswith('"""'):
+        assert ast.get_docstring(ast.parse(migrated)) == "Doc."
+
+
+def test_invalid_generated_output_does_not_recover_from_a_backup(tmp_path, monkeypatch):
+    # R327-06: when the migration's own output doesn't compile (forced here),
+    # the file is still valid, so it must not be replaced by migrating an
+    # older backup.
+    from TwitchChannelPointsMiner import config_migration
+
+    apply_edits = config_migration._apply_edits
+    monkeypatch.setattr(
+        config_migration,
+        "_apply_edits",
+        lambda source, edits: apply_edits(source, edits) + ")\n",
+    )
+    config = tmp_path / "config.py"
+    config.write_text(
+        'MINER_CONFIG = {"username": "alice",\n'
+        '    "claim_drops_startup": True,\n'
+        "}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    backup = tmp_path / "config.py.v0.bak"
+    backup.write_text(CONFIG, encoding="utf-8")
+    before = config.read_bytes()
+    backup_before = backup.read_bytes()
+
+    with pytest.raises(GeneratedConfigError, match="generated invalid"):
+        migrate_config(config)
+
+    assert config.read_bytes() == before
+    assert backup.read_bytes() == backup_before
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "config.py",
+        "config.py.v0.bak",
+    ]
+
+
+@pytest.mark.parametrize(
+    "miner_config",
+    [
+        '{"username": "alice", "password": ("secret")}',
+        '{"username": "alice", "password": ( ( "secret" ) ) }',
+        '{\n    "username": "alice",\n    "password": (  # note (\n'
+        '        "secret"\n    )\n}',
+        '{\n    "username": "alice",\n    "password": ("secret"),\n}',
+        '{\n    "username": "alice",\n    "password": (\n        "secret"  #### ) ##\n'
+        "    \\\n    )\n}",
+    ],
+)
+def test_a_parenthesized_password_is_removed_at_the_current_version(
+    tmp_path, miner_config
+):
+    # R327-07: a config already at CONFIG_VERSION only gets its password
+    # removed. The removal must take the value's parentheses with it, so the
+    # result is valid and saved, not refused on every start.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        f"MINER_CONFIG = {miner_config}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    assert migrate_config(config) is True
+
+    migrated = config.read_text(encoding="utf-8")
+    assert "secret" not in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"] == {"username": "alice"}
+    backup = tmp_path / f"config.py.v{CONFIG_VERSION}.bak"
+    assert "secret" not in backup.read_text(encoding="utf-8")
+    # The saved file needs no further edit, so the next start is a no-op.
+    assert migrate_config(config) is False
+
+
+@pytest.mark.parametrize(
+    "last_entry, expected",
+    [
+        ('"password": ("secret")\n', {}),
+        ('"password": ("secret"),\n', {}),
+        ('"other": ("x")\n', {"other": "x"}),
+        ('"other": ( ("x")  # note )\n    )\n', {"other": "x"}),
+    ],
+)
+def test_an_older_config_whose_last_entry_is_parenthesized_migrates(
+    last_entry, expected
+):
+    # Defaults are added after the last entry. Its comma goes after the
+    # parentheses (not inside, where it makes a tuple), and it survives the
+    # password's removal when the password is that last entry.
+    source = (
+        "CONFIG_VERSION = 11\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "alice",\n'
+        f"    {last_entry}"
+        "}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert "secret" not in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    config = namespace["MINER_CONFIG"]
+    assert config["username"] == "alice"
+    assert "password" not in config
+    for name, value in expected.items():
+        assert config[name] == value
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+@pytest.mark.parametrize(
+    "first_lines",
+    [
+        '"""Doc."""; \\\n    MINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc."""; \\\r\n    MINER_CONFIG = {"username": "alice"}\r\n',
+        'from __future__ import annotations; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+        'import os; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+        'CONFIG_VERSION = 5; \\\n  MINER_CONFIG = {"username": "alice"}\n',
+        # A backslash joins a blank or comment line to the header's line.
+        '"""Doc.""" \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc.""" \\\n# note\nMINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc.""" \\\r\n\r\nMINER_CONFIG = {"username": "alice"}\r\n',
+        'import os \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        'CONFIG_VERSION = 5 \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        'from __future__ import annotations \\\n\nMINER_CONFIG = {"username": "alice"}\n',
+        # A backslash in a comment continues nothing.
+        '"""Doc.""" # not \\\nMINER_CONFIG = {"username": "alice"}\n',
+    ],
+)
+def test_a_header_continued_onto_the_next_line_migrates(first_lines):
+    # The first statement shares the header's logical line past a backslash
+    # continuation; inserted statements must not split that logical line.
+    source = first_lines + "STREAMERS = []\nMINE_CONFIG = {}\nANALYTICS_CONFIG = None\n"
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["username"] == "alice"
+    assert namespace["CONFIG_VERSION"] == CONFIG_VERSION
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+def test_a_dict_whose_first_entry_shares_the_opening_line_migrates():
+    # The dashboard writes this layout when it adds to a one-line dict. The
+    # added defaults take the closing line's indent plus four spaces.
+    source = (
+        'MINER_CONFIG = {"username": "alice"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": [],\n'
+        '    "category_sort": "RANDOM",\n'
+        "}\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINE_CONFIG"]["category_sort"] == "RANDOM"
+    assert "\n    'blacklist': [],\n" in migrated
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+def test_closing_paren_scan_is_linear_on_a_run_of_hashes():
+    # CodeQL: overlapping comment alternatives backtracked exponentially on
+    # a long run of `#` with no `)` after it.
+    import time
+
+    from TwitchChannelPointsMiner import config_migration
+
+    started = time.perf_counter()
+    assert config_migration._CLOSING_PAREN.match("#" * 50000) is None
+    assert config_migration._CLOSING_PAREN.match(" #" + "#" * 50000 + "\n") is None
+    assert time.perf_counter() - started < 1
+    # A `)` inside a comment never counts; the one on the next line does.
+    assert config_migration._CLOSING_PAREN.match("  # c )") is None
+    match = config_migration._CLOSING_PAREN.match("  # ) ##\n  )")
+    assert match is not None and match.end() == len("  # ) ##\n  )")
+
+
+@pytest.mark.parametrize(
+    "entries, expected",
+    [
+        ('{("password"): "s", "username": "a"}', {"username": "a"}),
+        (
+            '{"username": "a", ("password") : ("s"), ("x"): 1}',
+            {"username": "a", "x": 1},
+        ),
+        ('{"password": "s", **EXTRA}', {"extra": True}),
+        ('{"username": "a", "password": "s"  # a, b\n}', {"username": "a"}),
+    ],
+)
+def test_password_removal_keeps_neighbouring_entries_intact(entries, expected):
+    source = (
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'EXTRA = {"extra": True}\n'
+        f"MINER_CONFIG = {entries}\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"] == expected
+
+
+@pytest.mark.parametrize(
+    "late_import",
+    [
+        "import logging",
+        "from TwitchChannelPointsMiner.logger import ColorPalette",
+        "from TwitchChannelPointsMiner.classes.Settings import Priority",
+        "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
+    ],
+)
+def test_an_import_below_its_first_use_does_not_count_as_present(late_import):
+    # R327-08: the config already imports the name, but only below the
+    # statement the migration adds it to, so it must be imported above that.
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "LOGGER = LoggerSettings(save=False)\n"
+        'MINER_CONFIG = {"username": "alice"}\n'
+        f"{late_import}\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["username"] == "alice"
+    assert namespace["LOGGER"].save is False
+
+
+def test_defaults_are_not_given_a_name_a_function_annotates_locally():
+    # R327-17: an annotation without a value binds nothing in the module, but
+    # in a function it makes the name local, so logging.INFO written into
+    # that function would raise UnboundLocalError.
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        "def make_logger():\n"
+        "    settings = LoggerSettings(save=False)\n"
+        "    logging: object\n"
+        "    return settings\n"
+        "\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": make_logger()}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert "logging.INFO" not in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].save is False
+
+
+def test_defaults_are_not_given_names_a_factory_binds_locally():
+    # R327-10: `import logging` inside the function makes logging local to
+    # all of it, so a module-level import can't supply logging.INFO above it.
+    # Those defaults are left to LoggerSettings; the others are still added.
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        "def make_logger():\n"
+        "    settings = LoggerSettings(save=False)\n"
+        "    import logging\n"
+        "    return settings\n"
+        "\n"
+        "def make_colors():\n"
+        "    ColorPalette = None\n"
+        "    return LoggerSettings(save=False)\n"
+        "\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": make_logger()}\n'
+        "COLORS = make_colors()\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    settings = namespace["MINER_CONFIG"]["logger_settings"]
+    assert settings.save is False
+    assert settings.less is False
+    # Any binding other than a plain top-level import keeps the defaults
+    # using that name out of the whole file.
+    assert "logging.INFO" not in migrated
+    assert "color_palette=" not in migrated
+    assert "less=False" in migrated
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "match 0:\n        case logging:\n            pass",
+        "if False:\n        del logging",
+        "for logging in ():\n        pass",
+        "try:\n        pass\n    except Exception as logging:\n        pass",
+    ],
+)
+def test_every_local_binding_form_keeps_the_logging_defaults_out(binding):
+    # R327-11: a match capture or `del` makes logging local to the whole
+    # function too, so logging.INFO would raise UnboundLocalError there.
+    source = (
+        "import functools\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        "@functools.lru_cache\n"
+        "def make_logger():\n"
+        "    settings = LoggerSettings(save=False)\n"
+        f"    {binding}\n"
+        "    return settings\n"
+        "\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": make_logger()}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].save is False
+    assert "logging.INFO" not in migrated.split("MINER_CONFIG")[0]
+
+
+def test_a_global_declaration_keeps_the_logging_defaults():
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        "def make_logger():\n"
+        "    global logging\n"
+        "    return LoggerSettings(save=False)\n"
+        "\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": make_logger()}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].save is False
+    assert "console_level=logging.INFO" in migrated
+
+
+@pytest.mark.parametrize(
+    "logger_expression, prelude",
+    [
+        (
+            "make_logger()",
+            (
+                "def make_logger():\n"
+                "    return next(LoggerSettings(save=False) for logging in (None,))\n"
+            ),
+        ),
+        ("[LoggerSettings(save=False) for logging in (None,)][0]", ""),
+        (
+            "Holder.settings",
+            (
+                "class Holder:\n"
+                "    logging = None\n"
+                "    settings = LoggerSettings(save=False)\n"
+            ),
+        ),
+        ("[[LoggerSettings(save=False) for _ in (1,)] for logging in (2,)][0][0]", ""),
+    ],
+)
+def test_comprehension_and_class_bindings_keep_the_logging_defaults_out(
+    logger_expression, prelude
+):
+    # R327-12: a comprehension target or a class attribute named logging
+    # shadows the module-level import where the LoggerSettings call runs.
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        f"{prelude}"
+        f'MINER_CONFIG = {{"username": "alice", "logger_settings": {logger_expression}}}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].save is False
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="type parameters need 3.12")
+@pytest.mark.parametrize(
+    "definition, call",
+    [
+        (
+            "def make_logger[logging]():\n    return LoggerSettings(save=False)\n",
+            "make_logger()",
+        ),
+        (
+            "class Make[logging]:\n    settings = LoggerSettings(save=False)\n",
+            "Make.settings",
+        ),
+        ("type Make[logging] = LoggerSettings(save=False)\n", "Make.__value__"),
+        ("type Make[ColorPalette] = LoggerSettings(save=False)\n", "Make.__value__"),
+    ],
+)
+def test_type_parameters_keep_the_logging_defaults_out(definition, call):
+    # R327-13, R327-14: a type parameter named logging (or ColorPalette)
+    # shadows the import inside the def, class or type alias.
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        f"{definition}"
+        f'MINER_CONFIG = {{"username": "alice", "logger_settings": {call}}}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].save is False
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["logging = None", "import os as logging", "from os import path as logging"],
+)
+def test_a_module_level_rebinding_keeps_the_logging_defaults_out(binding):
+    # The added `import logging` can't be relied on when the config binds
+    # logging to something else itself.
+    source = (
+        f"{binding}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}\n'
+        'MINE_CONFIG = {"categories": []}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert "logging.INFO" not in migrated
+    assert "logging.DEBUG" not in migrated
+    assert "'category_log_level'" not in migrated
+    assert namespace["MINE_CONFIG"]["categories"] == []
+
+
+def test_a_rebound_enum_name_is_not_used_for_new_priority_lists():
+    source = (
+        "def Priority():\n" "    pass\n" "\n" 'MINER_CONFIG = {"username": "alice"}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert "priority" not in namespace["MINER_CONFIG"]
+    assert len(namespace["MINER_CONFIG"]["streamer_source_priority"]) == 5
+
+
+def test_no_import_replaces_a_name_the_config_binds_itself():
+    # R327-15: logging is the config's own string and every logging default
+    # is already set, so the migration must not import logging over it.
+    source = (
+        "logging = 'alice'\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "LOGGER = LoggerSettings(console_level=20, file_level=10, color_palette=None)\n"
+        'MINER_CONFIG = {"username": logging.upper()}\n'
+        "Email = 'mine'\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["username"] == "ALICE"
+    assert namespace["Email"] == "mine"
+    assert "import logging" not in migrated
+    assert "import ColorPalette" not in migrated
+    assert "import Email" not in migrated
+
+
+@pytest.mark.parametrize(
+    "last_import",
+    ["import os;", "import os ;  # comment", "from __future__ import annotations;"],
+)
+def test_imports_are_added_after_an_import_ending_in_a_semicolon(last_import):
+    # R327-18: the `;` stays with its import instead of being left alone on a
+    # line after the inserted imports.
+    source = f'{last_import}\nMINER_CONFIG = {{"username": "alice"}}\n'
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert len(namespace["MINER_CONFIG"]["priority"]) == 4
+
+
+def test_a_priority_imported_from_elsewhere_is_not_used_for_new_lists():
+    # The name is bound, but not by the import the default relies on.
+    source = (
+        "from enum import Enum as Priority\n" 'MINER_CONFIG = {"username": "alice"}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert "priority" not in namespace["MINER_CONFIG"]
+
+
+def test_a_wildcard_from_another_module_keeps_the_dependent_defaults_out():
+    source = (
+        "from os.path import *\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}\n'
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert "logging.INFO" not in migrated
+    assert "priority" not in namespace["MINER_CONFIG"]
+    assert namespace["MINER_CONFIG"]["logger_settings"].less is False
+
+
+def test_a_rebound_priority_warns_that_the_default_list_was_not_added(caplog):
+    source = 'def Priority():\n    pass\n\nMINER_CONFIG = {"username": "alice"}\n'
+
+    with caplog.at_level(logging.WARNING):
+        migrated, _, _ = migrate_config_source(source)
+
+    assert "'priority'" not in migrated
+    assert "may bind Priority itself" in caplog.text
+    assert "without FAVORITE" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("[logging.INFO]", True),
+        ("(ColorPalette.DEFAULT,)", True),
+        ("dict(level=logging.INFO)", True),
+        ("logging.INFO", True),
+        ("'logging'", False),
+        ("[Priority.STREAK]", False),
+    ],
+)
+def test_uses_any_reads_every_name_in_a_default(value, expected):
+    from TwitchChannelPointsMiner.config_migration import _uses_any
+
+    assert _uses_any(value, {"logging", "ColorPalette"}) is expected
+
+
+@pytest.mark.parametrize(
+    "last_import", ["import os  # comment", "import os;  # comment"]
+)
+def test_imports_are_added_below_an_import_with_a_trailing_comment(last_import):
+    source = f'{last_import}\nMINER_CONFIG = {{"username": "alice"}}\n'
+
+    migrated, _, _ = migrate_config_source(source)
+
+    lines = migrated.split("\n")
+    assert lines[0] == f"CONFIG_VERSION = {CONFIG_VERSION}"
+    assert lines[1] == last_import
+    assert lines[2].startswith("from TwitchChannelPointsMiner.classes.Settings")
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert len(namespace["MINER_CONFIG"]["priority"]) == 4
+
+
+def _example_at_version(version):
+    source = (Path(__file__).resolve().parent.parent / "config.example.py").read_text(
+        encoding="utf-8"
+    )
+    replacement = "" if version == 0 else f"CONFIG_VERSION = {version}\n"
+    old, count = re.subn(r"^CONFIG_VERSION = \d+\n", replacement, source, flags=re.M)
+    assert count == 1
+    return old
+
+
+@pytest.mark.parametrize("version", [0, 5, 9, 11])
+def test_config_example_migrates_from_older_versions_by_adding_only_defaults(
+    version,
+):
+    # Golden test: config.example.py migrated from an older version is the
+    # same file with CONFIG_VERSION updated and only these lines inserted.
+    # The output is the same as before #327's placement changes.
+    old = _example_at_version(version)
+
+    migrated, old_version, new_version = migrate_config_source(old)
+
+    assert (old_version, new_version) == (version, CONFIG_VERSION)
+    expected_lines = [
+        "        username=None,\n",
+        "    'blacklist': [],\n",
+        "    'track_category_streamer_points': False,\n",
+    ]
+    if version:
+        old = old.replace(
+            f"CONFIG_VERSION = {version}\n", f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        )
+    else:
+        # An unversioned file gets CONFIG_VERSION below its coding line.
+        expected_lines.insert(0, f"CONFIG_VERSION = {CONFIG_VERSION}\n")
+        assert migrated.split("\n")[:2] == [
+            "# -*- coding: utf-8 -*-",
+            f"CONFIG_VERSION = {CONFIG_VERSION}",
+        ]
+    matcher = difflib.SequenceMatcher(
+        a=old.splitlines(keepends=True),
+        b=migrated.splitlines(keepends=True),
+        autojunk=False,
+    )
+    changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
+    assert {opcode[0] for opcode in changes} == {"insert"}
+    inserted = [line for _, _, _, j1, j2 in changes for line in matcher.b[j1:j2]]
+    assert inserted == expected_lines
+    # Migrating the output again changes nothing.
+    assert migrate_config_source(migrated)[0] == migrated
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        CONFIG,
+        "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"
+        '"""Doc."""\nfrom __future__ import annotations\n'
+        'MINER_CONFIG = {"username": "alice"}\n',
+        '"""Doc."""; MINER_CONFIG = {"username": "alice"}\n',
+        "import os  # comment\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}\n'
+        'MINE_CONFIG = {"categories": []}\n',
+    ],
+)
+def test_migrating_the_migrations_own_output_is_a_no_op(source):
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrate_config_source(migrated) == (
+        migrated,
+        CONFIG_VERSION,
+        CONFIG_VERSION,
+    )
+
+
+def test_non_ascii_text_before_a_semicolon_shared_header_keeps_offsets():
+    # ast columns are UTF-8 byte offsets; the inserts must land on characters.
+    source = '"""Dökümän für Ålice."""; MINER_CONFIG = {"username": "ålice"}\n'
+
+    migrated, _, _ = migrate_config_source(source)
+
+    assert migrated.startswith(
+        f'"""Dökümän für Ålice."""; CONFIG_VERSION = {CONFIG_VERSION}\n'
+    )
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["__doc__"] == "Dökümän für Ålice."
+    assert namespace["MINER_CONFIG"]["username"] == "ålice"
+    assert len(namespace["MINER_CONFIG"]["priority"]) == 4
+
+
+@pytest.mark.parametrize("newline", ["\r\n", "\r"])
+def test_crlf_and_cr_configs_migrate_with_their_header_first(tmp_path, newline):
+    source = newline.join(
+        [
+            "# -*- coding: utf-8 -*-",
+            '"""Doc."""',
+            "import os  # comment",
+            "from TwitchChannelPointsMiner.logger import LoggerSettings",
+            'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}',
+            "STREAMERS = []",
+            'MINE_CONFIG = {"categories": []}',
+            "ANALYTICS_CONFIG = None",
+            "",
+        ]
+    )
+    header = [
+        "# -*- coding: utf-8 -*-",
+        '"""Doc."""',
+        f"CONFIG_VERSION = {CONFIG_VERSION}",
+        "import os  # comment",
+    ]
+
+    # The source itself: the user's lines keep their line endings.
+    migrated, _, _ = migrate_config_source(source)
+
+    assert re.split(r"\r\n|\r|\n", migrated)[:4] == header
+    assert f"import os  # comment{newline}" in migrated
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    assert namespace["MINER_CONFIG"]["logger_settings"].console_level == logging.INFO
+    assert migrate_config_source(migrated)[0] == migrated
+
+    # The file: read with universal newlines, so it is saved with LF endings.
+    config = tmp_path / "config.py"
+    config.write_bytes(source.encode("utf-8"))
+
+    assert migrate_config(config) is True
+    assert config.read_bytes().decode("utf-8").split("\n")[:4] == header
+    assert migrate_config(config) is False
