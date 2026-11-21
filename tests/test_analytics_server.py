@@ -3,6 +3,7 @@ import errno
 import logging
 import os
 import re
+import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -305,6 +306,120 @@ def test_config_endpoints_require_analytics_authentication():
     assert response.status_code == 403
     assert notification_response.status_code == 403
     assert "analytics username and password" in read_response.get_json()["error"]
+
+
+def test_analytics_beyond_localhost_requires_password_by_default():
+    with pytest.raises(ValueError, match="requires a password"):
+        AnalyticsServer(host="0.0.0.0", password=None)
+
+
+def test_trust_proxy_auth_allows_non_loopback_bind_without_password():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    assert server.password is None
+    assert server.trust_proxy_auth is True
+
+
+def test_trust_proxy_auth_allows_config_endpoint_without_password(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    monkeypatch.setitem(
+        __import__(
+            "TwitchChannelPointsMiner.classes.AnalyticsServer", fromlist=["web_config"]
+        ).web_config.__globals__,
+        "read_managed_web_config",
+        lambda _path: {"streamers": []},
+    )
+    server = AnalyticsServer(password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get("/config")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"streamers": []}
+
+
+def test_trust_proxy_auth_does_not_bypass_a_configured_password():
+    server = AnalyticsServer(username="user", password="secret", trust_proxy_auth=True)
+
+    response = server.app.test_client().get("/")
+
+    assert response.status_code == 401
+
+
+def test_trust_proxy_auth_loopback_bind_rejects_unlisted_host():
+    # trust_proxy_auth does not disable the loopback DNS-rebinding guard: a
+    # rebound page can't make its own Host header match an allowed name.
+    server = AnalyticsServer(host="127.0.0.1", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get(
+        "/__host_guard_probe__",
+        headers={
+            "Host": "evil.example:54455",
+            "Origin": "http://evil.example:54455",
+            "X-Forwarded-Host": "evil.example:54455",
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"].startswith("Unrecognized Host header.")
+
+
+@pytest.mark.parametrize("trust_proxy_auth", [False, True])
+def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_auth):
+    # Traefik keeps the browser's Host header, while Authelia is the only
+    # authentication layer. A loopback bind must accept the explicitly
+    # allowlisted host, with or without trust_proxy_auth.
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=trust_proxy_auth,
+        allowed_hosts=["Miner.Example.com:443"],
+    )
+
+    response = server.app.test_client().get(
+        "/__host_guard_probe__",
+        headers={
+            "Host": "miner.example.com",
+            "X-Forwarded-Host": "miner.example.com",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+def test_trust_proxy_auth_rejects_cross_site_post():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Host": "miner.example.com", "Origin": "https://evil.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Cross-site request rejected."
+
+
+def test_trust_proxy_auth_accepts_same_origin_traefik_post():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={
+            "Host": "miner.example.com",
+            "Origin": "https://miner.example.com",
+            "X-Forwarded-Host": "miner.example.com",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    # No on_restart callback in this test: passing the cross-site and config
+    # gates is what matters, and the endpoint reports restart as unavailable.
+    assert response.status_code == 503
 
 
 def test_static_assets_are_served_without_authentication():
@@ -938,6 +1053,7 @@ def test_config_ui_exposes_requested_management_controls():
         "logging-settings-form",
         "update-settings-form",
         "notification-settings",
+        "restart-miner",
     ):
         assert f'id="{selector}"' in template
     for setting in (
@@ -969,6 +1085,46 @@ def test_config_ui_exposes_requested_management_controls():
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "reorder_streamers" in script
     assert "Sortable.create" in script
+    assert "/config/restart" in script
+
+
+def test_config_restart_route_requests_miner_restart():
+    calls = []
+    server = AnalyticsServer(
+        username="user", password="secret", on_restart=lambda: calls.append(True)
+    )
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 202
+    # The request lands on a timer so the response flushes before the process
+    # is exec'd; wait out the grace period.
+    deadline = time.time() + 3
+    while not calls and time.time() < deadline:
+        time.sleep(0.05)
+    assert calls == [True]
+
+
+def test_config_restart_without_callback_reports_unavailable():
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 503
+
+
+def test_config_restart_requires_authentication():
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post("/config/restart")
+
+    assert response.status_code == 403
 
 
 def test_config_ui_preserves_an_integer_streak_only_window():
