@@ -524,9 +524,14 @@ class HistoryRecorder(threading.Thread):
             # changes.
             for filename, path in self._analytics_files():
                 if _clean_streamer(filename[: -len(".json")]) == streamer:
-                    self._ingest_analytics_file(
+                    if not self._ingest_analytics_file(
                         filename, path, file_locked=True, force=True
-                    )
+                    ):
+                        # Its last changes are unknown, so the kept balance
+                        # may be stale.  Forget it: the next file's first
+                        # entry becomes a new baseline instead of a delta
+                        # that could include changes deleted here.
+                        self.store.forget_import_balance(filename)
             deleted_at = float(self.clock())
             counts = self.store.delete_streamer(streamer, deleted_at=deleted_at)
             self._deleted_before[streamer] = max(
@@ -754,6 +759,16 @@ class HistoryRecorder(threading.Thread):
             game = entry.get("game") or None
             broadcast_id = self.store.open_broadcast(streamer)
             active = self._active_watch.get(streamer)
+            if (
+                active is not None
+                and active.get("broadcast_id") is None
+                and broadcast_id is not None
+                and active["reason"] == reason
+            ):
+                # The broadcast row appeared after the watch started (for
+                # example right after a delete); link the session to it.
+                self.store.link_watch_broadcast(active["id"], broadcast_id)
+                active["broadcast_id"] = broadcast_id
             if active is not None and self._same_watch(active, reason, broadcast_id):
                 self._tick_watch(streamer, now)
             if self._active_watch.get(streamer) is None or not self._same_watch(
@@ -1199,7 +1214,7 @@ class HistoryRecorder(threading.Thread):
             self._ingest_analytics_file(filename, path)
 
     def _ingest_analytics_file(self, filename, path, file_locked=False, force=False):
-        """Import one analytics JSON.
+        """Import one analytics JSON; False when it could not be read.
 
         ``force`` skips the tracking filters below; a delete uses it so the
         kept cursor has the file's last balance even for a channel History
@@ -1208,23 +1223,23 @@ class HistoryRecorder(threading.Thread):
 
         streamer = _clean_streamer(filename[: -len(".json")])
         if not streamer:
-            return
+            return True
         if force:
             pass
         elif streamer in self._drop_farmed:
             # Points written for a channel farmed only for Drops do not
             # belong to a configured streamer's history.
-            return
+            return True
         configured = None if force else self._configured_streamers()
         if configured is not None and streamer not in configured:
             # Leftover JSON from a channel the miner no longer tracks, for
             # example one farmed for Drops before History was enabled, would
             # otherwise be imported as a configured streamer's history.
-            return
+            return True
         try:
             stat = os.stat(path)
         except OSError:
-            return
+            return True
 
         series_source = f"analytics:{filename}:series"
         annotation_source = f"analytics:{filename}:annotations"
@@ -1236,16 +1251,16 @@ class HistoryRecorder(threading.Thread):
         series_fresh = self._state_matches(series_state, stat)
         annotation_fresh = self._state_matches(annotation_state, stat)
         if series_fresh and annotation_fresh:
-            return
+            return True
 
         try:
             with nullcontext() if file_locked else _analytics_file_lock():
                 payload = _read_json(path)
         except (OSError, ValueError, TypeError) as error:
             logger.warning("Unable to import history from %s: %s", path, error)
-            return
+            return False
         if not isinstance(payload, dict):
-            return
+            return False
         self._tracked_streamers.add(streamer)
 
         if not series_fresh:
@@ -1264,6 +1279,7 @@ class HistoryRecorder(threading.Thread):
                 stat,
                 annotation_state,
             )
+        return True
 
     @staticmethod
     def _state_matches(state, stat):

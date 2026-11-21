@@ -2224,3 +2224,71 @@ def test_watch_continuing_into_a_new_broadcast_starts_a_new_session(recorder):
     sessions = store.sessions(kind="watch", days=1, now=clock.value)["sessions"]
     assert sorted(item["broadcast_id"] for item in sessions) == ["b1", "b2"]
     assert [item["broadcast_id"] for item in sessions if item["active"]] == ["b2"]
+
+
+def test_unreadable_json_at_delete_does_not_inflate_the_next_file(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000},
+        {"x": int((NOW + 10) * 1000), "y": 1050},
+    ]
+    _write_json(path, {"series": series}, NOW + 11)
+    clock.value = NOW + 12
+    recorder.poll_once()
+    # The file now holds changes History cannot read.
+    Path(path).write_text("{not json", encoding="utf-8")
+    os.utime(path, (NOW + 20, NOW + 20))
+    clock.value = NOW + 30
+    recorder.delete_streamer("bob", remove_source=lambda: os.remove(path))
+
+    new = [
+        {"x": int((NOW + 100) * 1000), "y": 1110},
+        {"x": int((NOW + 110) * 1000), "y": 1120},
+    ]
+    _write_json(path, {"series": new}, NOW + 111)
+    clock.value = NOW + 115
+    recorder.poll_once()
+
+    # 1110 is a new baseline; only the known +10 counts.
+    assert recorder.store.overview(days=1, now=clock.value)["window"][
+        "points_gained"
+    ] == (10)
+
+
+def test_watch_started_before_its_broadcast_row_is_linked_later(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: [
+            {"username": "bob", "broadcast_id": "b1", "online_at": NOW}
+        ],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        clock.value = NOW + 60
+        recorder.delete_streamer("bob")
+        # Still watched and live: the next poll sees the watch before the
+        # live snapshot recreates the broadcast row.
+        watching = analytics / "now_watching.json"
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 70)
+        clock.value = NOW + 75
+        recorder.poll_once()
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 90)
+        clock.value = NOW + 95
+        recorder.poll_once()
+
+        watch = store.sessions(kind="watch", days=1, now=clock.value)["sessions"][0]
+        assert watch["broadcast_id"] == "b1"
+    finally:
+        recorder._shutdown()

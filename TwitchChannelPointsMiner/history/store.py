@@ -1253,6 +1253,25 @@ class HistoryStore(object):
             ),
         )
 
+    def forget_import_balance(self, filename):
+        """Drop a JSON's kept balance when its last changes are unknown."""
+
+        with self._write_connection() as connection:
+            connection.execute(
+                "UPDATE import_state SET last_balance = NULL WHERE source = ?",
+                (f"analytics:{filename}:series",),
+            )
+
+    def link_watch_broadcast(self, session_id, broadcast_id):
+        with self._write_connection() as connection:
+            connection.execute(
+                """
+                UPDATE watch_sessions SET broadcast_id = ?
+                WHERE id = ? AND broadcast_id IS NULL
+                """,
+                (str(broadcast_id), int(session_id)),
+            )
+
     def reset_import_position(self, filename):
         """Read a recreated analytics JSON from the start, keeping balances."""
 
@@ -1508,6 +1527,24 @@ class HistoryStore(object):
                     streak_claims.setdefault(row["streamer"], []).append(
                         (float(row["ts"]), _event_broadcast_id(row["metadata"]))
                     )
+        rows = [dict(row) for row in rows]
+        # A streamer live or watched now belongs in the list even without
+        # activity in the window, such as a broadcast that started yesterday.
+        listed = {row["streamer"] for row in rows}
+        for streamer in sorted((set(live_streams) | set(active_watch)) - listed):
+            rows.append(
+                {
+                    "streamer": streamer,
+                    "points_gained": 0,
+                    "points_spent": 0,
+                    "watch_seconds": 0.0,
+                    "watch_sessions": 0,
+                    "stream_sessions": 0,
+                    "streak_count": 0,
+                    "first_seen": None,
+                    "last_seen": None,
+                }
+            )
         result = []
         for row in rows:
             item = dict(row)

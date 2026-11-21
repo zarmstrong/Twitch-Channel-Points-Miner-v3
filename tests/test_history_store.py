@@ -608,3 +608,14 @@ def test_watch_tick_across_midnight_is_split_between_days(store):
         for row in store.daily(days=2, now=midnight + 30)
     }
     assert daily == {utc_day(midnight - 30): 30, utc_day(midnight): 30}
+
+
+def test_streamer_live_since_yesterday_is_listed_for_today(store):
+    yesterday = NOW - 24 * 60 * 60
+    store.upsert_stream_session("alice", "b1", yesterday)
+
+    listed = store.streamers(days=1, now=NOW)
+
+    assert [item["streamer"] for item in listed] == ["alice"]
+    assert listed[0]["live_stream"]["broadcast_id"] == "b1"
+    assert listed[0]["points_gained"] == 0
