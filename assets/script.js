@@ -1642,9 +1642,6 @@ function saveCategorySettings(event) {
 
 var RESTART_POLL_INTERVAL_MS = 2000;
 var RESTART_GIVE_UP_MS = 3 * 60 * 1000;
-// Without the instance header, a server that never stopped answering for this
-// long after the restart request is taken to have restarted between two probes.
-var RESTART_HEADERLESS_ASSUME_MS = 30 * 1000;
 
 // Calls onBack once a new miner process answers, or onGiveUp after
 // RESTART_GIVE_UP_MS. Each process sends its own X-Miner-Instance header;
@@ -1652,9 +1649,9 @@ var RESTART_HEADERLESS_ASSUME_MS = 30 * 1000;
 // differs from the one this page was served with tells the new process from
 // the old one, which keeps answering until the restart lands. If the header
 // is missing (a proxy that drops it), the server going away and answering
-// again is taken as the restart instead, or else the server answering for
-// RESTART_HEADERLESS_ASSUME_MS without a break (the outage fell between two
-// probes).
+// again is taken as the restart instead. A restart that falls entirely between
+// two probes then goes unnoticed and the page gives up with a message, which is
+// safer than reloading while the old process is still running.
 function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
     var started = Date.now();
     var sawServerDown = false;
@@ -1675,7 +1672,7 @@ function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
             var instance = xhr.getResponseHeader('X-Miner-Instance');
             var back = instance && previousInstance
                 ? instance !== previousInstance
-                : sawServerDown || Date.now() - started >= RESTART_HEADERLESS_ASSUME_MS;
+                : sawServerDown;
             if (back) {
                 onBack();
                 return;

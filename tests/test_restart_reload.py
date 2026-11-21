@@ -183,12 +183,10 @@ def test_reload_gives_up_after_three_minutes():
 
 
 @needs_node
-def test_without_the_header_a_restart_between_probes_is_assumed_after_a_while():
-    # The outage fell between two probes: nothing ever failed.
+def test_without_the_header_an_old_process_still_answering_is_not_a_restart():
     outcome = _wait_for_restart("old", [], rest=None)
 
-    assert outcome["result"] == "back"
-    assert 30 <= outcome["seconds"] <= 34
+    assert outcome["result"] == "gave up"
 
 
 RESTART_HARNESS = r"""
