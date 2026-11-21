@@ -169,14 +169,18 @@ class Stream(object):
 
     def pause_minute_watched(self):
         """Stop counting: the stream is out of a watch slot."""
-        self.__minute_watched_timestamp = 0
+        with _WATCH_STREAK_LOCK:
+            self.__minute_watched_timestamp = 0
 
     def update_minute_watched(self):
-        now = time.time()
-        if self.__minute_watched_timestamp != 0:
-            elapsed = min(
-                max(now - self.__minute_watched_timestamp, 0),
-                MINUTE_WATCHED_MAX_STEP_SECONDS,
-            )
-            self.minute_watched += round(elapsed / 60, 5)
-        self.__minute_watched_timestamp = now
+        # Under the lock the per-broadcast reset takes, so a step measured on
+        # one broadcast can't be added to the next broadcast's fresh count.
+        with _WATCH_STREAK_LOCK:
+            now = time.time()
+            if self.__minute_watched_timestamp != 0:
+                elapsed = min(
+                    max(now - self.__minute_watched_timestamp, 0),
+                    MINUTE_WATCHED_MAX_STEP_SECONDS,
+                )
+                self.minute_watched += round(elapsed / 60, 5)
+            self.__minute_watched_timestamp = now

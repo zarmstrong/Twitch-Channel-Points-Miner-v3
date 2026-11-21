@@ -1155,3 +1155,39 @@ def test_offline_snapshot_is_one_consistent_read(tmp_path, monkeypatch):
     streamer.set_offline()
 
     assert cache.get("channel", "broadcast-1").ended_at == seen_live_at
+
+
+def test_a_reset_during_a_counter_step_does_not_carry_the_step_over(monkeypatch):
+    # The websocket thread starts a new broadcast while the minute watcher is
+    # measuring the previous broadcast's step: the new count starts at zero.
+    import threading
+
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    stream = stream_module.Stream()
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    stream.update_minute_watched()
+    clock[0] += 60
+    measuring = threading.Event()
+    reset_done = threading.Event()
+
+    def round_during_step(value, digits):
+        # The step is measured; give the reset thread its chance before the
+        # step is added.
+        measuring.set()
+        reset_done.wait(0.5)
+        return round(value, digits)
+
+    monkeypatch.setattr(stream_module, "round", round_during_step, raising=False)
+    watcher = threading.Thread(target=stream.update_minute_watched)
+    watcher.start()
+    measuring.wait(1)
+    resetter = threading.Thread(
+        target=lambda: (stream.init_watch_streak(), reset_done.set())
+    )
+    resetter.start()
+    watcher.join(2)
+    resetter.join(2)
+
+    assert stream.minute_watched == 0
