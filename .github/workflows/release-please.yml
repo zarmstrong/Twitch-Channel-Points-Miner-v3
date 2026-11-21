@@ -10,13 +10,28 @@ permissions:
   contents: write
   pull-requests: write
 
+# Runs read and then rewrite the release body (the PR-link step here, the
+# Docker notes step in deploy-docker.yml), so two runs at once can drop each
+# other's edits. Queue them instead. GitHub keeps one pending run per group,
+# so a newer push replaces an older one still waiting; Release Please works
+# from repository state, so the newer run still creates any pending release.
+# Keyed by ref, so a manual run from another branch (which publishes
+# nothing; see the job conditions) can't replace a waiting master run.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release_please:
     name: Create release
+    # Releases come from master only. A manual run from another branch would
+    # read that branch's manifest while Release Please reads master.
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release_retry_2.outputs.release_created || steps.release_retry_1.outputs.release_created || steps.release.outputs.release_created }}
       tag_name: ${{ steps.release_retry_2.outputs.tag_name || steps.release_retry_1.outputs.tag_name || steps.release.outputs.tag_name }}
+      first_attempt_failed: ${{ steps.release.outcome == 'failure' }}
     steps:
       - name: Run Release Please
         id: release
@@ -50,21 +65,63 @@ jobs:
         with:
           target-branch: master
 
-      - name: Checkout link automation
+  # Release Please can create a release and then fail (for example while
+  # relabelling the release PR); a later attempt then reports no release.
+  # This job runs even when release_please failed, and after a failed or
+  # repeated attempt it publishes a release already made for this commit.
+  resolve_release:
+    name: Resolve release
+    needs: release_please
+    if: ${{ !cancelled() && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_ready: ${{ steps.resolve.outputs.release_ready }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      publish_docker: ${{ steps.resolve.outputs.publish_docker }}
+      publish_windows: ${{ steps.resolve.outputs.publish_windows }}
+    steps:
+      - name: Checkout release automation
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Find the release to publish
+        id: resolve
+        uses: actions/github-script@v9
+        env:
+          RELEASE_CREATED: ${{ needs.release_please.outputs.release_created }}
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+          RECHECK: ${{ needs.release_please.result != 'success' || needs.release_please.outputs.first_attempt_failed == 'true' || github.run_attempt != '1' }}
+          RERUN: ${{ github.run_attempt != '1' }}
+        with:
+          script: |
+            const automation = require('./.github/scripts/release-resolve.js');
+            await automation.resolveRelease({
+              github,
+              context,
+              core,
+              releaseCreated: process.env.RELEASE_CREATED,
+              tagName: process.env.RELEASE_TAG,
+              recheck: process.env.RECHECK === 'true',
+              rerun: process.env.RERUN === 'true',
+              manifestText: automation.readManifest(),
+            });
 
       # Release Please links PRs as /issues/N, which GitHub's in-page
       # navigation fails to open. The release is built from the release PR
       # body, so relinking it also fixes the notes of the next release. This
       # must finish before publish_docker rewrites the same release body.
+      # Runs on every push, not only for a release: with no tag it still
+      # relinks the open release PR.
       - name: Link PR references in release notes
         # Cosmetic; never block the release, Docker, or Windows jobs.
         continue-on-error: true
         uses: actions/github-script@v9
         env:
-          RELEASE_TAG: ${{ steps.release_retry_2.outputs.tag_name || steps.release_retry_1.outputs.tag_name || steps.release.outputs.tag_name }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag_name }}
         with:
           script: |
             const automation = require('./.github/scripts/release-pull-links.js');
@@ -77,8 +134,8 @@ jobs:
 
   close_released_issues:
     name: Close released issues
-    needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    needs: resolve_release
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -88,12 +145,12 @@ jobs:
       - name: Checkout released automation
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release_please.outputs.tag_name }}
+          ref: ${{ needs.resolve_release.outputs.tag_name }}
 
       - name: Close issues included in the release
         uses: actions/github-script@v9
         env:
-          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve_release.outputs.tag_name }}
         with:
           script: |
             const automation = require('./.github/scripts/release-linked-issues.js');
@@ -106,19 +163,19 @@ jobs:
 
   publish_docker:
     name: Publish Docker image
-    needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    needs: resolve_release
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.resolve_release.outputs.publish_docker == 'true' }}
     permissions:
       contents: write
     uses: ./.github/workflows/deploy-docker.yml
     with:
-      ref: ${{ needs.release_please.outputs.tag_name }}
+      ref: ${{ needs.resolve_release.outputs.tag_name }}
     secrets: inherit
 
   build_windows_exe:
     name: Build Windows executable (${{ matrix.flavor }})
-    needs: release_please
-    if: needs.release_please.outputs.release_created == 'true'
+    needs: resolve_release
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.resolve_release.outputs.publish_windows == 'true' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -128,42 +185,26 @@ jobs:
       - name: Checkout released source
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release_please.outputs.tag_name }}
+          ref: ${{ needs.resolve_release.outputs.tag_name }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      # A release tagged before the build action existed doesn't contain
+      # it, and this job also rebuilds such a release when its files are
+      # missing. Take the action from this workflow's commit instead.
+      - name: Checkout build action
+        uses: actions/checkout@v7
         with:
-          python-version: '3.14'
+          ref: ${{ github.sha }}
+          path: automation
+          # Without cone mode, only this directory is checked out; cone mode
+          # would add every file in the repository root.
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
-      - name: Install build dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-windows.txt
-          python -m pip install validators==0.22.0 pyinstaller==6.21.0
-
-      - name: Build Windows executable
-        shell: cmd
-        # Use setup-python's interpreter; the py launcher would pick the
-        # newest Python on the runner, which doesn't have PyInstaller.
-        env:
-          PYINSTALLER_PYTHON: python
-        run: build_windows.bat ${{ matrix.flavor }}
-
-      - name: Smoke-test Windows executable
-        shell: pwsh
-        env:
-          FLAVOR: ${{ matrix.flavor }}
-        run: |
-          $exeName = if ($env:FLAVOR -eq "standard") { "TwitchChannelPointsMiner.exe" } else { "TwitchChannelPointsMiner-Portable.exe" }
-          # --windowed is a GUI-subsystem exe, so a plain call here returns
-          # before the process actually finishes and leaves $LASTEXITCODE
-          # stale/empty; Start-Process -Wait is needed to block on it and
-          # get its real exit code.
-          $proc = Start-Process -FilePath "dist\$exeName" -ArgumentList "--self-test" -Wait -PassThru
-          if ($proc.ExitCode -ne 0) {
-            throw "Smoke test failed (exit code $($proc.ExitCode)) - the built exe is missing a GUI dependency"
-          }
+      - name: Build and smoke-test executable
+        uses: ./automation/.github/actions/build-windows-exe
+        with:
+          flavor: ${{ matrix.flavor }}
 
       - name: Upload built executable
         uses: actions/upload-artifact@v7
@@ -174,8 +215,8 @@ jobs:
 
   publish_windows_exe:
     name: Publish Windows executable
-    needs: [release_please, build_windows_exe]
-    if: needs.release_please.outputs.release_created == 'true'
+    needs: [resolve_release, build_windows_exe]
+    if: ${{ !cancelled() && needs.resolve_release.result == 'success' && needs.resolve_release.outputs.release_ready == 'true' && needs.resolve_release.outputs.publish_windows == 'true' && needs.build_windows_exe.result == 'success' }}
     runs-on: windows-latest
     permissions:
       contents: write
@@ -183,7 +224,7 @@ jobs:
       - name: Checkout released source
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release_please.outputs.tag_name }}
+          ref: ${{ needs.resolve_release.outputs.tag_name }}
 
       - name: Download standard executable
         uses: actions/download-artifact@v8
@@ -201,7 +242,7 @@ jobs:
         id: package
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve_release.outputs.tag_name }}
         run: |
           $version = $env:RELEASE_TAG -replace '^Twitch-Channel-Points-Miner-v2-', ''
           $zipName = "TwitchChannelPointsMiner-Portable-$version.zip"
@@ -212,7 +253,7 @@ jobs:
         id: installer
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+          RELEASE_TAG: ${{ needs.resolve_release.outputs.tag_name }}
         run: |
           $version = $env:RELEASE_TAG -replace '^Twitch-Channel-Points-Miner-v2-', ''
           $compiler = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
@@ -231,11 +272,23 @@ jobs:
           }
           "installer_path=dist/TwitchChannelPointsMiner-$version-Setup.exe" >> $env:GITHUB_OUTPUT
 
+      # gh release upload only adds assets. It never writes the release
+      # body, which publish_docker edits while this job runs. --clobber
+      # replaces the files when a re-run uploads them again.
       - name: Upload Windows artifacts to release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.release_please.outputs.tag_name }}
-          files: |
-            ${{ steps.package.outputs.zip_path }}
-            ${{ steps.installer.outputs.installer_path }}
-          fail_on_unmatched_files: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve_release.outputs.tag_name }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.installer_path }}
+        run: |
+          foreach ($file in @($env:ZIP_PATH, $env:INSTALLER_PATH)) {
+            if (-not $file -or -not (Test-Path -LiteralPath $file)) {
+              throw "Windows artifact '$file' was not built"
+            }
+          }
+          gh release upload $env:RELEASE_TAG $env:ZIP_PATH $env:INSTALLER_PATH --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }

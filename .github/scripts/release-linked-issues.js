@@ -241,13 +241,17 @@ async function releaseContains(github, owner, repo, tag, sha) {
   return data.status === 'ahead' || data.status === 'identical';
 }
 
-// Published releases, newest first.
-async function publishedReleases(github, owner, repo) {
+// Published releases, newest first. Prereleases are left out unless asked
+// for. A release cycle runs from one full release to the next: a prerelease,
+// such as the rolling nightly build, neither ends one nor closes issues, so
+// the fixes it contains are still awaiting release.
+async function publishedReleases(github, owner, repo, { prereleases = false } = {}) {
   const releases = await github.paginate(github.rest.repos.listReleases, {
     owner, repo, per_page: 100,
   });
   return releases
     .filter((release) => !release.draft && release.published_at)
+    .filter((release) => prereleases || !release.prerelease)
     .sort((left, right) => new Date(right.published_at) - new Date(left.published_at));
 }
 
@@ -261,13 +265,23 @@ async function releaseCutoff(github, owner, repo, release) {
   return data.commit.committer.date;
 }
 
+// The newest full release published before `newTag`, or null when `newTag`
+// isn't a published release.
 async function previousPublishedRelease(github, owner, repo, newTag) {
-  const published = await publishedReleases(github, owner, repo);
+  const published = await publishedReleases(github, owner, repo, { prereleases: true });
   const current = published.find((release) => release.tag_name === newTag);
   if (!current) return null;
   return published.find(
-    (release) => new Date(release.published_at) < new Date(current.published_at),
+    (release) =>
+      !release.prerelease &&
+      new Date(release.published_at) < new Date(current.published_at),
   ) || null;
+}
+
+// True when `tag` is a published prerelease.
+async function isPrerelease(github, owner, repo, tag) {
+  const published = await publishedReleases(github, owner, repo, { prereleases: true });
+  return published.some((release) => release.tag_name === tag && release.prerelease);
 }
 
 async function commitsBetween(github, owner, repo, previousTag, newTag) {
@@ -292,6 +306,13 @@ async function commitsBetween(github, owner, repo, previousTag, newTag) {
 
 async function closeReleasedIssues({ github, context, core, tag }) {
   const { owner, repo } = context.repo;
+  // Closing here would leave the cycle open: the markers of the fixes a
+  // prerelease closed would still count as current, so a later fix for a
+  // reopened issue would never be marked.
+  if (await isPrerelease(github, owner, repo, tag)) {
+    core.info(`${tag} is a prerelease; its issues stay open until a full release ships them`);
+    return;
+  }
   const previous = await previousPublishedRelease(github, owner, repo, tag);
   if (!previous) throw new Error(`Cannot determine a previous published release before ${tag}`);
 

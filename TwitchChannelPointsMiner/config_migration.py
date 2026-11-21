@@ -22,6 +22,7 @@ STREAMER_SETTINGS_DEFAULTS = (
     ("claim_drops", "True"),
     ("claim_moments", "True"),
     ("watch_streak", "True"),
+    ("streak_only", "False"),
     ("favorite", "False"),
     ("points_limit", "None"),
     ("community_goals", "False"),
@@ -139,6 +140,8 @@ ANALYTICS_CONFIG_DEFAULTS = (
     ("days_ago", "7"),
     ("password", "None"),
     ("log_poll_interval", "5"),
+    ("trust_proxy_auth", "False"),
+    ("allowed_hosts", "None"),
 )
 
 

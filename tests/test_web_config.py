@@ -396,6 +396,7 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
                 "claim_moments": True,
                 "chat": "NEVER",
                 "points_limit": 25000,
+                "streak_only": True,
             },
         },
     )
@@ -403,6 +404,7 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     assert [item["username"] for item in result["streamers"]] == ["one"]
     assert result["categories"] == ["beta", "alpha"]
     assert result["streamers"][0]["settings"]["points_limit"] == 25000
+    assert result["streamers"][0]["settings"]["streak_only"] is True
     assert not (tmp_path / "web-config.json").exists()
     assert config.read_text(encoding="utf-8") != original_source
     loaded = _load_config(config)
@@ -410,6 +412,42 @@ def test_managed_web_config_updates_lists_settings_and_permissions(tmp_path):
     # Windows has no POSIX permission bits; chmod only toggles read-only.
     if os.name == "posix":
         assert stat.S_IMODE(config.stat().st_mode) == 0o640
+
+
+def test_managed_web_config_preserves_an_integer_streak_only_window(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"streak_only": 5},
+        },
+    )
+
+    assert result["streamers"][0]["settings"]["streak_only"] == 5
+    loaded = _load_config(config)
+    assert loaded.STREAMERS[0].settings.streak_only == 5
+
+
+def test_managed_web_config_rejects_an_invalid_streak_only_window(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_streamer",
+                "username": "one",
+                "settings": {"streak_only": 0},
+            },
+        )
+
+    assert config.read_text(encoding="utf-8") == before
 
 
 def test_managed_web_config_updates_categories_when_replace_is_ebusy(
@@ -923,6 +961,8 @@ ANALYTICS_CONFIG = None
         "days_ago": 7,
         "password": "generated-secret",
         "log_poll_interval": 5,
+        "trust_proxy_auth": False,
+        "allowed_hosts": None,
     }
 
 
