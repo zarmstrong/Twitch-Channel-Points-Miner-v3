@@ -1642,6 +1642,9 @@ function saveCategorySettings(event) {
 
 var RESTART_POLL_INTERVAL_MS = 2000;
 var RESTART_GIVE_UP_MS = 3 * 60 * 1000;
+// Without the instance header, a server that never stopped answering for this
+// long after the restart request is taken to have restarted between two probes.
+var RESTART_HEADERLESS_ASSUME_MS = 30 * 1000;
 
 // Calls onBack once a new miner process answers, or onGiveUp after
 // RESTART_GIVE_UP_MS. Each process sends its own X-Miner-Instance header;
@@ -1649,7 +1652,9 @@ var RESTART_GIVE_UP_MS = 3 * 60 * 1000;
 // differs from the one this page was served with tells the new process from
 // the old one, which keeps answering until the restart lands. If the header
 // is missing (a proxy that drops it), the server going away and answering
-// again is taken as the restart instead.
+// again is taken as the restart instead, or else the server answering for
+// RESTART_HEADERLESS_ASSUME_MS without a break (the outage fell between two
+// probes).
 function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
     var started = Date.now();
     var sawServerDown = false;
@@ -1662,7 +1667,7 @@ function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
     }
     function poll() {
         $.ajax({
-            url: './static/style.css',
+            url: typeof minerProbeUrl === 'undefined' ? './assets/style.css' : minerProbeUrl,
             method: 'HEAD',
             cache: false,
             timeout: 5000
@@ -1670,7 +1675,7 @@ function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
             var instance = xhr.getResponseHeader('X-Miner-Instance');
             var back = instance && previousInstance
                 ? instance !== previousInstance
-                : sawServerDown;
+                : sawServerDown || Date.now() - started >= RESTART_HEADERLESS_ASSUME_MS;
             if (back) {
                 onBack();
                 return;
@@ -1685,9 +1690,11 @@ function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
 }
 
 function restartMiner() {
-    function restartRequested() {
+    // acceptedBy is the instance that took the restart request, the one that
+    // is about to go away. Without it (no answer reached us) the page's own.
+    function restartRequested(acceptedBy) {
         showConfigMessage('Restart requested. This page reloads when the miner is back.', false);
-        var servedBy = typeof minerInstance === 'undefined' ? null : minerInstance;
+        var servedBy = acceptedBy || (typeof minerInstance === 'undefined' ? null : minerInstance);
         waitForMinerRestart(servedBy, function () {
             location.reload();
         }, function () {
@@ -1704,7 +1711,9 @@ function restartMiner() {
             $.ajax({
                 url: '/config/restart',
                 method: 'POST',
-                success: restartRequested,
+                success: function (data, status, xhr) {
+                    restartRequested(xhr.getResponseHeader('X-Miner-Instance'));
+                },
                 error: function (xhr) {
                     if (xhr.status === 0) {
                         // The process was exec'd before the response flushed:
