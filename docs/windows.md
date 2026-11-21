@@ -114,6 +114,40 @@ logs are saved depends on which distribution you installed (see
   5. Start the miner normally. Your existing configuration and login data
      remain in place.
 
+## Nightly build
+
+A nightly build is an automatic build of the newest code on the `master`
+branch, made once a day when something has been merged since the last build.
+Use it to try a fix before it is released. Only the portable build is
+published this way; there is no nightly installer.
+
+1. Download `TwitchChannelPointsMiner-Portable-nightly.zip` from the
+   [nightly release page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/tag/nightly).
+   If the page says a new nightly build is being published, wait until that
+   note is gone.
+2. Extract it into a **new folder**, not the folder of the miner you already
+   use.
+3. To keep your settings, copy the `config`, `cookies` and `analytics` folders
+   of your current miner into the new folder. They are beside the portable
+   executable, or in `%LOCALAPPDATA%\TwitchChannelPointsMiner` when you used
+   the installer. Leave the originals where they are.
+4. Stop your normal miner, then start `TwitchChannelPointsMiner-Portable.exe`
+   from the new folder. Don't run both for the same Twitch account at once.
+
+Keep these in mind:
+
+- **It is not a release.** It passed the automated tests, but nobody has tried
+  it against Twitch. Expect bugs.
+- **Keep it separate.** A newer build can upgrade your configuration and
+  analytics files to a format the latest release can't read. Working on copies
+  means you can go back by starting your normal miner again.
+- **It doesn't update itself.** Download the ZIP again to get the next nightly
+  build. Once the fix you were waiting for is released, the nightly build
+  reports the release as an update.
+- **Know which build you run.** The window title and the analytics page show a
+  version such as `3.22.0+nightly.20261119.795629a`: the release it builds on,
+  the build date, and the commit. Include it when you report a problem.
+
 ## Windows troubleshooting
 
 - **The desktop window never appears, or a console window flashes and
