@@ -52,8 +52,13 @@ ANALYTICS_CONFIG = {
     "refresh": 5,
     "days_ago": 7,
     "log_poll_interval": 5,
+    "history_retention_days": 730,
 }
 ```
+
+The optional durable session, watch-time and streak history is stored in
+`analytics/<username>/history.sqlite3`. See [History](history.md#history) for
+storage, retention, Docker volume and SQLite network-share guidance.
 
 ## Analytics security and HTTPS reverse proxy
 

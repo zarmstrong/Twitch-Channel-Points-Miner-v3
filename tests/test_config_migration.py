@@ -268,6 +268,25 @@ ANALYTICS_CONFIG = None
     assert namespace["MINE_CONFIG"]["watch_status_interval_minutes"] == 0
 
 
+def test_version_twelve_migration_adds_history_retention_days():
+    source = """\
+CONFIG_VERSION = 12
+MINER_CONFIG = {"username": "alice"}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = {"port": 54455}
+"""
+
+    migrated, old_version, new_version = migrate_config_source(source)
+    namespace = {}
+    exec(migrated, namespace)
+
+    assert old_version == 12
+    assert new_version == CONFIG_VERSION
+    assert namespace["ANALYTICS_CONFIG"]["port"] == 54455
+    assert namespace["ANALYTICS_CONFIG"]["history_retention_days"] == 730
+
+
 def test_version_seven_migration_appends_wildcard_last_to_custom_priority():
     source = """\
 CONFIG_VERSION = 7

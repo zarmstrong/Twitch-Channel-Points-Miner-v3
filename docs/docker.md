@@ -27,7 +27,7 @@ subsequent launches.
 
 Persist these directories on the host:
 
-- `analytics`: analytics history and Drop data
+- `analytics`: analytics history, Drop data and `history.sqlite3`
 - `cookies`: saved Twitch authentication
 - `logs`: miner log files
 - `config`: the user-owned configuration
@@ -77,6 +77,10 @@ container uses UTC.
 
 `$(pwd)` does not work in Windows Command Prompt. Use absolute host paths there,
 such as `/path/to/cookies:/usr/src/app/cookies`.
+
+Keep the `analytics` volume on local disk. History stores its SQLite database
+in `analytics/<username>/history.sqlite3`, and SQLite locking is unreliable on
+NFS/SMB network shares. See [History](history.md#network-shares).
 
 On Windows, use absolute host paths. For example, mount
 `C:\Absolute\Path\config` at `/usr/src/app/config`.
