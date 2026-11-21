@@ -1299,3 +1299,42 @@ ANALYTICS_CONFIG = None
 
     assert "emoji" not in migrated
     assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
+
+
+@pytest.mark.parametrize("code", [errno.EBUSY, errno.EROFS])
+def test_convert_runner_keeps_config_when_the_runner_cannot_be_renamed(
+    tmp_path, monkeypatch, code
+):
+    runner = tmp_path / "run.py"
+    runner.write_text(RUNNER, encoding="utf-8")
+    config = tmp_path / "config" / "config.py"
+    real_rename = Path.rename
+
+    def reject_rename(self, target):
+        if self == runner:
+            raise OSError(code, "mount point")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", reject_rename)
+
+    assert convert_runner(runner, config) == config
+    assert config.is_file()
+    assert (config.parent / ".converted-from-run-py").is_file()
+    assert runner.is_file()
+    assert not (tmp_path / "run.py.bak").exists()
+
+
+def test_convert_runner_still_fails_on_other_rename_errors(tmp_path, monkeypatch):
+    runner = tmp_path / "run.py"
+    runner.write_text(RUNNER, encoding="utf-8")
+    config = tmp_path / "config" / "config.py"
+
+    def reject_rename(self, target):
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(Path, "rename", reject_rename)
+
+    with pytest.raises(OSError):
+        convert_runner(runner, config)
+    assert not config.exists()
+    assert not (config.parent / ".converted-from-run-py").exists()

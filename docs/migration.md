@@ -30,7 +30,10 @@ the old calls into the four current configuration values.
    persistent config directory for future upgrades.
 
 After a successful conversion, the converter renames the legacy runner to
-`run.py.bak` so it cannot be mistaken for the active configuration. It refuses
+`run.py.bak` so it cannot be mistaken for the active configuration. When the
+file is bind-mounted into the container, Linux does not allow the rename; the
+conversion then still succeeds and `run.py` stays where it is, which is
+harmless because `config.py` takes precedence. It refuses
 to overwrite either an existing `config/config.py` or `run.py.bak`. The new
 configuration has owner-only permissions, and `config/.converted-from-run-py`
 records the source path and SHA-256 hash.

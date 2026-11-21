@@ -1016,7 +1016,15 @@ def convert_runner(runner_path, config_path):
         marker.write_text(
             f"source={runner.resolve()}\nsha256={digest}\n", encoding="utf-8"
         )
-        runner.rename(backup)
+        try:
+            runner.rename(backup)
+        except OSError as error:
+            # A run.py bind-mounted as a single file (EBUSY) or from a
+            # read-only mount (EROFS) can't be renamed. The converted config
+            # is complete and takes precedence on every later start, so keep
+            # it and leave the original where it is.
+            if error.errno not in (errno.EBUSY, errno.EROFS, errno.EXDEV):
+                raise
     except Exception:
         marker.unlink(missing_ok=True)
         config.unlink(missing_ok=True)
