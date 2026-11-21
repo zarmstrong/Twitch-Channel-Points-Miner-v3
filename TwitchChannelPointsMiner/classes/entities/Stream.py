@@ -20,6 +20,12 @@ MINUTE_WATCHED_MAX_STEP_SECONDS = 60
 # the next broadcast.
 _WATCH_STREAK_LOCK = threading.Lock()
 
+# Overlapping stream-info requests start at most a request timeout apart. A
+# response requested up to this long before the one already applied is an
+# out-of-order reply and is dropped; anything older means the wall clock
+# stepped back, and the response is applied as usual.
+STALE_STREAM_RESPONSE_SECONDS = 120
+
 
 class Stream(object):
     __slots__ = [
@@ -36,6 +42,7 @@ class Stream(object):
         "payload",
         "watch_streak_missing",
         "watch_streak_checked_at",
+        "watch_streak_checked_minutes",
         "watch_streak_check_due",
         "watch_streak_broadcast_id",
         "watch_streak_transition_to",
@@ -76,32 +83,42 @@ class Stream(object):
         return {"data": (b64encode(json_event.encode("utf-8"))).decode("utf-8")}
 
     def update(self, broadcast_id, title, game, tags, viewers_count, seen_live_at=None):
-        if broadcast_id != self.broadcast_id:
-            # What Twitch advertised on the last broadcast proves nothing
-            # about this one.
-            self.channel_campaign_ids = []
-        self.title = title.strip()
-        self.game = game
-        # #343 temporary workaround
-        self.tags = tags or []
-        # ------------------------
-        self.viewers_count = viewers_count
+        """Apply a stream-info response; return False for a stale one.
 
-        self.drops_tags = (
-            DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
-        )
-        self.__last_update = time.time()
+        Several threads refresh a stream and their responses can arrive out
+        of order. One requested before the response already applied is
+        older news (it could put the previous broadcast back after the next
+        one started), so it is dropped.
+        """
+        now = time.time()
         # When Twitch last showed this stream live: the caller's request time
         # when given, since the response may arrive (and be applied) later.
-        # Set together with the broadcast ID, so live_snapshot() never pairs
-        # one broadcast's ID with another's time.
+        seen = now if seen_live_at is None else float(seen_live_at)
+        # #343 temporary workaround
+        tags = tags or []
+        # ------------------------
+        # Applied as one step, so live_snapshot() never pairs one broadcast's
+        # ID with another's time and two responses can't interleave.
         with _WATCH_STREAK_LOCK:
-            self.broadcast_id = broadcast_id
-            self.live_seen_at = (
-                self.__last_update if seen_live_at is None else float(seen_live_at)
+            if 0 < self.live_seen_at - seen <= STALE_STREAM_RESPONSE_SECONDS:
+                return False
+            if broadcast_id != self.broadcast_id:
+                # What Twitch advertised on the last broadcast proves nothing
+                # about this one.
+                self.channel_campaign_ids = []
+            self.title = title.strip()
+            self.game = game
+            self.tags = tags
+            self.viewers_count = viewers_count
+            self.drops_tags = (
+                DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
             )
+            self.__last_update = now
+            self.broadcast_id = broadcast_id
+            self.live_seen_at = seen
 
         logger.debug(f"Update: {self}")
+        return True
 
     def __repr__(self):
         return f"Stream(title={self.title}, game={self.__str_game()}, tags={self.__str_tags()})"
@@ -144,6 +161,8 @@ class Stream(object):
             self.watch_streak_broadcast_id = self.broadcast_id
             self.watch_streak_missing = True
             self.watch_streak_checked_at = 0
+            # Watched minutes covered by the last milestone check.
+            self.watch_streak_checked_minutes = 0
             # A milestone check queued for the minute watcher's budgeted
             # rechecks, ahead of the usual watched-minutes wait.
             self.watch_streak_check_due = False

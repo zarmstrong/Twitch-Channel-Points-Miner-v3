@@ -2007,6 +2007,7 @@ class Twitch(object):
             return False
 
         stream.watch_streak_checked_at = time.time()
+        stream.watch_streak_checked_minutes = getattr(stream, "minute_watched", 0) or 0
         stream.watch_streak_check_due = False
         # Other threads refresh the stream while the lookups run; everything
         # below is about this broadcast, so never read the live attribute.
@@ -2184,14 +2185,20 @@ class Twitch(object):
                     "no longer prioritizing it for this broadcast"
                 )
                 continue
-            if self._is_streak_only(
-                streamer
-            ) is True and minutes >= self._streak_only_watch_window(streamer):
-                # Past its window a streak-only channel is no longer watched,
-                # so its milestone cannot advance; a late WATCH_STREAK event
-                # still clears it.
-                continue
             check_due = getattr(stream, "watch_streak_check_due", False) is True
+            if self._is_streak_only(streamer) is True:
+                window = self._streak_only_watch_window(streamer)
+                if minutes >= window:
+                    # Past its window a streak-only channel is no longer
+                    # watched, so its milestone can't advance any more. One
+                    # last check covers the window's final minutes; after
+                    # that only a late WATCH_STREAK event clears it.
+                    checked_minutes = (
+                        getattr(stream, "watch_streak_checked_minutes", 0) or 0
+                    )
+                    if checked_minutes >= window:
+                        continue
+                    check_due = True
             if not check_due and minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES:
                 continue
             checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0

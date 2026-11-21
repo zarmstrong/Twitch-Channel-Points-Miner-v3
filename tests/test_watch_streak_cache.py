@@ -770,6 +770,8 @@ def test_streak_only_channel_past_its_window_is_not_rechecked(tmp_path):
     streamer.settings.streak_only = True
     streamer.is_online = True
     streamer.stream.minute_watched = 10
+    # The window's final check already ran.
+    streamer.stream.watch_streak_checked_minutes = 10
     twitch = Twitch.__new__(Twitch)
     twitch.gql = SimpleNamespace(
         get_stream_live_status=lambda channel_id: pytest.fail(
@@ -1341,3 +1343,52 @@ def test_a_slower_overlapping_check_does_not_reset_the_new_broadcast(
 
     assert streamer.stream.broadcast_id == "broadcast-2"
     assert streamer.stream.minute_watched == 2
+
+
+def test_streak_only_window_end_gets_one_final_check(tmp_path):
+    # streak_only=5: the usual recheck waits for five watched minutes, which
+    # is exactly when the window closes. The window's last minutes still get
+    # one milestone check, then no more.
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.settings.streak_only = 5
+    streamer.is_online = True
+    streamer.stream.minute_watched = 5
+    calls = []
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        return SimpleNamespace(stream=None)
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+
+    assert calls == ["channel-1"]
+
+
+def test_an_older_stream_response_does_not_replace_a_newer_one():
+    # Two refreshes overlap around a restart: B's response is applied first,
+    # then A's, requested earlier, arrives late and must not put A back.
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
+    assert stream.update("broadcast-2", seen_live_at=2_000_000_100, **kwargs)
+    assert stream.update("broadcast-1", seen_live_at=2_000_000_000, **kwargs) is False
+
+    assert stream.live_snapshot() == ("broadcast-2", 2_000_000_100)
+
+
+def test_stream_refresh_still_applies_after_the_clock_steps_back():
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
+    stream.update("broadcast-1", seen_live_at=2_000_003_600, **kwargs)
+
+    # The wall clock was an hour fast and got corrected.
+    assert stream.update("broadcast-1", seen_live_at=2_000_000_000, **kwargs)
+    assert stream.live_snapshot() == ("broadcast-1", 2_000_000_000)
