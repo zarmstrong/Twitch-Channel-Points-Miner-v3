@@ -90,6 +90,7 @@ from TwitchChannelPointsMiner.constants import (
     DROP_ID,
     URL,
     USER_AGENTS,
+    WATCH_STREAK_MAX_MINUTES_DEFAULT,
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
@@ -1796,9 +1797,13 @@ class Twitch(object):
     # === STREAMER / STREAM / INFO === #
     def update_stream(self, streamer):
         if streamer.stream.update_required() is True:
+            # The response proves the stream was live at some point after the
+            # request went out, so the request time is a safe "seen live".
+            requested_at = time.time()
             stream_info = self.get_stream_info(streamer)
             if stream_info is not None:
                 streamer.stream.update(
+                    seen_live_at=requested_at,
                     broadcast_id=stream_info["stream"]["id"],
                     title=stream_info["broadcastSettings"]["title"],
                     game=stream_info["broadcastSettings"]["game"],
@@ -1958,24 +1963,31 @@ class Twitch(object):
             return False
 
         stream.watch_streak_checked_at = time.time()
+        # Other threads refresh the stream while the lookups run; everything
+        # below is about this broadcast, so never read the live attribute.
+        broadcast_id = stream.broadcast_id
         logger.debug(
             "[watch-streak] checking Twitch milestone for "
-            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+            f"streamer={streamer.username}; broadcast={broadcast_id}"
         )
         try:
             live_status = self.gql.get_stream_live_status(streamer.channel_id)
             live_stream = live_status.stream
             if (
                 live_stream is None
-                or live_stream.id != stream.broadcast_id
+                or live_stream.id != broadcast_id
                 or live_stream.created_at is None
             ):
                 logger.debug(
                     "[watch-streak] broadcast changed while checking "
-                    f"streamer={streamer.username}; local={stream.broadcast_id}, "
+                    f"streamer={streamer.username}; local={broadcast_id}, "
                     f"twitch={getattr(live_stream, 'id', None)}"
                 )
                 return False
+            if self._watch_streak_continues_claimed_stream(
+                streamer, broadcast_id, live_stream.created_at
+            ):
+                return True
             milestone = self.gql.get_reward_list(
                 streamer.channel_id
             ).watch_streak_milestone
@@ -2013,18 +2025,60 @@ class Twitch(object):
             )
             return False
 
+        if stream.broadcast_id != broadcast_id:
+            logger.debug(
+                "[watch-streak] broadcast changed while checking "
+                f"streamer={streamer.username}; checked={broadcast_id}, "
+                f"now={stream.broadcast_id}"
+            )
+            return False
         stream.watch_streak_missing = False
         if getattr(streamer, "watch_streak_cache", None) is not None:
-            streamer.watch_streak_cache.mark_claimed(
-                streamer.username, stream.broadcast_id
-            )
+            streamer.watch_streak_cache.mark_claimed(streamer.username, broadcast_id)
         logger.info(
             "[watch-streak] Twitch already confirmed streak for "
-            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+            f"streamer={streamer.username}; broadcast={broadcast_id}"
         )
         return True
 
-    def _reconcile_due_watch_streaks(self, streamers, now=None):
+    def _watch_streak_continues_claimed_stream(
+        self, streamer, broadcast_id, created_at
+    ):
+        """Clear a pending streak whose broadcast continues a claimed stream.
+
+        set_online() measures the gap to the previous broadcast from the moment
+        the miner noticed this one, which can be long after it started (a
+        missed stream-up, or a miner restarted mid-stream). Twitch's own start
+        time gives the real gap, so a continuation of an already-claimed stream
+        is not farmed again. The previous broadcast's milestone predates this
+        broadcast's start, so the milestone check alone cannot tell.
+        """
+        cache = getattr(streamer, "watch_streak_cache", None)
+        if cache is None or created_at is None:
+            return False
+        started_at = created_at.replace(tzinfo=timezone.utc).timestamp()
+        cache.record_started_at(streamer.username, broadcast_id, started_at)
+        if (
+            cache.claimed_at_for_logical_stream(
+                streamer.username, broadcast_id, started_at=started_at
+            )
+            is None
+            or streamer.stream.broadcast_id != broadcast_id
+        ):
+            return False
+        streamer.stream.watch_streak_missing = False
+        logger.info(
+            "[watch-streak] broadcast continues an already-claimed stream for "
+            f"streamer={streamer.username}; broadcast={broadcast_id}"
+        )
+        return True
+
+    def _reconcile_due_watch_streaks(
+        self,
+        streamers,
+        now=None,
+        max_minutes=WATCH_STREAK_MAX_MINUTES_DEFAULT,
+    ):
         """Recheck pending streaks that have had time to advance mid-broadcast.
 
         The first broadcast of a streak moves Twitch's milestone forward
@@ -2033,20 +2087,44 @@ class Twitch(object):
         for the whole stream. Once enough time has been watched, poll Twitch's
         milestone on a cooldown until the streak is confirmed or the broadcast
         ends.
+
+        A streak Twitch never confirms (a channel without channel points, or
+        watch time that is not credited) stops counting as pending after
+        ``max_minutes`` watched minutes, so it cannot hold a slot and bypass
+        points_limit for the whole broadcast.
         """
-        if getattr(self, "gql", None) is None:
-            return
         current = time.time() if now is None else now
+        # At most one milestone lookup per watch cycle: each is a GQL round
+        # trip on the minute watcher, and a slow Twitch must not hold up
+        # minute-watched events for every other channel. Due channels are
+        # picked up on the following cycles.
+        lookup_done = False
         for streamer in streamers:
+            if getattr(self, "running", True) is not True:
+                return
             if getattr(streamer, "is_online", False) is not True:
                 continue
             if self._has_pending_watch_streak(streamer) is not True:
                 continue
             stream = getattr(streamer, "stream", None)
-            if (
-                getattr(stream, "minute_watched", 0)
-                < WATCH_STREAK_RECONCILE_AFTER_MINUTES
-            ):
+            minutes = getattr(stream, "minute_watched", 0) or 0
+            if minutes >= max_minutes:
+                stream.watch_streak_missing = False
+                logger.info(
+                    "[watch-streak] Twitch has not confirmed the streak for "
+                    f"streamer={streamer.username} after {minutes:.0f} watched "
+                    f"minutes (watch_streak_max_minutes={max_minutes:g}); "
+                    "no longer prioritizing it for this broadcast"
+                )
+                continue
+            if self._is_streak_only(
+                streamer
+            ) is True and minutes >= self._streak_only_watch_window(streamer):
+                # Past its window a streak-only channel is no longer watched,
+                # so its milestone cannot advance; a late WATCH_STREAK event
+                # still clears it.
+                continue
+            if minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES:
                 continue
             checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0
             if (
@@ -2054,6 +2132,9 @@ class Twitch(object):
                 and current - checked_at < WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
             ):
                 continue
+            if lookup_done or getattr(self, "gql", None) is None:
+                continue
+            lookup_done = True
             self.reconcile_watch_streak(streamer)
 
     def __streamer_drops_description(self, streamer):
@@ -5094,6 +5175,7 @@ class Twitch(object):
         streamer_source,
         is_drop_stream,
         interval_minutes=15,
+        streak_selected_indexes=None,
     ):
         def watch_reason(index):
             source = streamer_source(index)
@@ -5114,7 +5196,9 @@ class Twitch(object):
         streak_indexes = {
             index
             for index in streamers_watching
-            if self._has_pending_watch_streak(streamers[index])
+            if self._watching_for_streak(
+                streamers[index], index in (streak_selected_indexes or ())
+            )
         }
         points_streams = [
             f"{streamers[index].username} ({watch_reason(index)})"
@@ -6699,6 +6783,22 @@ class Twitch(object):
             and getattr(stream, "watch_streak_missing", False) is True
         )
 
+    @classmethod
+    def _watching_for_streak(cls, streamer, selected_by_streak):
+        """Is a pending watch streak why this channel holds its slot?
+
+        Only when the streak decides it: Priority.STREAK filled the slot, the
+        channel is streak_only, or its points_limit is reached and the streak
+        is what lets it be watched. Otherwise it would be watched anyway.
+        """
+        if cls._has_pending_watch_streak(streamer) is not True:
+            return False
+        return (
+            selected_by_streak is True
+            or cls._is_streak_only(streamer) is True
+            or cls._has_reached_points_limit(streamer)
+        )
+
     @staticmethod
     def _is_streak_only(streamer):
         settings = getattr(streamer, "settings", None)
@@ -6912,6 +7012,7 @@ class Twitch(object):
         drop_progress_stall_minutes=10,
         drop_pick_stickiness_minutes=0,
         watch_status_interval_minutes=15,
+        watch_streak_max_minutes=WATCH_STREAK_MAX_MINUTES_DEFAULT,
     ):
         # Streamers already warned about a missing spade URL, so the warning
         # is logged once per outage instead of on every watch cycle.
@@ -6928,7 +7029,9 @@ class Twitch(object):
                 # A pending streak can be confirmed mid-broadcast without a
                 # WATCH_STREAK event; clear it before choosing this cycle's
                 # slots so it stops bypassing points_limit and priority order.
-                self._reconcile_due_watch_streaks(streamers_snapshot, now)
+                self._reconcile_due_watch_streaks(
+                    streamers_snapshot, now, max_minutes=watch_streak_max_minutes
+                )
                 drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
                     streamers_snapshot,
                     now,
@@ -7014,6 +7117,9 @@ class Twitch(object):
                 # most one selection for a discovered Drops stream.
                 max_watch_amount = streams_watched
                 streamers_watching = set()
+                # Slots Priority.STREAK filled, as opposed to channels with a
+                # pending streak that an earlier priority already picked.
+                streak_selected_indexes = set()
 
                 default_source_priority = [
                     StreamerSource.STREAMERS,
@@ -7288,6 +7394,8 @@ class Twitch(object):
                                 if self._has_pending_watch_streak(
                                     streamers_snapshot[index]
                                 ):
+                                    if index not in streamers_watching:
+                                        streak_selected_indexes.add(index)
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
                                         break
@@ -7833,11 +7941,25 @@ class Twitch(object):
                 watched_indexes = set(streamers_watching)
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
+                    if streamer.is_watching is not True:
+                        # Time out of a watch slot is not watch time: the next
+                        # post after the channel gets a slot back starts
+                        # counting again instead of adding the whole gap.
+                        pause = getattr(
+                            getattr(streamer, "stream", None),
+                            "pause_minute_watched",
+                            None,
+                        )
+                        if callable(pause):
+                            pause()
 
                 self._forget_idle_stream_segment_watchers()
 
                 self.__save_now_watching_analytics(
-                    streamers_snapshot, streamers_watching, streamer_source
+                    streamers_snapshot,
+                    streamers_watching,
+                    streamer_source,
+                    streak_selected_indexes=streak_selected_indexes,
                 )
 
                 self.__log_watched_streamers(
@@ -7846,6 +7968,7 @@ class Twitch(object):
                     streamer_source,
                     is_drop_stream=_is_drop_stream,
                     interval_minutes=watch_status_interval_minutes,
+                    streak_selected_indexes=streak_selected_indexes,
                 )
 
                 # Segment requests are what earn Drop progress now, so start
@@ -11385,7 +11508,11 @@ class Twitch(object):
         )
 
     def __save_now_watching_analytics(
-        self, streamers_snapshot, streamers_watching, streamer_source
+        self,
+        streamers_snapshot,
+        streamers_watching,
+        streamer_source,
+        streak_selected_indexes=None,
     ):
         if getattr(Settings, "enable_analytics", False) is not True:
             return
@@ -11405,7 +11532,9 @@ class Twitch(object):
                 StreamerSource.WILDCARD_CATEGORIES,
             ):
                 reason = "drops"
-            elif self._has_pending_watch_streak(streamer):
+            elif self._watching_for_streak(
+                streamer, index in (streak_selected_indexes or ())
+            ):
                 reason = "streak"
             else:
                 reason = "points"

@@ -133,7 +133,6 @@ class StreamerSettings(object):
         claim_drops: bool = None,
         claim_moments: bool = None,
         watch_streak: bool = None,
-        streak_only: bool | int = None,
         favorite: bool = None,
         points_limit: int = None,
         community_goals: bool = None,
@@ -141,6 +140,9 @@ class StreamerSettings(object):
         chat: ChatPresence = None,
         gift_sub_thanks: bool = None,
         gift_sub_message: str = None,
+        # Last, so configs that pass the earlier settings positionally keep
+        # their meaning.
+        streak_only: bool | int = None,
     ):
         self.make_predictions = make_predictions
         self.follow_raid = follow_raid
@@ -287,7 +289,7 @@ class Streamer(object):
 
             if self.watch_streak_cache is not None:
                 self.watch_streak_cache.mark_ended(
-                    self.username, broadcast_id, ended_at=self.offline_at
+                    self.username, broadcast_id, ended_at=self._last_seen_live_at()
                 )
 
         self.toggle_chat()
@@ -351,6 +353,21 @@ class Streamer(object):
             },
         )
 
+    def _last_seen_live_at(self):
+        """The earliest the broadcast that just went offline can have ended.
+
+        offline_at is when the miner noticed, which can be any amount later
+        (a missed stream-down, a network outage, a suspended machine). The
+        last stream-info refresh proves the broadcast was still live then,
+        so a gap measured from it is never shorter than the real one and a
+        claim is never carried into a broadcast that started 30 or more
+        minutes after the previous one ended.
+        """
+        last_seen = getattr(self.stream, "live_seen_at", 0) or 0
+        if 0 < last_seen <= self.offline_at:
+            return last_seen
+        return self.offline_at
+
     def _watch_streak_confirmed_for_current_broadcast(self):
         """Is the last streak confirmation from the broadcast being tracked?
 
@@ -364,8 +381,15 @@ class Streamer(object):
         if confirmed_at == 0:
             return False
 
-        broadcast_started_at = max(self.stream_up, self.offline_at)
-        return broadcast_started_at == 0 or confirmed_at >= broadcast_started_at
+        if self.offline_at == 0:
+            # Not seen offline in this process, so there is no earlier
+            # broadcast here to mistake it for.
+            return self.stream_up == 0 or confirmed_at >= self.stream_up
+        # After an offline, only a stream-up seen since then marks where the
+        # new broadcast began. A WATCH_STREAK event for the previous broadcast
+        # can arrive after its stream-down, so being later than offline_at
+        # alone proves nothing when the new stream-up was missed.
+        return self.stream_up > self.offline_at and confirmed_at >= self.stream_up
 
     def print_history(self):
         return "; ".join(

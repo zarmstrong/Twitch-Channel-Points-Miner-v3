@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -518,3 +518,323 @@ def test_unsupported_cache_version_starts_empty(tmp_path, caplog):
 
     assert cache.get("channel", "broadcast-1") is None
     assert "Unsupported watch-streak cache version 999" in caplog.text
+
+
+def _utc_datetime(timestamp):
+    # Twitch timestamps are parsed as naive UTC datetimes.
+    return datetime.fromtimestamp(timestamp, timezone.utc).replace(tzinfo=None)
+
+
+def _pin_clock(monkeypatch, clock):
+    for module in (
+        "TwitchChannelPointsMiner.classes.entities.Streamer",
+        "TwitchChannelPointsMiner.classes.entities.Stream",
+        "TwitchChannelPointsMiner.WatchStreakCache",
+    ):
+        monkeypatch.setattr(f"{module}.time.time", lambda: clock[0])
+
+
+def _refresh_live_stream(streamer, broadcast_id):
+    streamer.stream.update(
+        broadcast_id=broadcast_id,
+        title="title",
+        game={},
+        tags=[],
+        viewers_count=1,
+    )
+
+
+def test_late_offline_detection_does_not_invent_a_continuation(tmp_path, monkeypatch):
+    # Broadcast A is last seen live at T+600, but the miner (offline, or with
+    # a dropped websocket) only notices it ended 45 minutes later. B starts
+    # two minutes after that: the real gap is far past 30 minutes.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.update_history("WATCH_STREAK", earned=450)
+    clock[0] += 600
+    _refresh_live_stream(streamer, "broadcast-1")
+
+    clock[0] += 45 * 60
+    streamer.set_offline()
+    clock[0] += 120
+    _refresh_live_stream(streamer, "broadcast-2")
+    streamer.set_online()
+
+    assert cache.get("channel", "broadcast-1").ended_at == 2_000_000_600
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_short_restart_seen_live_until_the_end_is_inherited(tmp_path, monkeypatch):
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.update_history("WATCH_STREAK", earned=450)
+    clock[0] += 600
+    _refresh_live_stream(streamer, "broadcast-1")
+
+    clock[0] += 60
+    streamer.set_offline()
+    clock[0] += 5 * 60
+    _refresh_live_stream(streamer, "broadcast-2")
+    streamer.set_online()
+
+    assert streamer.stream.watch_streak_missing is False
+
+
+def test_late_streak_event_after_stream_down_is_not_carried_over(tmp_path, monkeypatch):
+    # A's WATCH_STREAK event arrives just after A's stream-down, and B's
+    # stream-up is missed: the confirmation is A's, not B's.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    clock[0] += 600
+    streamer.set_offline()
+    clock[0] += 5
+    streamer.update_history("WATCH_STREAK", earned=450)
+
+    clock[0] += 40 * 60
+    _refresh_live_stream(streamer, "broadcast-2")
+    streamer.set_online()
+
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-2").claimed is False
+
+
+def test_mid_stream_reconcile_looks_up_one_channel_per_cycle(tmp_path):
+    first, _ = make_streak_streamer(tmp_path, username="first")
+    second, _ = make_streak_streamer(tmp_path, username="second")
+    calls = []
+    for streamer in (first, second):
+        streamer.is_online = True
+        streamer.stream.minute_watched = WATCH_STREAK_RECONCILE_AFTER_MINUTES
+        streamer.channel_id = f"{streamer.username}-id"
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        return SimpleNamespace(stream=None)
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    # The watch loop passes the real clock, which reconcile_watch_streak()
+    # also uses to stamp each check.
+    twitch._reconcile_due_watch_streaks([first, second])
+    assert calls == ["first-id"]
+    twitch._reconcile_due_watch_streaks([first, second])
+    assert calls == ["first-id", "second-id"]
+
+
+def test_mid_stream_reconcile_stops_on_shutdown(tmp_path):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.is_online = True
+    streamer.stream.minute_watched = 30
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = False
+    twitch.gql = SimpleNamespace()
+
+    twitch._reconcile_due_watch_streaks([streamer], now=2_000_000_000, max_minutes=20)
+
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_late_noticed_continuation_uses_twitch_start_time(tmp_path):
+    # A claimed broadcast ends, its continuation starts two minutes later,
+    # and the miner (restarted, say) only notices it an hour later. The gap
+    # from the noticed time is too long; Twitch's own start time is not.
+    start = 2_000_000_000.0
+    streamer, cache = make_streak_streamer(tmp_path, broadcast_id="broadcast-2")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+    cache.ensure("channel", "broadcast-2", started_at=start + 1000 + 3600)
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") is None
+
+    created_at = start + 1000 + 120
+    live_stream = SimpleNamespace(
+        id="broadcast-2", created_at=_utc_datetime(created_at)
+    )
+    twitch = twitch_with_streak_responses(live_stream, None)
+    twitch.gql.get_reward_list = lambda channel_id: pytest.fail(
+        "a continuation of a claimed stream needs no milestone lookup"
+    )
+
+    reconciled = twitch.reconcile_watch_streak(streamer)
+
+    assert reconciled is True
+    assert streamer.stream.watch_streak_missing is False
+    assert cache.get("channel", "broadcast-2").started_at == created_at
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") == start + 60
+
+
+def test_twitch_start_time_does_not_invent_a_continuation(tmp_path):
+    start = 2_000_000_000.0
+    streamer, cache = make_streak_streamer(tmp_path, broadcast_id="broadcast-2")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+    cache.ensure("channel", "broadcast-2", started_at=start + 1000 + 3600)
+    live_stream = SimpleNamespace(
+        id="broadcast-2", created_at=_utc_datetime(start + 1000 + 3500)
+    )
+    twitch = twitch_with_streak_responses(live_stream, None)
+
+    reconciled = twitch.reconcile_watch_streak(streamer)
+
+    assert reconciled is False
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_unconfirmed_streak_stops_being_pending_at_the_cap(tmp_path, caplog):
+    caplog.set_level("INFO")
+    streamer, cache = make_streak_streamer(tmp_path)
+    streamer.is_online = True
+    streamer.stream.minute_watched = 20
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: pytest.fail(
+            "a streak past the cap needs no further lookups"
+        )
+    )
+
+    twitch._reconcile_due_watch_streaks([streamer], now=2_000_000_000, max_minutes=20)
+
+    assert streamer.stream.watch_streak_missing is False
+    # Giving up is not a claim: a later broadcast must not inherit it.
+    assert cache.get("channel", "broadcast-1") is None
+    assert "watch_streak_max_minutes=20" in caplog.text
+
+
+def test_unconfirmed_streak_below_the_cap_keeps_checking(tmp_path):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.is_online = True
+    streamer.stream.minute_watched = 19.9
+    calls = []
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        return SimpleNamespace(stream=None)
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    twitch._reconcile_due_watch_streaks([streamer], now=2_000_000_000, max_minutes=20)
+
+    assert calls == ["channel-1"]
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_streak_only_channel_past_its_window_is_not_rechecked(tmp_path):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.settings.streak_only = True
+    streamer.is_online = True
+    streamer.stream.minute_watched = 10
+    twitch = Twitch.__new__(Twitch)
+    twitch.gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: pytest.fail(
+            "a streak-only channel past its window is no longer watched"
+        )
+    )
+
+    twitch._reconcile_due_watch_streaks([streamer], now=2_000_000_000, max_minutes=20)
+
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_offline_end_uses_the_request_time_of_the_last_live_refresh(
+    tmp_path, monkeypatch
+):
+    # The live response is applied 20 seconds after its request; the stream
+    # may have ended right after the request, so that is the safe end.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    requested_at = clock[0] + 600
+    clock[0] = requested_at + 20
+    streamer.stream.update(
+        broadcast_id="broadcast-1",
+        title="title",
+        game={},
+        tags=[],
+        viewers_count=1,
+        seen_live_at=requested_at,
+    )
+
+    clock[0] += 60
+    streamer.set_offline()
+
+    assert cache.get("channel", "broadcast-1").ended_at == requested_at
+
+
+def test_update_stream_records_the_request_time_as_seen_live(monkeypatch):
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    streamer = make_streamer("channel")
+    streamer.settings.claim_drops = False
+
+    def get_stream_info(target):
+        clock[0] += 20
+        return {
+            "stream": {"id": "broadcast-1", "tags": [], "viewersCount": 1},
+            "broadcastSettings": {"title": "title", "game": {}},
+        }
+
+    monkeypatch.setattr(
+        Twitch, "get_stream_info", lambda self, target: get_stream_info(target)
+    )
+    twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+
+    twitch.update_stream(streamer)
+
+    assert streamer.stream.live_seen_at == 2_000_000_000.0
+
+
+def test_reconcile_ignores_a_milestone_after_the_broadcast_changed(tmp_path):
+    streamer, cache = make_streak_streamer(tmp_path)
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0),
+        expires_at=None,
+    )
+    twitch = twitch_with_streak_responses(live_stream, milestone)
+
+    def get_reward_list(channel_id):
+        # Another thread moves the stream to a new broadcast meanwhile.
+        streamer.stream.broadcast_id = "broadcast-2"
+        return SimpleNamespace(watch_streak_milestone=milestone)
+
+    twitch.gql.get_reward_list = get_reward_list
+
+    reconciled = twitch.reconcile_watch_streak(streamer)
+
+    assert reconciled is False
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-1") is None
+    assert cache.get("channel", "broadcast-2") is None

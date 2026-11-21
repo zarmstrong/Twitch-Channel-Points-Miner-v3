@@ -15,7 +15,7 @@ from pathlib import Path
 
 _LINE_PATTERN = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
-CONFIG_VERSION = 12
+CONFIG_VERSION = 13
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -123,6 +123,7 @@ MINE_CONFIG_DEFAULTS = (
     ("drop_progress_stall_minutes", "10"),
     ("drop_pick_stickiness_minutes", "15"),
     ("watch_status_interval_minutes", "15"),
+    ("watch_streak_max_minutes", "20"),
     ("category_drops_override_streamers", "False"),
     ("drop_badge_catalog", "True"),
     ("drop_badge_refresh_interval_hours", "1"),
@@ -220,6 +221,10 @@ def _missing_call_defaults(call, call_name, defaults):
         not isinstance(call, ast.Call)
         or _call_name(call.func) != call_name
         or any(keyword.arg is None for keyword in call.keywords)
+        # Positional arguments set settings this keyword check can't see, and
+        # adding the same setting as a keyword makes the call raise TypeError.
+        # Leave such calls alone: unset settings already use their defaults.
+        or call.args
     ):
         return []
     existing = {keyword.arg for keyword in call.keywords}

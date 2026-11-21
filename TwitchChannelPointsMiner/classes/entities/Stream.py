@@ -8,6 +8,12 @@ from TwitchChannelPointsMiner.constants import DROP_ID
 
 logger = logging.getLogger(__name__)
 
+# The minute watcher posts for a watched stream about every 20 seconds. A
+# longer gap between two successful posts means the stream was out of a watch
+# slot (or the watcher stalled), and that time was not watched: count at most
+# this much of it so minute_watched tracks real watch time.
+MINUTE_WATCHED_MAX_STEP_SECONDS = 60
+
 
 class Stream(object):
     __slots__ = [
@@ -25,6 +31,7 @@ class Stream(object):
         "watch_streak_missing",
         "watch_streak_checked_at",
         "minute_watched",
+        "live_seen_at",
         "__last_update",
         "__minute_watched_timestamp",
     ]
@@ -47,6 +54,7 @@ class Stream(object):
 
         self.spade_url = None
         self.payload = None
+        self.live_seen_at = 0
 
         self.init_watch_streak()
 
@@ -54,7 +62,7 @@ class Stream(object):
         json_event = json.dumps(self.payload, separators=(",", ":"))
         return {"data": (b64encode(json_event.encode("utf-8"))).decode("utf-8")}
 
-    def update(self, broadcast_id, title, game, tags, viewers_count):
+    def update(self, broadcast_id, title, game, tags, viewers_count, seen_live_at=None):
         if broadcast_id != self.broadcast_id:
             # What Twitch advertised on the last broadcast proves nothing
             # about this one.
@@ -71,6 +79,11 @@ class Stream(object):
             DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
         )
         self.__last_update = time.time()
+        # When Twitch last showed this stream live: the caller's request time
+        # when given, since the response may arrive (and be applied) later.
+        self.live_seen_at = (
+            self.__last_update if seen_live_at is None else float(seen_live_at)
+        )
 
         logger.debug(f"Update: {self}")
 
@@ -108,9 +121,16 @@ class Stream(object):
         self.minute_watched = 0
         self.__minute_watched_timestamp = 0
 
+    def pause_minute_watched(self):
+        """Stop counting: the stream is out of a watch slot."""
+        self.__minute_watched_timestamp = 0
+
     def update_minute_watched(self):
+        now = time.time()
         if self.__minute_watched_timestamp != 0:
-            self.minute_watched += round(
-                (time.time() - self.__minute_watched_timestamp) / 60, 5
+            elapsed = min(
+                max(now - self.__minute_watched_timestamp, 0),
+                MINUTE_WATCHED_MAX_STEP_SECONDS,
             )
-        self.__minute_watched_timestamp = time.time()
+            self.minute_watched += round(elapsed / 60, 5)
+        self.__minute_watched_timestamp = now

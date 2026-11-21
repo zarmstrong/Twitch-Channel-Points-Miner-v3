@@ -30,6 +30,11 @@ CLIENT_VERSION = "ef928475-9403-42f2-8a34-55784bd08e16"  # Browser
 # Twitch counts a broadcast that starts less than 30 minutes after the previous
 # one ended as the same stream for watch-streak purposes.
 WATCH_STREAK_STREAM_GAP_SECONDS = 30 * 60
+# watch_streak_max_minutes: how long a pending streak that Twitch never
+# confirms may hold a watch slot (and bypass points_limit) per broadcast.
+WATCH_STREAK_MAX_MINUTES_DEFAULT = 20
+WATCH_STREAK_MAX_MINUTES_MIN = 11
+WATCH_STREAK_MAX_MINUTES_MAX = 60
 
 USER_AGENTS = {
     "Windows": {

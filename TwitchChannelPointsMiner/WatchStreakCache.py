@@ -157,6 +157,12 @@ class WatchStreakCache:
         previous one ended as the same stream.  A claim made on any broadcast
         in that chain therefore covers the current broadcast too, so the miner
         must not farm it again.
+
+        ``started_at`` overrides the stored start of the current broadcast,
+        so a caller that knows Twitch's own start time can use it instead of
+        the moment the miner noticed the broadcast.  Recorded ends are the
+        last time the broadcast was seen live (Streamer._last_seen_live_at),
+        so a measured gap is never shorter than the real one.
         """
 
         login = streamer_login.lower().strip()
@@ -164,18 +170,18 @@ class WatchStreakCache:
             return None
         with self._lock:
             current = self._sessions.get(self._key(login, broadcast_id))
-            if current is not None:
-                if current.claimed:
-                    return (
-                        current.claimed_at
-                        if current.claimed_at is not None
-                        else current.started_at
-                    )
+            if current is not None and current.claimed:
+                return (
+                    current.claimed_at
+                    if current.claimed_at is not None
+                    else current.started_at
+                )
+            if started_at is not None:
+                current_started_at = float(started_at)
+            elif current is not None:
                 current_started_at = current.started_at
             else:
-                if started_at is None:
-                    return None
-                current_started_at = float(started_at)
+                return None
 
             previous_sessions = [
                 session
@@ -203,6 +209,25 @@ class WatchStreakCache:
                     )
                 current_started_at = previous.started_at
         return None
+
+    def record_started_at(self, streamer_login, broadcast_id, started_at):
+        """Store Twitch's own start time for a broadcast the cache tracks.
+
+        ensure() records when the miner noticed the broadcast, which can be
+        much later than when it started (a missed stream-up, or a miner that
+        was restarted). Later continuation checks measure gaps from here.
+        """
+        if broadcast_id in [None, ""] or started_at is None:
+            return None
+        with self._lock:
+            session = self._sessions.get(self._key(streamer_login, broadcast_id))
+            if session is None:
+                return None
+            started_at = float(started_at)
+            if session.started_at != started_at:
+                session.started_at = started_at
+                self._save_locked()
+            return session
 
     def mark_claimed(self, streamer_login, broadcast_id, claimed_at=None):
         now = time.time() if claimed_at is None else float(claimed_at)
