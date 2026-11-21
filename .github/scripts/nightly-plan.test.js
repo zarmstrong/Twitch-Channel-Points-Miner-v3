@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { assertNotSuperseded, planNightly, publishDecision } = require('./nightly-plan');
+const { planNightly, publishDecision } = require('./nightly-plan');
 
 const SHA = 'a'.repeat(40);
 const OLD = 'b'.repeat(40);
@@ -17,12 +17,16 @@ function notFound(status = 404) {
 // Tests workflow reports for the commit, newest first.
 const ZIP = { name: 'TwitchChannelPointsMiner-Portable-nightly.zip', state: 'uploaded' };
 
+function publishingNote(sha) {
+  return `<!-- nightly-publishing:start ${sha} -->\n> note\n<!-- nightly-publishing:end -->\n\nOlder notes.`;
+}
+
 // `ahead` lists the commits that already contain the commit being built.
 // `nightlyAssets` is what the published nightly release holds, or null when
-// there is no published nightly release.
+// there is no published nightly release; `nightlyBody` is its notes.
 function fakeGithub({
   tags = { '3.22.0': OLD }, latest = '3.22.0', runs = [{ status: 'completed', conclusion: 'success' }],
-  calls = [], ahead = [], nightlyAssets = [ZIP],
+  calls = [], ahead = [], nightlyAssets = [ZIP], nightlyBody = 'Notes.',
 } = {}) {
   return {
     rest: {
@@ -30,7 +34,7 @@ function fakeGithub({
         getReleaseByTag: async ({ tag }) => {
           calls.push(['release', tag]);
           if (tag !== 'nightly' || !nightlyAssets) throw notFound();
-          return { data: { tag_name: tag, assets: nightlyAssets } };
+          return { data: { id: 1, tag_name: tag, body: nightlyBody, assets: nightlyAssets } };
         },
         compareCommitsWithBasehead: async ({ basehead }) => {
           calls.push(['compare', basehead]);
@@ -131,9 +135,37 @@ test('a re-run of an earlier night never moves nightly backwards', async () => {
     const github = fakeGithub({ tags: { '3.22.0': OLD, nightly: NEWER }, ahead: [NEWER], calls });
     const { outputs, messages } = await plan({ github, force });
     assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);
-    assert.match(messages.at(-1)[1], /is newer than/);
+    assert.match(messages.at(-1)[1], /a newer nightly build \(c{40}\) is published or being published/);
     assert.deepEqual(calls.find(([kind]) => kind === 'compare'), ['compare', `${SHA}...${NEWER}`]);
   }
+});
+
+test('a newer build that another run started publishing is not overtaken', async () => {
+  // That run pushed its Docker image and failed before it moved the tag.
+  const NEWER = 'c'.repeat(40);
+  const github = fakeGithub({
+    tags: { '3.22.0': OLD, nightly: OLD }, ahead: [NEWER], nightlyBody: publishingNote(NEWER),
+  });
+  const { outputs } = await plan({ github, force: true });
+  assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);
+});
+
+test('a build whose publishing did not finish is published again', async () => {
+  // The tag and an older download are in place, as after a forced rebuild
+  // that pushed its Docker image and then failed.
+  const github = fakeGithub({
+    tags: { '3.22.0': OLD, nightly: SHA }, nightlyBody: publishingNote(SHA),
+  });
+  const { outputs } = await plan({ github });
+  assert.deepEqual([outputs.build, outputs.publish], ['true', 'true']);
+});
+
+test('an unfinished build is finished even when master is exactly the latest release', async () => {
+  const github = fakeGithub({
+    tags: { '3.22.0': SHA, nightly: OLD }, nightlyBody: publishingNote(OLD),
+  });
+  const { outputs } = await plan({ github });
+  assert.deepEqual([outputs.build, outputs.publish], ['true', 'true']);
 });
 
 test('a commit whose tests did not pass is never published, even when forced', async () => {
@@ -198,40 +230,6 @@ test('an API failure is not mistaken for a missing tag or release', async () => 
   const broken = fakeGithub();
   broken.rest.repos.getLatestRelease = async () => { throw notFound(503); };
   await assert.rejects(plan({ github: broken }), /Not Found/);
-});
-
-async function superseded(github) {
-  const failures = [];
-  const current = await assertNotSuperseded({
-    github,
-    context: { repo: { owner: 'o', repo: 'r' } },
-    core: { setFailed: (message) => failures.push(message) },
-    sha: SHA,
-  });
-  return { current, failures };
-}
-
-test('a publishing job stops when a newer nightly build was published meanwhile', async () => {
-  const NEWER = 'c'.repeat(40);
-  const { current, failures } = await superseded(
-    fakeGithub({ tags: { nightly: NEWER }, ahead: [NEWER] }),
-  );
-  assert.equal(current, false);
-  assert.match(failures[0], /already at c{40}, which is newer than a{40}/);
-});
-
-test('a publishing job goes ahead for a first, repeated or newer build', async () => {
-  const cases = [
-    {},
-    { nightly: SHA },
-    // The published build is older than, or unrelated to, the one being built.
-    { nightly: OLD },
-  ];
-  for (const tags of cases) {
-    const { current, failures } = await superseded(fakeGithub({ tags }));
-    assert.equal(current, true);
-    assert.deepEqual(failures, []);
-  }
 });
 
 test('publishing needs the schedule or a request, master, and credentials', () => {

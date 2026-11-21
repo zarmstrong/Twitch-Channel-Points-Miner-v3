@@ -78,6 +78,7 @@ jobs:
           node .github/scripts/release-pull-links.test.js
           node .github/scripts/docker-latest-tag.test.js
           node .github/scripts/nightly-plan.test.js
+          node .github/scripts/nightly-release.test.js
 
   black:
     name: Black

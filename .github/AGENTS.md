@@ -36,6 +36,7 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 - `scripts/release-pull-links.js` relinks PR references in release notes.
 - `scripts/docker-latest-tag.js` decides whether a Docker publish moves `latest` and the Docker Hub description. Only the newest plain `MAJOR.MINOR.PATCH` tag does, so a prerelease or an older release published again leaves them alone. `deploy-docker.yml` checks it out from the workflow's commit, because an older release tag doesn't contain it.
 - `scripts/nightly-plan.js` decides whether a nightly run builds and whether it publishes.
+- `scripts/nightly-release.js` runs the publishing steps. The nightly release records, in a block at the top of its notes, the commit a run has started publishing; the last step removes it. Publishing jobs check that block, not only the plan, because "Re-run failed jobs" on an old run re-runs neither the plan nor the first step. Keep every step that publishes behind `assertPublishing`.
 - `scripts/nightly_version.py` computes the nightly version (`3.22.0+nightly.20261119.795629a`) and stamps it into the build's checkout. It is Python because the Windows and Docker builds both run it; its tests are in `tests/test_nightly_version.py`.
 
 Each JavaScript one has a `*.test.js` file using Node's built-in test runner:
@@ -45,6 +46,7 @@ node .github/scripts/release-linked-issues.test.js
 node .github/scripts/release-pull-links.test.js
 node .github/scripts/docker-latest-tag.test.js
 node .github/scripts/nightly-plan.test.js
+node .github/scripts/nightly-release.test.js
 ```
 
 The scripts receive `github`, `context` and `core` from `actions/github-script`. Tests pass fakes, so they run offline. Add a test with any behaviour change.

@@ -26,6 +26,7 @@ on:
     paths:
       - .github/workflows/nightly.yml
       - .github/scripts/nightly-plan.js
+      - .github/scripts/nightly-release.js
       - .github/scripts/nightly_version.py
 
 permissions:
@@ -136,12 +137,45 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # First publishing step: records in the nightly release which commit is
+  # being published, before anything is pushed. See nightly-release.js.
+  begin_publish:
+    name: Start publishing
+    needs: [plan, build_windows]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout nightly automation
+        uses: actions/checkout@v7
+        with:
+          # Without cone mode, only this directory is checked out.
+          sparse-checkout: /.github/scripts/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Record the build being published
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.beginPublishing({ github, context, core, sha: context.sha });
+
   # Waits for the Windows build, so Docker's nightly tag never moves on a
-  # night the Windows build failed.
+  # night the Windows build failed. A dry run has no begin_publish to wait
+  # for; a publishing run needs it to have succeeded.
   docker:
     name: Build Docker image
-    needs: [plan, build_windows]
-    if: needs.plan.outputs.build == 'true'
+    needs: [plan, build_windows, begin_publish]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.plan.outputs.build == 'true' &&
+        needs.build_windows.result == 'success' &&
+        (needs.begin_publish.result == 'success' ||
+          (needs.plan.outputs.publish != 'true' && needs.begin_publish.result == 'skipped'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -184,16 +218,15 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ needs.plan.outputs.version }}
 
-      # "Re-run failed jobs" on an earlier night's run keeps that run's plan,
-      # so its check for a newer nightly build doesn't run again. Check here,
-      # right before publishing.
-      - name: Check no newer nightly build was published
+      # "Re-run failed jobs" on an earlier night's run re-runs neither the
+      # plan nor begin_publish. Only the run the release records may push.
+      - name: Check this run is still the one publishing
         if: needs.plan.outputs.publish == 'true'
         uses: actions/github-script@v9
         with:
           script: |
-            const automation = require('./.github/scripts/nightly-plan.js');
-            await automation.assertNotSuperseded({ github, context, core, sha: context.sha });
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.assertPublishing({ github, context, core, sha: context.sha });
 
       # A dry run builds AMD64 only and pushes nothing.
       - name: Build Docker image
@@ -208,10 +241,14 @@ jobs:
           cache-from: type=gha
           cache-to: ${{ needs.plan.outputs.publish == 'true' && 'type=gha,mode=max' || '' }}
 
+  # Last publishing step. One release, updated in place, so watchers aren't
+  # notified every night. It is always a prerelease: GitHub never reports
+  # one as the latest release, which is what the miner's update check reads,
+  # and the release automation skips prereleases.
   publish_release:
     name: Update nightly prerelease
     needs: [plan, docker]
-    if: needs.plan.outputs.publish == 'true'
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.docker.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -224,15 +261,12 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      # "Re-run failed jobs" on an earlier night's run keeps that run's plan,
-      # so its check for a newer nightly build doesn't run again. Check here,
-      # right before publishing.
-      - name: Check no newer nightly build was published
+      - name: Check this run is still the one publishing
         uses: actions/github-script@v9
         with:
           script: |
-            const automation = require('./.github/scripts/nightly-plan.js');
-            await automation.assertNotSuperseded({ github, context, core, sha: context.sha });
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.assertPublishing({ github, context, core, sha: context.sha });
 
       - name: Download portable zip
         uses: actions/download-artifact@v8
@@ -240,68 +274,34 @@ jobs:
           name: nightly-windows-portable
           path: dist
 
-      # One release, updated in place, so watchers aren't notified every
-      # night. It is always a prerelease: GitHub never reports one as the
-      # latest release, which is what the miner's update check reads, and
-      # the release automation skips prereleases. The tag moves last. A run
-      # that fails before that, or leaves the release without its file, is
-      # built again the next night: the plan skips a commit only when the
-      # tag is on it and the release has the file.
-      - name: Update the nightly prerelease
+      # --clobber removes the old file before it uploads the new one. If
+      # the upload fails, the release keeps its "being published" note, so
+      # the next run publishes again.
+      - name: Replace the Windows download
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload nightly dist/TwitchChannelPointsMiner-Portable-nightly.zip \
+            --clobber --repo "${GITHUB_REPOSITORY}"
+
+      # Moves the nightly tag, then replaces the notes, which removes the
+      # "being published" note.
+      - name: Finish publishing
+        uses: actions/github-script@v9
+        env:
           NIGHTLY_VERSION: ${{ needs.plan.outputs.version }}
           BUILD_DATE: ${{ needs.plan.outputs.date }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
-          ZIP_PATH: dist/TwitchChannelPointsMiner-Portable-nightly.zip
-        shell: bash
-        run: |
-          set -euo pipefail
-          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
-          short_sha="${GITHUB_SHA:0:7}"
-          built="${BUILD_DATE:0:4}-${BUILD_DATE:4:2}-${BUILD_DATE:6:2}"
-          title="Nightly build ${NIGHTLY_VERSION}"
-
-          notes_file=$(mktemp)
-          trap 'rm -f "${notes_file}"' EXIT
-          {
-            echo "An automatic build of the newest code on \`master\`. It passed the automated tests, but nobody has tried it against Twitch. Expect bugs, and use the [latest release](${repo_url}/releases/latest) unless you want to test a fix early."
-            echo
-            echo "* Version: \`${NIGHTLY_VERSION}\`"
-            echo "* Commit: [\`${short_sha}\`](${repo_url}/commit/${GITHUB_SHA})"
-            echo "* Built: ${built} (UTC)"
-            if [ -n "${RELEASE_TAG}" ]; then
-              echo "* [Changes since ${RELEASE_TAG}](${repo_url}/compare/${RELEASE_TAG}...${GITHUB_SHA})"
-            fi
-            echo
-            echo "### Windows"
-            echo
-            echo "Download \`TwitchChannelPointsMiner-Portable-nightly.zip\` below. Only the portable build is published nightly."
-            echo
-            echo "### Docker image"
-            echo
-            echo '```bash'
-            echo "docker pull ${image}:nightly"
-            echo '```'
-          } > "${notes_file}"
-
-          # Created without the file, so it is published at once. Created
-          # with one, gh makes a draft first, and a run that died then would
-          # leave a draft behind.
-          if ! gh release view nightly --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release create nightly --repo "${GITHUB_REPOSITORY}" \
-              --target "${GITHUB_SHA}" --title "${title}" --notes-file "${notes_file}" \
-              --prerelease --latest=false
-          fi
-          gh release upload nightly "${ZIP_PATH}" --clobber --repo "${GITHUB_REPOSITORY}"
-          # --draft=false also publishes a draft that an earlier run left.
-          gh release edit nightly --repo "${GITHUB_REPOSITORY}" \
-            --title "${title}" --notes-file "${notes_file}" \
-            --draft=false --prerelease --latest=false
-          # Move the tag, or create it when the release had lost it.
-          if ! gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" \
-            -f sha="${GITHUB_SHA}" -F force=true --silent; then
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/nightly" -f sha="${GITHUB_SHA}" --silent
-          fi
+        with:
+          script: |
+            const automation = require('./.github/scripts/nightly-release.js');
+            await automation.finishPublishing({
+              github,
+              context,
+              core,
+              sha: context.sha,
+              version: process.env.NIGHTLY_VERSION,
+              date: process.env.BUILD_DATE,
+              releaseTag: process.env.RELEASE_TAG,
+              image: `${process.env.DOCKERHUB_NAMESPACE}/twitch-channel-points-miner`,
+            });
