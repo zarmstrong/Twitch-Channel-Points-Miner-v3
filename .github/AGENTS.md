@@ -30,7 +30,7 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 
 ## Release scripts
 
-- `scripts/release-linked-issues.js` closes issues a release ships.
+- `scripts/release-linked-issues.js` closes issues a release ships. A release cycle runs from one full release to the next: a GitHub prerelease, such as a nightly build, doesn't end one and closes no issues.
 - `scripts/release-pull-links.js` relinks PR references in release notes.
 - `scripts/docker-latest-tag.js` decides whether a Docker publish moves `latest` and the Docker Hub description. Only the newest plain `MAJOR.MINOR.PATCH` tag does, so a prerelease or an older release published again leaves them alone. `deploy-docker.yml` checks it out from the workflow's commit, because an older release tag doesn't contain it.
 
