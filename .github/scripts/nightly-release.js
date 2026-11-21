@@ -3,16 +3,18 @@
 // Publishing a nightly build takes several steps in several jobs: the Docker
 // push, the Windows upload, the release notes and the `nightly` tag. Any of
 // them can fail, and a failed run can be re-run nights later. The nightly
-// release records which commit is being published, in a block at the top of
-// its notes that is written before anything is pushed and removed by the
-// last step. That block is what keeps runs from publishing over each other,
-// and what tells a later run that the last one didn't finish.
+// release records which run is publishing which commit, in a block at the
+// top of its notes that is written before anything is pushed and removed by
+// the last step. That block is what keeps runs from publishing over each
+// other, and what tells a later run that the last one didn't finish. It
+// names the run as well as the commit, because two runs can build the same
+// commit into different builds: the version carries the build date.
 
 const NIGHTLY_TAG = 'nightly';
 // The file nightly.yml uploads to the nightly release.
 const NIGHTLY_ASSET = 'TwitchChannelPointsMiner-Portable-nightly.zip';
 const PUBLISHING_BLOCK =
-  /<!-- nightly-publishing:start ([0-9a-f]{40}) -->[\s\S]*?<!-- nightly-publishing:end -->\n*/;
+  /<!-- nightly-publishing:start ([0-9a-f]{40}) (\d+) -->[\s\S]*?<!-- nightly-publishing:end -->\n*/;
 
 // The commit a tag points to, or null when the tag doesn't exist.
 async function tagCommit(github, owner, repo, tag) {
@@ -50,10 +52,22 @@ async function nightlyRelease(github, owner, repo) {
   }
 }
 
+// The build a run has started publishing and not finished, as its commit
+// and the id of the workflow run, or null. A re-run keeps its run's id.
+function publishingBuild(release) {
+  const match = PUBLISHING_BLOCK.exec(release?.body || '');
+  return match ? { sha: match[1], run: match[2] } : null;
+}
+
 // The commit a run has started publishing and not finished, or null.
 function publishingCommit(release) {
-  const match = PUBLISHING_BLOCK.exec(release?.body || '');
-  return match ? match[1] : null;
+  return publishingBuild(release)?.sha || null;
+}
+
+// True when the release records this run as the one publishing `sha`.
+function isPublishing(release, sha, run) {
+  const build = publishingBuild(release);
+  return Boolean(build) && build.sha === sha && build.run === String(run);
 }
 
 // Where nightly publishing stands: the commit the tag is on, the commit a
@@ -84,9 +98,9 @@ async function newerBuild(github, owner, repo, state, sha) {
   return null;
 }
 
-function publishingBlock(sha) {
+function publishingBlock(sha, run) {
   return [
-    `<!-- nightly-publishing:start ${sha} -->`,
+    `<!-- nightly-publishing:start ${sha} ${run} -->`,
     `> **A new nightly build (\`${sha.slice(0, 7)}\`) is being published.** Until this note goes away, the download below and the Docker image may come from different builds. If it is still here hours later, that run failed and the next nightly run publishes again.`,
     '<!-- nightly-publishing:end -->',
     '',
@@ -94,8 +108,8 @@ function publishingBlock(sha) {
   ].join('\n');
 }
 
-// First publishing step: records `sha` in the release before anything is
-// pushed, creating the release on the first night. Fails when a newer build
+// First publishing step: records this run and `sha` in the release before
+// anything is pushed, creating the release on the first night. Fails when a newer build
 // is published or being published, which a re-run of an earlier run meets.
 async function beginPublishing({ github, context, core, sha }) {
   const { owner, repo } = context.repo;
@@ -106,7 +120,7 @@ async function beginPublishing({ github, context, core, sha }) {
     return false;
   }
   const previous = (state.release?.body || '').replace(PUBLISHING_BLOCK, '');
-  const body = publishingBlock(sha) + previous;
+  const body = publishingBlock(sha, context.runId) + previous;
   if (state.release) {
     await github.rest.repos.updateRelease({
       owner, repo, release_id: state.release.id, body, prerelease: true, make_latest: 'false',
@@ -128,12 +142,13 @@ async function beginPublishing({ github, context, core, sha }) {
 // earlier run re-runs neither. Only the run recorded in the release may go on.
 async function assertPublishing({ github, context, core, sha }) {
   const { owner, repo } = context.repo;
-  const publishing = publishingCommit(await nightlyRelease(github, owner, repo));
-  if (publishing !== sha) {
+  const release = await nightlyRelease(github, owner, repo);
+  if (!isPublishing(release, sha, context.runId)) {
+    const build = publishingBuild(release);
     core.setFailed(
-      publishing
-        ? `Another run is publishing ${publishing} as the nightly build; ${sha} is out of date.`
-        : `The nightly release doesn't record ${sha} as being published; this run is out of date.`,
+      build
+        ? `Run ${build.run} is publishing ${build.sha} as the nightly build; this run is out of date.`
+        : `The nightly release doesn't record this run as publishing ${sha}; it is out of date.`,
     );
     return false;
   }
@@ -177,8 +192,8 @@ async function finishPublishing({
 }) {
   const { owner, repo } = context.repo;
   const release = await nightlyRelease(github, owner, repo);
-  if (publishingCommit(release) !== sha) {
-    core.setFailed(`The nightly release no longer records ${sha} as being published.`);
+  if (!isPublishing(release, sha, context.runId)) {
+    core.setFailed(`The nightly release no longer records this run as publishing ${sha}.`);
     return false;
   }
   if (!(release.assets || []).some((asset) => asset.name === NIGHTLY_ASSET && asset.state === 'uploaded')) {

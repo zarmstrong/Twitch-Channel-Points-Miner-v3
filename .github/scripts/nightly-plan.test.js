@@ -18,7 +18,7 @@ function notFound(status = 404) {
 const ZIP = { name: 'TwitchChannelPointsMiner-Portable-nightly.zip', state: 'uploaded' };
 
 function publishingNote(sha) {
-  return `<!-- nightly-publishing:start ${sha} -->\n> note\n<!-- nightly-publishing:end -->\n\nOlder notes.`;
+  return `<!-- nightly-publishing:start ${sha} 100 -->\n> note\n<!-- nightly-publishing:end -->\n\nOlder notes.`;
 }
 
 // `ahead` lists the commits that already contain the commit being built.

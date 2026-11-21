@@ -137,8 +137,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # First publishing step: records in the nightly release which commit is
-  # being published, before anything is pushed. See nightly-release.js.
+  # First publishing step: records in the nightly release which run is
+  # publishing which commit, before anything is pushed. See nightly-release.js.
   begin_publish:
     name: Start publishing
     needs: [plan, build_windows]

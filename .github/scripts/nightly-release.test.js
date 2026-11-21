@@ -73,11 +73,12 @@ function fakeRepository({ tag = null, release = null } = {}) {
   return repository;
 }
 
-function run(step, repository, sha, extra = {}) {
+// Each test's steps belong to workflow run 100 unless it says otherwise.
+function run(step, repository, sha, { runId = 100, ...extra } = {}) {
   const failures = [];
   return step({
     github: repository.github,
-    context: { repo: { owner: 'o', repo: 'r' }, serverUrl: 'https://github.com' },
+    context: { repo: { owner: 'o', repo: 'r' }, serverUrl: 'https://github.com', runId },
     core: { setFailed: (message) => failures.push(message), info() {} },
     sha,
     ...extra,
@@ -93,11 +94,11 @@ function upload(repository) {
   repository.release.assets = [ZIP];
 }
 
-async function publish(repository, sha) {
-  assert.equal((await run(beginPublishing, repository, sha)).ok, true);
-  assert.equal((await run(assertPublishing, repository, sha)).ok, true);
+async function publish(repository, sha, runId = 100) {
+  assert.equal((await run(beginPublishing, repository, sha, { runId })).ok, true);
+  assert.equal((await run(assertPublishing, repository, sha, { runId })).ok, true);
   upload(repository);
-  assert.equal((await run(finishPublishing, repository, sha, DETAILS)).ok, true);
+  assert.equal((await run(finishPublishing, repository, sha, { ...DETAILS, runId })).ok, true);
 }
 
 async function state(repository) {
@@ -160,7 +161,7 @@ test('a re-run of an older run cannot publish over a newer finished build', asyn
   // "Re-run failed jobs" on A re-runs only its publishing jobs.
   const rerun = await run(assertPublishing, repository, C2);
   assert.equal(rerun.ok, false);
-  assert.match(rerun.failures[0], /doesn't record 2{40} as being published/);
+  assert.match(rerun.failures[0], /doesn't record this run as publishing 2{40}/);
   // "Re-run all jobs" on A starts publishing again.
   const restart = await run(beginPublishing, repository, C2);
   assert.equal(restart.ok, false);
@@ -188,6 +189,30 @@ test('a re-run of an older run cannot publish over a newer build that failed par
   assert.equal(publishingCommit(repository.release), C3);
   // B's own re-run still goes through.
   assert.equal((await run(assertPublishing, repository, C3)).ok, true);
+});
+
+test('a re-run of an older run cannot finish over a newer run of the same commit', async () => {
+  const repository = fakeRepository();
+  await publish(repository, C1);
+  // Run 100 pushed its Docker image of C2 and failed before the upload. The
+  // next night run 200 built C2 again, under a new dated version, pushed
+  // its Docker image and failed in the same place.
+  await run(beginPublishing, repository, C2, { runId: 100 });
+  await run(beginPublishing, repository, C2, { runId: 200 });
+
+  // "Re-run failed jobs" on run 100 would upload its older Windows build.
+  const rerun = await run(assertPublishing, repository, C2, { runId: 100 });
+  assert.equal(rerun.ok, false);
+  assert.match(rerun.failures[0], /Run 200 is publishing 2{40}/);
+  upload(repository);
+  const finish = await run(finishPublishing, repository, C2, { ...DETAILS, runId: 100 });
+  assert.equal(finish.ok, false);
+  assert.equal(isComplete(await state(repository), C2), false);
+
+  // Run 200's own re-run finishes it.
+  assert.equal((await run(assertPublishing, repository, C2, { runId: 200 })).ok, true);
+  assert.equal((await run(finishPublishing, repository, C2, { ...DETAILS, runId: 200 })).ok, true);
+  assert.equal(isComplete(await state(repository), C2), true);
 });
 
 test('a rebuild of the same commit that fails part-way is not taken for finished', async () => {
