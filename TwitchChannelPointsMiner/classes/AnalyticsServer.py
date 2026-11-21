@@ -171,6 +171,13 @@ def _canonical_hostname(hostname):
     matches the "xn--mnchen-3ya.example.com" that HTTP clients send.
     """
     hostname = (hostname or "").lower()
+    if not hostname.isascii():
+        # UTS 46 mapping, as browsers apply it before sending the Host header:
+        # full-width letters and ligatures fold to plain ones, and the
+        # ideographic full stops separate labels.
+        hostname = unicodedata.normalize("NFKC", hostname).lower()
+        for stop in "\u3002\uff0e\uff61":
+            hostname = hostname.replace(stop, ".")
     if not hostname:
         return ""
     try:
@@ -210,6 +217,10 @@ def _allowed_hostname(entry):
     """
     entry = str(entry).strip()
     if "://" in entry:
+        if "\\" in entry:
+            # Browsers read a backslash as a slash, urlsplit does not, so the
+            # two would disagree about which host the URL names.
+            return ""
         try:
             # Clients percent-decode the host of a URL.
             return _canonical_hostname(unquote(urlsplit(entry).hostname or ""))

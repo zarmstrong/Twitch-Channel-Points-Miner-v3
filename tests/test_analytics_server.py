@@ -408,6 +408,8 @@ def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_aut
         ("https://faß.example/", "xn--fa-hia.example"),
         ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
         ("https://%6Diner.example.com/", "miner.example.com"),
+        ("https://miner\u3002example.com/", "miner.example.com"),
+        ("https://\uff4diner.example.com/", "miner.example.com"),
     ],
 )
 def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
@@ -484,7 +486,16 @@ def test_allowed_hosts_url_entry_admits_its_host_not_the_scheme():
     assert rejected.status_code == 403
 
 
-@pytest.mark.parametrize("entry", ["", "   ", "https://", "[not-an-ip]"])
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "",
+        "   ",
+        "https://",
+        "[not-an-ip]",
+        "https://miner.example.com\\@attacker.example/",
+    ],
+)
 def test_allowed_hosts_warns_about_and_skips_unusable_entries(entry, caplog):
     with caplog.at_level(logging.WARNING):
         server = AnalyticsServer(
