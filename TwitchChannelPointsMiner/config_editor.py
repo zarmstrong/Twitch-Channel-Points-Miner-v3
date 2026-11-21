@@ -25,6 +25,7 @@ STREAMER_SETTING_DEFAULTS = {
     "claim_moments": True,
     "chat": "ONLINE",
     "points_limit": None,
+    "streak_only": False,
 }
 STREAMER_SETTING_NAMES = set(STREAMER_SETTING_DEFAULTS)
 CATEGORY_SORTS = {
@@ -1671,9 +1672,18 @@ def _ensure_config_import(config_path, statement):
 def _validate_streamer_settings(settings):
     if not isinstance(settings, dict) or set(settings) - STREAMER_SETTING_NAMES:
         raise ConfigEditError("Unsupported per-streamer setting.")
-    for name in STREAMER_SETTING_NAMES - {"chat", "points_limit"}:
+    for name in STREAMER_SETTING_NAMES - {"chat", "points_limit", "streak_only"}:
         if name in settings and not isinstance(settings[name], bool):
             raise ConfigEditError(f"{name} must be true or false.")
+    if "streak_only" in settings:
+        streak_only = settings["streak_only"]
+        if not isinstance(streak_only, bool) and (
+            not isinstance(streak_only, int) or streak_only <= 0
+        ):
+            raise ConfigEditError(
+                "streak_only must be true, false, or a positive integer "
+                "number of minutes."
+            )
     if "chat" in settings and settings["chat"] not in CHAT_PRESENCES:
         raise ConfigEditError("Invalid chat presence.")
     points_limit = settings.get("points_limit")

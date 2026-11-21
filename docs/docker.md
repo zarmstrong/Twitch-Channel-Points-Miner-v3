@@ -92,6 +92,35 @@ under `environment:`, or `-e TWITCH_ANDROID_LOGIN=...` with `docker run`). It is
 only read when `cookies/<username>-android.pkl` doesn't exist yet. See
 [Android login](settings.md#android-login).
 
+## Nightly image
+
+The `nightly` tag is an automatic build of the newest code on the `master`
+branch, made once a day when something has been merged since the last build.
+Use it to try a fix before it is released:
+
+```sh
+docker pull zacharmstrong/twitch-channel-points-miner:nightly
+```
+
+In `compose.yml`, change the image tag from `latest` to `nightly`.
+
+- **It is not a release.** It passed the automated tests, but nobody has tried
+  it against Twitch. Expect bugs. `latest` stays the right tag for everyday use.
+- **Back up first.** Copy your `config`, `cookies` and `analytics` directories
+  before the first start, or point the nightly container at copies. A newer
+  build can upgrade those files to a format the latest release can't read, so
+  the backup is how you go back.
+- **It doesn't update itself.** Run `docker compose pull && docker compose up -d`
+  to get the next nightly build.
+- **Know which build you run.** The startup log and the analytics page show a
+  version such as `3.22.0+nightly.20261119.795629a`: the release it builds on,
+  the build date, and the commit. Include it when you report a problem.
+
+To go back, change the tag to `latest`, restore your backup and recreate the
+container. The [nightly release page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/tag/nightly)
+lists what the current build contains. While a new build is being published,
+the page says so, and the image may be newer than the build it describes.
+
 ## Graceful Docker shutdowns
 
 The miner handles Docker's normal `SIGTERM` stop signal and writes its
