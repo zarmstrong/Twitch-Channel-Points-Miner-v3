@@ -36,6 +36,15 @@ Set `TZ` to an
 [IANA time zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
 If it is omitted, the container uses UTC.
 
+## Tags
+
+- `latest`: the newest release. Use this one.
+- `<version>`, for example `3.22.0`: one specific release.
+- `nightly`: an automatic daily build of unreleased code, for trying a fix
+  early. It can break; see the
+  [nightly image guide](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/docs/docker.md#nightly-image)
+  before using it.
+
 ## Documentation
 
 - [Configuration and complete usage guide](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3#how-to-use)
