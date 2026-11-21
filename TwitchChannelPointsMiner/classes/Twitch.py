@@ -11961,6 +11961,9 @@ class Twitch(object):
             claimed_in = []
             # Under the report-order lock as well: this can note rewards as
             # earned, like a listing (see __remember_watch_reward_campaign).
+            # The claim lock is held here, as it is for the rows the caller
+            # writes next: a write stalled on disk holds up the claim after
+            # this one, though no longer one that is only due.
             with _drop_report_order_lock(self), _watch_reward_lock(self):
                 for campaign in list(
                     (getattr(self, "watch_reward_campaigns", None) or {}).values()
