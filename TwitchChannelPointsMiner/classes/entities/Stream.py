@@ -168,8 +168,14 @@ class Stream(object):
             return True
 
     def pause_minute_watched(self):
-        """Stop counting: the stream is out of a watch slot."""
+        """Stop counting: the stream is out of a watch slot.
+
+        The time from the last successful post until the slot was lost was
+        still watched, so it is counted first. Otherwise a channel that only
+        gets single-cycle slots would never count any time at all.
+        """
         with _WATCH_STREAK_LOCK:
+            self.__count_minute_watched_step(time.time())
             self.__minute_watched_timestamp = 0
 
     def update_minute_watched(self):
@@ -177,10 +183,13 @@ class Stream(object):
         # one broadcast can't be added to the next broadcast's fresh count.
         with _WATCH_STREAK_LOCK:
             now = time.time()
-            if self.__minute_watched_timestamp != 0:
-                elapsed = min(
-                    max(now - self.__minute_watched_timestamp, 0),
-                    MINUTE_WATCHED_MAX_STEP_SECONDS,
-                )
-                self.minute_watched += round(elapsed / 60, 5)
+            self.__count_minute_watched_step(now)
             self.__minute_watched_timestamp = now
+
+    def __count_minute_watched_step(self, now):
+        if self.__minute_watched_timestamp != 0:
+            elapsed = min(
+                max(now - self.__minute_watched_timestamp, 0),
+                MINUTE_WATCHED_MAX_STEP_SECONDS,
+            )
+            self.minute_watched += round(elapsed / 60, 5)

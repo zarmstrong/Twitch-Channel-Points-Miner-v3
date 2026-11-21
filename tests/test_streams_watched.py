@@ -3973,13 +3973,37 @@ def test_minute_watched_skips_time_out_of_a_watch_slot(monkeypatch):
         stream.update_minute_watched()
         clock[0] += 20
     # The channel loses its watch slot for ten minutes, then gets it back.
+    # The 20 seconds from the last post until the slot was lost count; the
+    # ten minutes out of the slot don't.
     stream.pause_minute_watched()
     clock[0] += 600
     stream.update_minute_watched()
     clock[0] += 20
     stream.update_minute_watched()
 
-    assert stream.minute_watched == pytest.approx(60 / 60, abs=1e-4)
+    assert stream.minute_watched == pytest.approx(80 / 60, abs=1e-4)
+
+
+def test_minute_watched_counts_single_cycle_slots(monkeypatch):
+    # Two channels take turns holding one slot, a 20-second cycle each.
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    first, second = Stream(), Stream()
+
+    for _ in range(45):
+        first.update_minute_watched()
+        clock[0] += 20
+        first.pause_minute_watched()
+        second.update_minute_watched()
+        clock[0] += 20
+        second.pause_minute_watched()
+
+    # 45 slots of 20 seconds each: 15 minutes apiece.
+    assert first.minute_watched == pytest.approx(15, abs=1e-3)
+    assert second.minute_watched == pytest.approx(15, abs=1e-3)
 
 
 def test_minute_watched_counts_at_most_a_minute_for_a_stalled_watcher(monkeypatch):
