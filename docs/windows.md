@@ -123,6 +123,8 @@ published this way; there is no nightly installer.
 
 1. Download `TwitchChannelPointsMiner-Portable-nightly.zip` from the
    [nightly release page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/tag/nightly).
+   If the page says a new nightly build is being published, wait until that
+   note is gone.
 2. Extract it into a **new folder**, not the folder of the miner you already
    use.
 3. To keep your settings, copy the `config`, `cookies` and `analytics` folders

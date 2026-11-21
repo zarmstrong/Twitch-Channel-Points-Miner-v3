@@ -114,7 +114,8 @@ In `compose.yml`, change the image tag from `latest` to `nightly`.
 
 To go back, change the tag to `latest`, restore your backup and recreate the
 container. The [nightly release page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases/tag/nightly)
-lists what the current build contains.
+lists what the current build contains. While a new build is being published,
+the page says so, and the image may be newer than the build it describes.
 
 ## Graceful Docker shutdowns
 
