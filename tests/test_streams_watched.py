@@ -26,10 +26,14 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
+from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.ChannelBanStatus import (
     ChannelBanStatus,
 )
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
+from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
+    campaign_from_reward_groups,
+)
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
@@ -2657,7 +2661,109 @@ def _reward_campaign_view(*drop_ids):
     [view] = _drop_campaigns("quest")
     view.reward_categories = [{"id": "1", "displayName": "Shared Game"}]
     view.drops = [SimpleNamespace(id=drop_id) for drop_id in drop_ids]
+    view.watchable_drops = lambda: view.drops
     return [view]
+
+
+def _quest_group(group_id, category_ids, subs=None, minutes=0):
+    return {
+        "id": group_id,
+        "name": group_id,
+        "track": None,
+        "lane": None,
+        "progressCriteria": {
+            "requirementType": "WATCH",
+            "requirements": {"minutesWatched": 60, "subs": subs},
+            "isRepeatable": False,
+            "repeatableConfig": None,
+            "channels": None,
+            "categories": [
+                {"id": category_id, "displayName": f"Game {category_id}"}
+                for category_id in category_ids
+            ],
+        },
+        "rewards": [{"id": f"reward-{group_id}", "name": "Chest"}],
+        "self": {
+            "status": "IN_PROGRESS",
+            "currentMinutesWatched": minutes,
+            "currentSubs": 0,
+            "grantCount": 0,
+            "nextEligibleAt": None,
+            "currentWindow": None,
+        },
+    }
+
+
+def _quest_category_views(*groups):
+    # The real entities, as the campaign sync hands each stream its
+    # category's part of a reward campaign.
+    campaign = Campaign(
+        campaign_from_reward_groups(
+            {
+                "id": "quest",
+                "name": "Quest",
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+                "game": None,
+                "rewardGroups": list(groups),
+            }
+        )
+    )
+    for drop, group in zip(campaign.drops, groups):
+        drop.update(
+            {
+                "hasPreconditionsMet": True,
+                "currentMinutesWatched": group["self"]["currentMinutesWatched"],
+                "currentSubs": 0,
+                "dropInstanceID": None,
+                "isClaimed": False,
+            }
+        )
+    return {
+        category["id"]: [campaign.in_reward_category(category)]
+        for category in campaign.reward_categories
+    }
+
+
+@pytest.mark.parametrize(
+    "unearnable_group",
+    [
+        # Needs a subscription the account has not made.
+        _quest_group("group-sub", ["1"], subs=1),
+        # Its minutes are in.
+        _quest_group("group-done", ["1"], minutes=60),
+    ],
+)
+def test_reward_group_watching_cannot_add_to_is_no_part_to_cover(
+    monkeypatch, unearnable_group
+):
+    # The discovered pick's category also counts toward a group no stream can
+    # add minutes to. The followed channel, in the other category of the
+    # group both earn, misses nothing by not counting toward that one.
+    messages = _capture_info(monkeypatch)
+    views = _quest_category_views(
+        unearnable_group, _quest_group("group-shared", ["1", "2"])
+    )
+    assert [drop.id for drop in views["1"][0].drops] == [
+        unearnable_group["id"],
+        "group-shared",
+    ]
+    category = _category_drop_streamer("category-streamer")
+    category.stream.campaigns = views["1"]
+    follower = _followed_drop_streamer("followed-streamer", views["2"])
+    points = _watch_streamer("points", from_followers=True)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
+    )
+
+    assert "category-streamer" not in _watched_for_drops(messages)
+    assert "followed-streamer" in _watched_for_drops(messages)
 
 
 @pytest.mark.parametrize(
