@@ -7,8 +7,7 @@ from enum import Enum, auto
 from functools import partial
 from threading import Event, Lock, Thread
 
-import irc.connection
-from irc.bot import SingleServerIRCBot
+from irc.bot import ExponentialBackoff, SingleServerIRCBot
 
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.constants import IRC, IRC_PORT, IRC_TLS_PORT
@@ -32,6 +31,10 @@ ALLOW_PLAINTEXT_IRC_ENV = "TCPM_ALLOW_PLAINTEXT_IRC"
 # Without TLS, a chat waits and probes again: 30 s, doubling up to 15 min.
 IRC_TLS_RETRY_INITIAL_SECONDS = 30
 IRC_TLS_RETRY_MAX_SECONDS = 15 * 60
+
+# Bounds the TCP connect and the TLS handshake of a chat's IRC connection,
+# so a stalled path to Twitch IRC can't block the chat thread indefinitely.
+IRC_CONNECT_TIMEOUT_SECONDS = 15
 
 DEFAULT_GIFT_SUB_MESSAGE = "Thanks for the sub!"
 # Twitch rejects chat messages longer than 500 characters.
@@ -80,6 +83,72 @@ def _irc_tls_context():
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context
+
+
+class _StoppableConnectFactory:
+    """An irc `connect_factory` whose pending connect can be interrupted.
+
+    irc's own Factory connects a blocking socket without a timeout, and the
+    connection only gets its socket once the connect returns, so stopping a
+    chat had nothing to close while the TCP connect or the TLS handshake was
+    stalled. This factory gives the connect (and the handshake, which the TLS
+    wrapper runs inside it) a timeout and keeps the pending socket, so
+    cancel() can shut it down. Closing a socket alone doesn't wake a thread
+    blocked on it; shutting it down does. After cancel() no new connect
+    starts, including the bot's scheduled reconnects.
+    """
+
+    def __init__(self, wrapper=None, timeout=IRC_CONNECT_TIMEOUT_SECONDS):
+        self.wrapper = wrapper
+        self.timeout = timeout
+        self._lock = Lock()
+        self._pending = None
+        self._cancelled = False
+
+    def __call__(self, server_address):
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw.settimeout(self.timeout)
+        try:
+            sock = raw if self.wrapper is None else self.wrapper(raw)
+        except BaseException:
+            raw.close()
+            raise
+        with self._lock:
+            if self._cancelled:
+                sock.close()
+                raise OSError("the chat was stopped before connecting")
+            self._pending = sock
+        try:
+            sock.connect(server_address)
+        except BaseException:
+            sock.close()
+            raise
+        finally:
+            with self._lock:
+                if self._pending is sock:
+                    self._pending = None
+        with self._lock:
+            cancelled = self._cancelled
+        if cancelled:
+            sock.close()
+            raise OSError("the chat was stopped while connecting")
+        # Connected: back to the process default (blocking unless something
+        # set one), as irc's own factory leaves it.
+        sock.settimeout(socket.getdefaulttimeout())
+        return sock
+
+    def cancel(self):
+        """Stop the pending connect, if any, and refuse any later one."""
+        with self._lock:
+            self._cancelled = True
+            sock = self._pending
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
 
 
 class IRCTLSUnavailable(Exception):
@@ -182,15 +251,15 @@ class ClientIRC(SingleServerIRCBot):
 
         if tls_available is None:
             tls_available = _irc_tls_available()
-        connect_params = {}
         if tls_available:
             port = IRC_TLS_PORT
             context = _irc_tls_context()
-            connect_params["connect_factory"] = irc.connection.Factory(
+            self.__connect_factory = _StoppableConnectFactory(
                 wrapper=partial(context.wrap_socket, server_hostname=IRC)
             )
         elif _plaintext_irc_allowed():
             port = IRC_PORT
+            self.__connect_factory = _StoppableConnectFactory()
             logger.warning(
                 f"Using plaintext IRC on port {IRC_PORT} because {ALLOW_PLAINTEXT_IRC_ENV} is set; the chat OAuth token is sent unencrypted",
                 extra={"emoji": ":warning:"},
@@ -201,7 +270,15 @@ class ClientIRC(SingleServerIRCBot):
             )
 
         super(ClientIRC, self).__init__(
-            [(IRC, port, f"oauth:{token}")], username, username, **connect_params
+            [(IRC, port, f"oauth:{token}")],
+            username,
+            username,
+            # irc's default strategy is one instance shared by every bot. A
+            # chat that leaves schedules its reconnect check on its own
+            # reactor, which then stops, and the shared strategy never
+            # schedules another one for any chat.
+            recon=ExponentialBackoff(),
+            connect_factory=self.__connect_factory,
         )
 
     def on_welcome(self, client, event):
@@ -237,6 +314,9 @@ class ClientIRC(SingleServerIRCBot):
         with self.__lifecycle_lock:
             self.__stopped = True
             self.__active = False
+        # Interrupts a connect still in progress, which disconnect() can't
+        # reach: the connection gets its socket only once the connect returns.
+        self.__connect_factory.cancel()
         self.connection.disconnect(msg)
 
     """
