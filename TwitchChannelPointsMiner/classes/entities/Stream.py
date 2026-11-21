@@ -39,7 +39,6 @@ class Stream(object):
         "watch_streak_final_checks",
         "watch_streak_check_due",
         "watch_streak_broadcast_id",
-        "previous_watch_streak_broadcast_id",
         "watch_streak_transition_to",
         "minute_watched",
         "watch_slot_minutes",
@@ -70,9 +69,6 @@ class Stream(object):
         self.live_seen_at = 0
         # The broadcast a missed-offline transition was last claimed for.
         self.watch_streak_transition_to = None
-        # The broadcast the streak state belonged to before the latest reset.
-        self.previous_watch_streak_broadcast_id = None
-        self.watch_streak_broadcast_id = None
 
         self.init_watch_streak()
 
@@ -150,6 +146,11 @@ class Stream(object):
     def update_elapsed(self):
         return 0 if self.__last_update == 0 else (time.time() - self.__last_update)
 
+    def request_refresh(self):
+        """Make the next online check fetch stream info again."""
+        with _WATCH_STREAK_LOCK:
+            self.__last_update = 0
+
     def live_snapshot(self):
         """Return (broadcast_id, live_seen_at) as one consistent pair."""
         with _WATCH_STREAK_LOCK:
@@ -160,8 +161,6 @@ class Stream(object):
             # The broadcast this state belongs to. broadcast_id itself can
             # move to the next broadcast on a refresh before the transition
             # resets this state for it.
-            if self.watch_streak_broadcast_id != self.broadcast_id:
-                self.previous_watch_streak_broadcast_id = self.watch_streak_broadcast_id
             self.watch_streak_broadcast_id = self.broadcast_id
             self.watch_streak_missing = True
             self.watch_streak_checked_at = 0

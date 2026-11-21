@@ -37,13 +37,13 @@ def _sent_at(message):
 
 
 def _stream_down_predates_online(message, streamer):
-    """Whether Twitch sent this stream-down before it showed the streamer's
-    current broadcast live, so it is about an earlier broadcast.
+    """Whether Twitch sent this stream-down before the miner last marked the
+    streamer online (see Streamer.sent_before_online()).
 
-    A stream-down delayed in delivery, or waiting for a refresh that found
-    the next broadcast, would otherwise take that next broadcast offline.
-    One that is wrongly ignored (see Streamer.sent_before_online()) is
-    caught by the next online check instead.
+    Such a stream-down can be about the earlier broadcast: delayed in
+    delivery, or sent while the refresh that found the next broadcast was
+    in flight. It can also be the current broadcast's, if that ended while
+    the reply that showed it live was in flight. Only Twitch can tell.
     """
     sent_before_online = getattr(streamer, "sent_before_online", None)
     return (
@@ -434,8 +434,16 @@ class WebSocketsPool:
                                 if streamer.is_online is not True:
                                     pass
                                 elif _stream_down_predates_online(message, streamer):
+                                    # Ask Twitch on the next online check
+                                    # instead of ending a broadcast that may
+                                    # still be live.
+                                    request_refresh = getattr(
+                                        streamer.stream, "request_refresh", None
+                                    )
+                                    if callable(request_refresh):
+                                        request_refresh()
                                     logger.debug(
-                                        "Ignoring a stream-down for "
+                                        "Rechecking a stream-down for "
                                         f"{streamer.username} sent before it "
                                         "was last marked online"
                                     )

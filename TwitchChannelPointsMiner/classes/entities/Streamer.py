@@ -108,6 +108,9 @@ def is_drop_discovered(streamer):
 # it is reentrant because toggle_chat() calls leave_chat().
 _chat_lifecycle_lock = RLock()
 
+# How many online transitions Streamer.online_history keeps.
+ONLINE_HISTORY_SIZE = 5
+
 # One reentrant lock per channel, held across a stream-info refresh and the
 # online/offline change it leads to, and by the websocket's stream-down. The
 # main loop, the minute watcher and the websockets all refresh streamers, and
@@ -220,7 +223,7 @@ class Streamer(object):
         "is_watching",
         "stream_up",
         "online_at",
-        "online_seen_live_at",
+        "online_history",
         "offline_at",
         "channel_points",
         "community_goals",
@@ -266,11 +269,10 @@ class Streamer(object):
         self.is_watching = False
         self.stream_up = 0
         self.online_at = 0
-        # The request time of the reply that brought the current broadcast
-        # online (Stream.live_seen_at then): Twitch already showed it live by
-        # that time, so anything Twitch sent earlier is about an earlier
-        # broadcast. Earlier than online_at when the reply was slow.
-        self.online_seen_live_at = 0
+        # (broadcast ID, online_at) for the last few times the miner marked
+        # this streamer online, oldest first: which broadcast was online when
+        # Twitch sent a late message.
+        self.online_history = ()
         self.offline_at = 0
         self.channel_points = 0
         self.community_goals = {}
@@ -347,9 +349,10 @@ class Streamer(object):
     def set_online(self, drops_description=None):
         if self.is_online is False:
             self.online_at = time.time()
-            self.online_seen_live_at = (
-                getattr(self.stream, "live_seen_at", 0) or self.online_at
+            self.online_history = (getattr(self, "online_history", ()) or ()) + (
+                (self.stream.broadcast_id, self.online_at),
             )
+            self.online_history = self.online_history[-ONLINE_HISTORY_SIZE:]
             self.is_online = True
             self.stream.init_watch_streak()
             if self.watch_streak_cache is not None:
@@ -425,15 +428,25 @@ class Streamer(object):
         )
 
     def sent_before_online(self, sent_at):
-        """Whether Twitch sent something at sent_at (epoch seconds) before it
-        showed the current broadcast live, so it is about an earlier one.
+        """Whether Twitch sent something at sent_at (epoch seconds) before the
+        miner last marked this streamer online.
 
-        Compares Twitch's clock with the local one: with the local clock
-        ahead, something sent just after the broadcast came online can be
-        taken for an earlier broadcast's too.
+        Before that moment the miner may not have known about the current
+        broadcast yet, so such a message can be about an earlier one. Compares
+        Twitch's clock with the local one.
         """
-        since = getattr(self, "online_seen_live_at", 0) or 0
+        since = getattr(self, "online_at", 0) or 0
         return sent_at is not None and since > 0 and sent_at < since
+
+    def broadcast_online_at(self, sent_at):
+        """The broadcast the miner had marked online when Twitch sent
+        something at sent_at, or None if that is older than the history."""
+        for broadcast_id, online_at in reversed(
+            getattr(self, "online_history", ()) or ()
+        ):
+            if online_at <= sent_at:
+                return broadcast_id
+        return None
 
     def update_history(self, reason_code, earned, counter=1, awarded_at=None):
         if reason_code not in self.history:
@@ -449,23 +462,27 @@ class Streamer(object):
 
     def __credit_watch_streak(self, awarded_at):
         if self.sent_before_online(awarded_at):
-            # Earned on an earlier broadcast, delivered after this one came
-            # online. Credit the previous broadcast if the cache tracks it
-            # (creating a session now would close this broadcast's), and
-            # leave this broadcast's streak pending.
-            previous = getattr(self.stream, "previous_watch_streak_broadcast_id", None)
+            # Delivered after the miner marked the current broadcast online,
+            # but sent before: earned on whichever broadcast was online then.
+            # Credit it only if the cache tracks that one (creating a session
+            # now would close the current broadcast's), and leave the current
+            # broadcast's streak pending.
+            earned_on = self.broadcast_online_at(awarded_at)
+            current = self.stream.watch_streak_broadcast_id or self.stream.broadcast_id
             if (
-                previous not in (None, "")
+                earned_on not in (None, "", current)
                 and self.watch_streak_cache is not None
-                and self.watch_streak_cache.get(self.username, previous)
+                and self.watch_streak_cache.get(self.username, earned_on)
             ):
-                self.watch_streak_cache.mark_claimed(self.username, previous)
-            logger.info(
-                "[watch-streak] "
-                f"Twitch confirmed streak for streamer={self.username} on an "
-                f"earlier broadcast ({previous}); still pending for this one"
-            )
-            return
+                self.watch_streak_cache.mark_claimed(self.username, earned_on)
+            if earned_on != current:
+                logger.info(
+                    "[watch-streak] "
+                    f"Twitch confirmed streak for streamer={self.username} on "
+                    f"an earlier broadcast ({earned_on}); still pending for "
+                    "this one"
+                )
+                return
         # Credited to the broadcast the streak state belongs to: a refresh
         # may already show the next broadcast's ID before the miner runs
         # its transition, and this award can't be for that one yet.

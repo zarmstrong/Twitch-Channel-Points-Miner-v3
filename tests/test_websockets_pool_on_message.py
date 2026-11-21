@@ -147,25 +147,28 @@ def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
 
 
 @pytest.mark.parametrize(
-    ("online_seen_live_at", "expected_calls"),
+    ("online_at", "expected_calls", "expected_refreshes"),
     [
-        pytest.param(1700000000.0 + 30, [], id="sent-before-online"),
-        pytest.param(1700000000.0 - 30, ["set_offline"], id="sent-after-online"),
-        pytest.param(0, ["set_offline"], id="online-time-unknown"),
+        pytest.param(1700000000.0 + 30, [], 1, id="sent-before-online"),
+        pytest.param(1700000000.0 - 30, ["set_offline"], 0, id="sent-after-online"),
+        pytest.param(0, ["set_offline"], 0, id="online-time-unknown"),
     ],
 )
-def test_stream_down_sent_before_the_streamer_went_online_is_ignored(
-    logger, online_seen_live_at, expected_calls
+def test_stream_down_sent_before_the_streamer_went_online_is_rechecked(
+    logger, online_at, expected_calls, expected_refreshes
 ):
-    # A's stream-down was delayed (or waited for a refresh that found B and
-    # set B online). Twitch sent it before it showed B live, so it isn't B's.
+    # A's stream-down was delayed (or sent while the refresh that found B
+    # was in flight). It may not be B's, so B isn't ended on it: the next
+    # online check asks Twitch.
     from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 
     target = FakeStreamer("predates-target", "2")
-    target.online_seen_live_at = online_seen_live_at
+    target.online_at = online_at
     target.sent_before_online = lambda sent_at: Streamer.sent_before_online(
         target, sent_at
     )
+    refreshes = []
+    target.stream = SimpleNamespace(request_refresh=lambda: refreshes.append(1))
 
     WebSocketsPool.on_message(
         _websocket([target]),
@@ -173,6 +176,8 @@ def test_stream_down_sent_before_the_streamer_went_online_is_ignored(
     )
 
     assert target.calls == expected_calls
+    assert len(refreshes) == expected_refreshes
+    logger.error.assert_not_called()
 
 
 def test_points_earned_passes_twitch_send_time_with_the_award(logger, monkeypatch):

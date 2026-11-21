@@ -301,30 +301,54 @@ def test_award_sent_after_the_new_broadcast_came_online_claims_it(
     assert streamer.stream.watch_streak_missing is False
 
 
-def test_online_reference_is_the_request_time_of_the_reply_that_showed_it_live(
-    monkeypatch,
+def test_award_delayed_across_two_transitions_credits_the_broadcast_it_was_sent_on(
+    tmp_path, monkeypatch
 ):
-    # The reply was slow: Twitch showed the stream live by the request time,
-    # well before the miner marked it online.
+    # A's award is delivered only after A-to-B (an hour apart) and a quick
+    # B-to-C restart. Crediting B would let C inherit a claim that neither
+    # earned.
+    clock = [2_000_000_000.0]
+    streamer, cache = _streamer_moved_to_a_new_broadcast(tmp_path, monkeypatch, clock)
+    a_awarded_at = clock[0] - 60 * 60 + 30
+    previous_id, previous_seen = streamer.stream.live_snapshot()
+    clock[0] += 5 * 60
+    _refresh_live_stream(streamer, "broadcast-3")
+    streamer.set_offline(broadcast_id=previous_id, seen_live_at=previous_seen)
+    streamer.set_online()
+
+    streamer.update_history("WATCH_STREAK", earned=450, awarded_at=a_awarded_at)
+
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert cache.get("channel", "broadcast-2").claimed is False
+    assert cache.get("channel", "broadcast-3").claimed is False
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_award_older_than_the_online_history_credits_no_broadcast(
+    tmp_path, monkeypatch
+):
+    clock = [2_000_000_000.0]
+    streamer, cache = _streamer_moved_to_a_new_broadcast(tmp_path, monkeypatch, clock)
+
+    streamer.update_history(
+        "WATCH_STREAK", earned=450, awarded_at=clock[0] - 2 * 60 * 60
+    )
+
+    assert cache.get("channel", "broadcast-1").claimed is False
+    assert cache.get("channel", "broadcast-2").claimed is False
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_requested_refresh_makes_the_next_online_check_ask_twitch(monkeypatch):
     clock = [2_000_000_000.0]
     _pin_clock(monkeypatch, clock)
     streamer = make_streamer("channel")
-    streamer.stream.update(
-        broadcast_id="broadcast-1",
-        title="title",
-        game={},
-        tags=[],
-        viewers_count=1,
-        seen_live_at=clock[0] - 90,
-    )
+    _refresh_live_stream(streamer, "broadcast-1")
+    assert streamer.stream.update_required() is False
 
-    streamer.set_online()
+    streamer.stream.request_refresh()
 
-    assert streamer.online_at == clock[0]
-    assert streamer.online_seen_live_at == clock[0] - 90
-    # B ended while the slow reply was in flight: its stream-down is B's.
-    assert streamer.sent_before_online(clock[0] - 30) is False
-    assert streamer.sent_before_online(clock[0] - 120) is True
+    assert streamer.stream.update_required() is True
 
 
 def test_streak_confirmed_before_previous_broadcast_ended_is_refarmed(
