@@ -162,10 +162,30 @@ def _secret_matches(supplied, expected):
     )
 
 
+def _canonical_hostname(hostname):
+    """Lowercase host in one spelling: IP addresses compressed, names as IDNA.
+
+    Applied to both the configured entries and the request's Host header, so
+    "2001:db8:0:0:0:0:0:1" matches "[2001:db8::1]" and "münchen.example.com"
+    matches the "xn--mnchen-3ya.example.com" that HTTP clients send.
+    """
+    hostname = (hostname or "").lower()
+    if not hostname:
+        return ""
+    try:
+        return str(ipaddress.ip_address(hostname))
+    except ValueError:
+        pass
+    try:
+        return hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return hostname
+
+
 def _request_hostname(host_header):
     """Hostname from a Host header, lowercased, without port or IPv6 brackets."""
     try:
-        return (urlsplit(f"//{host_header}").hostname or "").lower()
+        return _canonical_hostname(urlsplit(f"//{host_header}").hostname)
     except ValueError:
         return ""
 
@@ -179,10 +199,11 @@ def _allowed_hostname(entry):
     entry = str(entry).strip()
     if "://" in entry:
         try:
-            return (urlsplit(entry).hostname or "").lower()
+            return _canonical_hostname(urlsplit(entry).hostname)
         except ValueError:
             return ""
     try:
+        # A bare IPv6 address has colons that urlsplit would take for a port.
         return str(ipaddress.ip_address(entry))
     except ValueError:
         return _request_hostname(entry)
@@ -858,16 +879,18 @@ class AnalyticsServer(Thread):
         if isinstance(allowed_hosts, str):
             allowed_hosts = [allowed_hosts]
         hostnames = set()
-        for entry in allowed_hosts or []:
+        for position, entry in enumerate(allowed_hosts or []):
             hostname = _allowed_hostname(entry)
             if hostname:
                 hostnames.add(hostname)
             else:
                 # Without this, a typo only shows up as a 403 on the proxy.
                 logger.warning(
-                    "Ignoring ANALYTICS_CONFIG['allowed_hosts'] entry %r: it is "
-                    "not a host name.",
-                    entry,
+                    # The entry itself is not logged: a pasted URL can carry
+                    # a user name, password or token.
+                    "Ignoring entry %d of ANALYTICS_CONFIG['allowed_hosts']: "
+                    "it is not a host name.",
+                    position + 1,
                     extra={"emoji": ":warning:"},
                 )
         self.allowed_hosts = frozenset(hostnames)
