@@ -3595,9 +3595,10 @@ def test_stalled_report_write_does_not_keep_a_claim_from_being_sent_again(
     monkeypatch, watcher
 ):
     # Twitch refused the claim, and it is due again shortly before the
-    # campaign ends. A row of the report, of any drop, is being written to a
-    # disk that does not answer: the main loop still sees the moment has
-    # come, and the claim thread still sends the claim.
+    # campaign ends; the window of a repeat has opened too. A row of the
+    # report, of any drop, is being written to a disk that does not answer:
+    # the main loop still sees both moments have come and starts the claim
+    # thread, and the claim thread still sends the claim.
     twitch, gql = refused_claim_twitch(
         monkeypatch,
         convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
@@ -3605,7 +3606,12 @@ def test_stalled_report_write_does_not_keep_a_claim_from_being_sent_again(
     own_locks(twitch)
     twitch.drop_progress_last_saved = {}
     twitch.drop_status_last_saved = {}
-    assert twitch.watch_reward_pending_starts
+    assert claim_retries(twitch)
+    assert twitch.watch_reward_claim_thread is None
+    for campaign_id in twitch.watch_reward_claim_retries:
+        twitch.watch_reward_claim_retries[campaign_id] = utc_now() - timedelta(
+            seconds=1
+        )
     twitch.watch_reward_pending_starts = {utc_now() - timedelta(seconds=1)}
     sent = threading.Event()
 
@@ -3617,11 +3623,14 @@ def test_stalled_report_write_does_not_keep_a_claim_from_being_sent_again(
     gql.claim_drop_rewards = accept
     monkeypatch.setattr(twitch_module, "Thread", threading.Thread)
     seen = []
+    claim_threads = []
 
     def main_loop_pass():
+        # What the main loop calls while it waits between passes.
         seen.append(twitch.watch_reward_start_due())
         seen.append(twitch.take_opened_watch_reward_start())
-        twitch.claim_waiting_watch_rewards()
+        twitch.start_unattended_watch_reward_claims()
+        claim_threads.append(twitch.watch_reward_claim_thread)
 
     main_loop = threading.Thread(target=main_loop_pass, daemon=True)
     write = StalledWrite(twitch, watcher)
@@ -3633,11 +3642,14 @@ def test_stalled_report_write_does_not_keep_a_claim_from_being_sent_again(
         still_writing = write.written == []
     finally:
         write.end()
-    claim_thread = twitch.watch_reward_claim_thread
-    if claim_thread is not None:
-        claim_thread.join(timeout=5)
+    for claim_thread in claim_threads:
+        if claim_thread is not None:
+            claim_thread.join(timeout=5)
+            assert not claim_thread.is_alive()
 
+    assert not main_loop.is_alive()
     assert seen == [True, True]
+    assert claim_threads and claim_threads[0] is not None
     assert claimed_meanwhile and still_writing
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
     assert twitch.watch_reward_claim_thread is None
