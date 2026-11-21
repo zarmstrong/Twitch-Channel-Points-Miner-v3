@@ -1379,7 +1379,10 @@ def test_analytics_delete_keeps_the_file_when_history_cannot_be_cleared(
     monkeypatch.setattr(
         history_module,
         "delete_streamer_history",
-        lambda streamer, **kwargs: deleted.append(streamer),
+        lambda streamer, remove_source=None, **kwargs: (
+            deleted.append(streamer),
+            remove_source(),
+        ),
     )
     response = server_module.delete_streamer_analytics("alice")
 

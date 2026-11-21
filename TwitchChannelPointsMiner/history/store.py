@@ -549,32 +549,55 @@ class HistoryStore(object):
             f"points:{streamer}:{timestamp:.3f}:{balance_value}:{delta}"
         )
         with self._write_connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO points (
-                    streamer, ts, balance, delta, reason, kind, dedupe_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    streamer,
-                    timestamp,
-                    balance_value,
-                    delta,
-                    str(reason or ""),
-                    kind,
-                    dedupe_key,
-                ),
-            )
-            if cursor.rowcount <= 0:
-                return False
-            self._touch_daily(
+            return self._insert_points(
                 connection,
                 streamer,
                 timestamp,
-                points_gained=max(0, delta),
-                points_spent=max(0, -delta),
+                balance_value,
+                delta,
+                reason,
+                kind,
+                dedupe_key,
             )
-            return True
+
+    @classmethod
+    def _insert_points(
+        cls,
+        connection,
+        streamer,
+        timestamp,
+        balance_value,
+        delta,
+        reason,
+        kind,
+        dedupe_key,
+    ):
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO points (
+                streamer, ts, balance, delta, reason, kind, dedupe_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                streamer,
+                timestamp,
+                balance_value,
+                delta,
+                str(reason or ""),
+                kind,
+                dedupe_key,
+            ),
+        )
+        if cursor.rowcount <= 0:
+            return False
+        cls._touch_daily(
+            connection,
+            streamer,
+            timestamp,
+            points_gained=max(0, delta),
+            points_spent=max(0, -delta),
+        )
+        return True
 
     def record_event(
         self,
@@ -603,43 +626,108 @@ class HistoryStore(object):
             else None
         )
         with self._write_connection() as connection:
-            if event_type == "watch_streak" and dedupe_window:
-                existing = connection.execute(
-                    """
-                    SELECT 1 FROM events
-                    WHERE streamer = ? AND type = 'watch_streak'
-                      AND ABS(ts - ?) <= ?
-                    LIMIT 1
-                    """,
-                    (streamer, timestamp, float(dedupe_window)),
-                ).fetchone()
-                if existing is not None:
-                    return False
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO events (
-                    streamer, ts, type, label, points_delta, metadata, dedupe_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    streamer,
-                    timestamp,
-                    event_type,
-                    str(label or ""),
-                    None if points_delta is None else int(points_delta),
-                    payload,
-                    dedupe_key,
-                ),
-            )
-            if cursor.rowcount <= 0:
-                return False
-            self._touch_daily(
+            return self._insert_event(
                 connection,
                 streamer,
                 timestamp,
-                streak_delta=1 if event_type == "watch_streak" else 0,
+                event_type,
+                label,
+                points_delta,
+                payload,
+                dedupe_key,
+                dedupe_window,
             )
-            return True
+
+    @classmethod
+    def _insert_event(
+        cls,
+        connection,
+        streamer,
+        timestamp,
+        event_type,
+        label,
+        points_delta,
+        payload,
+        dedupe_key,
+        dedupe_window,
+    ):
+        if event_type == "watch_streak" and dedupe_window:
+            existing = connection.execute(
+                """
+                SELECT 1 FROM events
+                WHERE streamer = ? AND type = 'watch_streak'
+                  AND ABS(ts - ?) <= ?
+                LIMIT 1
+                """,
+                (streamer, timestamp, float(dedupe_window)),
+            ).fetchone()
+            if existing is not None:
+                return False
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO events (
+                streamer, ts, type, label, points_delta, metadata, dedupe_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                streamer,
+                timestamp,
+                event_type,
+                str(label or ""),
+                None if points_delta is None else int(points_delta),
+                payload,
+                dedupe_key,
+            ),
+        )
+        if cursor.rowcount <= 0:
+            return False
+        cls._touch_daily(
+            connection,
+            streamer,
+            timestamp,
+            streak_delta=1 if event_type == "watch_streak" else 0,
+        )
+        return True
+
+    def import_batch(self, source, state, points=(), events=()):
+        """Write one file's imported rows and its cursor in one transaction.
+
+        A retry after a failure part way then starts from the old cursor with
+        none of the batch written, instead of finding some rows already there
+        and computing deltas against them.  ``points`` items are
+        ``(streamer, timestamp, balance, delta, reason, dedupe_key)``;
+        ``events`` items are ``(streamer, timestamp, type, label,
+        points_delta, dedupe_key)``.  ``state`` holds the
+        :meth:`set_import_state` arguments.
+        """
+
+        with self._write_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for streamer, timestamp, balance, delta, reason, dedupe_key in points:
+                delta = int(delta)
+                self._insert_points(
+                    connection,
+                    _clean_streamer(streamer),
+                    float(timestamp),
+                    None if balance is None else int(balance),
+                    delta,
+                    reason,
+                    "spend" if delta < 0 else "earn",
+                    dedupe_key,
+                )
+            for streamer, timestamp, event_type, label, delta, dedupe_key in events:
+                self._insert_event(
+                    connection,
+                    _clean_streamer(streamer),
+                    float(timestamp),
+                    str(event_type or "event").strip().lower(),
+                    label,
+                    delta,
+                    None,
+                    dedupe_key,
+                    120.0,
+                )
+            self._upsert_import_state(connection, source, **state)
 
     # -- streams / watch sessions -----------------------------------------
     def upsert_stream_session(
@@ -1128,28 +1216,42 @@ class HistoryStore(object):
         consumed=None,
     ):
         with self._write_connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO import_state (
-                    source, mtime, size, last_x, last_balance, consumed
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source) DO UPDATE SET
-                    mtime = excluded.mtime,
-                    size = excluded.size,
-                    last_x = excluded.last_x,
-                    last_balance = excluded.last_balance,
-                    consumed = excluded.consumed
-                """,
-                (
-                    source,
-                    None if mtime is None else float(mtime),
-                    None if size is None else int(size),
-                    None if last_x is None else float(last_x),
-                    None if last_balance is None else int(last_balance),
-                    None if consumed is None else int(consumed),
-                ),
+            self._upsert_import_state(
+                connection, source, mtime, size, last_x, last_balance, consumed
             )
+
+    @staticmethod
+    def _upsert_import_state(
+        connection,
+        source,
+        mtime=None,
+        size=None,
+        last_x=None,
+        last_balance=None,
+        consumed=None,
+    ):
+        connection.execute(
+            """
+            INSERT INTO import_state (
+                source, mtime, size, last_x, last_balance, consumed
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source) DO UPDATE SET
+                mtime = excluded.mtime,
+                size = excluded.size,
+                last_x = excluded.last_x,
+                last_balance = excluded.last_balance,
+                consumed = excluded.consumed
+            """,
+            (
+                source,
+                None if mtime is None else float(mtime),
+                None if size is None else int(size),
+                None if last_x is None else float(last_x),
+                None if last_balance is None else int(last_balance),
+                None if consumed is None else int(consumed),
+            ),
+        )
 
     def deletion_cutoffs(self):
         """Return ``{streamer: deleted_at}`` for streamers deleted on request."""

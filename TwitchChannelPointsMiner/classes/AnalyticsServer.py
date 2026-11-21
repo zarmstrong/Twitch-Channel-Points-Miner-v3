@@ -656,43 +656,61 @@ def delete_streamer_analytics(streamer):
             mimetype="application/json",
         )
 
+    path = os.path.join(Settings.analytics_path, filename)
+    removal = {}
+
+    def remove_file():
+        # Runs with ANALYTICS_FILE_MUTEX held.
+        try:
+            os.remove(path)
+        except OSError as error:
+            removal["error"] = error
+
     # The optional History tab keeps its own durable copy of point, watch and
-    # live-session data, so "delete analytics data" must clear that too.  Do
-    # it first: if History cannot be cleared, keep the file so the delete can
-    # be retried, instead of reporting success with History left behind.
+    # live-session data, so "delete analytics data" must clear that too.  It
+    # is cleared first and the file removed under the same lock, so a change
+    # the miner writes in between is neither lost nor counted again later.
+    # If History cannot be cleared the file is kept, so the delete can be
+    # retried instead of reporting success with History left behind.
     try:
         from TwitchChannelPointsMiner.history import delete_streamer_history
-
-        delete_streamer_history(
-            filename[: -len(".json")],
-            database_path=os.path.join(Settings.analytics_path, "history.sqlite3"),
-        )
     except Exception:
-        logger.warning("Unable to delete optional streamer history", exc_info=True)
+        logger.warning("Unable to load the optional History module", exc_info=True)
+        delete_streamer_history = None
+    if delete_streamer_history is None:
+        with ANALYTICS_FILE_MUTEX:
+            remove_file()
+    else:
+        try:
+            delete_streamer_history(
+                filename[: -len(".json")],
+                database_path=os.path.join(Settings.analytics_path, "history.sqlite3"),
+                remove_source=remove_file,
+            )
+        except Exception:
+            logger.warning("Unable to delete optional streamer history", exc_info=True)
+            return Response(
+                json.dumps(
+                    {"error": "Unable to delete streamer history. Try again shortly."}
+                ),
+                status=503,
+                mimetype="application/json",
+            )
+
+    error = removal.get("error")
+    if isinstance(error, FileNotFoundError):
         return Response(
-            json.dumps(
-                {"error": "Unable to delete streamer history. Try again shortly."}
-            ),
-            status=503,
+            json.dumps({"error": f"Analytics data for '{streamer}' not found."}),
+            status=404,
             mimetype="application/json",
         )
-
-    with ANALYTICS_FILE_MUTEX:
-        try:
-            os.remove(os.path.join(Settings.analytics_path, filename))
-        except FileNotFoundError:
-            return Response(
-                json.dumps({"error": f"Analytics data for '{streamer}' not found."}),
-                status=404,
-                mimetype="application/json",
-            )
-        except OSError as error:
-            logger.error(f"Unable to delete analytics data in '{filename}': {error}")
-            return Response(
-                json.dumps({"error": "Unable to delete streamer analytics data."}),
-                status=500,
-                mimetype="application/json",
-            )
+    if error is not None:
+        logger.error(f"Unable to delete analytics data in '{filename}': {error}")
+        return Response(
+            json.dumps({"error": "Unable to delete streamer analytics data."}),
+            status=500,
+            mimetype="application/json",
+        )
 
     logger.info(f"Deleted analytics data in '{filename}'")
     response_cache.clear()

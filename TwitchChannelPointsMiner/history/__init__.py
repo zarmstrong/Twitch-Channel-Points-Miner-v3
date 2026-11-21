@@ -184,7 +184,9 @@ class HistoryUnavailableError(RuntimeError):
     """History is starting and cannot delete anything yet."""
 
 
-def delete_streamer_history(streamer, store=None, database_path=None):
+def delete_streamer_history(
+    streamer, store=None, database_path=None, remove_source=None
+):
     """Delete one streamer's History rows; returns the per-table counts.
 
     Goes through the recorder so the delete is serialized with its imports and
@@ -194,23 +196,30 @@ def delete_streamer_history(streamer, store=None, database_path=None):
     History is not running in this process at all, ``database_path`` (the
     account's database, if any) is cleared directly; ``None`` is returned when
     there is nothing to clear.
+
+    ``remove_source`` optionally deletes the streamer's analytics JSON once
+    its History is cleared, while the miner's analytics file lock is held.
+    It is not called when clearing History fails.
     """
+
+    from TwitchChannelPointsMiner.history.recorder import _analytics_file_lock
 
     recorder = _recorder
     store = get_store() if store is None else store
-    if store is not None:
-        if recorder is not None and recorder.store is store:
-            return recorder.delete_streamer(streamer)
-        return store.delete_streamer(streamer)
-    if recorder is not None and recorder.is_alive():
+    if store is not None and recorder is not None and recorder.store is store:
+        return recorder.delete_streamer(streamer, remove_source=remove_source)
+    if store is None and recorder is not None and recorder.is_alive():
         raise HistoryUnavailableError("History is still starting")
-    if database_path and os.path.isfile(database_path):
+    if store is None and database_path and os.path.isfile(database_path):
         from TwitchChannelPointsMiner.history.store import HistoryStore
 
-        standalone = HistoryStore(database_path)
-        standalone.initialize()
-        return standalone.delete_streamer(streamer)
-    return None
+        store = HistoryStore(database_path)
+        store.initialize()
+    with _analytics_file_lock():
+        counts = None if store is None else store.delete_streamer(streamer)
+        if remove_source is not None:
+            remove_source()
+    return counts
 
 
 def is_recording():

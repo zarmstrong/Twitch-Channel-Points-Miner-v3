@@ -1679,3 +1679,143 @@ def test_a_short_watch_still_records_its_time(recorder):
         "sessions"
     ][0]
     assert session["watch_seconds"] == 60
+
+
+def test_analytics_json_is_read_under_the_miner_file_lock(recorder, monkeypatch):
+    from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    _write_json(path, {"series": [{"x": int(NOW * 1000), "y": 1}]}, NOW + 1)
+    locked = []
+    original = recorder_module._read_json
+
+    def read(target):
+        locked.append(ANALYTICS_FILE_MUTEX.locked())
+        return original(target)
+
+    monkeypatch.setattr(recorder_module, "_read_json", read)
+    recorder._ingest_analytics(NOW + 2)
+
+    assert locked == [True]
+    assert not ANALYTICS_FILE_MUTEX.locked()
+
+
+def test_a_failed_import_writes_nothing_so_the_retry_is_exact(recorder, monkeypatch):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    x = int(NOW * 1000)
+    series = [{"x": x, "y": 1000}, {"x": x, "y": 1050}, {"x": x, "y": 1060}]
+    _write_json(path, {"series": series}, NOW + 1)
+    original = HistoryStore._insert_points
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("disk I/O error")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(HistoryStore, "_insert_points", staticmethod(flaky))
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._ingest_analytics(NOW + 2)
+    monkeypatch.setattr(HistoryStore, "_insert_points", original)
+    recorder._ingest_analytics(NOW + 3)
+
+    window = recorder.store.overview(days=1, now=NOW + 3)["window"]
+    assert window["points_gained"] == 60
+    assert window["points_spent"] == 0
+
+
+def test_broadcast_open_at_startup_stays_closed_once_backfill_tracks_it(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    bob_session = {"streamer_login": "bob", "broadcast_id": "b1", "started_at": NOW}
+    _write_json(cache, _cache_payload(bob_session), NOW + 10)
+    _write_json(
+        analytics / "bob.json",
+        {
+            "series": [
+                {"x": int(NOW * 1000), "y": 1},
+                {"x": int((NOW + 5) * 1000), "y": 2},
+            ]
+        },
+        NOW + 10,
+    )
+    clock = FakeClock(NOW + 3600)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        # bob is configured but offline now.
+        online_streamers=lambda: [{"username": "bob", "is_online": False}],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()  # the backfill makes bob tracked
+        # Another channel's entry rewrites the cache; bob's old one is still open.
+        _write_json(
+            cache,
+            _cache_payload(
+                bob_session,
+                {"streamer_login": "carol", "broadcast_id": "c1", "started_at": NOW},
+            ),
+            NOW + 3610,
+        )
+        clock.value = NOW + 3615
+        recorder.poll_once()
+
+        assert store.overview(days=1, now=clock.value)["live_streams"] == 0
+    finally:
+        recorder._shutdown()
+
+
+def test_delete_removes_the_json_under_the_miner_file_lock(recorder):
+    from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX
+
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000},
+        {"x": int((NOW + 60) * 1000), "y": 1010},
+    ]
+    _write_json(path, {"series": series}, NOW + 61)
+    recorder.clock.value = NOW + 70
+    seen = {}
+
+    def remove():
+        seen["locked"] = ANALYTICS_FILE_MUTEX.locked()
+        seen["points"] = recorder.store.overview(days=1, now=NOW + 70)["window"][
+            "points_gained"
+        ]
+        os.remove(path)
+
+    # The change at NOW + 60 was never imported by a poll.
+    recorder.delete_streamer("bob", remove_source=remove)
+
+    assert seen == {"locked": True, "points": 0}
+    assert not os.path.exists(path)
+    # Its balance is in the kept cursor, so the next file starts from 1010.
+    state = recorder.store.get_import_state("analytics:bob.json:series")
+    assert state["last_balance"] == 1010
+
+
+def test_change_later_in_the_same_second_as_a_delete_is_kept(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [{"x": int(NOW * 1000), "y": 1000}]
+    _write_json(path, {"series": series}, NOW + 1)
+    clock.value = NOW + 100.4
+    recorder.delete_streamer("bob")
+
+    # The miner truncates to the second: a reward at NOW + 100.8 has x NOW + 100.
+    series.append({"x": int((NOW + 100) * 1000), "y": 1010})
+    _write_json(path, {"series": series}, NOW + 101)
+    clock.value = NOW + 102
+    recorder.poll_once()
+
+    assert recorder.store.overview(days=1, now=clock.value)["window"][
+        "points_gained"
+    ] == (10)
