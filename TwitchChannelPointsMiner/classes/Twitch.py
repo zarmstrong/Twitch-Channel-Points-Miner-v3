@@ -2038,12 +2038,12 @@ class Twitch(object):
             if self._watch_streak_continues_claimed_stream(
                 streamer, broadcast_id, live_stream.created_at
             ):
-                stream.watch_streak_checked_minutes = checked_minutes
+                self._record_watch_streak_check(stream, broadcast_id, checked_minutes)
                 return True
             milestone = self.gql.get_reward_list(
                 streamer.channel_id
             ).watch_streak_milestone
-            stream.watch_streak_checked_minutes = checked_minutes
+            self._record_watch_streak_check(stream, broadcast_id, checked_minutes)
         except GQLError as error:
             logger.warning(
                 "[watch-streak] unable to check Twitch milestone for "
@@ -2098,6 +2098,16 @@ class Twitch(object):
             "[watch-streak] Twitch already confirmed streak for "
             f"streamer={streamer.username}; broadcast={broadcast_id}"
         )
+        return True
+
+    @staticmethod
+    def _record_watch_streak_check(stream, broadcast_id, minutes):
+        record = getattr(stream, "record_watch_streak_check", None)
+        if callable(record):
+            return record(broadcast_id, minutes)
+        if getattr(stream, "broadcast_id", None) != broadcast_id:
+            return False
+        stream.watch_streak_checked_minutes = minutes
         return True
 
     def _watch_streak_continues_claimed_stream(

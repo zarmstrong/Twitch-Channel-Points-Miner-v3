@@ -1504,3 +1504,29 @@ def test_slow_refresh_reply_does_not_undo_a_newer_refresh(monkeypatch):
     twitch.update_stream(streamer)
 
     assert streamer.stream.broadcast_id == "broadcast-2"
+
+
+def test_slow_check_of_the_old_broadcast_does_not_mark_the_new_one_checked(
+    tmp_path,
+):
+    # A's check is still waiting on Twitch when the stream moves to B and B's
+    # state is reset. A's answer must not count as B's final check.
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.stream.init_watch_streak()
+    streamer.stream.minute_watched = 5
+    live_stream = SimpleNamespace(
+        id="broadcast-1", created_at=datetime(2026, 10, 26, 17, 45, 7)
+    )
+    twitch = twitch_with_streak_responses(live_stream, None)
+
+    def get_reward_list(channel_id):
+        streamer.stream.broadcast_id = "broadcast-2"
+        streamer.stream.init_watch_streak()
+        return SimpleNamespace(watch_streak_milestone=None)
+
+    twitch.gql.get_reward_list = get_reward_list
+
+    twitch.reconcile_watch_streak(streamer)
+
+    assert streamer.stream.watch_streak_broadcast_id == "broadcast-2"
+    assert streamer.stream.watch_streak_checked_minutes == 0

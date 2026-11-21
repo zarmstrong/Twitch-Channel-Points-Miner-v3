@@ -207,6 +207,17 @@ class Stream(object):
             self.watch_streak_transition_to = broadcast_id
             return True
 
+    def record_watch_streak_check(self, broadcast_id, minutes):
+        """Record the watched minutes a milestone check for broadcast_id
+        covered, unless the state has been reset for another broadcast since:
+        a slow check of the old broadcast must not mark the new one checked.
+        """
+        with _WATCH_STREAK_LOCK:
+            if (self.watch_streak_broadcast_id or self.broadcast_id) != broadcast_id:
+                return False
+            self.watch_streak_checked_minutes = minutes
+            return True
+
     def credit_watch_streak(self):
         """Clear the pending streak for an award; return its broadcast.
 
