@@ -116,6 +116,7 @@ class StreamerSettings(object):
         "claim_drops",
         "claim_moments",
         "watch_streak",
+        "streak_only",
         "favorite",
         "points_limit",
         "community_goals",
@@ -132,6 +133,7 @@ class StreamerSettings(object):
         claim_drops: bool = None,
         claim_moments: bool = None,
         watch_streak: bool = None,
+        streak_only: bool | int = None,
         favorite: bool = None,
         points_limit: int = None,
         community_goals: bool = None,
@@ -145,6 +147,7 @@ class StreamerSettings(object):
         self.claim_drops = claim_drops
         self.claim_moments = claim_moments
         self.watch_streak = watch_streak
+        self.streak_only = streak_only
         self.favorite = favorite
         self.points_limit = points_limit
         self.community_goals = community_goals
@@ -167,6 +170,8 @@ class StreamerSettings(object):
             self.community_goals = False
         if self.favorite is None:
             self.favorite = False
+        if self.streak_only is None:
+            self.streak_only = False
         if self.bet is None:
             self.bet = BetSettings()
         if self.chat is None:
@@ -177,7 +182,7 @@ class StreamerSettings(object):
             self.gift_sub_message = DEFAULT_GIFT_SUB_MESSAGE
 
     def __repr__(self):
-        return f"StreamerSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, favorite={self.favorite}, points_limit={self.points_limit}, community_goals={self.community_goals}, bet={self.bet}, chat={self.chat}, gift_sub_thanks={self.gift_sub_thanks}, gift_sub_message={self.gift_sub_message!r})"
+        return f"StreamerSettings(make_predictions={self.make_predictions}, follow_raid={self.follow_raid}, claim_drops={self.claim_drops}, claim_moments={self.claim_moments}, watch_streak={self.watch_streak}, streak_only={self.streak_only}, favorite={self.favorite}, points_limit={self.points_limit}, community_goals={self.community_goals}, bet={self.bet}, chat={self.chat}, gift_sub_thanks={self.gift_sub_thanks}, gift_sub_message={self.gift_sub_message!r})"
 
 
 class Streamer(object):
@@ -209,6 +214,7 @@ class Streamer(object):
         "mutex",
         "last_drop_watch_signature",
         "watch_streak_cache",
+        "watch_streak_confirmed_at",
     ]
 
     def __init__(
@@ -254,6 +260,7 @@ class Streamer(object):
         self.history = {}
         self.last_drop_watch_signature = None
         self.watch_streak_cache = None
+        self.watch_streak_confirmed_at = 0
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -306,6 +313,28 @@ class Streamer(object):
                 )
                 if session is not None and session.claimed is True:
                     self.stream.watch_streak_missing = False
+                elif self._watch_streak_confirmed_for_current_broadcast():
+                    # Twitch can confirm the streak before the miner notices the
+                    # channel is live, while broadcast_id still points at the
+                    # previous broadcast. Carry that confirmation over to the
+                    # broadcast we just started tracking instead of re-arming.
+                    self.stream.watch_streak_missing = False
+                    self.watch_streak_cache.mark_claimed(
+                        self.username, self.stream.broadcast_id
+                    )
+                elif (
+                    self.watch_streak_cache.claimed_at_for_logical_stream(
+                        self.username,
+                        self.stream.broadcast_id,
+                        started_at=self.online_at,
+                    )
+                    is not None
+                ):
+                    # A broadcast that started less than 30 minutes after the
+                    # previous one ended is the same Twitch stream for streak
+                    # purposes. If that stream was already claimed, do not farm
+                    # this continuation again.
+                    self.stream.watch_streak_missing = False
 
         self.toggle_chat()
 
@@ -321,6 +350,22 @@ class Streamer(object):
                 "event": Events.STREAMER_ONLINE,
             },
         )
+
+    def _watch_streak_confirmed_for_current_broadcast(self):
+        """Is the last streak confirmation from the broadcast being tracked?
+
+        Twitch may award the streak for a broadcast before the miner has
+        refreshed ``stream.broadcast_id`` (or before any broadcast id is known).
+        The confirmation timestamp is compared against the point where the
+        current broadcast started so a previous broadcast's streak is not
+        mistaken for this one.
+        """
+        confirmed_at = self.watch_streak_confirmed_at
+        if confirmed_at == 0:
+            return False
+
+        broadcast_started_at = max(self.stream_up, self.offline_at)
+        return broadcast_started_at == 0 or confirmed_at >= broadcast_started_at
 
     def print_history(self):
         return "; ".join(
@@ -339,6 +384,7 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
+            self.watch_streak_confirmed_at = time.time()
             if self.watch_streak_cache is not None:
                 self.watch_streak_cache.mark_claimed(
                     self.username, self.stream.broadcast_id
