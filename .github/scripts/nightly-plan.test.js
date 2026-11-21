@@ -21,12 +21,13 @@ function publishingNote(sha) {
   return `<!-- nightly-publishing:start ${sha} 100 -->\n> note\n<!-- nightly-publishing:end -->\n\nOlder notes.`;
 }
 
-// `ahead` lists the commits that already contain the commit being built.
+// `ahead` lists the commits and branches that already contain the commit
+// being built; by default it is on master.
 // `nightlyAssets` is what the published nightly release holds, or null when
 // there is no published nightly release; `nightlyBody` is its notes.
 function fakeGithub({
   tags = { '3.22.0': OLD }, latest = '3.22.0', runs = [{ status: 'completed', conclusion: 'success' }],
-  calls = [], ahead = [], nightlyAssets = [ZIP], nightlyBody = 'Notes.',
+  calls = [], ahead = ['master'], nightlyAssets = [ZIP], nightlyBody = 'Notes.',
 } = {}) {
   return {
     rest: {
@@ -132,19 +133,29 @@ test('a re-run of an earlier night never moves nightly backwards', async () => {
   const NEWER = 'c'.repeat(40);
   for (const force of [false, true]) {
     const calls = [];
-    const github = fakeGithub({ tags: { '3.22.0': OLD, nightly: NEWER }, ahead: [NEWER], calls });
+    const github = fakeGithub({ tags: { '3.22.0': OLD, nightly: NEWER }, ahead: ['master', NEWER], calls });
     const { outputs, messages } = await plan({ github, force });
     assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);
     assert.match(messages.at(-1)[1], /a newer nightly build \(c{40}\) is published or being published/);
-    assert.deepEqual(calls.find(([kind]) => kind === 'compare'), ['compare', `${SHA}...${NEWER}`]);
+    assert.deepEqual(
+      calls.filter(([kind]) => kind === 'compare').map(([, basehead]) => basehead),
+      [`${SHA}...master`, `${SHA}...${NEWER}`],
+    );
   }
+});
+
+test('a commit that is no longer on master is never published', async () => {
+  // A re-run of a run started before master's history was rewritten.
+  const { outputs, messages } = await plan({ force: true, github: fakeGithub({ ahead: [] }) });
+  assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);
+  assert.match(messages.at(-1)[1], /a{40} is not on master any more/);
 });
 
 test('a newer build that another run started publishing is not overtaken', async () => {
   // That run pushed its Docker image and failed before it moved the tag.
   const NEWER = 'c'.repeat(40);
   const github = fakeGithub({
-    tags: { '3.22.0': OLD, nightly: OLD }, ahead: [NEWER], nightlyBody: publishingNote(NEWER),
+    tags: { '3.22.0': OLD, nightly: OLD }, ahead: ['master', NEWER], nightlyBody: publishingNote(NEWER),
   });
   const { outputs } = await plan({ github, force: true });
   assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);

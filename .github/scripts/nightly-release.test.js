@@ -37,8 +37,11 @@ function fakeRepository({ tag = null, release = null } = {}) {
         },
         compareCommitsWithBasehead: async ({ basehead }) => {
           const [base, head] = basehead.split('...');
-          const behind = HISTORY.indexOf(base) <= HISTORY.indexOf(head);
-          return { data: { status: behind ? 'ahead' : 'behind' } };
+          const from = HISTORY.indexOf(base);
+          const to = HISTORY.indexOf(head === 'master' ? HISTORY.at(-1) : head);
+          // A commit outside master's history shares none of it.
+          if (from < 0 || to < 0) return { data: { status: 'diverged' } };
+          return { data: { status: from <= to ? 'ahead' : 'behind' } };
         },
         getReleaseByTag: async ({ tag: name }) => {
           if (name !== 'nightly' || !repository.release) throw apiError(404);
@@ -189,6 +192,29 @@ test('a re-run of an older run cannot publish over a newer build that failed par
   assert.equal(publishingCommit(repository.release), C3);
   // B's own re-run still goes through.
   assert.equal((await run(assertPublishing, repository, C3)).ok, true);
+});
+
+test('a re-run for a commit that left master publishes nothing', async () => {
+  // Run A was started for X; master's history was then rewritten and run B
+  // published C2 from the new history.
+  const X = 'f'.repeat(40);
+  const repository = fakeRepository();
+  await publish(repository, C2, 200);
+
+  // "Re-run all jobs" on A starts publishing X again.
+  const restart = await run(beginPublishing, repository, X, { runId: 100 });
+  assert.equal(restart.ok, false);
+  assert.match(restart.failures[0], /f{40} is not on master any more/);
+  assert.equal(repository.tag, C2);
+  assert.equal(isComplete(await state(repository), C2), true);
+});
+
+test('a commit GitHub no longer has is not on master', async () => {
+  const repository = fakeRepository();
+  repository.github.rest.repos.compareCommitsWithBasehead = async () => { throw apiError(404); };
+  const restart = await run(beginPublishing, repository, C2);
+  assert.equal(restart.ok, false);
+  assert.match(restart.failures[0], /not on master any more/);
 });
 
 test('a re-run of an older run cannot finish over a newer run of the same commit', async () => {

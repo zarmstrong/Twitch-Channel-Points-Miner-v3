@@ -11,6 +11,8 @@
 // commit into different builds: the version carries the build date.
 
 const NIGHTLY_TAG = 'nightly';
+// Nightly builds are builds of this branch.
+const PUBLISH_BRANCH = 'master';
 // The file nightly.yml uploads to the nightly release.
 const NIGHTLY_ASSET = 'TwitchChannelPointsMiner-Portable-nightly.zip';
 const PUBLISHING_BLOCK =
@@ -28,12 +30,18 @@ async function tagCommit(github, owner, repo, tag) {
   }
 }
 
-// True when `sha` is part of the history of `head`.
+// True when `sha` is part of the history of `head`. Histories that have
+// diverged, or a commit GitHub no longer has, are not.
 async function contains(github, owner, repo, head, sha) {
-  const { data } = await github.rest.repos.compareCommitsWithBasehead({
-    owner, repo, basehead: `${sha}...${head}`, per_page: 1, page: 1,
-  });
-  return data.status === 'ahead' || data.status === 'identical';
+  try {
+    const { data } = await github.rest.repos.compareCommitsWithBasehead({
+      owner, repo, basehead: `${sha}...${head}`, per_page: 1, page: 1,
+    });
+    return data.status === 'ahead' || data.status === 'identical';
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
 }
 
 // True when the build at `other` already contains `sha` and more.
@@ -89,11 +97,18 @@ function isComplete(state, sha) {
   return state.tag === sha && state.hasDownload && !state.publishing;
 }
 
-// The newer commit that makes publishing `sha` a step backwards, or null:
-// the finished nightly build, or one another run has started publishing.
-async function newerBuild(github, owner, repo, state, sha) {
+// Why `sha` must not be published now, or null when it may be. A run can be
+// re-run long after it was started, with the commit it was started for.
+async function outOfDateReason(github, owner, repo, state, sha) {
+  // After history was rewritten, "newer" can't be told from the commits.
+  if (!(await contains(github, owner, repo, PUBLISH_BRANCH, sha))) {
+    return `${sha} is not on ${PUBLISH_BRANCH} any more`;
+  }
+  // The finished nightly build, or one another run has started publishing.
   for (const other of [state.tag, state.publishing]) {
-    if (await isOlderThan(github, owner, repo, sha, other)) return other;
+    if (await isOlderThan(github, owner, repo, sha, other)) {
+      return `a newer nightly build (${other}) is published or being published`;
+    }
   }
   return null;
 }
@@ -109,14 +124,14 @@ function publishingBlock(sha, run) {
 }
 
 // First publishing step: records this run and `sha` in the release before
-// anything is pushed, creating the release on the first night. Fails when a newer build
-// is published or being published, which a re-run of an earlier run meets.
+// anything is pushed, creating the release on the first night. Fails when
+// the commit is out of date, which a re-run of an earlier run can be.
 async function beginPublishing({ github, context, core, sha }) {
   const { owner, repo } = context.repo;
   const state = await nightlyState(github, owner, repo);
-  const newer = await newerBuild(github, owner, repo, state, sha);
-  if (newer) {
-    core.setFailed(`A newer nightly build (${newer}) is published or being published; ${sha} is out of date.`);
+  const outOfDate = await outOfDateReason(github, owner, repo, state, sha);
+  if (outOfDate) {
+    core.setFailed(`This run is out of date and publishes nothing: ${outOfDate}.`);
     return false;
   }
   const previous = (state.release?.body || '').replace(PUBLISHING_BLOCK, '');
@@ -227,7 +242,7 @@ module.exports = {
   beginPublishing,
   finishPublishing,
   isComplete,
-  newerBuild,
+  outOfDateReason,
   nightlyState,
   publishingCommit,
   releaseNotes,

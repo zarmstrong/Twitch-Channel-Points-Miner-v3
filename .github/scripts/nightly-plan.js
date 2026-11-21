@@ -4,7 +4,7 @@
 // the build is published (Docker's `nightly` tag and the rolling `nightly`
 // prerelease) or is only a dry run.
 
-const { isComplete, newerBuild, nightlyState, tagCommit } = require('./nightly-release');
+const { isComplete, nightlyState, outOfDateReason, tagCommit } = require('./nightly-release');
 
 const PUBLISH_REF = 'refs/heads/master';
 const TESTS_WORKFLOW = 'tests.yml';
@@ -60,10 +60,8 @@ async function skipReason({ github, owner, repo, sha, force, releaseTag }) {
     return { reason: `the last nightly build was already made from ${sha}` };
   }
   // A re-run of an earlier night's run must not move nightly backwards.
-  const newer = await newerBuild(github, owner, repo, state, sha);
-  if (newer) {
-    return { reason: `a newer nightly build (${newer}) is published or being published` };
-  }
+  const outOfDate = await outOfDateReason(github, owner, repo, state, sha);
+  if (outOfDate) return { reason: outOfDate };
   // A run that started publishing and failed is finished first, whatever
   // the commit: its note would otherwise stay on the release.
   if (
