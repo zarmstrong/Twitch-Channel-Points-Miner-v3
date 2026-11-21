@@ -1440,6 +1440,7 @@ def test_history_ignores_only_streamers_tracked_just_for_drops(monkeypatch):
 
     classify = started["is_drop_streamer"]
     assert [item.username for item in miner.streamers if classify(item)] == ["drops"]
+    assert set(started["source_locks"]) == {"now_watching", "streak_cache"}
     assert started["streamers_ready"]() is False
     miner.daily_report_balances_loaded = True
     assert started["streamers_ready"]() is True

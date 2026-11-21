@@ -1819,3 +1819,137 @@ def test_change_later_in_the_same_second_as_a_delete_is_kept(recorder):
     assert recorder.store.overview(days=1, now=clock.value)["window"][
         "points_gained"
     ] == (10)
+
+
+class _RecordingLock:
+    def __init__(self):
+        self.held = False
+        self.entries = 0
+
+    def __enter__(self):
+        self.held = True
+        self.entries += 1
+        return self
+
+    def __exit__(self, *exc):
+        self.held = False
+        return False
+
+
+def test_snapshot_and_cache_are_read_under_the_miner_locks(tmp_path, monkeypatch):
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    watching_lock = _RecordingLock()
+    cache_lock = _RecordingLock()
+    recorder = HistoryRecorder(
+        HistoryStore(analytics / "history.sqlite3"),
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=FakeClock(NOW + 20),
+        source_locks={"now_watching": watching_lock, "streak_cache": cache_lock},
+    )
+    recorder._prepare()
+    try:
+        _write_json(analytics / "now_watching.json", [], NOW + 10)
+        _write_json(cache, _cache_payload(), NOW + 10)
+        held = []
+        original = recorder_module._read_json
+
+        def read(path):
+            held.append((os.path.basename(path), watching_lock.held, cache_lock.held))
+            return original(path)
+
+        monkeypatch.setattr(recorder_module, "_read_json", read)
+        recorder.poll_once()
+
+        assert ("now_watching.json", True, False) in held
+        assert (os.path.basename(cache), False, True) in held
+    finally:
+        recorder._shutdown()
+
+
+def test_recreated_json_with_the_same_length_and_second_is_read(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    x = int((NOW + 60) * 1000)
+    _write_json(path, {"series": [{"x": x, "y": 1000}]}, NOW + 60)
+    clock.value = NOW + 60.2
+    recorder.poll_once()
+
+    clock.value = NOW + 60.5
+    recorder.delete_streamer("bob", remove_source=lambda: os.remove(path))
+    # The new file's only entry has the old one's length and second.
+    _write_json(path, {"series": [{"x": x, "y": 1010}]}, NOW + 61)
+    clock.value = NOW + 62
+    recorder.poll_once()
+
+    assert recorder.store.overview(days=1, now=clock.value)["window"][
+        "points_gained"
+    ] == (10)
+
+
+def test_watch_from_a_snapshot_written_before_a_delete_starts_at_the_delete(
+    recorder,
+):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 80)
+    clock.value = NOW + 84
+    recorder.delete_streamer("bob")
+    clock.value = NOW + 90
+    recorder._poll_now_watching()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+        "sessions"
+    ][0]
+    assert session["started_at"] == NOW + 84
+
+
+def test_claim_earlier_in_the_delete_second_stays_deleted(recorder):
+    clock = recorder.clock
+    recorder._tracked_streamers.add("bob")
+    claim = {
+        "streamer_login": "bob",
+        "broadcast_id": "b1",
+        "started_at": NOW,
+        "claimed": True,
+        "claimed_at": NOW + 100.2,
+        "ended_at": NOW + 200,
+    }
+    _write_json(recorder.streak_cache_path, _cache_payload(claim), NOW + 101)
+    clock.value = NOW + 100.8
+    recorder.delete_streamer("bob")
+    _write_json(recorder.streak_cache_path, _cache_payload(claim), NOW + 201)
+    clock.value = NOW + 210
+    recorder._ingest_streak_cache(clock.value)
+
+    assert recorder.store.events(days=1, now=clock.value)["total"] == 0
+
+
+def test_a_failed_schema_rebuild_is_prepared_again(recorder, monkeypatch):
+    original = HistoryStore._initialize_schema
+    calls = []
+
+    def flaky(self):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return original(self)
+
+    def corrupt():
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    poll = recorder.poll_once
+    monkeypatch.setattr(HistoryStore, "_initialize_schema", flaky)
+    monkeypatch.setattr(recorder, "poll_once", corrupt)
+    recorder._poll_guarded()
+    assert recorder._run_id is None
+
+    monkeypatch.setattr(recorder, "poll_once", poll)
+    recorder._poll_guarded()
+    assert recorder._run_id is not None
+    assert recorder.store.sessions(kind="run", days=1, now=NOW)["total"] == 1

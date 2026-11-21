@@ -1253,6 +1253,19 @@ class HistoryStore(object):
             ),
         )
 
+    def reset_import_position(self, filename):
+        """Read a recreated analytics JSON from the start, keeping balances."""
+
+        with self._write_connection() as connection:
+            connection.execute(
+                """
+                UPDATE import_state SET consumed = 0, last_x = NULL,
+                    mtime = NULL, size = NULL
+                WHERE source IN (?, ?)
+                """,
+                (f"analytics:{filename}:series", f"analytics:{filename}:annotations"),
+            )
+
     def deletion_cutoffs(self):
         """Return ``{streamer: deleted_at}`` for streamers deleted on request."""
 

@@ -746,6 +746,16 @@ class TwitchChannelPointsMiner:
                     online_streamers=lambda: list(self.streamers),
                     # Channels tracked only for Drops.  One that is also
                     # configured or followed keeps its History.
+                    # Held by the miner while it replaces these files; on
+                    # Windows a replace fails while History has one open.
+                    source_locks={
+                        "now_watching": getattr(
+                            getattr(self, "twitch", None), "analytics_mutex", None
+                        ),
+                        "streak_cache": getattr(
+                            getattr(self, "watch_streak_cache", None), "_lock", None
+                        ),
+                    },
                     is_drop_streamer=lambda streamer: (
                         is_drop_discovered(streamer)
                         and not streamer.explicitly_configured

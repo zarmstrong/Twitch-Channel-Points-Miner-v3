@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager, nullcontext
@@ -195,6 +196,7 @@ class HistoryRecorder(threading.Thread):
         drop_streamers=None,
         streamers_ready=None,
         is_drop_streamer=None,
+        source_locks=None,
     ):
         super(HistoryRecorder, self).__init__()
         self.daemon = True
@@ -211,6 +213,10 @@ class HistoryRecorder(threading.Thread):
         self.drop_streamers = drop_streamers
         self.streamers_ready = streamers_ready
         self.is_drop_streamer = is_drop_streamer
+        # Locks the miner holds while it replaces now_watching.json
+        # ("now_watching") and the watch-streak cache ("streak_cache").  On
+        # Windows its os.replace fails while History has the file open.
+        self.source_locks = dict(source_locks or {})
         self._stop_event = threading.Event()
         # Held for a whole poll and for a delete, so a delete never interleaves
         # with an import that already read the deleted data.
@@ -220,6 +226,7 @@ class HistoryRecorder(threading.Thread):
         self._persisted_drop_farmed = set()
         self._retention_watermark = None
         self._prepared_once = False
+        self._restore_after_rebuild = None
         self._active_watch = {}
         self._now_watching_initialized = False
         self._now_watching_mtime = 0.0
@@ -307,19 +314,26 @@ class HistoryRecorder(threading.Thread):
     def _recover_from_corruption(self, error):
         """Rebuild a database that turned out corrupt while running."""
 
+        if not isinstance(error, sqlite3.DatabaseError) or not (
+            HistoryStore._is_corruption(error)
+        ):
+            return False
         try:
             with self._lock:
-                if not self.store.recover_if_corrupt(error):
-                    return False
-                # The rebuilt file is empty.  Keep what only lives in memory
-                # or in the old file, then start over as after a restart.
-                self.store.restore_deletion_cutoffs(self._deleted_before)
-                self.store.update_drop_farmed_streamers(add=self._drop_farmed)
+                # From here on the old run is gone whatever happens, so the
+                # next poll prepares again if any step below fails.  What only
+                # lives in memory is written back into the new file then.
+                if self._restore_after_rebuild is None:
+                    self._restore_after_rebuild = (
+                        dict(self._deleted_before),
+                        set(self._drop_farmed),
+                    )
                 self._active_watch.clear()
                 self._online_live_keys.clear()
                 self._cache_startup_closed.clear()
                 self._streak_cache_key = None
                 self._run_id = None
+                self.store.recover_if_corrupt(error)
                 self._prepare()
             return True
         except Exception:
@@ -372,6 +386,11 @@ class HistoryRecorder(threading.Thread):
         self._tracked_streamers = (
             self.store.watched_streamers() | self.store.known_streamers()
         )
+        if self._restore_after_rebuild is not None:
+            cutoffs, drop_farmed = self._restore_after_rebuild
+            self.store.restore_deletion_cutoffs(cutoffs)
+            self.store.update_drop_farmed_streamers(add=drop_farmed)
+            self._restore_after_rebuild = None
         self._deleted_before = self.store.deletion_cutoffs()
         self._persisted_drop_farmed = self.store.drop_farmed_streamers()
         self._drop_farmed |= self._persisted_drop_farmed
@@ -385,6 +404,10 @@ class HistoryRecorder(threading.Thread):
         # and must not leave an extra run row behind each time.
         self._run_id = self.store.start_run(self.version, started_at=now)
         self._prepared_once = True
+
+    def _source_lock(self, name):
+        lock = self.source_locks.get(name)
+        return nullcontext() if lock is None else lock
 
     def _streamers_loaded(self):
         if self.streamers_ready is None:
@@ -484,10 +507,7 @@ class HistoryRecorder(threading.Thread):
             for filename, path in self._analytics_files():
                 if _clean_streamer(filename[: -len(".json")]) == streamer:
                     self._ingest_analytics_file(filename, path, file_locked=True)
-            # The miner writes whole seconds, so a change later in the same
-            # second as the delete has an x at the start of that second.
-            # Everything earlier in it was just imported above.
-            deleted_at = float(math.floor(self.clock()))
+            deleted_at = float(self.clock())
             counts = self.store.delete_streamer(streamer, deleted_at=deleted_at)
             self._deleted_before[streamer] = max(
                 deleted_at, self._deleted_before.get(streamer, 0.0)
@@ -504,13 +524,29 @@ class HistoryRecorder(threading.Thread):
             }
             if remove_source is not None:
                 remove_source()
+                # The miner starts a new file with its next change.  Read
+                # that from the start; the kept balance gives its first delta.
+                for filename, _path in self._analytics_files_named(streamer):
+                    if not os.path.exists(_path):
+                        self.store.reset_import_position(filename)
             return counts
 
-    def _deleted_since(self, streamer, timestamp):
-        """True when ``timestamp`` predates a delete of this streamer."""
+    def _deleted_since(self, streamer, timestamp, whole_seconds=False):
+        """True when ``timestamp`` predates a delete of this streamer.
+
+        The analytics JSON stores whole seconds (``whole_seconds=True``): a
+        change later in the same second as the delete has an ``x`` at the
+        start of that second, so the cutoff is rounded down for it.  The
+        delete imports that JSON first, so the earlier changes of that second
+        are already behind the import cursor.
+        """
 
         cutoff = self._deleted_before.get(streamer)
-        return cutoff is not None and float(timestamp) < cutoff
+        if cutoff is None:
+            return False
+        if whole_seconds:
+            cutoff = math.floor(cutoff)
+        return float(timestamp) < cutoff
 
     def _retention_cutoff(self, now):
         """Return the time before which cached data must not be imported.
@@ -662,7 +698,8 @@ class HistoryRecorder(threading.Thread):
                     )
             return
 
-        entries = _load_list(path)
+        with self._source_lock("now_watching"):
+            entries = _load_list(path)
         if entries is None:
             entries = []
         # A snapshot written later than the last observation marks when the
@@ -694,18 +731,22 @@ class HistoryRecorder(threading.Thread):
                     self._close_watch(streamer, changed_at, credit=True)
                 self._tracked_streamers.add(streamer)
                 self._import_cached_sessions(streamer, now)
-                # The watch began when the snapshot naming it was written.
+                # The watch began when the snapshot naming it was written,
+                # but not before a delete of this streamer's history.
+                started_at = max(
+                    changed_at, self._deleted_before.get(streamer, changed_at)
+                )
                 session_id = self.store.start_watch_session(
                     streamer,
                     reason,
-                    started_at=changed_at,
+                    started_at=started_at,
                     broadcast_id=self.store.open_broadcast(streamer),
                 )
                 if session_id is not None:
                     self._active_watch[streamer] = {
                         "id": session_id,
                         "reason": reason,
-                        "last_tick": changed_at,
+                        "last_tick": started_at,
                     }
             if game:
                 self.store.update_open_stream_details(
@@ -874,7 +915,8 @@ class HistoryRecorder(threading.Thread):
             return
 
         try:
-            payload = _read_json(self.streak_cache_path)
+            with self._source_lock("streak_cache"):
+                payload = _read_json(self.streak_cache_path)
         except (OSError, ValueError, TypeError) as error:
             logger.warning(
                 "Unable to read history watch-streak cache %s: %s",
@@ -1049,6 +1091,17 @@ class HistoryRecorder(threading.Thread):
         return max(sessions, key=lambda item: item["started_at"])
 
     # -- per-streamer analytics JSON --------------------------------------
+    def _analytics_files_named(self, streamer):
+        """Analytics JSON names for one streamer, present or not."""
+
+        names = {f"{streamer}.json"}
+        names.update(
+            name
+            for name, _path in self._analytics_files()
+            if _clean_streamer(name[: -len(".json")]) == streamer
+        )
+        return [(name, os.path.join(self.analytics_path, name)) for name in names]
+
     def _analytics_files(self):
         try:
             names = sorted(os.listdir(self.analytics_path))
@@ -1169,7 +1222,9 @@ class HistoryRecorder(threading.Thread):
             delta = balance - int(last_balance)
             # Entries from before a delete still move the running balance, so
             # the first change after the delete gets the right delta.
-            if delta != 0 and not self._deleted_since(streamer, x / 1000.0):
+            if delta != 0 and not self._deleted_since(
+                streamer, x / 1000.0, whole_seconds=True
+            ):
                 rows.append(
                     (
                         streamer,
@@ -1211,7 +1266,7 @@ class HistoryRecorder(threading.Thread):
         pending, consumed, last_x = _pending_entries(entries, state)
         rows = []
         for x, occurrence, entry in pending:
-            if self._deleted_since(streamer, x / 1000.0):
+            if self._deleted_since(streamer, x / 1000.0, whole_seconds=True):
                 continue
             label = ""
             event_type = "points"
@@ -1254,6 +1309,7 @@ def build_recorder(
     drop_streamers=None,
     streamers_ready=None,
     is_drop_streamer=None,
+    source_locks=None,
 ):
     store = HistoryStore(os.path.join(analytics_path, "history.sqlite3"))
     recorder = HistoryRecorder(
@@ -1268,5 +1324,6 @@ def build_recorder(
         drop_streamers=drop_streamers,
         streamers_ready=streamers_ready,
         is_drop_streamer=is_drop_streamer,
+        source_locks=source_locks,
     )
     return recorder

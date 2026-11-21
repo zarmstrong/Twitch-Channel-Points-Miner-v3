@@ -97,6 +97,7 @@ def start_history(
     retention_days=None,
     streamers_ready=None,
     is_drop_streamer=None,
+    source_locks=None,
 ):
     """Start the passive recorder once for this process.
 
@@ -113,6 +114,10 @@ def start_history(
     as tracked only for Drops.  It replaces ``drop_streamers`` and reads the
     same snapshot, so a channel retired between two reads is not mistaken for
     a configured one.
+
+    ``source_locks`` optionally maps ``"now_watching"`` and
+    ``"streak_cache"`` to the locks the miner holds while it replaces those
+    files, so History never has them open during a replace.
 
     ``streamers_ready`` is an optional callable that returns true once the
     miner has loaded its streamers; nothing is imported before then.
@@ -143,6 +148,7 @@ def start_history(
                 drop_streamers=drop_streamers,
                 streamers_ready=streamers_ready,
                 is_drop_streamer=is_drop_streamer,
+                source_locks=source_locks,
             )
             _store = recorder.store
             recorder.start()
