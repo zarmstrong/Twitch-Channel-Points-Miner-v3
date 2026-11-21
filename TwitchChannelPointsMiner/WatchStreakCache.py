@@ -25,6 +25,11 @@ class WatchStreakSession:
     claimed: bool = False
     claimed_at: Optional[float] = None
     ended_at: Optional[float] = None
+    # ended_at is a time the broadcast was last seen live, so it can't be
+    # later than the real end. Entries written before this field existed
+    # recorded when the miner noticed the offline instead, which can be
+    # much later, so they never prove a short gap.
+    ended_seen_live: bool = False
 
     @property
     def key(self):
@@ -100,6 +105,7 @@ class WatchStreakCache:
                             if item.get("ended_at") is not None
                             else None
                         ),
+                        ended_seen_live=item.get("ended_seen_live") is True,
                     )
                 except (KeyError, TypeError, ValueError):
                     continue
@@ -193,7 +199,7 @@ class WatchStreakCache:
             previous_sessions.sort(key=lambda session: session.started_at, reverse=True)
 
             for previous in previous_sessions:
-                if previous.ended_at is None:
+                if previous.ended_at is None or previous.ended_seen_live is not True:
                     break
                 gap = current_started_at - previous.ended_at
                 # ensure() closes a session the miner never saw go offline at
@@ -240,7 +246,13 @@ class WatchStreakCache:
             self._save_locked()
             return session
 
-    def mark_ended(self, streamer_login, broadcast_id, ended_at=None):
+    def mark_ended(self, streamer_login, broadcast_id, ended_at=None, seen_live=True):
+        """Record a broadcast's end.
+
+        seen_live says ended_at is a time the broadcast was last seen live
+        (never later than the real end); only such an end can prove that a
+        later broadcast continues the same logical stream.
+        """
         if broadcast_id in [None, ""]:
             return None
         now = time.time() if ended_at is None else float(ended_at)
@@ -250,6 +262,7 @@ class WatchStreakCache:
                 return None
             if session.ended_at is None:
                 session.ended_at = now
+                session.ended_seen_live = seen_live is True
                 self._save_locked()
             return session
 

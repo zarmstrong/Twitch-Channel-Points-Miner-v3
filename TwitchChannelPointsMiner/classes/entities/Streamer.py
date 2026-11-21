@@ -294,10 +294,12 @@ class Streamer(object):
             self.is_online = False
 
             if self.watch_streak_cache is not None:
+                ended_at, seen_live = self._last_seen_live_at(seen_live_at)
                 self.watch_streak_cache.mark_ended(
                     self.username,
                     broadcast_id,
-                    ended_at=self._last_seen_live_at(seen_live_at),
+                    ended_at=ended_at,
+                    seen_live=seen_live,
                 )
 
         self.toggle_chat()
@@ -370,6 +372,9 @@ class Streamer(object):
         so a gap measured from it is never shorter than the real one and a
         claim is never carried into a broadcast that started 30 or more
         minutes after the previous one ended.
+
+        Returns (time, seen_live): seen_live is False when no live refresh is
+        known and offline_at, which may be late, is the only time available.
         """
         last_seen = (
             getattr(self.stream, "live_seen_at", 0)
@@ -377,8 +382,8 @@ class Streamer(object):
             else seen_live_at
         ) or 0
         if 0 < last_seen <= self.offline_at:
-            return last_seen
-        return self.offline_at
+            return last_seen, True
+        return self.offline_at, False
 
     def _watch_streak_confirmed_for_current_broadcast(self):
         """Is the last streak confirmation from the broadcast being tracked?

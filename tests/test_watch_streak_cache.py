@@ -178,6 +178,7 @@ def test_short_restart_after_a_claim_does_not_rearm_the_streamer(tmp_path, monke
     streamer.set_online()
     streamer.update_history("WATCH_STREAK", earned=450)
     current_time[0] += 100
+    _refresh_live_stream(streamer, "broadcast-1")
     streamer.set_offline()
 
     # Restart two minutes after the previous broadcast ended; Twitch still
@@ -988,3 +989,74 @@ def test_confirming_a_streak_for_an_older_broadcast_changes_nothing():
     assert stream.watch_streak_missing is True
     assert stream.confirm_watch_streak_for("broadcast-2") is True
     assert stream.watch_streak_missing is False
+
+
+def test_legacy_cache_end_does_not_prove_a_continuation(tmp_path):
+    # Written before ended_seen_live existed: ended_at was when the miner
+    # noticed the offline, possibly long after the real end.
+    start = 2_000_000_000.0
+    path = tmp_path / "watch-streak.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sessions": [
+                    {
+                        "account_name": "viewer",
+                        "streamer_login": "channel",
+                        "broadcast_id": "broadcast-1",
+                        "started_at": start,
+                        "claimed": True,
+                        "claimed_at": start + 60,
+                        "ended_at": start + 2700,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache = WatchStreakCache.load(path, "viewer")
+
+    cache.ensure("channel", "broadcast-2", started_at=start + 2820)
+
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert cache.claimed_at_for_logical_stream("channel", "broadcast-2") is None
+
+
+def test_seen_live_end_survives_a_restart(tmp_path):
+    start = 2_000_000_000.0
+    path = tmp_path / "watch-streak.json"
+    cache = WatchStreakCache.load(path, "viewer")
+    cache.ensure("channel", "broadcast-1", started_at=start)
+    cache.mark_claimed("channel", "broadcast-1", claimed_at=start + 60)
+    cache.mark_ended("channel", "broadcast-1", ended_at=start + 1000)
+
+    restored = WatchStreakCache.load(path, "viewer")
+    restored.ensure("channel", "broadcast-2", started_at=start + 1100)
+
+    assert restored.get("channel", "broadcast-1").ended_seen_live is True
+    assert restored.claimed_at_for_logical_stream("channel", "broadcast-2") == (
+        start + 60
+    )
+
+
+def test_offline_without_a_live_refresh_does_not_prove_a_continuation(
+    tmp_path, monkeypatch
+):
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.set_online()
+    streamer.update_history("WATCH_STREAK", earned=450)
+    clock[0] += 600
+    # No stream refresh: the offline time is only when the miner noticed.
+    streamer.set_offline()
+    clock[0] += 120
+    streamer.stream.broadcast_id = "broadcast-2"
+    streamer.set_online()
+
+    assert cache.get("channel", "broadcast-1").ended_seen_live is False
+    assert streamer.stream.watch_streak_missing is True

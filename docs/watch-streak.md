@@ -25,6 +25,10 @@ streak, and watch time that Twitch doesn't credit never advances one. After
 stops prioritizing the streak for the rest of that broadcast. The channel then
 competes for a slot like any other, and `points_limit` applies to it again.
 
+Watched minutes are counted in memory. If the miner restarts while the same
+broadcast is live, the count starts again from zero, and so does a `streak_only`
+window.
+
 Set it in `MINE_CONFIG`:
 
 ```python
