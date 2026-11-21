@@ -1091,3 +1091,47 @@ def test_mid_stream_reconcile_reaches_every_due_channel(tmp_path, monkeypatch):
         clock[0] += 20
 
     assert {f"channel{index}-id" for index in range(10)} <= set(calls)
+
+
+class _RefreshBetweenReads:
+    """A stream another thread refreshes right after its ID is read alone."""
+
+    def __init__(self, stream, on_id_read):
+        object.__setattr__(self, "_stream", stream)
+        object.__setattr__(self, "_on_id_read", on_id_read)
+
+    def __getattr__(self, name):
+        value = getattr(self._stream, name)
+        if name == "broadcast_id" and self._on_id_read is not None:
+            on_id_read = self._on_id_read
+            object.__setattr__(self, "_on_id_read", None)
+            on_id_read()
+        return value
+
+    def __setattr__(self, name, value):
+        setattr(self._stream, name, value)
+
+
+def test_previous_broadcast_snapshot_is_one_consistent_read(tmp_path, monkeypatch):
+    # The websocket thread refreshes the stream to B (an hour after A was last
+    # seen live) between this thread's read of A's ID and of its last-seen
+    # time. A's end must still be A's own last-seen time.
+    clock = [2_000_000_000.0]
+    streamer, cache = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    seen_live_at = streamer.stream.live_seen_at
+    real_stream = streamer.stream
+
+    def other_thread_refresh():
+        if real_stream.broadcast_id == "broadcast-1":
+            clock[0] += 60 * 60
+            _refresh_live_stream(streamer, "broadcast-2")
+
+    streamer.stream = _RefreshBetweenReads(real_stream, other_thread_refresh)
+    twitch, _ = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-2", gap_seconds=60 * 60
+    )
+
+    twitch.check_streamer_online(streamer)
+
+    assert cache.get("channel", "broadcast-1").ended_at == seen_live_at
+    assert real_stream.watch_streak_missing is True

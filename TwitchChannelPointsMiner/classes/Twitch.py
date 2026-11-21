@@ -1935,8 +1935,15 @@ class Twitch(object):
             except StreamerIsOfflineException:
                 streamer.set_offline()
         else:
-            previous_broadcast_id = streamer.stream.broadcast_id
-            previous_seen_live_at = getattr(streamer.stream, "live_seen_at", 0)
+            live_snapshot = getattr(streamer.stream, "live_snapshot", None)
+            if callable(live_snapshot):
+                # One read of both: another thread's refresh landing between
+                # two reads would pair this broadcast's ID with the next
+                # broadcast's last-seen time, inventing a short gap.
+                previous_broadcast_id, previous_seen_live_at = live_snapshot()
+            else:
+                previous_broadcast_id = streamer.stream.broadcast_id
+                previous_seen_live_at = getattr(streamer.stream, "live_seen_at", 0)
             try:
                 self.update_stream(streamer)
                 # A failed extraction while going online is otherwise never

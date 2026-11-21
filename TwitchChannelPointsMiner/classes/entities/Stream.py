@@ -74,7 +74,6 @@ class Stream(object):
             # What Twitch advertised on the last broadcast proves nothing
             # about this one.
             self.channel_campaign_ids = []
-        self.broadcast_id = broadcast_id
         self.title = title.strip()
         self.game = game
         # #343 temporary workaround
@@ -88,9 +87,13 @@ class Stream(object):
         self.__last_update = time.time()
         # When Twitch last showed this stream live: the caller's request time
         # when given, since the response may arrive (and be applied) later.
-        self.live_seen_at = (
-            self.__last_update if seen_live_at is None else float(seen_live_at)
-        )
+        # Set together with the broadcast ID, so live_snapshot() never pairs
+        # one broadcast's ID with another's time.
+        with _WATCH_STREAK_LOCK:
+            self.broadcast_id = broadcast_id
+            self.live_seen_at = (
+                self.__last_update if seen_live_at is None else float(seen_live_at)
+            )
 
         logger.debug(f"Update: {self}")
 
@@ -121,6 +124,11 @@ class Stream(object):
 
     def update_elapsed(self):
         return 0 if self.__last_update == 0 else (time.time() - self.__last_update)
+
+    def live_snapshot(self):
+        """Return (broadcast_id, live_seen_at) as one consistent pair."""
+        with _WATCH_STREAK_LOCK:
+            return self.broadcast_id, self.live_seen_at
 
     def init_watch_streak(self):
         with _WATCH_STREAK_LOCK:
