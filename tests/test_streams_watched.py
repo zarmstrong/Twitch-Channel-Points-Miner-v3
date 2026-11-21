@@ -657,14 +657,18 @@ def test_pending_watch_streak_survives_beyond_eleven_minutes():
 
 
 def test_pending_watch_streak_stays_watched_until_confirmed(monkeypatch):
+    # Past the old 11-minute limit but under the default cap: still pending,
+    # so Priority.STREAK keeps the slot.
+    streamer = _watch_streamer("slow-streak", watch_streak=True, minute_watched=15)
     posted = _run_one_watch_iteration(
         monkeypatch,
-        [_watch_streamer("slow-streak", watch_streak=True, minute_watched=30)],
+        [streamer],
         streams_watched=1,
         priority=[Priority.STREAK],
     )
 
     assert posted == ["https://spade.test/slow-streak"]
+    assert streamer.stream.watch_streak_missing is True
 
 
 def test_minute_watcher_reconciles_a_streak_that_advances_mid_stream(monkeypatch):

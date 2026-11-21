@@ -2133,9 +2133,11 @@ class Twitch(object):
         current = time.time() if now is None else now
         # At most one milestone lookup per watch cycle: each is a GQL round
         # trip on the minute watcher, and a slow Twitch must not hold up
-        # minute-watched events for every other channel. Due channels are
-        # picked up on the following cycles.
-        lookup_done = False
+        # minute-watched events for every other channel. The lookup goes to
+        # the due channel that waited longest (queued checks first), so a
+        # channel late in the list is not starved by earlier ones whose
+        # cooldowns keep expiring.
+        due = []
         for streamer in streamers:
             if getattr(self, "running", True) is not True:
                 return
@@ -2177,10 +2179,12 @@ class Twitch(object):
                 and current - checked_at < WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
             ):
                 continue
-            if lookup_done or getattr(self, "gql", None) is None:
-                continue
-            lookup_done = True
-            self.reconcile_watch_streak(streamer)
+            due.append((not check_due, checked_at, len(due), streamer))
+        if not due or getattr(self, "gql", None) is None:
+            return
+        if getattr(self, "running", True) is not True:
+            return
+        self.reconcile_watch_streak(min(due)[-1])
 
     def __streamer_drops_description(self, streamer):
         if not is_drop_discovered(streamer):

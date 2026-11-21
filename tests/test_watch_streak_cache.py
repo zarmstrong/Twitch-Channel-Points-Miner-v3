@@ -1060,3 +1060,34 @@ def test_offline_without_a_live_refresh_does_not_prove_a_continuation(
 
     assert cache.get("channel", "broadcast-1").ended_seen_live is False
     assert streamer.stream.watch_streak_missing is True
+
+
+def test_mid_stream_reconcile_reaches_every_due_channel(tmp_path, monkeypatch):
+    # Ten due channels, one lookup per 20-second cycle and a 3-minute
+    # cooldown: a fixed scan order would keep rechecking the first nine.
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    streamers = []
+    for index in range(10):
+        streamer, _ = make_streak_streamer(tmp_path, username=f"channel{index}")
+        streamer.is_online = True
+        streamer.channel_id = f"channel{index}-id"
+        streamer.stream.minute_watched = WATCH_STREAK_RECONCILE_AFTER_MINUTES
+        streamers.append(streamer)
+    calls = []
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        return SimpleNamespace(stream=None)
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    for _ in range(30):
+        twitch._reconcile_due_watch_streaks(streamers)
+        clock[0] += 20
+
+    assert {f"channel{index}-id" for index in range(10)} <= set(calls)
