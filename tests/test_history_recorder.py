@@ -1953,3 +1953,157 @@ def test_a_failed_schema_rebuild_is_prepared_again(recorder, monkeypatch):
     recorder._poll_guarded()
     assert recorder._run_id is not None
     assert recorder.store.sessions(kind="run", days=1, now=NOW)["total"] == 1
+
+
+def test_stopped_history_stays_readable_and_deletes_through_the_recorder(
+    recorder, monkeypatch
+):
+    from flask import Flask
+
+    from TwitchChannelPointsMiner.history import web as history_web
+
+    monkeypatch.setattr(history_module, "_recorder", recorder)
+    monkeypatch.setattr(history_module, "_store", recorder.store)
+    history_module.stop_history()
+
+    assert history_module.get_store() is recorder.store
+    assert history_module.is_recording() is False
+    app = Flask(__name__)
+    history_web.register_history(app)
+    health = app.test_client().get("/history/health")
+    assert health.status_code == 200
+    assert health.get_json()["recording"] is False
+
+    calls = []
+    monkeypatch.setattr(
+        recorder, "delete_streamer", lambda name, **kwargs: calls.append(name) or {}
+    )
+    history_module.delete_streamer_history("bob")
+    assert calls == ["bob"]
+
+
+def test_delete_without_a_recorder_imports_pending_changes_first(tmp_path, monkeypatch):
+    import time
+
+    # The standalone delete stamps its cutoff with the real clock.
+    base = time.time() - 100
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    path = analytics / "bob.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    series = [
+        {"x": int(base * 1000), "y": 1000},
+        {"x": int((base + 60) * 1000), "y": 1010},
+    ]
+    _write_json(path, {"series": series}, base + 61)
+    first = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=FakeClock(base + 70),
+    )
+    first._prepare()
+    first.poll_once()
+    first._shutdown()
+    # The miner wrote 1050 after History stopped; then the user deletes.
+    series.append({"x": int((base + 80) * 1000), "y": 1050})
+    _write_json(path, {"series": series}, base + 81)
+    monkeypatch.setattr(history_module, "_recorder", None)
+    monkeypatch.setattr(history_module, "_store", None)
+    history_module.delete_streamer_history(
+        "bob",
+        database_path=str(analytics / "history.sqlite3"),
+        remove_source=lambda: os.remove(path),
+    )
+
+    _write_json(
+        path, {"series": [{"x": int((base + 200) * 1000), "y": 1060}]}, base + 201
+    )
+    second = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=FakeClock(base + 210),
+    )
+    second._prepare()
+    try:
+        second.poll_once()
+        assert store.overview(days=1, now=base + 210)["window"]["points_gained"] == 10
+    finally:
+        second._shutdown()
+
+
+def test_live_title_and_category_changes_are_recorded(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    entry = {
+        "username": "bob",
+        "broadcast_id": "b1",
+        "online_at": NOW,
+        "is_online": True,
+        "title": "Morning",
+        "game": "Chess",
+    }
+    snapshot = [entry]
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        snapshot[0] = dict(entry, title="Evening", game="Go")
+        clock.value = NOW + 60
+        recorder.poll_once()
+
+        live = store.streamers(days=1, now=clock.value)[0]["live_stream"]
+        assert (live["title"], live["game"]) == ("Evening", "Go")
+    finally:
+        recorder._shutdown()
+
+
+def test_first_watch_is_linked_to_its_cached_live_broadcast(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    _write_json(
+        cache,
+        _cache_payload(
+            {"streamer_login": "bob", "broadcast_id": "b1", "started_at": NOW}
+        ),
+        NOW + 10,
+    )
+    clock = FakeClock(NOW + 20)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+    )
+    recorder._prepare()
+    try:
+        _write_json(
+            analytics / "now_watching.json",
+            [{"username": "bob", "reason": "points"}],
+            NOW + 25,
+        )
+        clock.value = NOW + 30
+        recorder._poll_now_watching()
+
+        watch = store.sessions(kind="watch", days=1, now=clock.value)["sessions"][0]
+        assert watch["broadcast_id"] == "b1"
+    finally:
+        recorder._shutdown()

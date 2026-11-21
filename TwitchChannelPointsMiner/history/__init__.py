@@ -173,16 +173,20 @@ def start_history(
 
 
 def stop_history():
-    global _recorder, _store
+    """Stop recording, keeping the stored History readable and deletable.
+
+    The analytics server can outlive the miner (the desktop app keeps its
+    window open), so the store stays available and ``recording`` reports
+    false.  The stopped recorder is kept too: deletes still go through it,
+    so they wait for a poll that is finishing and catch up on the JSON.
+    """
 
     with _lock:
         recorder = _recorder
-        _recorder = None
-        _store = None
     if recorder is None:
         return
     recorder.stop()
-    if recorder is not threading.current_thread():
+    if recorder.ident is not None and recorder is not threading.current_thread():
         recorder.join(timeout=10)
 
 
@@ -221,11 +225,24 @@ def delete_streamer_history(
 
         store = HistoryStore(database_path)
         store.initialize()
-    with _analytics_file_lock():
-        counts = None if store is None else store.delete_streamer(streamer)
-        if remove_source is not None:
-            remove_source()
-    return counts
+    if store is None:
+        with _analytics_file_lock():
+            if remove_source is not None:
+                remove_source()
+        return None
+    # No recorder owns this store.  A recorder that is never started still
+    # does the delete properly: it imports the JSON's pending changes first,
+    # so the kept balance is right for the next file.
+    from TwitchChannelPointsMiner.history.recorder import HistoryRecorder
+
+    standalone = HistoryRecorder(
+        store,
+        analytics_path=os.path.dirname(os.path.abspath(store.path)),
+        streak_cache_path=os.devnull,
+        username="",
+    )
+    standalone.load_state()
+    return standalone.delete_streamer(streamer, remove_source=remove_source)
 
 
 def is_recording():

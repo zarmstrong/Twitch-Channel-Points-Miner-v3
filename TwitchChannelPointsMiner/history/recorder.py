@@ -237,6 +237,7 @@ class HistoryRecorder(threading.Thread):
         self._cached_stream_sessions = []
         self._cache_startup_closed = set()
         self._online_live_keys = set()
+        self._online_details = {}
         self._drop_farmed = set()
         self._live_streamer_names = set()
         self._streamer_snapshot = None
@@ -330,6 +331,7 @@ class HistoryRecorder(threading.Thread):
                     )
                 self._active_watch.clear()
                 self._online_live_keys.clear()
+                self._online_details.clear()
                 self._cache_startup_closed.clear()
                 self._streak_cache_key = None
                 self._run_id = None
@@ -408,6 +410,14 @@ class HistoryRecorder(threading.Thread):
     def _source_lock(self, name):
         lock = self.source_locks.get(name)
         return nullcontext() if lock is None else lock
+
+    def load_state(self):
+        """Load the stored state a delete needs, without starting a run."""
+
+        with self._lock:
+            self._deleted_before = self.store.deletion_cutoffs()
+            self._persisted_drop_farmed = self.store.drop_farmed_streamers()
+            self._drop_farmed |= self._persisted_drop_farmed
 
     def _streamers_loaded(self):
         if self.streamers_ready is None:
@@ -719,6 +729,11 @@ class HistoryRecorder(threading.Thread):
                 # configured streamers, so they must not enter the history.
                 continue
             seen.add(streamer)
+            if streamer not in self._tracked_streamers:
+                # First watch: import its cached broadcasts before resuming
+                # one, so the watch below is linked to the live broadcast.
+                self._tracked_streamers.add(streamer)
+                self._import_cached_sessions(streamer, now)
             self._resume_cached_live_stream(streamer, now)
             game = entry.get("game") or None
             active = self._active_watch.get(streamer)
@@ -817,7 +832,17 @@ class HistoryRecorder(threading.Thread):
             broadcast_id = entry["broadcast_id"]
             key = (streamer, broadcast_id)
             current.add(key)
+            details = (entry["title"], entry["game"])
             if key in self._online_live_keys:
+                if self._online_details.get(key) != details:
+                    # Title or category changed during the broadcast.
+                    self.store.update_open_stream_details(
+                        streamer,
+                        timestamp=now,
+                        game=entry["game"],
+                        title=entry["title"],
+                    )
+                    self._online_details[key] = details
                 continue
             started_at = entry["started_at"]
             if previous.get(streamer) not in (None, broadcast_id):
@@ -843,12 +868,18 @@ class HistoryRecorder(threading.Thread):
             # must not close the cached session again.
             self._cache_startup_closed.discard(key)
             self._online_live_keys.add(key)
+            self._online_details[key] = details
         # A broadcast this process saw online that is no longer reported, for
         # example because the streamer was removed from the config, would
         # otherwise stay live: nothing else writes its end.
         for streamer, broadcast_id in self._online_live_keys - current:
             self.store.end_stream_session(streamer, broadcast_id, ended_at=now)
         self._online_live_keys &= current
+        self._online_details = {
+            key: value
+            for key, value in self._online_details.items()
+            if key in self._online_live_keys
+        }
 
     def _online_stream_entries(self, now):
         if not self._streamer_state_ready:
