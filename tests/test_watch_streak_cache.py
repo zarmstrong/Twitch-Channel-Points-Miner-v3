@@ -866,8 +866,35 @@ def test_reconcile_ignores_a_milestone_after_the_broadcast_changed(tmp_path):
 
     assert reconciled is False
     assert streamer.stream.watch_streak_missing is True
+    # Never tracked: no session is invented for it.
     assert cache.get("channel", "broadcast-1") is None
     assert cache.get("channel", "broadcast-2") is None
+
+
+def test_milestone_for_the_previous_broadcast_still_records_its_claim(tmp_path):
+    # The check confirms A just as the stream moves to B. A's claim is kept,
+    # so a short continuation inherits it; B stays pending.
+    streamer, cache = make_streak_streamer(tmp_path)
+    cache.ensure("channel", "broadcast-1")
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0),
+        expires_at=None,
+    )
+    twitch = twitch_with_streak_responses(live_stream, milestone)
+
+    def get_reward_list(channel_id):
+        streamer.stream.broadcast_id = "broadcast-2"
+        return SimpleNamespace(watch_streak_milestone=milestone)
+
+    twitch.gql.get_reward_list = get_reward_list
+
+    assert twitch.reconcile_watch_streak(streamer) is False
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert streamer.stream.watch_streak_missing is True
 
 
 def _twitch_moving_to_broadcast(monkeypatch, clock, broadcast_id, gap_seconds):
@@ -1345,18 +1372,52 @@ def test_a_slower_overlapping_check_does_not_reset_the_new_broadcast(
     assert streamer.stream.minute_watched == 2
 
 
-def test_streak_only_window_end_gets_one_final_check(tmp_path):
+def test_streak_only_window_end_gets_one_final_check(tmp_path, monkeypatch):
     # streak_only=5: the usual recheck waits for five watched minutes, which
     # is exactly when the window closes. The window's last minutes still get
-    # one milestone check, then no more.
+    # one milestone check; once Twitch has answered, no more.
     streamer, _ = make_streak_streamer(tmp_path)
     streamer.settings.streak_only = 5
     streamer.is_online = True
     streamer.stream.minute_watched = 5
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    live_stream = SimpleNamespace(
+        id="broadcast-1", created_at=datetime(2026, 10, 26, 17, 45, 7)
+    )
+    calls = []
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: calls.append("live")
+        or SimpleNamespace(stream=live_stream),
+        get_reward_list=lambda channel_id: SimpleNamespace(watch_streak_milestone=None),
+    )
+
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+    clock[0] += 10 * 60
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+
+    assert calls == ["live"]
+
+
+def test_failed_final_streak_only_check_is_retried(tmp_path, monkeypatch):
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.settings.streak_only = 5
+    streamer.is_online = True
+    streamer.stream.minute_watched = 5
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
     calls = []
 
     def get_stream_live_status(channel_id):
-        calls.append(channel_id)
+        calls.append("live")
+        if len(calls) == 1:
+            raise RetryError("WithIsStreamLiveQuery", [])
         return SimpleNamespace(stream=None)
 
     twitch = Twitch.__new__(Twitch)
@@ -1364,9 +1425,13 @@ def test_streak_only_window_end_gets_one_final_check(tmp_path):
     twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
 
     twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+    # Retried once the cooldown has passed, not every cycle.
+    clock[0] += 20
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+    clock[0] += 10 * 60
     twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
 
-    assert calls == ["channel-1"]
+    assert calls == ["live", "live"]
 
 
 def test_an_older_stream_response_does_not_replace_a_newer_one():
@@ -1376,10 +1441,20 @@ def test_an_older_stream_response_does_not_replace_a_newer_one():
 
     stream = Stream()
     kwargs = dict(title="title", game={}, tags=[], viewers_count=1)
-    assert stream.update("broadcast-2", seen_live_at=2_000_000_100, **kwargs)
-    assert stream.update("broadcast-1", seen_live_at=2_000_000_000, **kwargs) is False
+    older = stream.begin_refresh()
+    newer = stream.begin_refresh()
+    # The older request's reply is slow: minutes, not seconds.
+    assert stream.update(
+        "broadcast-2", seen_live_at=2_000_000_600, refresh_seq=newer, **kwargs
+    )
+    assert (
+        stream.update(
+            "broadcast-1", seen_live_at=2_000_000_000, refresh_seq=older, **kwargs
+        )
+        is False
+    )
 
-    assert stream.live_snapshot() == ("broadcast-2", 2_000_000_100)
+    assert stream.live_snapshot() == ("broadcast-2", 2_000_000_600)
 
 
 def test_stream_refresh_still_applies_after_the_clock_steps_back():
@@ -1392,3 +1467,40 @@ def test_stream_refresh_still_applies_after_the_clock_steps_back():
     # The wall clock was an hour fast and got corrected.
     assert stream.update("broadcast-1", seen_live_at=2_000_000_000, **kwargs)
     assert stream.live_snapshot() == ("broadcast-1", 2_000_000_000)
+
+
+def test_slow_refresh_reply_does_not_undo_a_newer_refresh(monkeypatch):
+    # The first refresh's reply is slow; a second refresh starts and applies
+    # B meanwhile. The first reply, still showing A, must not put A back.
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    streamer = make_streamer("channel")
+    streamer.settings.claim_drops = False
+    twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+    replies = []
+
+    def get_stream_info(self, target):
+        replies.append(1)
+        if len(replies) == 1:
+            clock[0] += 5 * 60
+            twitch.update_stream(target)
+            broadcast_id = "broadcast-1"
+        else:
+            broadcast_id = "broadcast-2"
+        return {
+            "stream": {"id": broadcast_id, "tags": [], "viewersCount": 1},
+            "broadcastSettings": {"title": "title", "game": {}},
+        }
+
+    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
+
+    twitch.update_stream(streamer)
+
+    assert streamer.stream.broadcast_id == "broadcast-2"

@@ -1799,10 +1799,13 @@ class Twitch(object):
         if streamer.stream.update_required() is True:
             # The response proves the stream was live at some point after the
             # request went out, so the request time is a safe "seen live".
+            begin_refresh = getattr(streamer.stream, "begin_refresh", None)
+            refresh_seq = begin_refresh() if callable(begin_refresh) else None
             requested_at = time.time()
             stream_info = self.get_stream_info(streamer)
             if stream_info is not None:
                 streamer.stream.update(
+                    refresh_seq=refresh_seq,
                     seen_live_at=requested_at,
                     broadcast_id=stream_info["stream"]["id"],
                     title=stream_info["broadcastSettings"]["title"],
@@ -2007,8 +2010,10 @@ class Twitch(object):
             return False
 
         stream.watch_streak_checked_at = time.time()
-        stream.watch_streak_checked_minutes = getattr(stream, "minute_watched", 0) or 0
         stream.watch_streak_check_due = False
+        # Recorded only once Twitch has answered, so a failed final check of a
+        # streak_only window is retried.
+        checked_minutes = getattr(stream, "minute_watched", 0) or 0
         # Other threads refresh the stream while the lookups run; everything
         # below is about this broadcast, so never read the live attribute.
         broadcast_id = stream.broadcast_id
@@ -2033,10 +2038,12 @@ class Twitch(object):
             if self._watch_streak_continues_claimed_stream(
                 streamer, broadcast_id, live_stream.created_at
             ):
+                stream.watch_streak_checked_minutes = checked_minutes
                 return True
             milestone = self.gql.get_reward_list(
                 streamer.channel_id
             ).watch_streak_milestone
+            stream.watch_streak_checked_minutes = checked_minutes
         except GQLError as error:
             logger.warning(
                 "[watch-streak] unable to check Twitch milestone for "
@@ -2071,15 +2078,22 @@ class Twitch(object):
             )
             return False
 
+        cache = getattr(streamer, "watch_streak_cache", None)
         if self._clear_pending_watch_streak(stream, broadcast_id) is not True:
+            # The milestone still confirms the checked broadcast, and a short
+            # continuation inherits its claim. Only for a session the cache
+            # already tracks: creating one now would close the new
+            # broadcast's session.
+            if cache is not None and cache.get(streamer.username, broadcast_id):
+                cache.mark_claimed(streamer.username, broadcast_id)
             logger.debug(
                 "[watch-streak] broadcast changed while checking "
                 f"streamer={streamer.username}; checked={broadcast_id}, "
                 f"now={stream.broadcast_id}"
             )
             return False
-        if getattr(streamer, "watch_streak_cache", None) is not None:
-            streamer.watch_streak_cache.mark_claimed(streamer.username, broadcast_id)
+        if cache is not None:
+            cache.mark_claimed(streamer.username, broadcast_id)
         logger.info(
             "[watch-streak] Twitch already confirmed streak for "
             f"streamer={streamer.username}; broadcast={broadcast_id}"
@@ -2186,6 +2200,7 @@ class Twitch(object):
                 )
                 continue
             check_due = getattr(stream, "watch_streak_check_due", False) is True
+            final_check = False
             if self._is_streak_only(streamer) is True:
                 window = self._streak_only_watch_window(streamer)
                 if minutes >= window:
@@ -2198,8 +2213,12 @@ class Twitch(object):
                     )
                     if checked_minutes >= window:
                         continue
-                    check_due = True
-            if not check_due and minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES:
+                    final_check = True
+            if (
+                not check_due
+                and not final_check
+                and minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES
+            ):
                 continue
             checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0
             if (

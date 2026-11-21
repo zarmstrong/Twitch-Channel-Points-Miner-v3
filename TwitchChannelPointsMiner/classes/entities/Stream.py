@@ -20,12 +20,6 @@ MINUTE_WATCHED_MAX_STEP_SECONDS = 60
 # the next broadcast.
 _WATCH_STREAK_LOCK = threading.Lock()
 
-# Overlapping stream-info requests start at most a request timeout apart. A
-# response requested up to this long before the one already applied is an
-# out-of-order reply and is dropped; anything older means the wall clock
-# stepped back, and the response is applied as usual.
-STALE_STREAM_RESPONSE_SECONDS = 120
-
 
 class Stream(object):
     __slots__ = [
@@ -51,6 +45,8 @@ class Stream(object):
         "live_seen_at",
         "__last_update",
         "__minute_watched_timestamp",
+        "__refresh_requested",
+        "__refresh_applied",
         "__watch_slot_timestamp",
     ]
 
@@ -73,6 +69,10 @@ class Stream(object):
         self.spade_url = None
         self.payload = None
         self.live_seen_at = 0
+        # Stream-info refreshes in request order, so a reply that arrives
+        # after a newer one was applied can be recognized.
+        self.__refresh_requested = 0
+        self.__refresh_applied = 0
         # The broadcast a missed-offline transition was last claimed for.
         self.watch_streak_transition_to = None
 
@@ -82,13 +82,28 @@ class Stream(object):
         json_event = json.dumps(self.payload, separators=(",", ":"))
         return {"data": (b64encode(json_event.encode("utf-8"))).decode("utf-8")}
 
-    def update(self, broadcast_id, title, game, tags, viewers_count, seen_live_at=None):
+    def begin_refresh(self):
+        """Number a stream-info request; pass it to update() with the reply."""
+        with _WATCH_STREAK_LOCK:
+            self.__refresh_requested += 1
+            return self.__refresh_requested
+
+    def update(
+        self,
+        broadcast_id,
+        title,
+        game,
+        tags,
+        viewers_count,
+        seen_live_at=None,
+        refresh_seq=None,
+    ):
         """Apply a stream-info response; return False for a stale one.
 
         Several threads refresh a stream and their responses can arrive out
-        of order. One requested before the response already applied is
-        older news (it could put the previous broadcast back after the next
-        one started), so it is dropped.
+        of order. A reply to a request made before the one already applied
+        (refresh_seq from begin_refresh()) is older news: it could put the
+        previous broadcast back after the next one started, so it is dropped.
         """
         now = time.time()
         # When Twitch last showed this stream live: the caller's request time
@@ -100,8 +115,10 @@ class Stream(object):
         # Applied as one step, so live_snapshot() never pairs one broadcast's
         # ID with another's time and two responses can't interleave.
         with _WATCH_STREAK_LOCK:
-            if 0 < self.live_seen_at - seen <= STALE_STREAM_RESPONSE_SECONDS:
-                return False
+            if refresh_seq is not None:
+                if refresh_seq < self.__refresh_applied:
+                    return False
+                self.__refresh_applied = refresh_seq
             if broadcast_id != self.broadcast_id:
                 # What Twitch advertised on the last broadcast proves nothing
                 # about this one.
