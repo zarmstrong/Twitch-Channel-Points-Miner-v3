@@ -1135,3 +1135,23 @@ def test_previous_broadcast_snapshot_is_one_consistent_read(tmp_path, monkeypatc
 
     assert cache.get("channel", "broadcast-1").ended_at == seen_live_at
     assert real_stream.watch_streak_missing is True
+
+
+def test_offline_snapshot_is_one_consistent_read(tmp_path, monkeypatch):
+    # A refresh on another thread applies B (an hour after A was last seen
+    # live) between set_offline()'s read of A's ID and of its last-seen time.
+    clock = [2_000_000_000.0]
+    streamer, cache = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    seen_live_at = streamer.stream.live_seen_at
+    real_stream = streamer.stream
+
+    def other_thread_refresh():
+        if real_stream.broadcast_id == "broadcast-1":
+            clock[0] += 60 * 60
+            _refresh_live_stream(streamer, "broadcast-2")
+
+    streamer.stream = _RefreshBetweenReads(real_stream, other_thread_refresh)
+
+    streamer.set_offline()
+
+    assert cache.get("channel", "broadcast-1").ended_at == seen_live_at

@@ -288,7 +288,17 @@ class Streamer(object):
         the stream already shows a newer one (an offline the miner missed).
         """
         if broadcast_id is None:
-            broadcast_id = self.stream.broadcast_id
+            live_snapshot = getattr(self.stream, "live_snapshot", None)
+            if callable(live_snapshot):
+                # One read of both: a refresh on another thread landing
+                # between two reads would pair this broadcast's ID with the
+                # next broadcast's last-seen time and record a late end.
+                broadcast_id, snapshot_seen_live_at = live_snapshot()
+                if seen_live_at is None:
+                    # 0 (never seen live) still means "unknown" downstream.
+                    seen_live_at = snapshot_seen_live_at or 0
+            else:
+                broadcast_id = self.stream.broadcast_id
         if self.is_online is True:
             self.offline_at = time.time()
             self.is_online = False
