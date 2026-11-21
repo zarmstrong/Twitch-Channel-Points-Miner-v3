@@ -244,6 +244,10 @@ WATCH_REWARD_FINISHED_REFRESH_SECONDS = 60 * 60
 # How long before a reward campaign ends a claim Twitch did not accept is
 # sent once more, when the next try would otherwise come after the end.
 WATCH_REWARD_LAST_CLAIM_SECONDS = 2 * 60
+# How often the claim thread, waiting to send a refused claim again, looks
+# whether the miner is stopping. Whatever stops it, the thread is gone
+# within this long, and the shutdown that joins it waits no longer.
+WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS = 1
 # How many channels one such read may ask, in all and per category, before
 # it gives up until the next evaluation.
 WATCH_REWARD_REFRESH_CHANNEL_LIMIT = 4
@@ -270,6 +274,16 @@ UNLINKED_CLAIM_RETRY_SECONDS = 6 * 60 * 60
 # the claim is forgotten: long enough to ride out short or empty responses,
 # short enough that an ended campaign leaves the daily report the same day.
 UNLINKED_CLAIM_MISSING_GRACE_SECONDS = 15 * 60
+# Default per-broadcast watch window for streak_only streamers: one broadcast
+# advances a multi-broadcast streak after only a few minutes, so watch that
+# window instead of camping the whole stream until the payout on the last one.
+STREAK_ONLY_WATCH_MINUTES = 10
+# The first broadcast of a streak advances the milestone without paying a
+# WATCH_STREAK bonus, so no points event clears the pending flag. Recheck
+# Twitch after this much locally watched time, then on this cooldown, so a
+# milestone that advances mid-broadcast does not stay pending all stream long.
+WATCH_STREAK_RECONCILE_AFTER_MINUTES = 5
+WATCH_STREAK_RECONCILE_INTERVAL_SECONDS = 3 * 60
 
 
 class Twitch(object):
@@ -374,6 +388,8 @@ class Twitch(object):
         "watch_reward_claim_thread",
         "watch_reward_claim_pass_lock",
         "watch_reward_claim_requested",
+        "watch_reward_claim_retries",
+        "watch_reward_claim_wake",
         "watch_reward_pending_starts",
         "watch_reward_opening_unevaluated",
         "watch_reward_finished_rows",
@@ -571,6 +587,11 @@ class Twitch(object):
         # claim lock, never while holding it or the watch-reward lock.
         self.watch_reward_claim_pass_lock = RLock()
         self.watch_reward_claim_requested = False
+        # When the claim thread sends a refused claim again, by campaign
+        # (see __retry_unaccepted_reward_claims), and what ends its wait
+        # for that moment early: a claim to send now, or a sooner moment.
+        self.watch_reward_claim_retries = {}
+        self.watch_reward_claim_wake = Event()
         self.watch_reward_pending_starts = set()
         self.watch_reward_finished_rows = frozenset()
         self.watch_reward_earned_rows = frozenset()
@@ -1916,6 +1937,7 @@ class Twitch(object):
                 if streamer.stream.update_required() is True:
                     return
                 streamer.set_online(self.__streamer_drops_description(streamer))
+                self.reconcile_watch_streak(streamer)
             except StreamerIsOfflineException:
                 streamer.set_offline()
         else:
@@ -1927,6 +1949,123 @@ class Twitch(object):
                     self.get_spade_url(streamer)
             except StreamerIsOfflineException:
                 streamer.set_offline()
+
+    def reconcile_watch_streak(self, streamer):
+        """Clear a pending streak Twitch already awarded for this broadcast.
+
+        The local cache only knows about streak awards the miner observed, so a
+        streak granted before the miner connected (or before the first visit to
+        a channel) still looks pending. The milestone's achievement timestamp
+        identifies that case without waiting another five minutes.
+        """
+        settings = getattr(streamer, "settings", None)
+        stream = getattr(streamer, "stream", None)
+        if (
+            getattr(settings, "watch_streak", False) is not True
+            or getattr(stream, "watch_streak_missing", False) is not True
+            or getattr(streamer, "channel_id", None) in (None, "")
+            or getattr(stream, "broadcast_id", None) in (None, "")
+        ):
+            return False
+
+        stream.watch_streak_checked_at = time.time()
+        logger.debug(
+            "[watch-streak] checking Twitch milestone for "
+            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+        )
+        try:
+            live_status = self.gql.get_stream_live_status(streamer.channel_id)
+            live_stream = live_status.stream
+            if (
+                live_stream is None
+                or live_stream.id != stream.broadcast_id
+                or live_stream.created_at is None
+            ):
+                logger.debug(
+                    "[watch-streak] broadcast changed while checking "
+                    f"streamer={streamer.username}; local={stream.broadcast_id}, "
+                    f"twitch={getattr(live_stream, 'id', None)}"
+                )
+                return False
+            milestone = self.gql.get_reward_list(
+                streamer.channel_id
+            ).watch_streak_milestone
+        except GQLError as error:
+            logger.warning(
+                "[watch-streak] unable to check Twitch milestone for "
+                f"streamer={streamer.username}: {error}"
+            )
+            return False
+
+        if milestone is None:
+            logger.info(
+                "[watch-streak] no Twitch milestone for "
+                f"streamer={streamer.username}; broadcast={stream.broadcast_id} "
+                "still pending"
+            )
+            return False
+
+        if milestone.achievement_timestamp < live_stream.created_at:
+            logger.info(
+                "[watch-streak] last milestone for "
+                f"streamer={streamer.username} "
+                f"({milestone.achievement_timestamp.isoformat()}Z) predates "
+                f"broadcast={stream.broadcast_id} "
+                f"({live_stream.created_at.isoformat()}Z); still pending"
+            )
+            return False
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if milestone.expires_at is not None and milestone.expires_at <= now:
+            logger.info(
+                "[watch-streak] milestone for "
+                f"streamer={streamer.username} expired at "
+                f"{milestone.expires_at.isoformat()}Z; still pending"
+            )
+            return False
+
+        stream.watch_streak_missing = False
+        if getattr(streamer, "watch_streak_cache", None) is not None:
+            streamer.watch_streak_cache.mark_claimed(
+                streamer.username, stream.broadcast_id
+            )
+        logger.info(
+            "[watch-streak] Twitch already confirmed streak for "
+            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+        )
+        return True
+
+    def _reconcile_due_watch_streaks(self, streamers, now=None):
+        """Recheck pending streaks that have had time to advance mid-broadcast.
+
+        The first broadcast of a streak moves Twitch's milestone forward
+        without paying a WATCH_STREAK bonus, so no points event clears the
+        pending flag. Waiting for that event would keep the channel prioritized
+        for the whole stream. Once enough time has been watched, poll Twitch's
+        milestone on a cooldown until the streak is confirmed or the broadcast
+        ends.
+        """
+        if getattr(self, "gql", None) is None:
+            return
+        current = time.time() if now is None else now
+        for streamer in streamers:
+            if getattr(streamer, "is_online", False) is not True:
+                continue
+            if self._has_pending_watch_streak(streamer) is not True:
+                continue
+            stream = getattr(streamer, "stream", None)
+            if (
+                getattr(stream, "minute_watched", 0)
+                < WATCH_STREAK_RECONCILE_AFTER_MINUTES
+            ):
+                continue
+            checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0
+            if (
+                checked_at
+                and current - checked_at < WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
+            ):
+                continue
+            self.reconcile_watch_streak(streamer)
 
     def __streamer_drops_description(self, streamer):
         if not is_drop_discovered(streamer):
@@ -2842,7 +2981,8 @@ class Twitch(object):
                 # campaign sync comes along to try it again: a reward waiting
                 # to be claimed gives no reason to load a streamer. Every
                 # stored campaign's, the least time left first, and each once
-                # an evaluation.
+                # an evaluation. What is refused here too is sent again by
+                # the claim thread.
                 self.__claim_waiting_watch_rewards_by_deadline(reward_claims_tried)
                 self.__retry_unaccepted_reward_claims(campaign_id)
                 views = reward_category_views(
@@ -3524,8 +3664,12 @@ class Twitch(object):
 
     def __note_watch_reward_starts(self, moments):
         """Remember when the windows of reward campaign repeats open, for
-        take_opened_watch_reward_start. Called with the watch-reward lock
-        held."""
+        take_opened_watch_reward_start: the moments that call for a category
+        refresh. Called with the watch-reward lock held.
+
+        A claim to send again is not among them. The claim thread keeps
+        those moments itself (see __retry_unaccepted_reward_claims): the
+        main loop can be busy for longer than such a reward has left."""
         pending = getattr(self, "watch_reward_pending_starts", None)
         if pending is None:
             pending = self.watch_reward_pending_starts = set()
@@ -3548,23 +3692,34 @@ class Twitch(object):
                 self.watch_reward_opening_unevaluated = True
         return bool(opened)
 
-    def claim_waiting_watch_rewards(self):
-        """Send the claims of the stored reward campaigns' waiting rewards,
-        on the claim thread. The main loop calls this when a moment noted
-        for it has come, which can be a claim to send again (see
-        __retry_unaccepted_reward_claims). The category refresh made then
-        sends it only for a campaign of a configured category, and none is
-        made without categories: a reward campaign is also earned on a
-        configured streamer's channel."""
-        for campaign in list(self.__watch_reward_campaigns().values()):
-            if self.__is_open_drop_campaign(campaign) is True:
-                self.__claim_watch_reward_drops_soon(campaign)
+    def start_unattended_watch_reward_claims(self):
+        """Start the claim thread if a refused claim is due to be sent
+        again and no thread is there to send it.
+
+        The claim thread waits for those moments itself, so there is
+        nothing to do here unless none could be started when the moment was
+        noted (see __start_reward_claim_thread). The main loop calls this
+        while it waits between passes: it is the one thread sure to be
+        there. It only starts the thread and sends nothing itself. Should
+        none be had this time either, the moment is put off as after a
+        claim that was refused."""
+        now = utc_now()
+        with _watch_reward_lock(self):
+            if (
+                getattr(self, "running", True) is not True
+                or getattr(self, "watch_reward_claim_thread", None) is not None
+                or not any(
+                    moment <= now for moment in self.__reward_claim_retries().values()
+                )
+            ):
+                return
+        self.__start_reward_claim_thread()
 
     def watch_reward_start_due(self) -> bool:
         """Whether take_opened_watch_reward_start has a moment to report.
-        The main loop asks while it waits between passes: a claim due again
-        in a campaign's last minute would be past the campaign's end after
-        the full wait."""
+        The main loop asks while it waits between passes: a window opened
+        in a campaign's last minutes may be closed again after the full
+        wait."""
         now = utc_now()
         with _watch_reward_lock(self):
             return any(
@@ -4979,9 +5134,24 @@ class Twitch(object):
                 return "followed channel"
             return "streamer"
 
+        # A pending watch streak is the reason that stream holds its slot, even
+        # when the user's fallback priority would otherwise farm it for points.
+        # List it only under "watch streak" so the points line does not imply a
+        # second, lower-priority reason for the same channel.
+        streak_indexes = {
+            index
+            for index in streamers_watching
+            if self._has_pending_watch_streak(streamers[index])
+        }
         points_streams = [
             f"{streamers[index].username} ({watch_reason(index)})"
             for index in streamers_watching
+            if index not in streak_indexes
+        ]
+        streak_streams = [
+            f"{streamers[index].username} ({watch_reason(index)})"
+            for index in streamers_watching
+            if index in streak_indexes
         ]
         drops_streams = []
 
@@ -5026,7 +5196,9 @@ class Twitch(object):
             "Watching for points: "
             f"{', '.join(points_streams) if points_streams else 'none'}; "
             "watching for drops: "
-            f"{', '.join(drops_streams) if drops_streams else 'none'}"
+            f"{', '.join(drops_streams) if drops_streams else 'none'}; "
+            "watching for watch streak: "
+            f"{', '.join(streak_streams) if streak_streams else 'none'}"
         )
         # Log at INFO only when the line changes, or as a reminder once
         # interval_minutes pass (0 disables the reminder). Repeats in between
@@ -6542,19 +6714,42 @@ class Twitch(object):
             return self.client_version
 
     @staticmethod
-    def _has_pending_watch_streak(streamer, now=None):
+    def _has_pending_watch_streak(streamer):
+        # The streamer state is authoritative here. A short restart that
+        # continues an already-claimed Twitch stream clears
+        # watch_streak_missing in Streamer.set_online(), while a continuation
+        # that was not claimed yet stays pending and can be watched at once.
         settings = getattr(streamer, "settings", None)
         stream = getattr(streamer, "stream", None)
-        if (
-            getattr(settings, "watch_streak", False) is not True
-            or getattr(stream, "watch_streak_missing", False) is not True
-            or getattr(stream, "minute_watched", 0) >= 11
-        ):
-            return False
+        return (
+            getattr(settings, "watch_streak", False) is True
+            and getattr(stream, "watch_streak_missing", False) is True
+        )
 
-        offline_at = getattr(streamer, "offline_at", 0)
-        timestamp = time.time() if now is None else now
-        return offline_at == 0 or ((timestamp - offline_at) // 60) > 30
+    @staticmethod
+    def _is_streak_only(streamer):
+        settings = getattr(streamer, "settings", None)
+        return getattr(settings, "streak_only", False) not in (None, False)
+
+    @staticmethod
+    def _streak_only_watch_window(streamer):
+        # streak_only accepts a Boolean (STREAK_ONLY_WATCH_MINUTES per
+        # broadcast) or an integer minute count; the dashboard writes the
+        # Boolean, config.py can set a custom window.
+        streak_only = getattr(getattr(streamer, "settings", None), "streak_only", False)
+        return streak_only if type(streak_only) is int else STREAK_ONLY_WATCH_MINUTES
+
+    def _streak_worth_watching(self, streamer):
+        # A streamer's pending streak is worth a slot for anyone, but a
+        # streak-only channel only needs the first minutes of a broadcast to
+        # advance a multi-broadcast streak: stop camping the whole stream
+        # until Twitch finally pays out on the last broadcast.
+        if not self._has_pending_watch_streak(streamer):
+            return False
+        if self._is_streak_only(streamer) is not True:
+            return True
+        minutes = getattr(getattr(streamer, "stream", None), "minute_watched", 0) or 0
+        return minutes < self._streak_only_watch_window(streamer)
 
     @staticmethod
     def _has_reached_points_limit(streamer):
@@ -6757,6 +6952,10 @@ class Twitch(object):
                 # (config reload / category reconciliation), and indexing into a
                 # list that shrinks mid-iteration raises IndexError.
                 streamers_snapshot = list(streamers)
+                # A pending streak can be confirmed mid-broadcast without a
+                # WATCH_STREAK event; clear it before choosing this cycle's
+                # slots so it stops bypassing points_limit and priority order.
+                self._reconcile_due_watch_streaks(streamers_snapshot, now)
                 drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
                     streamers_snapshot,
                     now,
@@ -6815,8 +7014,12 @@ class Twitch(object):
                         or (now - streamers_snapshot[i].online_at) > 30
                     )
                     and (
-                        self._has_reached_points_limit(streamers_snapshot[i]) is False
-                        or self._has_pending_watch_streak(streamers_snapshot[i], now)
+                        (
+                            self._has_reached_points_limit(streamers_snapshot[i])
+                            is False
+                            and not self._is_streak_only(streamers_snapshot[i])
+                        )
+                        or self._streak_worth_watching(streamers_snapshot[i])
                     )
                     and (
                         (
@@ -7110,7 +7313,7 @@ class Twitch(object):
                         elif prior == Priority.STREAK:
                             for index in available_source_indexes:
                                 if self._has_pending_watch_streak(
-                                    streamers_snapshot[index], now
+                                    streamers_snapshot[index]
                                 ):
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
@@ -7479,9 +7682,7 @@ class Twitch(object):
                     # streak (when the user prioritizes streaks) is only a
                     # few minutes of overlap - both may stay watched.
                     if streak_priority and index not in discovered_tiers:
-                        if self._has_pending_watch_streak(
-                            streamers_snapshot[index], now
-                        ):
+                        if self._has_pending_watch_streak(streamers_snapshot[index]):
                             return True
                     kept_key = _drop_campaign_key(kept_index)
                     return kept_key is not None and kept_key == _drop_campaign_key(
@@ -7722,7 +7923,8 @@ class Twitch(object):
                                     continue
                                 raise
                         logger.debug(
-                            f"Send minute watched request for {streamer} - Status code: {response.status_code}"
+                            f"Send minute watched request for {streamer} - "
+                            f"Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
                             streamer.stream.update_minute_watched()
@@ -10348,21 +10550,38 @@ class Twitch(object):
         lock and then for Twitch, which can take over a minute; done there,
         it would stop the watching meanwhile. One thread does the claiming:
         it goes through every stored campaign, and once more when a listing
-        asked for it while it was busy."""
+        asked for it while it was busy. It stays for as long as a claim
+        Twitch refused is to be sent again."""
         if not any(
             (drop.get("self") or {}).get("dropInstanceID")
             and (drop.get("self") or {}).get("isClaimed") is not True
             for drop in campaign.get("timeBasedDrops") or []
         ):
             return
+        if self.__start_reward_claim_thread(requested=True) is not True:
+            # The next channel listing tries again. Should the campaign end
+            # before one comes: noted as a claim to send again, which the
+            # main loop has a thread started for when it is due (see
+            # start_unattended_watch_reward_claims).
+            self.__note_reward_claim_retry(str(campaign.get("id")))
+
+    def __start_reward_claim_thread(self, requested=False) -> bool:
+        """Have a claim thread at work: started here, unless one is there
+        already or the miner is stopping. `requested` asks it for a pass
+        over the waiting rewards now; without it the thread only waits for
+        the claims to send again. False when no thread could be started."""
         with _watch_reward_lock(self):
             if getattr(self, "running", True) is not True:
                 # Shutting down: a thread started now would not be waited
                 # for. The first listing of the next run claims it.
-                return
-            self.watch_reward_claim_requested = True
+                return True
+            if requested is True:
+                self.watch_reward_claim_requested = True
             if getattr(self, "watch_reward_claim_thread", None) is not None:
-                return
+                # It may be waiting for a claim to send again: for a later
+                # moment than the one just noted, or with a pass asked for.
+                self.__reward_claim_wake().set()
+                return True
             thread = Thread(
                 target=self.__claim_stored_watch_reward_drops,
                 name="Reward campaign claim",
@@ -10383,25 +10602,113 @@ class Twitch(object):
                 "the next channel listing tries again",
                 level=logging.DEBUG,
             )
-            # Or the main loop, should the campaign end before one comes.
-            self.__retry_unaccepted_reward_claims(str(campaign.get("id")))
+            # A claim due again that the thread was to send is put off as
+            # after a refusal. Left due, the main loop would ask for a
+            # thread again at once, and again.
+            now = utc_now()
+            with _watch_reward_lock(self):
+                due = [
+                    campaign_id
+                    for campaign_id, moment in self.__reward_claim_retries().items()
+                    if moment <= now
+                ]
+            for campaign_id in due:
+                self.__note_reward_claim_retry(campaign_id)
+            return False
+        return True
 
     def __claim_stored_watch_reward_drops(self):
+        """The claim thread: a pass over the waiting rewards when one was
+        asked for, and another whenever a claim Twitch refused is due again
+        (see __retry_unaccepted_reward_claims). It waits for those moments
+        itself and ends once none is left."""
         try:
             while True:
                 with _watch_reward_lock(self):
+                    requested = (
+                        getattr(self, "watch_reward_claim_requested", False) is True
+                    )
                     self.watch_reward_claim_requested = False
-                self.__claim_waiting_watch_rewards_by_deadline()
+                    due = self.__take_due_reward_claim_retries()
+                if due and not requested:
+                    self.__log_drop_check(
+                        "sending the reward campaign claims Twitch did not "
+                        "accept again",
+                        level=logging.DEBUG,
+                    )
+                if requested or due:
+                    self.__claim_waiting_watch_rewards_by_deadline()
                 with _watch_reward_lock(self):
-                    if self.watch_reward_claim_requested is not True:
+                    if self.watch_reward_claim_requested is True:
+                        continue
+                    retries = self.__reward_claim_retries()
+                    if not retries or getattr(self, "running", True) is not True:
                         # Checked and cleared under the lock a listing asks
                         # under, so none is told a thread is at work that has
                         # already decided to stop.
                         self.watch_reward_claim_thread = None
                         return
+                    retry_at = min(retries.values())
+                    # Cleared under the lock it is set under: whoever asks
+                    # from here on ends the wait below.
+                    wake = self.__reward_claim_wake()
+                    wake.clear()
+                if self.__wait_for_reward_claim_retry(retry_at, wake) is True:
+                    continue
+                with _watch_reward_lock(self):
+                    if (
+                        self.watch_reward_claim_requested is True
+                        and getattr(self, "running", True) is True
+                    ):
+                        continue
+                    self.watch_reward_claim_thread = None
+                    return
         except BaseException:
             self.watch_reward_claim_thread = None
             raise
+
+    def __wait_for_reward_claim_retry(self, retry_at, wake) -> bool:
+        """Wait on the claim thread until `retry_at`, or until `wake` is
+        set: a pass was asked for, or a sooner moment noted. False once the
+        miner is stopping, which ends the thread.
+
+        The stop is looked for every WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS
+        rather than signalled: `running` is cleared in several places, by a
+        shutdown, a restart and a login that failed, and a thread that slept
+        on would hold the shutdown up until the moment it waits for."""
+        while getattr(self, "running", True) is True:
+            left = (retry_at - utc_now()).total_seconds()
+            if left <= 0 or wake.wait(min(left, WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS)):
+                return True
+        return False
+
+    def __reward_claim_retries(self) -> dict:
+        """When the claim of each stored campaign is sent again, by campaign
+        ID. Called with the watch-reward lock held."""
+        retries = getattr(self, "watch_reward_claim_retries", None)
+        if retries is None:
+            retries = self.watch_reward_claim_retries = {}
+        return retries
+
+    def __reward_claim_wake(self):
+        """What ends the claim thread's wait early. Called with the
+        watch-reward lock held."""
+        wake = getattr(self, "watch_reward_claim_wake", None)
+        if wake is None:
+            wake = self.watch_reward_claim_wake = Event()
+        return wake
+
+    def __take_due_reward_claim_retries(self) -> bool:
+        """Whether a claim is due to be sent again. Those due are taken off
+        the list: the pass made for them sends every waiting claim, and
+        notes the next moment for what is refused again. Called with the
+        watch-reward lock held."""
+        now = utc_now()
+        retries = self.__reward_claim_retries()
+        due = [campaign_id for campaign_id, moment in retries.items() if moment <= now]
+        for campaign_id in due:
+            del retries[campaign_id]
+        return bool(due)
 
     def __claim_waiting_watch_rewards_by_deadline(self, tried=None):
         """Send the claim of every reward of the open stored campaigns that
@@ -10558,9 +10865,9 @@ class Twitch(object):
         return [(campaign, drop_dict) for _, _, campaign, drop_dict in found]
 
     def __retry_unaccepted_reward_claims(self, campaign_id):
-        """Have the categories refreshed again when a progress read would
-        next be due, if a reward of the stored campaign is still waiting to
-        be claimed after its claim was sent.
+        """Have the claim thread send the claims again when a progress read
+        would next be due, if a reward of the stored campaign is still
+        waiting to be claimed after its claim was sent.
 
         A reward waiting to be claimed gives no reason to load a streamer,
         so with nothing else to watch no campaign sync runs to send the
@@ -10572,22 +10879,59 @@ class Twitch(object):
 
         The end is the campaign's, or the moment the repeat after a waiting
         one opens, if that comes first: a repeat may not be there to claim
-        once the next has started."""
-        stored = self.__watch_reward_campaigns().get(campaign_id)
-        if stored is None or self.__is_open_drop_campaign(stored) is not True:
-            return
-        now = utc_now()
-        waiting, ends_at = self.__waiting_reward_claims(stored, now)
-        if not waiting:
-            return
-        retry_at = now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
-        if ends_at is not None and retry_at >= ends_at:
-            retry_at = max(
-                ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
-                now + min(timedelta(seconds=60), (ends_at - now) / 2),
-            )
+        once the next has started.
+
+        The claim thread waits for the moment itself, and is started for
+        it when the claim was sent by another (the campaign sync, the
+        category evaluation). Left to the main loop, the claim would wait
+        for whatever that is busy with: a report written to a stalled disk,
+        or a category refresh, can take longer than the reward has left.
+
+        One wait the thread shares with every other: it takes the
+        watch-reward lock to read these moments, and a row of the report is
+        written under that lock (see __save_drop_snapshot_if_new). A write
+        stalled there holds the claim up for as long."""
+        if self.__note_reward_claim_retry(campaign_id) is True:
+            self.__start_reward_claim_thread()
+
+    def __note_reward_claim_retry(self, campaign_id) -> bool:
+        """Note when the stored campaign's claims are next sent again (see
+        __retry_unaccepted_reward_claims), counted from now. One moment a
+        campaign: the one from its last try. False, and nothing is left
+        noted for it, when no reward of it is waiting to be claimed.
+
+        The record is read under the lock the moment is noted under, which
+        is the one a listing stores a record under. Read before it, a
+        record with nothing to claim could be replaced by one with a reward
+        waiting, that reward's claim be refused and its moment noted, all
+        before the lock was had here: the moment would then be taken away
+        for a record that is no longer the stored one, and the thread
+        waiting for it would end with the claim still to send."""
         with _watch_reward_lock(self):
-            self.__note_watch_reward_starts({retry_at})
+            stored = self.__watch_reward_campaigns().get(campaign_id)
+            retry_at = None
+            if stored is not None and self.__is_open_drop_campaign(stored) is True:
+                now = utc_now()
+                waiting, ends_at = self.__waiting_reward_claims(stored, now)
+                if waiting:
+                    retry_at = now + timedelta(
+                        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+                    )
+                    if ends_at is not None and retry_at >= ends_at:
+                        retry_at = max(
+                            ends_at
+                            - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
+                            now + min(timedelta(seconds=60), (ends_at - now) / 2),
+                        )
+            retries = self.__reward_claim_retries()
+            if retry_at is not None:
+                retries[campaign_id] = retry_at
+                return True
+            if retries.pop(campaign_id, None) is not None:
+                # A thread waiting for this moment alone has nothing left
+                # to wait for.
+                self.__reward_claim_wake().set()
+            return False
 
     def __category_has_watch_reward(self, twitch_campaigns) -> bool:
         """Whether one of the campaigns a category is searched for is a
@@ -11219,6 +11563,10 @@ class Twitch(object):
         for index in streamers_watching:
             streamer = streamers_snapshot[index]
             source = streamer_source(index)
+            # A pending watch streak outranks the points fallback, so report
+            # the streak rather than implying the channel is watched only to
+            # accrue channel points. Drops and badge campaigns keep their own
+            # label because those streams may earn a reward as well.
             if source == StreamerSource.BADGES:
                 reason = "badge"
             elif source in (
@@ -11226,6 +11574,8 @@ class Twitch(object):
                 StreamerSource.WILDCARD_CATEGORIES,
             ):
                 reason = "drops"
+            elif self._has_pending_watch_streak(streamer):
+                reason = "streak"
             else:
                 reason = "points"
 
