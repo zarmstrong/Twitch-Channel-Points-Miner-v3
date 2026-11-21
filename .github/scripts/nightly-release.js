@@ -18,6 +18,9 @@ const NIGHTLY_ASSET = 'TwitchChannelPointsMiner-Portable-nightly.zip';
 const PUBLISHING_BLOCK =
   /<!-- nightly-publishing:start ([0-9a-f]{40}) (\d+) -->[\s\S]*?<!-- nightly-publishing:end -->\n*/;
 
+// The last line of finished release notes: the commit and the run they describe.
+const PUBLISHED_MARK = /<!-- nightly-published: ([0-9a-f]{40}) (\d+) -->/;
+
 // The commit a tag points to, or null when the tag doesn't exist.
 async function tagCommit(github, owner, repo, tag) {
   try {
@@ -67,6 +70,13 @@ function publishingBuild(release) {
   return match ? { sha: match[1], run: match[2] } : null;
 }
 
+// The build the finished nightly release was made from, as its commit and
+// the id of the workflow run that published it, or null.
+function publishedBuild(release) {
+  const match = PUBLISHED_MARK.exec(release?.body || '');
+  return match ? { sha: match[1], run: match[2] } : null;
+}
+
 // The commit a run has started publishing and not finished, or null.
 function publishingCommit(release) {
   return publishingBuild(release)?.sha || null;
@@ -79,13 +89,15 @@ function isPublishing(release, sha, run) {
 }
 
 // Where nightly publishing stands: the commit the tag is on, the commit a
-// run started publishing and didn't finish, and whether the download exists.
+// run started publishing and didn't finish, the builds the release names
+// (published and being published), and whether the download exists.
 async function nightlyState(github, owner, repo) {
   const release = await nightlyRelease(github, owner, repo);
   return {
     release,
     tag: await tagCommit(github, owner, repo, NIGHTLY_TAG),
     publishing: publishingCommit(release),
+    builds: [publishedBuild(release), publishingBuild(release)].filter(Boolean),
     hasDownload: Boolean(release) && (release.assets || []).some(
       (asset) => asset.name === NIGHTLY_ASSET && asset.state === 'uploaded',
     ),
@@ -97,9 +109,10 @@ function isComplete(state, sha) {
   return state.tag === sha && state.hasDownload && !state.publishing;
 }
 
-// Why `sha` must not be published now, or null when it may be. A run can be
-// re-run long after it was started, with the commit it was started for.
-async function outOfDateReason(github, owner, repo, state, sha) {
+// Why run `run` must not publish `sha` now, or null when it may. A run can
+// be re-run long after it was started, in whole or only its failed jobs,
+// and it keeps the commit and the build it was started with.
+async function outOfDateReason(github, owner, repo, state, sha, run) {
   // After history was rewritten, "newer" can't be told from the commits.
   if (!(await contains(github, owner, repo, PUBLISH_BRANCH, sha))) {
     return `${sha} is not on ${PUBLISH_BRANCH} any more`;
@@ -108,6 +121,13 @@ async function outOfDateReason(github, owner, repo, state, sha) {
   for (const other of [state.tag, state.publishing]) {
     if (await isOlderThan(github, owner, repo, sha, other)) {
       return `a newer nightly build (${other}) is published or being published`;
+    }
+  }
+  // Two runs can build the same commit, into builds with different dates.
+  // Run ids only grow, so the later run's build is the newer one.
+  for (const build of state.builds) {
+    if (build.sha === sha && BigInt(build.run) > BigInt(run)) {
+      return `run ${build.run}, started later, has published or is publishing ${sha}`;
     }
   }
   return null;
@@ -129,7 +149,7 @@ function publishingBlock(sha, run) {
 async function beginPublishing({ github, context, core, sha }) {
   const { owner, repo } = context.repo;
   const state = await nightlyState(github, owner, repo);
-  const outOfDate = await outOfDateReason(github, owner, repo, state, sha);
+  const outOfDate = await outOfDateReason(github, owner, repo, state, sha, context.runId);
   if (outOfDate) {
     core.setFailed(`This run is out of date and publishes nothing: ${outOfDate}.`);
     return false;
@@ -157,9 +177,9 @@ async function beginPublishing({ github, context, core, sha }) {
 // earlier run re-runs neither. Only the run recorded in the release may go on.
 async function assertPublishing({ github, context, core, sha }) {
   const { owner, repo } = context.repo;
-  const release = await nightlyRelease(github, owner, repo);
-  if (!isPublishing(release, sha, context.runId)) {
-    const build = publishingBuild(release);
+  const state = await nightlyState(github, owner, repo);
+  if (!isPublishing(state.release, sha, context.runId)) {
+    const build = publishingBuild(state.release);
     core.setFailed(
       build
         ? `Run ${build.run} is publishing ${build.sha} as the nightly build; this run is out of date.`
@@ -167,10 +187,16 @@ async function assertPublishing({ github, context, core, sha }) {
     );
     return false;
   }
+  // The commit can have gone out of date since this run recorded it.
+  const outOfDate = await outOfDateReason(github, owner, repo, state, sha, context.runId);
+  if (outOfDate) {
+    core.setFailed(`This run is out of date and publishes nothing: ${outOfDate}.`);
+    return false;
+  }
   return true;
 }
 
-function releaseNotes({ repoUrl, sha, version, date, releaseTag, image }) {
+function releaseNotes({ repoUrl, sha, run, version, date, releaseTag, image }) {
   const built = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
   const lines = [
     `An automatic build of the newest code on \`master\`. It passed the automated tests, but nobody has tried it against Twitch. Expect bugs, and use the [latest release](${repoUrl}/releases/latest) unless you want to test a fix early.`,
@@ -194,6 +220,8 @@ function releaseNotes({ repoUrl, sha, version, date, releaseTag, image }) {
     `docker pull ${image}:nightly`,
     '```',
     '',
+    `<!-- nightly-published: ${sha} ${run} -->`,
+    '',
   );
   return lines.join('\n');
 }
@@ -206,11 +234,8 @@ async function finishPublishing({
   github, context, core, sha, version, date, releaseTag, image,
 }) {
   const { owner, repo } = context.repo;
+  if (!(await assertPublishing({ github, context, core, sha }))) return false;
   const release = await nightlyRelease(github, owner, repo);
-  if (!isPublishing(release, sha, context.runId)) {
-    core.setFailed(`The nightly release no longer records this run as publishing ${sha}.`);
-    return false;
-  }
   if (!(release.assets || []).some((asset) => asset.name === NIGHTLY_ASSET && asset.state === 'uploaded')) {
     core.setFailed(`The nightly release has no ${NIGHTLY_ASSET}; the upload did not finish.`);
     return false;
@@ -228,7 +253,7 @@ async function finishPublishing({
     repo,
     release_id: release.id,
     name: `Nightly build ${version}`,
-    body: releaseNotes({ repoUrl, sha, version, date, releaseTag, image }),
+    body: releaseNotes({ repoUrl, sha, run: context.runId, version, date, releaseTag, image }),
     prerelease: true,
     make_latest: 'false',
   });

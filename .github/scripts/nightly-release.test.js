@@ -194,6 +194,51 @@ test('a re-run of an older run cannot publish over a newer build that failed par
   assert.equal((await run(assertPublishing, repository, C3)).ok, true);
 });
 
+test('a failed job re-run after its commit left master publishes nothing', async () => {
+  // Run 100 recorded C3 and its Docker job failed. Master's history was
+  // then rewritten without C3, and the failed jobs were re-run.
+  const repository = fakeRepository();
+  await run(beginPublishing, repository, C3);
+  HISTORY.pop();
+  try {
+    const rerun = await run(assertPublishing, repository, C3);
+    assert.equal(rerun.ok, false);
+    assert.match(rerun.failures[0], /3{40} is not on master any more/);
+    upload(repository);
+    assert.equal((await run(finishPublishing, repository, C3, DETAILS)).ok, false);
+    assert.equal(publishingCommit(repository.release), C3);
+  } finally {
+    HISTORY.push(C3);
+  }
+});
+
+test('an older run cannot start publishing a commit a later run already published', async () => {
+  // Run 100's first step failed before it recorded anything. Run 200 then
+  // published the same commit, under the next day's version.
+  const repository = fakeRepository();
+  await publish(repository, C2, 200);
+  const published = repository.release.body;
+
+  // "Re-run failed jobs" on run 100 runs that first step again.
+  const rerun = await run(beginPublishing, repository, C2, { runId: 100 });
+  assert.equal(rerun.ok, false);
+  assert.match(rerun.failures[0], /run 200, started later, has published or is publishing 2{40}/);
+  assert.equal(repository.release.body, published);
+  assert.equal(isComplete(await state(repository), C2), true);
+
+  // A later run may build the same commit again, as a forced rebuild does.
+  assert.equal((await run(beginPublishing, repository, C2, { runId: 300 })).ok, true);
+});
+
+test('an older run cannot take over a commit a later run is publishing', async () => {
+  const repository = fakeRepository();
+  await run(beginPublishing, repository, C2, { runId: 200 });
+  const rerun = await run(beginPublishing, repository, C2, { runId: 100 });
+  assert.equal(rerun.ok, false);
+  assert.match(rerun.failures[0], /run 200, started later/);
+  assert.equal((await run(assertPublishing, repository, C2, { runId: 200 })).ok, true);
+});
+
 test('a re-run for a commit that left master publishes nothing', async () => {
   // Run A was started for X; master's history was then rewritten and run B
   // published C2 from the new history.
@@ -294,7 +339,8 @@ test('API failures are not mistaken for a missing tag or release', async () => {
 });
 
 test('release notes link the commit, the changes and the downloads', () => {
-  const notes = releaseNotes({ repoUrl: 'https://github.com/o/r', sha: C2, ...DETAILS });
+  const notes = releaseNotes({ repoUrl: 'https://github.com/o/r', sha: C2, run: 100, ...DETAILS });
+  assert.ok(notes.trimEnd().endsWith(`<!-- nightly-published: ${C2} 100 -->`));
   assert.match(notes, /Version: `3\.22\.0\+nightly\.20261119\.2222222`/);
   assert.match(notes, /\[`2222222`\]\(https:\/\/github\.com\/o\/r\/commit\/2{40}\)/);
   assert.match(notes, /Built: 2026-11-19 \(UTC\)/);

@@ -68,7 +68,7 @@ async function plan({ eventName = 'schedule', ref = 'refs/heads/master', github,
   const messages = [];
   const result = await planNightly({
     github: github || fakeGithub(),
-    context: { repo: { owner: 'o', repo: 'r' }, eventName, ref },
+    context: { repo: { owner: 'o', repo: 'r' }, eventName, ref, runId: 300 },
     core: {
       setOutput: (name, value) => { outputs[name] = value; },
       notice: (message) => messages.push(['notice', message]),
@@ -149,6 +149,17 @@ test('a commit that is no longer on master is never published', async () => {
   const { outputs, messages } = await plan({ force: true, github: fakeGithub({ ahead: [] }) });
   assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);
   assert.match(messages.at(-1)[1], /a{40} is not on master any more/);
+});
+
+test('a forced run does not rebuild a commit a later run already published', async () => {
+  // A re-run of an earlier forced run keeps its inputs and its run id.
+  const body = `Notes.\n<!-- nightly-published: ${SHA} 400 -->\n`;
+  const github = fakeGithub({ tags: { '3.22.0': OLD, nightly: SHA }, nightlyBody: body });
+  const { outputs, messages } = await plan({
+    eventName: 'workflow_dispatch', publishRequested: true, force: true, github,
+  });
+  assert.deepEqual([outputs.build, outputs.publish], ['false', 'false']);
+  assert.match(messages.at(-1)[1], /run 400, started later, has published or is publishing a{40}/);
 });
 
 test('a newer build that another run started publishing is not overtaken', async () => {

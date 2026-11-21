@@ -50,7 +50,7 @@ function publishDecision({ eventName, ref, publishRequested, hasDockerCredential
 }
 
 // Why a run that would publish `sha` must not, or null when it should.
-async function skipReason({ github, owner, repo, sha, force, releaseTag }) {
+async function skipReason({ github, owner, repo, sha, run, force, releaseTag }) {
   const tests = await testsOutcome(github, owner, repo, sha);
   if (tests !== 'success') {
     return { failedTests: true, reason: `the Tests run for ${sha} is ${tests}, not success` };
@@ -60,7 +60,7 @@ async function skipReason({ github, owner, repo, sha, force, releaseTag }) {
     return { reason: `the last nightly build was already made from ${sha}` };
   }
   // A re-run of an earlier night's run must not move nightly backwards.
-  const outOfDate = await outOfDateReason(github, owner, repo, state, sha);
+  const outOfDate = await outOfDateReason(github, owner, repo, state, sha, run);
   if (outOfDate) return { reason: outOfDate };
   // A run that started publishing and failed is finished first, whatever
   // the commit: its note would otherwise stay on the release.
@@ -93,7 +93,9 @@ async function planNightly({
       ? `Dry run: building without publishing, because ${dryRunReason}.`
       : `Nothing to do: ${dryRunReason}.`;
   } else {
-    const skip = await skipReason({ github, owner, repo, sha, force, releaseTag });
+    const skip = await skipReason({
+      github, owner, repo, sha, run: context.runId, force, releaseTag,
+    });
     build = !skip;
     reason = skip ? `Skipped: ${skip.reason}.` : `Building and publishing ${sha}.`;
     if (skip?.failedTests) core.warning(reason);
