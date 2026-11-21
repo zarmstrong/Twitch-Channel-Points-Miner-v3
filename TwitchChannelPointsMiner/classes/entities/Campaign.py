@@ -331,14 +331,19 @@ class Campaign(object):
             filter(lambda x: x.dt_match is True and x.is_claimed is False, self.drops)
         )
 
-    def has_watchable_drops(self):
-        return any(
-            drop.dt_match is True
+    def watchable_drops(self):
+        """The drops watching can add minutes to now."""
+        return [
+            drop
+            for drop in self.drops
+            if drop.dt_match is True
             and drop.is_claimed is False
             and drop.current_minutes_watched < drop.minutes_required
             and drop.needs_subscription() is False
-            for drop in self.drops
-        )
+        ]
+
+    def has_watchable_drops(self):
+        return bool(self.watchable_drops())
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
@@ -355,6 +360,12 @@ class Campaign(object):
             for i in range(len(self.drops)):
                 current_id = self.drops[i].id
                 if drop["id"] == current_id:
+                    if REWARD_GROUP_KEY in drop:
+                        # A repeat whose window started over is listed
+                        # under the same ID with the new window's dates.
+                        # Left with the old ones, its progress would be
+                        # reported against a deadline already past.
+                        self.drops[i].set_window(drop["startAt"], drop["endAt"])
                     self.drops[i].update(drop["self"])
                     # If after update we all conditions are meet we can claim the drop
                     if self.drops[i].is_claimable is True:

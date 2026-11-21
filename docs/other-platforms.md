@@ -38,7 +38,6 @@ nano config/config.py
 **6. Install packages**
 ```
 pip install -r requirements.txt
-pip install Twitch-Channel-Points-Miner-v2
 ```
 
 **7. Run the miner!**
