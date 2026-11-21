@@ -280,7 +280,6 @@ test('previous release selection skips prereleases', async () => {
     rest: { repos: { listReleases() {} } },
   };
   assert.equal((await previousPublishedRelease(github, 'o', 'r', '2')).tag_name, '1');
-  // A prerelease being published still follows the newest full release.
   assert.equal((await previousPublishedRelease(github, 'o', 'r', '3-rc')).tag_name, '2');
 });
 
@@ -850,21 +849,49 @@ test('a release closes the fixes since the last full release, not since a prerel
 test('a prerelease that contains the fix does not stop it being marked', async () => {
   const mutations = [];
   const compared = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-02-10T00:00:00Z', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+    releases: [NIGHTLY, ...RELEASES],
+  });
+  // The nightly build has the fix; release 2 doesn't.
+  github.rest.repos.compareCommitsWithBasehead = async ({ basehead }) => {
+    compared.push(basehead);
+    return { data: { status: basehead === 'abc...nightly' ? 'ahead' : 'behind' } };
+  };
+  github.rest.repos.getCommit = async ({ ref }) => (
+    ref === 'nightly'
+      ? { data: { commit: { committer: { date: '2026-02-19T00:00:00Z' } } } }
+      : getTagCommit({ ref })
+  );
   await markIssuesAwaitingRelease({
-    github: markingGithub({
-      pulls: [{ number: 9, merged_at: '2026-02-10T00:00:00Z', merge_commit_sha: 'abc', labels: [] }],
-      mutations,
-      releases: [NIGHTLY, ...RELEASES],
-      // Only the nightly build has the fix; no full release does.
-      compare: async ({ basehead }) => {
-        compared.push(basehead);
-        return { data: { status: 'ahead' } };
-      },
-    }),
+    github,
     context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc' } },
     core: { info() {} },
   });
-  assert.deepEqual(compared, []);
+  assert.deepEqual(compared, ['abc...2']);
   assert.deepEqual(mutations.map(([kind]) => kind), ['comment']);
   assert.match(mutations[0][1].body, /The fix in #9 was merged/);
+});
+
+test('publishing a prerelease closes nothing', async () => {
+  const info = [];
+  const calls = [];
+  const github = closingGithub({
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [{ name: 'awaiting-release' }] } },
+    comments: [marker('2026-02-10T00:00:00Z')],
+    prereleases: [
+      { tag_name: '3-rc', draft: false, prerelease: true, published_at: '2026-02-25T00:00:00Z' },
+    ],
+    calls,
+  });
+  github.graphql = async () => { throw new Error('A prerelease must not look up issues'); };
+  await closeReleasedIssues({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' } },
+    core: { info: (message) => info.push(message) },
+    tag: '3-rc',
+  });
+  assert.deepEqual(calls, []);
+  assert.match(info[0], /3-rc is a prerelease/);
 });
