@@ -179,6 +179,17 @@ def _watch_reward_lock(twitch):
     return getattr(twitch, "watch_reward_lock", None) or _WATCH_REWARD_FALLBACK_LOCK
 
 
+_DROP_REPORT_ORDER_FALLBACK_LOCK = Lock()
+
+
+def _drop_report_order_lock(twitch):
+    # Same defensive getattr as above.
+    return (
+        getattr(twitch, "drop_report_order_lock", None)
+        or _DROP_REPORT_ORDER_FALLBACK_LOCK
+    )
+
+
 def _channel_progress_query_lock(twitch):
     return (
         getattr(twitch, "channel_progress_query_lock", None)
@@ -384,6 +395,7 @@ class Twitch(object):
         "campaign_game_slugs",
         "watch_reward_campaigns",
         "watch_reward_lock",
+        "drop_report_order_lock",
         "watch_reward_lookup_failures",
         "watch_reward_claim_thread",
         "watch_reward_claim_pass_lock",
@@ -573,8 +585,16 @@ class Twitch(object):
         # last channel listing that included them (see RewardCampaign.py).
         self.watch_reward_campaigns = {}
         # Held while a record is compared with the stored one and replaced:
-        # the discovery and sync threads both store them.
+        # the discovery and sync threads both store them. Only ever for as
+        # long as that takes, never across a request or a write to disk: the
+        # claim thread and the main loop read what is due under it.
         self.watch_reward_lock = Lock()
+        # Keeps the rows of the Drops report in the order they were decided
+        # in (see __save_drop_snapshot_if_new). Held across a write to disk,
+        # which can stall, so nothing that only reads the stored records
+        # takes it. Taken after the claim locks and before the watch-reward
+        # lock, never while holding that one or the analytics mutex.
+        self.drop_report_order_lock = Lock()
         # The drop each accepted claim ID was last accepted for. A repeating
         # reward group is claimed under one ID once per repeat.
         self.accepted_claim_drop_ids = {}
@@ -977,23 +997,35 @@ class Twitch(object):
         """Call `save` to write this progress snapshot to the report if it
         is to be saved, recording it as saved. Returns whether it was.
 
-        Decided, recorded and written in one step, under the lock a reward
-        campaign's record is stored under: the sync and the minute watcher
-        work on copies, and a listing that finds a window started over
+        Decided, recorded and written in one step, under the report-order
+        lock: the sync and the minute watcher work on copies of a reward
+        campaign's record, and a listing that finds a window started over
         forgets what was saved for the drop. A copy from before that
         listing, recorded or written after it, would put the old window's
-        minutes back in the report over the new one's."""
-        with _watch_reward_lock(self):
-            if self.__reward_snapshot_is_stale(
-                str(tracking_key).split("|", 1)[0], minutes_watched, status
-            ):
-                return False
-            if (
-                self.__should_save_drop_snapshot(tracking_key, minutes_watched, status)
-                is False
-            ):
-                return False
-            self.__mark_drop_snapshot_saved(tracking_key, minutes_watched, status)
+        minutes back in the report over the new one's. So a listing takes
+        this lock too, to store its record (see
+        __remember_watch_reward_campaign).
+
+        The watch-reward lock, which the stored records are read under, is
+        held for the decision alone and not for the write: a write can
+        stall (a slow disk, a network share), and the claim thread and the
+        main loop take that lock to see what is due. A claim to send again
+        in a campaign's last minutes would wait behind the write, past the
+        campaign's end."""
+        with _drop_report_order_lock(self):
+            with _watch_reward_lock(self):
+                if self.__reward_snapshot_is_stale(
+                    str(tracking_key).split("|", 1)[0], minutes_watched, status
+                ):
+                    return False
+                if (
+                    self.__should_save_drop_snapshot(
+                        tracking_key, minutes_watched, status
+                    )
+                    is False
+                ):
+                    return False
+                self.__mark_drop_snapshot_saved(tracking_key, minutes_watched, status)
             save()
             return True
 
@@ -1003,15 +1035,18 @@ class Twitch(object):
         before (-1 for none), or None when there was nothing new to save.
         See __save_drop_snapshot_if_new."""
         progress_key = drop.id
-        with _watch_reward_lock(self):
-            last_saved_minutes = self.drop_progress_last_saved.get(progress_key, -1)
-            if drop.current_minutes_watched <= last_saved_minutes:
-                return None
-            if self.__reward_snapshot_is_stale(
-                str(progress_key), drop.current_minutes_watched
-            ):
-                return None
-            self.drop_progress_last_saved[progress_key] = drop.current_minutes_watched
+        with _drop_report_order_lock(self):
+            with _watch_reward_lock(self):
+                last_saved_minutes = self.drop_progress_last_saved.get(progress_key, -1)
+                if drop.current_minutes_watched <= last_saved_minutes:
+                    return None
+                if self.__reward_snapshot_is_stale(
+                    str(progress_key), drop.current_minutes_watched
+                ):
+                    return None
+                self.drop_progress_last_saved[progress_key] = (
+                    drop.current_minutes_watched
+                )
             save()
             return last_saved_minutes
 
@@ -9544,7 +9579,11 @@ class Twitch(object):
         )
         # Compared and stored under one lock: the reward-group lookup runs on
         # the discovery thread while a channel listing can arrive on another.
-        with _watch_reward_lock(self):
+        # Under the report-order lock too: this forgets what was saved for a
+        # drop that started over and notes the rewards seen earned, and a
+        # row decided on the record before must be written before either
+        # (see __save_drop_snapshot_if_new).
+        with _drop_report_order_lock(self), _watch_reward_lock(self):
             previous = known.get(campaign_id)
             if (
                 previous is not None
@@ -9810,9 +9849,10 @@ class Twitch(object):
                 f"unable to mark earned reward rows in the report: {error}",
                 level=logging.DEBUG,
             )
-        # Outside the report's lock: a row is saved under the watch-reward
-        # lock, which is taken before that one. The rows an earlier record
-        # could not write come first: its repeat is in no later record.
+        # Outside the report's lock: a row is saved under the report-order
+        # and watch-reward locks, which are taken before that one. The rows
+        # an earlier record could not write come first: its repeat is in no
+        # later record.
         with _watch_reward_lock(self):
             to_write = dict(getattr(self, "watch_reward_unwritten_rows", None) or {})
         for drop_id, drop in counted.items():
@@ -9829,7 +9869,7 @@ class Twitch(object):
                     f"{error}; trying again with the next listing",
                     level=logging.DEBUG,
                 )
-            with _watch_reward_lock(self):
+            with _drop_report_order_lock(self), _watch_reward_lock(self):
                 unwritten = dict(
                     getattr(self, "watch_reward_unwritten_rows", None) or {}
                 )
@@ -10131,7 +10171,7 @@ class Twitch(object):
     def __forget_saved_drop_snapshots(self, drop_ids):
         """Forget what was last saved to the report for these drops, so
         that their next snapshot is saved whatever its minutes. Called with
-        the watch-reward lock held."""
+        the report-order and watch-reward locks held."""
         if not drop_ids:
             return
         # Keys are the drop ID alone (the watcher's) or start with it and a
@@ -11919,7 +11959,12 @@ class Twitch(object):
             # sends the claim again in the meantime; a listing that still
             # reports it claimable brings the ID back.
             claimed_in = []
-            with _watch_reward_lock(self):
+            # Under the report-order lock as well: this can note rewards as
+            # earned, like a listing (see __remember_watch_reward_campaign).
+            # The claim lock is held here, as it is for the rows the caller
+            # writes next: a write stalled on disk holds up the claim after
+            # this one, though no longer one that is only due.
+            with _drop_report_order_lock(self), _watch_reward_lock(self):
                 for campaign in list(
                     (getattr(self, "watch_reward_campaigns", None) or {}).values()
                 ):
@@ -11929,7 +11974,7 @@ class Twitch(object):
                         stored_drop["self"]["dropInstanceID"] = None
                         claimed_in.append(campaign)
                         self.__note_accepted_reward_claim(campaign, stored_drop)
-            # Outside the watch-reward lock, which a row is saved under.
+            # Outside those locks, which a row is saved under.
             for campaign in claimed_in:
                 self.__finish_earned_reward_rows(campaign, {})
         self.__forget_inventory_minutes(drop)
