@@ -66,6 +66,7 @@ def test_streamer_settings_default_preserves_values_and_fills_missing_ones():
     assert settings.community_goals is True
     assert settings.favorite is False
     assert settings.points_limit is None
+    assert settings.streak_only is False
     assert isinstance(settings.bet, BetSettings)
     assert settings.chat is ChatPresence.ONLINE
 

@@ -32,7 +32,9 @@ from .Pagination import Edge, PageInfo, Paginated
 from .PlaybackAccessToken import Authorization, PlaybackAccessTokenResponse
 from .Predictions import Error as PredictionError
 from .Predictions import MakePredictionResponse
+from .RewardList import RewardListResponse, WatchStreakMilestone
 from .Stream import Stream, Tag
+from .StreamLiveStatus import LiveStream, StreamLiveStatusResponse
 from .VideoPlayerStreamInfoOverlayChannel import (
     User,
     VideoPlayerStreamInfoOverlayChannelResponse,
