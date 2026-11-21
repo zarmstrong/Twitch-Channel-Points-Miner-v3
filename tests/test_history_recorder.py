@@ -1802,7 +1802,7 @@ def test_delete_removes_the_json_under_the_miner_file_lock(recorder):
     assert state["last_balance"] == 1010
 
 
-def test_change_later_in_the_same_second_as_a_delete_is_kept(recorder):
+def test_entries_in_the_delete_second_count_as_deleted(recorder):
     clock = recorder.clock
     path = os.path.join(recorder.analytics_path, "bob.json")
     series = [{"x": int(NOW * 1000), "y": 1000}]
@@ -1810,15 +1810,17 @@ def test_change_later_in_the_same_second_as_a_delete_is_kept(recorder):
     clock.value = NOW + 100.4
     recorder.delete_streamer("bob")
 
-    # The miner truncates to the second: a reward at NOW + 100.8 has x NOW + 100.
+    # x NOW + 100 may be a reward stamped just before the delete and written
+    # just after it, so it stays deleted; its balance still counts.
     series.append({"x": int((NOW + 100) * 1000), "y": 1010})
-    _write_json(path, {"series": series}, NOW + 101)
-    clock.value = NOW + 102
+    series.append({"x": int((NOW + 101) * 1000), "y": 1015})
+    _write_json(path, {"series": series}, NOW + 102)
+    clock.value = NOW + 103
     recorder.poll_once()
 
     assert recorder.store.overview(days=1, now=clock.value)["window"][
         "points_gained"
-    ] == (10)
+    ] == (5)
 
 
 class _RecordingLock:
@@ -1882,9 +1884,12 @@ def test_recreated_json_with_the_same_length_and_second_is_read(recorder):
 
     clock.value = NOW + 60.5
     recorder.delete_streamer("bob", remove_source=lambda: os.remove(path))
-    # The new file's only entry has the old one's length and second.
-    _write_json(path, {"series": [{"x": x, "y": 1010}]}, NOW + 61)
-    clock.value = NOW + 62
+    # The new file starts with an entry at the old one's position and second.
+    # That entry is in the delete's second, so it is not recorded, but it
+    # must not be mistaken for the old one either.
+    series = [{"x": x, "y": 1010}, {"x": int((NOW + 61) * 1000), "y": 1020}]
+    _write_json(path, {"series": series}, NOW + 62)
+    clock.value = NOW + 63
     recorder.poll_once()
 
     assert recorder.store.overview(days=1, now=clock.value)["window"][
@@ -2107,3 +2112,115 @@ def test_first_watch_is_linked_to_its_cached_live_broadcast(tmp_path):
         assert watch["broadcast_id"] == "b1"
     finally:
         recorder._shutdown()
+
+
+def test_stopping_history_ends_live_broadcasts(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: [
+            {"username": "bob", "broadcast_id": "b1", "online_at": NOW}
+        ],
+    )
+    recorder._prepare()
+    recorder.poll_once()
+    assert store.overview(days=1, now=clock.value)["live_streams"] == 1
+
+    clock.value = NOW + 45
+    recorder._shutdown()
+
+    assert store.overview(days=1, now=NOW + 600)["live_streams"] == 0
+
+
+def test_snapshot_time_and_contents_are_read_together(recorder, monkeypatch):
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    lock = _RecordingLock()
+    recorder.source_locks["now_watching"] = lock
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 10)
+    held = []
+    original = os.path.getmtime
+
+    def getmtime(target):
+        if os.fspath(target) == path:
+            held.append(lock.held)
+        return original(target)
+
+    monkeypatch.setattr(os.path, "getmtime", getmtime)
+    recorder.clock.value = NOW + 15
+    recorder._poll_now_watching()
+
+    assert held and all(held)
+
+
+def test_delete_catches_up_a_channel_no_longer_configured(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    path = analytics / "bob.json"
+    series = [
+        {"x": int(NOW * 1000), "y": 1000},
+        {"x": int((NOW + 10) * 1000), "y": 1010},
+    ]
+    _write_json(path, {"series": series}, NOW + 11)
+    snapshot = [{"username": "bob"}]
+    clock = FakeClock(NOW + 20)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        # bob leaves the config with a change History has not imported.
+        snapshot.clear()
+        series.append({"x": int((NOW + 30) * 1000), "y": 1050})
+        _write_json(path, {"series": series}, NOW + 31)
+        clock.value = NOW + 35
+        recorder.poll_once()
+        clock.value = NOW + 40
+        recorder.delete_streamer("bob", remove_source=lambda: os.remove(path))
+
+        # bob is configured again and earns 10.
+        snapshot.append({"username": "bob"})
+        _write_json(
+            path, {"series": [{"x": int((NOW + 100) * 1000), "y": 1060}]}, NOW + 101
+        )
+        clock.value = NOW + 105
+        recorder.poll_once()
+
+        assert store.overview(days=1, now=clock.value)["window"]["points_gained"] == 10
+    finally:
+        recorder._shutdown()
+
+
+def test_watch_continuing_into_a_new_broadcast_starts_a_new_session(recorder):
+    clock = recorder.clock
+    store = recorder.store
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    store.upsert_stream_session("bob", "b1", NOW)
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 10)
+    clock.value = NOW + 11
+    recorder._poll_now_watching()
+
+    # bob restarts the stream between two watch cycles.
+    store.upsert_stream_session("bob", "b2", NOW + 50)
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 70)
+    clock.value = NOW + 71
+    recorder._poll_now_watching()
+
+    sessions = store.sessions(kind="watch", days=1, now=clock.value)["sessions"]
+    assert sorted(item["broadcast_id"] for item in sessions) == ["b1", "b2"]
+    assert [item["broadcast_id"] for item in sessions if item["active"]] == ["b2"]

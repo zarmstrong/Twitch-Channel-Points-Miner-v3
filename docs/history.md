@@ -83,7 +83,8 @@ alone; History logs a warning and retries without affecting the miner.
 Deleting a streamer's analytics data from the dashboard also clears that
 streamer's History rows. History remembers when the delete happened and does
 not import anything older again, even though the watch-streak cache may still
-hold it. Data recorded after the delete is kept as usual. If the History rows
+hold it. Data recorded after the delete is kept as usual, except point changes
+in the same second as the delete, which are treated as deleted. If the History rows
 cannot be cleared, for example while History is still starting or because
 another process holds a lock on the database, the analytics data is kept too and the delete returns an error, so
 you can retry it.

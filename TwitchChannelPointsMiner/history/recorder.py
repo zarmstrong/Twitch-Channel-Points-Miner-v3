@@ -457,6 +457,14 @@ class HistoryRecorder(threading.Thread):
                     exc_info=True,
                 )
         try:
+            # Nothing observes these broadcasts any more, and the dashboard
+            # can outlive the miner; end them at their last observation.
+            self.store.close_open_streams(now)
+        except Exception:
+            logger.warning("Unable to close History live sessions", exc_info=True)
+        self._online_live_keys = set()
+        self._online_details = {}
+        try:
             self.store.end_run(self._run_id, ended_at=now)
         except Exception:
             logger.warning("Unable to close the History run", exc_info=True)
@@ -516,7 +524,9 @@ class HistoryRecorder(threading.Thread):
             # changes.
             for filename, path in self._analytics_files():
                 if _clean_streamer(filename[: -len(".json")]) == streamer:
-                    self._ingest_analytics_file(filename, path, file_locked=True)
+                    self._ingest_analytics_file(
+                        filename, path, file_locked=True, force=True
+                    )
             deleted_at = float(self.clock())
             counts = self.store.delete_streamer(streamer, deleted_at=deleted_at)
             self._deleted_before[streamer] = max(
@@ -544,18 +554,20 @@ class HistoryRecorder(threading.Thread):
     def _deleted_since(self, streamer, timestamp, whole_seconds=False):
         """True when ``timestamp`` predates a delete of this streamer.
 
-        The analytics JSON stores whole seconds (``whole_seconds=True``): a
-        change later in the same second as the delete has an ``x`` at the
-        start of that second, so the cutoff is rounded down for it.  The
-        delete imports that JSON first, so the earlier changes of that second
-        are already behind the import cursor.
+        The analytics JSON stores whole seconds (``whole_seconds=True``), so
+        an entry in the delete's own second cannot be placed before or after
+        it.  The miner also stamps an entry before it takes the file lock, so
+        one stamped just before the delete can be written just after it.  The
+        whole second is therefore treated as deleted: a change made later in
+        that second is not recorded (the running balance still moves past
+        it), but deleted data never comes back.
         """
 
         cutoff = self._deleted_before.get(streamer)
         if cutoff is None:
             return False
         if whole_seconds:
-            cutoff = math.floor(cutoff)
+            return float(timestamp) < math.floor(cutoff) + 1
         return float(timestamp) < cutoff
 
     def _retention_cutoff(self, now):
@@ -690,10 +702,16 @@ class HistoryRecorder(threading.Thread):
         if not self._streamer_state_ready:
             self._refresh_streamer_state()
         path = self._now_watching_path()
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            mtime = 0.0
+        # Read the time and the contents under the miner's lock, so both
+        # belong to the same snapshot.
+        with self._source_lock("now_watching"):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0.0
+            entries = None
+            if self._now_watching_initialized and mtime != self._now_watching_mtime:
+                entries = _load_list(path)
 
         if not self._now_watching_initialized:
             self._now_watching_mtime = mtime
@@ -708,8 +726,6 @@ class HistoryRecorder(threading.Thread):
                     )
             return
 
-        with self._source_lock("now_watching"):
-            entries = _load_list(path)
         if entries is None:
             entries = []
         # A snapshot written later than the last observation marks when the
@@ -736,11 +752,12 @@ class HistoryRecorder(threading.Thread):
                 self._import_cached_sessions(streamer, now)
             self._resume_cached_live_stream(streamer, now)
             game = entry.get("game") or None
+            broadcast_id = self.store.open_broadcast(streamer)
             active = self._active_watch.get(streamer)
-            if active is not None and active["reason"] == reason:
+            if active is not None and self._same_watch(active, reason, broadcast_id):
                 self._tick_watch(streamer, now)
-            if self._active_watch.get(streamer) is None or (
-                self._active_watch[streamer]["reason"] != reason
+            if self._active_watch.get(streamer) is None or not self._same_watch(
+                self._active_watch[streamer], reason, broadcast_id
             ):
                 if self._active_watch.get(streamer) is not None:
                     self._close_watch(streamer, changed_at, credit=True)
@@ -751,16 +768,18 @@ class HistoryRecorder(threading.Thread):
                 started_at = max(
                     changed_at, self._deleted_before.get(streamer, changed_at)
                 )
+                broadcast_id = self.store.open_broadcast(streamer)
                 session_id = self.store.start_watch_session(
                     streamer,
                     reason,
                     started_at=started_at,
-                    broadcast_id=self.store.open_broadcast(streamer),
+                    broadcast_id=broadcast_id,
                 )
                 if session_id is not None:
                     self._active_watch[streamer] = {
                         "id": session_id,
                         "reason": reason,
+                        "broadcast_id": broadcast_id,
                         "last_tick": started_at,
                     }
             if game:
@@ -774,6 +793,20 @@ class HistoryRecorder(threading.Thread):
         # Only now is the snapshot fully recorded; a failed write above leaves
         # the old mtime so the same snapshot is processed again next poll.
         self._now_watching_mtime = mtime
+
+    @staticmethod
+    def _same_watch(active, reason, broadcast_id):
+        """True while a watch continues in the same session.
+
+        A new broadcast starts a new session even when the watch reason did
+        not change.  A broadcast that is no longer open (the miner has not
+        noticed the stream ending yet) keeps the session.
+        """
+
+        if active["reason"] != reason:
+            return False
+        current = active.get("broadcast_id")
+        return broadcast_id is None or current is None or broadcast_id == current
 
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
@@ -1165,15 +1198,24 @@ class HistoryRecorder(threading.Thread):
         for filename, path in self._analytics_files():
             self._ingest_analytics_file(filename, path)
 
-    def _ingest_analytics_file(self, filename, path, file_locked=False):
+    def _ingest_analytics_file(self, filename, path, file_locked=False, force=False):
+        """Import one analytics JSON.
+
+        ``force`` skips the tracking filters below; a delete uses it so the
+        kept cursor has the file's last balance even for a channel History
+        does not record.
+        """
+
         streamer = _clean_streamer(filename[: -len(".json")])
         if not streamer:
             return
-        if streamer in self._drop_farmed:
+        if force:
+            pass
+        elif streamer in self._drop_farmed:
             # Points written for a channel farmed only for Drops do not
             # belong to a configured streamer's history.
             return
-        configured = self._configured_streamers()
+        configured = None if force else self._configured_streamers()
         if configured is not None and streamer not in configured:
             # Leftover JSON from a channel the miner no longer tracks, for
             # example one farmed for Drops before History was enabled, would
