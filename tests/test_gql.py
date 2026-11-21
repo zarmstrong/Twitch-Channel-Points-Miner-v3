@@ -917,6 +917,156 @@ def test_stream_info_parser_accepts_null_user():
     assert gql.video_player_stream_info_overlay_channel("deleted-channel").user is None
 
 
+def test_stream_live_status_parser_reads_broadcast_creation_time():
+    payload = {
+        "data": {
+            "user": {
+                "id": "channel-1",
+                "stream": {
+                    "id": "broadcast-1",
+                    "createdAt": "2026-10-26T17:45:07Z",
+                },
+            }
+        },
+        "extensions": {"operationName": "WithIsStreamLiveQuery"},
+    }
+
+    response = Parser().parse_stream_live_status_response(payload)
+
+    assert response.channel_id == "channel-1"
+    assert response.stream.id == "broadcast-1"
+    assert response.stream.created_at == datetime(2026, 10, 26, 17, 45, 7)
+
+
+def test_stream_live_status_parser_accepts_offline_user():
+    payload = {
+        "data": {"user": {"id": "channel-1", "stream": None}},
+        "extensions": {"operationName": "WithIsStreamLiveQuery"},
+    }
+
+    response = Parser().parse_stream_live_status_response(payload)
+
+    assert response.channel_id == "channel-1"
+    assert response.stream is None
+
+
+def test_reward_list_parser_reads_watch_streak_milestone():
+    payload = {
+        "data": {
+            "channel": {
+                "self": {
+                    "watchStreakMilestone": {
+                        "watchStreakMilestone": {
+                            "value": "5",
+                            "achievementTimestamp": "2026-10-26T18:00:00Z",
+                        },
+                        "expiresAt": "2026-10-27T18:00:00Z",
+                    }
+                }
+            }
+        },
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    milestone = response.watch_streak_milestone
+    assert milestone.value == "5"
+    assert milestone.achievement_timestamp == datetime(2026, 10, 26, 18, 0, 0)
+    assert milestone.expires_at == datetime(2026, 10, 27, 18, 0, 0)
+
+
+def test_reward_list_parser_accepts_null_optional_milestone_fields():
+    payload = {
+        "data": {
+            "channel": {
+                "self": {
+                    "watchStreakMilestone": {
+                        "watchStreakMilestone": {
+                            "value": None,
+                            "achievementTimestamp": "2026-10-26T18:00:00Z",
+                        },
+                        "expiresAt": None,
+                    }
+                }
+            }
+        },
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    milestone = response.watch_streak_milestone
+    assert milestone.value is None
+    assert milestone.expires_at is None
+    assert milestone.achievement_timestamp == datetime(2026, 10, 26, 18, 0, 0)
+
+
+def test_reward_list_parser_ignores_milestone_without_achievement_time():
+    payload = {
+        "data": {
+            "channel": {
+                "self": {
+                    "watchStreakMilestone": {
+                        "watchStreakMilestone": {
+                            "value": "5",
+                            "achievementTimestamp": None,
+                        },
+                        "expiresAt": "2026-10-27T18:00:00Z",
+                    }
+                }
+            }
+        },
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    assert response.watch_streak_milestone is None
+
+
+def test_reward_list_parser_accepts_missing_milestone():
+    payload = {
+        "data": {"channel": {"self": {"watchStreakMilestone": None}}},
+        "extensions": {"operationName": "RewardList"},
+    }
+
+    response = Parser().parse_reward_list_response(payload)
+
+    assert response.watch_streak_milestone is None
+
+
+def test_watch_streak_operations_use_current_persisted_queries():
+    calls = []
+
+    def post(url, json, headers):
+        calls.append(json)
+        return FakeResponse({})
+
+    gql = GQL(client_session(), post_request=post)
+    gql.parser = SimpleNamespace(
+        parse_stream_live_status_response=lambda response: response,
+        parse_reward_list_response=lambda response: response,
+    )
+
+    gql.get_stream_live_status("channel-1")
+    gql.get_reward_list("channel-1")
+
+    assert calls[0]["variables"] == {"id": "channel-1"}
+    assert (
+        calls[0]["extensions"]["persistedQuery"]["sha256Hash"]
+        == "04e46329a6786ff3a81c01c50bfa5d725902507a0deb83b0edbf7abe7a3716ea"
+    )
+    assert calls[1]["variables"] == {
+        "channelID": "channel-1",
+        "shouldIncludeAllSuspendedStreaks": False,
+    }
+    assert (
+        calls[1]["extensions"]["persistedQuery"]["sha256Hash"]
+        == "0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4"
+    )
+
+
 def test_playback_authorization_accepts_null_forbidden_reason():
     payload = {
         "data": {
@@ -2052,6 +2202,159 @@ def test_category_search_discovers_channels_for_an_all_channel_campaign(
     )
 
     assert usernames == ["big", "mid"]
+
+
+@pytest.mark.parametrize(
+    "watch_rewards,catalog_campaigns,expected",
+    [
+        # Any channel of the category counts toward a reward campaign (#348).
+        ({"quest-1": {}}, [], ["big", "mid"]),
+        # An ordinary Drop campaign needs the Drops tag, as before.
+        ({}, [], []),
+        # One the catalog lists beside the reward campaign is searched for
+        # first; with no tagged channel live, the others still earn the reward.
+        ({"quest-1": {}}, [{"id": "gist-1", "channels": []}], ["big", "mid"]),
+    ],
+)
+def test_category_search_ignores_the_drops_tag_for_a_reward_campaign_category(
+    monkeypatch, watch_rewards, catalog_campaigns, expected
+):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300, "mid": 200},
+        allow_listed=(),
+        campaigns=[
+            {"id": "quest-1", "name": "Quest", "all_channels": True, "channels": []}
+        ],
+        # No live channel carries the Drops tag.
+        directory_logins=[],
+    )
+    twitch.watch_reward_campaigns = watch_rewards
+    twitch.twitchdrops_app_campaigns = {"gray-zone-warfare": catalog_campaigns}
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == expected
+    # The channels found are also the ones watched for the reward: the
+    # watcher asks this record, which a search without the tag otherwise
+    # leaves empty.
+    assert twitch.category_campaign_eligibility == {
+        ("gray-zone-warfare", login): (1, 1) for login in expected
+    }
+
+
+@pytest.mark.parametrize(
+    "directory_logins,expected", [(["tagged"], ["tagged"]), ([], [])]
+)
+def test_search_for_a_badge_drop_keeps_to_tagged_channels_beside_a_reward_campaign(
+    monkeypatch, directory_logins, expected
+):
+    # The account's campaign list names only the quest in this game; the
+    # badge Drop the search is for comes from the badge catalog. Only a
+    # Drops-tagged channel earns it, however many others are live.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300, "mid": 200, "tagged": 5},
+        allow_listed=(),
+        campaigns=[
+            {"id": "quest-1", "name": "Quest", "all_channels": True, "channels": []}
+        ],
+        directory_logins=directory_logins,
+    )
+    twitch.watch_reward_campaigns = {"quest-1": {}}
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare",
+        drops_enabled=True,
+        limit=1,
+        respect_campaign_restrictions=False,
+        include_watch_rewards=False,
+    )
+
+    assert usernames == expected
+
+
+def _quest_beside_a_drop_campaign(monkeypatch, directory_logins):
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300, "mid": 200, "tagged": 5},
+        allow_listed=(),
+        campaigns=[
+            {"id": "quest-1", "name": "Quest", "all_channels": True, "channels": []},
+            {"id": "drop-1", "name": "Drop", "all_channels": True, "channels": []},
+        ],
+        directory_logins=directory_logins,
+    )
+    twitch.watch_reward_campaigns = {
+        "quest-1": {
+            "id": "quest-1",
+            "_watch_reward": {"categories": [{"id": "gzw-id", "displayName": "GZW"}]},
+        }
+    }
+    return twitch
+
+
+@pytest.mark.parametrize(
+    "directory_logins,expected",
+    [
+        # Drops-tagged channels earn the Drop campaign and the reward both.
+        (["tagged"], ["tagged"]),
+        # None is live: every other channel still earns the reward (#348).
+        ([], ["big", "mid"]),
+    ],
+)
+def test_category_search_falls_back_to_untagged_channels_for_a_reward_campaign(
+    monkeypatch, directory_logins, expected
+):
+    twitch = _quest_beside_a_drop_campaign(monkeypatch, directory_logins)
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare", drops_enabled=True, limit=2
+    )
+
+    assert usernames == expected
+    assert set(twitch.category_campaign_eligibility) == {
+        ("gray-zone-warfare", login) for login in expected
+    }
+
+
+@pytest.mark.parametrize(
+    "channel_campaign_ids,expected", [(["quest-1"], ["big"]), ([], [])]
+)
+def test_forced_streamer_without_the_drops_tag_is_kept_for_a_reward_campaign(
+    monkeypatch, channel_campaign_ids, expected
+):
+    # The complete Drops directory does not list the channel. It is asked
+    # for its own campaigns instead, and kept when the reward campaign is
+    # among them.
+    twitch = _quest_beside_a_drop_campaign(monkeypatch, directory_logins=[])
+    helix_get = Twitch._Twitch__helix_get
+
+    def with_user_ids(self, *args):
+        response = helix_get(self, *args)
+        for stream in response.get("data") or []:
+            stream.setdefault("user_id", "4242")
+        return response
+
+    monkeypatch.setattr(Twitch, "_Twitch__helix_get", with_user_ids)
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_from_channel_id",
+        lambda self, channel_id: (
+            [twitch.watch_reward_campaigns[key] for key in channel_campaign_ids],
+            True,
+            True,
+        ),
+    )
+
+    assert (
+        twitch.get_live_streamers_for_category(
+            "Gray Zone Warfare|big", drops_enabled=True
+        )
+        == expected
+    )
 
 
 def test_category_search_puts_allow_listed_channels_first_for_mixed_campaigns(
@@ -4820,7 +5123,7 @@ def _helix_twitch(monkeypatch, response_factory):
     twitch.twitch_login = SimpleNamespace(get_auth_token=lambda: "token")
     twitch.user_agent = "test-agent"
     monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.Twitch.requests.get",
+        "TwitchChannelPointsMiner.classes.HttpSession.get",
         lambda url, **kwargs: response_factory(),
     )
     return twitch
@@ -4882,7 +5185,7 @@ def test_permanent_streams_error_is_an_evaluated_empty_category(monkeypatch):
             return FakeResponse({"data": [{"id": "ow-id", "name": "Overwatch 2"}]})
         return FakeResponse({"error": "Bad Request"}, 400)
 
-    monkeypatch.setattr("TwitchChannelPointsMiner.classes.Twitch.requests.get", get)
+    monkeypatch.setattr("TwitchChannelPointsMiner.classes.HttpSession.get", get)
     monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
 
     assert (

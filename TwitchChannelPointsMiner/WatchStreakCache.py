@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
+
 logger = logging.getLogger(__name__)
 
 WATCH_STREAK_CACHE_VERSION = 1
@@ -145,6 +147,62 @@ class WatchStreakCache:
             self._sessions[key] = session
             self._save_locked()
             return session
+
+    def claimed_at_for_logical_stream(
+        self, streamer_login, broadcast_id, started_at=None
+    ):
+        """Return the streak claim shared by this broadcast's logical stream.
+
+        Twitch treats a broadcast that starts less than 30 minutes after the
+        previous one ended as the same stream.  A claim made on any broadcast
+        in that chain therefore covers the current broadcast too, so the miner
+        must not farm it again.
+        """
+
+        login = streamer_login.lower().strip()
+        if not login:
+            return None
+        with self._lock:
+            current = self._sessions.get(self._key(login, broadcast_id))
+            if current is not None:
+                if current.claimed:
+                    return (
+                        current.claimed_at
+                        if current.claimed_at is not None
+                        else current.started_at
+                    )
+                current_started_at = current.started_at
+            else:
+                if started_at is None:
+                    return None
+                current_started_at = float(started_at)
+
+            previous_sessions = [
+                session
+                for session in self._sessions.values()
+                if session.streamer_login == login
+                and session.broadcast_id != str(broadcast_id)
+                and session.started_at <= current_started_at
+            ]
+            previous_sessions.sort(key=lambda session: session.started_at, reverse=True)
+
+            for previous in previous_sessions:
+                if previous.ended_at is None:
+                    break
+                gap = current_started_at - previous.ended_at
+                # ensure() closes a session the miner never saw go offline at
+                # the new broadcast's start time. Never infer a continuation
+                # from that unknown gap; only an observed end is trustworthy.
+                if gap <= 0 or gap >= WATCH_STREAK_STREAM_GAP_SECONDS:
+                    break
+                if previous.claimed:
+                    return (
+                        previous.claimed_at
+                        if previous.claimed_at is not None
+                        else previous.started_at
+                    )
+                current_started_at = previous.started_at
+        return None
 
     def mark_claimed(self, streamer_login, broadcast_id, claimed_at=None):
         now = time.time() if claimed_at is None else float(claimed_at)

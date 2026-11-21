@@ -185,6 +185,7 @@ MINER_CONFIG = {
         claim_drops=True,  # We can't filter rewards base on stream. Set to False for skip viewing counter increase and you will never obtain a drop reward from this script. Issue #21
         claim_moments=True,  # If set to True, https://help.twitch.tv/s/article/moments will be claimed when available
         watch_streak=True,  # If a streamer go online change the priority of streamers array and catch the watch screak. Issue #11
+        streak_only=False,  # Watch the channel only for its watch streak: at most ~10 minutes per broadcast (set an int to override the window), then leave it until the streak is claimed - no watch-time points are farmed there
         favorite=False,  # Prioritize this streamer when Priority.FAVORITE is configured
         points_limit=None,  # Stop watching after reaching this balance; pending watch streaks still take priority
         community_goals=False,  # If True, contributes the max channel points per stream to the streamers' community challenge goals
@@ -284,6 +285,7 @@ STREAMERS = [
             make_predictions=False,
             follow_raid=True,
             watch_streak=True,
+            streak_only=True,  # Farm this channel's watch streak only, leave it for everyone else
         ),
     ),
     Streamer(
@@ -365,5 +367,7 @@ ANALYTICS_CONFIG = None
 #     'refresh': 5,                             # Chart refresh interval in minutes
 #     'days_ago': 7,                            # Initial chart history range
 #     'password': None,                         # Required when binding to a non-loopback host
+#     'trust_proxy_auth': False,                # Set True only when an authenticating reverse proxy (Authelia, Traefik, oauth2-proxy, ...) is the only way to reach this port: disables Basic auth and enables the Config tab without a password
+#     'allowed_hosts': None,                    # Extra Host header names accepted by the loopback DNS-rebinding guard, e.g. ['miner.example.com']; required for a 127.0.0.1 bind behind a reverse proxy that preserves Host
 #     'log_poll_interval': 5,                   # Log viewer polling interval in seconds (1-180)
 # }

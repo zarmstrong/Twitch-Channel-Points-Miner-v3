@@ -290,6 +290,9 @@ CATEGORY_LOOKUP_FAILURE_LIMIT = 3
 # minutes, which would retire a channel still earning a Drop during a brief
 # outage.
 BADGE_LOOKUP_FAILURE_LIMIT = 12
+# How often the main loop, waiting for its next pass, asks whether a reward
+# campaign has called for a category refresh meanwhile.
+MAIN_LOOP_REWARD_CHECK_SECONDS = 5
 
 
 def _load_daily_report_state(path):
@@ -733,6 +736,8 @@ class TwitchChannelPointsMiner:
         days_ago: int = 7,
         password: str = None,
         log_poll_interval: int = 5,
+        trust_proxy_auth: bool = False,
+        allowed_hosts: list = None,
     ):
         # Analytics switch
         if Settings.enable_analytics is True:
@@ -748,6 +753,9 @@ class TwitchChannelPointsMiner:
                 password=password,
                 log_poll_interval=log_poll_interval,
                 logs_file=self.logs_file,
+                trust_proxy_auth=trust_proxy_auth,
+                allowed_hosts=allowed_hosts,
+                on_restart=lambda: self.twitch.restart_requested.set(),
             )
             http_server.daemon = True
             http_server.name = "Analytics Thread"
@@ -1430,10 +1438,22 @@ class TwitchChannelPointsMiner:
                     + 5,
                 )
             while self.running and self.twitch.running:
-                if self.twitch.restart_requested.wait(random.uniform(20, 60)):
+                if self.__wait_for_next_pass():
                     break
                 # One failed pass (e.g. a network error in the category refresh)
                 # must not end the main loop; log it and retry on the next pass.
+                try:
+                    # First: a repeat's window may have opened in its
+                    # campaign's last minutes, and the report state's write
+                    # to disk and the checks below can take that long.
+                    next_category_refresh_at = self.__refresh_for_opened_reward_window(
+                        next_category_refresh_at
+                    )
+                except Exception:
+                    logger.error(
+                        "Error in the main loop, retrying on the next pass",
+                        exc_info=True,
+                    )
                 self.__save_daily_report_state_safely()
                 try:
                     self.__send_daily_report_if_due()
@@ -1472,6 +1492,10 @@ class TwitchChannelPointsMiner:
                                     ),
                                 )
                         finally:
+                            # A refresh made for an opened reward window that
+                            # evaluated nothing is made again before the
+                            # ordinary interval.
+                            self.twitch.retry_unevaluated_watch_reward_opening()
                             effective_category_refresh_seconds = (
                                 min(category_refresh_interval_seconds, 5 * 60)
                                 if self.twitch.twitchdrops_app_campaigns
@@ -1503,6 +1527,53 @@ class TwitchChannelPointsMiner:
             # A requested restart leaves through here without stopping the
             # workers, so keep what was recorded since the last pass.
             self.__save_daily_report_state_safely(retire_all=True)
+
+    def __wait_for_next_pass(self) -> bool:
+        """Wait for the main loop's next pass, 20 to 60 seconds away.
+        Returns True when a restart was requested meanwhile.
+
+        The wait ends early once a reward campaign calls for the loop (see
+        __refresh_for_opened_reward_window): the window of a repeat has
+        opened, which can be noted while this waits. A call is noticed
+        within MAIN_LOOP_REWARD_CHECK_SECONDS.
+
+        A refused claim is not among those calls. The claim thread sends it
+        again itself, when it is due, whatever this loop is busy with. Only
+        when no thread could be started for it does the loop come into it:
+        as often as it looks for a call it has one started (see
+        Twitch.start_unattended_watch_reward_claims)."""
+        ends_at = time.monotonic() + random.uniform(20, 60)
+        while True:
+            try:
+                self.twitch.start_unattended_watch_reward_claims()
+            except Exception:
+                # As for a failed pass: it must not end the main loop.
+                logger.error(
+                    "Error looking for a reward campaign claim to send again",
+                    exc_info=True,
+                )
+            left = ends_at - time.monotonic()
+            if left <= 0 or self.twitch.watch_reward_start_due():
+                return False
+            if self.twitch.restart_requested.wait(
+                min(left, MAIN_LOOP_REWARD_CHECK_SECONDS)
+            ):
+                return True
+
+    def __refresh_for_opened_reward_window(self, next_category_refresh_at):
+        """When the next category refresh is due: as scheduled, or now when
+        the window of a reward campaign's repeat has opened since the last
+        pass. The category was left when the repeat before was earned.
+
+        No claim is sent for the moment: a refused one is sent again by the
+        claim thread (see Twitch.__retry_unaccepted_reward_claims). With
+        category refreshes off the moment is taken all the same, so that it
+        does not end every wait of the loop."""
+        if self.twitch.take_opened_watch_reward_start() is not True:
+            return next_category_refresh_at
+        if next_category_refresh_at is None:
+            return None
+        return min(next_category_refresh_at, time.time())
 
     def __subscribe_user_drop_events(self):
         # Claim drops as soon as Twitch reports them claimable. Only needed when
@@ -1976,6 +2047,7 @@ class TwitchChannelPointsMiner:
                     limit=self.badge_drop_streamer_limit,
                     sort_by=self.badge_drop_category_sort,
                     respect_campaign_restrictions=False,
+                    include_watch_rewards=False,
                 )
             except Exception as error:
                 record_failure(game_slug, error)
@@ -1995,6 +2067,7 @@ class TwitchChannelPointsMiner:
                     limit=30,
                     sort_by=self.badge_drop_category_sort,
                     restricted_campaigns=restricted_campaigns,
+                    include_watch_rewards=False,
                 )
             except Exception as error:
                 record_failure(game_slug, error)
@@ -2531,6 +2604,11 @@ class TwitchChannelPointsMiner:
                 unevaluated_category_slugs.update(category_slugs)
                 if error.game_slug:
                     unevaluated_category_slugs.add(error.game_slug)
+                # A reward campaign's repeat is due before its window closes,
+                # which the next ordinary refresh can come after.
+                self.twitch.retry_failed_watch_reward_category(
+                    set(category_slugs) | {error.game_slug}
+                )
                 consequence = (
                     "its tracked streamers are kept until the next refresh"
                     if tracking
@@ -3145,6 +3223,18 @@ class TwitchChannelPointsMiner:
             if self.sync_campaigns_thread.is_alive():
                 logger.warning(
                     "Sync campaigns thread did not stop in time, continuing shutdown anyway"
+                )
+
+        # Started by the two threads above, so looked for after them. A
+        # claim Twitch is still answering would otherwise be cut off by the
+        # exit, or be recorded after the report state is saved for the last
+        # time at the end of this method.
+        reward_claim_thread = getattr(self.twitch, "watch_reward_claim_thread", None)
+        if reward_claim_thread is not None and reward_claim_thread.is_alive():
+            reward_claim_thread.join(timeout=60)
+            if reward_claim_thread.is_alive():
+                logger.warning(
+                    "Reward campaign claim thread did not stop in time, continuing shutdown anyway"
                 )
 
         if (

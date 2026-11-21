@@ -1,5 +1,30 @@
 # Changelog
 
+## [3.22.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.21.1...3.22.0) (2026-11-19)
+
+
+### Features
+
+* **drops:** mine watch-time reward campaigns (quests) ([#348](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/348)) ([#357](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/357)) ([ccd1753](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ccd17538476be66914be89d8dcdf38ef909f619e))
+
+
+### Bug Fixes
+
+* **docker:** move latest only for the newest stable release ([#265](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/265)) ([#342](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/342)) ([f972ab7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f972ab7f80fdf96510ce13b660ec6e52acb938be))
+* **drops:** skip channels the account is banned or timed out in ([#331](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/331)) ([#340](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/340)) ([fab99e7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/fab99e7d5955467166f1d8987df062cef2fb4de0))
+
+
+### Performance Improvements
+
+* **drops:** read per-minute drop progress from DropCurrentSessionContext instead of the full Inventory ([#330](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/330)) ([#336](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/336)) ([d182dd3](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d182dd3fec8d9aee43c07b1887479d7b479af5b8))
+* **drops:** stop requesting the nonexistent Helix drops/campaigns endpoint ([#329](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/329)) ([#337](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/337)) ([47aaeb4](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/47aaeb4530501f80163a36232c71f4de9eb6ec72))
+* **http:** reuse HTTPS connections for GQL, spade and Helix requests ([#344](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/344)) ([#345](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/345)) ([8bba7d7](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/8bba7d7c4e2b66934fdfebf1bc86a9ef3be7b9cb))
+
+
+### Documentation
+
+* add a security policy ([#334](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/334)) ([f6892f2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f6892f29556f2d738013cba4fd1438797e34acf0))
+
 ## [3.21.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.21.0...3.21.1) (2026-11-15)
 
 

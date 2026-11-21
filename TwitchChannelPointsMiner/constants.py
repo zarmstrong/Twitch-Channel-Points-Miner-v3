@@ -27,6 +27,10 @@ DROP_ID = "c2542d6d-cd10-4532-919b-3d19f30a768b"
 # CLIENT_VERSION = "32d439b2-bd5b-4e35-b82a-fae10b04da70"  # Android App
 CLIENT_VERSION = "ef928475-9403-42f2-8a34-55784bd08e16"  # Browser
 
+# Twitch counts a broadcast that starts less than 30 minutes after the previous
+# one ended as the same stream for watch-streak purposes.
+WATCH_STREAK_STREAM_GAP_SECONDS = 30 * 60
+
 USER_AGENTS = {
     "Windows": {
         "CHROME": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
@@ -56,6 +60,15 @@ class GQLOperations:
             "persistedQuery": {
                 "version": 1,
                 "sha256Hash": "04e46329a6786ff3a81c01c50bfa5d725902507a0deb83b0edbf7abe7a3716ea",
+            }
+        },
+    }
+    RewardList = {
+        "operationName": "RewardList",
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4",
             }
         },
     }
@@ -148,6 +161,16 @@ class GQLOperations:
             "}"
         ),
     }
+    # Resolves under both the TV and the Android login. `banStatus` is null
+    # when the account is not banned in the channel.
+    ChannelBanStatus = {
+        "operationName": "ChannelBanStatus",
+        "query": (
+            "query ChannelBanStatus($channelID: ID!) {"
+            "user(id: $channelID) { id self { banStatus { isPermanent expiresAt } } }"
+            "}"
+        ),
+    }
     GameSlug = {
         "operationName": "GameSlug",
         "query": "query GameSlug($id: ID!) { game(id: $id) { id slug } }",
@@ -157,6 +180,31 @@ class GQLOperations:
         "query": (
             "query CategoryGame($slug: String!) {"
             "game(slug: $slug) { id name displayName }"
+            "}"
+        ),
+    }
+    # The reward groups of a sitewide reward campaign (a quest), which names
+    # the categories it counts in. Hand-written: Twitch's web client only has
+    # it as a fragment of campaign-specific operations.
+    RewardCampaignDetails = {
+        "operationName": "RewardCampaignDetails",
+        "query": (
+            "query RewardCampaignDetails($id: ID!) {"
+            "dropsCampaign(id: $id) {"
+            "id name status startAt endAt game { id name } "
+            "rewardGroups {"
+            "id name track lane "
+            "progressCriteria {"
+            "requirementType requirements { minutesWatched subs } "
+            "isRepeatable "
+            "repeatableConfig {"
+            "repeatableTimes resetIntervalSeconds shouldCompleteAllRepeatsToEarn"
+            "} "
+            "channels { id } categories { id displayName }"
+            "} "
+            "rewards { id name distributionType thumbnailURL }"
+            "}"
+            "}"
             "}"
         ),
     }

@@ -22,9 +22,20 @@ Priorities can be combined in order. Avoid contradictory fallback rules such as
 `ORDER` and `POINTS_ASCENDING` in the same list.
 
 Set `points_limit` in `StreamerSettings` to stop watching a streamer once its
-channel-points balance reaches that value. A pending watch streak can temporarily
-bypass the limit so its reward is not missed. Set `favorite=True` per streamer
-and include `Priority.FAVORITE` to reserve watch slots for favorites first.
+channel-points balance reaches that value. A pending watch streak can bypass the
+limit until Twitch confirms the streak, so its reward is not missed. Set
+`favorite=True` per streamer and include `Priority.FAVORITE` to reserve watch
+slots for favorites first.
+
+See [Watch streaks](watch-streak.md) for the pending-streak checks, logical
+streams, and the `streak_only` option.
+
+Channels where your account is banned or timed out are skipped for both
+points and Drops. This covers configured streamers, followed channels and
+discovered channels alike. The miner checks each live channel when it first
+considers it, then every 30 minutes, every 6 hours for a permanent ban, and
+again when a timeout ends. Each change is logged once at INFO. If a check
+fails, the channel keeps its last known state and is not treated as banned.
 
 ## Android login
 
@@ -171,6 +182,7 @@ of these values in each provider's `events` list.
 | `claim_drops` | bool | `True` | Accumulate Drop watch progress and claim available Drops. |
 | `claim_moments` | bool | `True` | Claim available [Moments](https://help.twitch.tv/s/article/moments). |
 | `watch_streak` | bool | `True` | Prioritize available watch-streak rewards. |
+| `streak_only` | bool or int | `False` | Watch the channel only for its watch streak: at most ~10 minutes per broadcast (or the integer number of minutes given), then leave it until the streak is claimed. See [Watch streaks](watch-streak.md). |
 | `favorite` | bool | `False` | Prioritize this streamer when `Priority.FAVORITE` is configured. |
 | `points_limit` | int or None | `None` | Stop watching at this balance, except for an eligible pending watch streak. |
 | `community_goals` | bool | `False` | Contribute the maximum allowed points to community goals. |

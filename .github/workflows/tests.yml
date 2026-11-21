@@ -73,8 +73,12 @@ jobs:
 
       - name: Run release issue automation tests
         run: |
+          node .github/scripts/release-resolve.test.js
           node .github/scripts/release-linked-issues.test.js
           node .github/scripts/release-pull-links.test.js
+          node .github/scripts/docker-latest-tag.test.js
+          node .github/scripts/nightly-plan.test.js
+          node .github/scripts/nightly-release.test.js
 
   black:
     name: Black
@@ -157,66 +161,25 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      # The source above is the PR's head, which may predate the build
+      # action or carry an older copy of it. Take the action from the commit
+      # this workflow file came from (the merge commit, for a PR), so the
+      # two always match.
+      - name: Checkout build action
+        uses: actions/checkout@v7
         with:
-          python-version: "3.14"
-          cache: pip
+          path: automation
+          # Without cone mode, only this directory is checked out; cone mode
+          # would add every file in the repository root.
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
-      # Confirmed root cause of a 10-15+ minute "Smoke-test Windows
-      # executable" hang: merely pip-installing Pillow (a new, unsigned
-      # compiled DLL landing in site-packages) is enough to trigger it -
-      # even a build that never bundles Pillow into the exe at all still
-      # hung. Excluding only the checkout dir (an earlier attempt) didn't
-      # help, because the DLL never lands there - it's under Python's own
-      # install directory. Exclude that too, plus pip's cache, so nothing
-      # written during dependency install or the build gets queued for
-      # Defender's real-time/cloud scan. Ephemeral runner, lifetime of this
-      # job only.
-      - name: Exclude workspace and Python installs from Windows Defender scanning
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath (Split-Path (python -c "import sys; print(sys.executable)"))
-          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\pip"
-
-      - name: Install build dependencies
-        shell: pwsh
-        # $ErrorActionPreference only governs terminating (PowerShell-native)
-        # errors; a failing external command like `pip install` just sets
-        # $LASTEXITCODE and lets the script continue by default, so a
-        # mid-script pip failure was previously masked by a later pip
-        # command's success - stop after each line explicitly instead.
-        run: |
-          python -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
-          python -m pip install -r requirements-windows.txt
-          if ($LASTEXITCODE -ne 0) { throw "requirements-windows.txt install failed" }
-          python -m pip install validators==0.22.0 pyinstaller==6.21.0
-          if ($LASTEXITCODE -ne 0) { throw "validators/pyinstaller install failed" }
-
-      - name: Build Windows executable
-        shell: cmd
-        # Use setup-python's interpreter; the py launcher would pick the
-        # newest Python on the runner, which doesn't have PyInstaller.
-        env:
-          PYINSTALLER_PYTHON: python
-        run: build_windows.bat ${{ matrix.flavor }}
-
-      - name: Smoke-test Windows executable
-        shell: pwsh
-        env:
-          FLAVOR: ${{ matrix.flavor }}
-        run: |
-          $exeName = if ($env:FLAVOR -eq "standard") { "TwitchChannelPointsMiner.exe" } else { "TwitchChannelPointsMiner-Portable.exe" }
-          # --windowed is a GUI-subsystem exe, so a plain call here returns
-          # before the process actually finishes and leaves $LASTEXITCODE
-          # stale/empty; Start-Process -Wait is needed to block on it and
-          # get its real exit code.
-          $proc = Start-Process -FilePath "dist\$exeName" -ArgumentList "--self-test" -Wait -PassThru
-          if ($proc.ExitCode -ne 0) {
-            throw "Smoke test failed (exit code $($proc.ExitCode)) - the built exe is missing a GUI dependency"
-          }
+      - name: Build and smoke-test executable
+        uses: ./automation/.github/actions/build-windows-exe
+        with:
+          flavor: ${{ matrix.flavor }}
+          pip-cache: "true"
 
       - name: Upload built executable
         uses: actions/upload-artifact@v7

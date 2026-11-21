@@ -3,6 +3,11 @@ from enum import Enum, auto
 from typing import Optional
 
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop, utc_now
+from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
+    REWARD_GROUP_KEY,
+    campaign_from_reward_groups,
+    watch_reward_categories,
+)
 from TwitchChannelPointsMiner.classes.Settings import Settings
 
 
@@ -116,9 +121,18 @@ def campaign_from_channel_progress(campaign) -> Optional[dict]:
     A group's "self" is not copied: its status is unreliable (unstarted
     campaigns report IN_PROGRESS with currentMinutesWatched null), and
     inventory supplies progress elsewhere. Returns None when the campaign is
-    malformed or no reward group is kept."""
+    malformed or no reward group is kept.
+
+    A campaign without a game that watching a category can earn is a sitewide
+    reward campaign (a quest), which campaign_from_reward_groups converts
+    instead: its repeatable groups are kept, and "self" is its only source of
+    progress."""
     if not isinstance(campaign, dict):
         return None
+    if "game" in campaign and not campaign["game"]:
+        reward_campaign = campaign_from_reward_groups(campaign)
+        if reward_campaign is not None:
+            return reward_campaign
     campaign_id = campaign.get("id")
     start_at = campaign.get("startAt")
     end_at = campaign.get("endAt")
@@ -223,6 +237,9 @@ class Campaign(object):
         "dt_match",
         "drops",
         "channels",
+        "reward_categories",
+        "reward_drop_category_ids",
+        "reward_drop_report_categories",
     ]
 
     def __init__(self, dict):
@@ -243,6 +260,28 @@ class Campaign(object):
         self.dt_match = self.start_at < utc_now() < self.end_at
 
         self.drops = list(map(lambda x: Drop(x), dict["timeBasedDrops"]))
+        # A watch-earned reward campaign (see RewardCampaign.py) counts in
+        # several categories, each drop in its own: the categories, and the
+        # IDs of those each drop counts in. Empty for a Drop campaign.
+        self.reward_categories = watch_reward_categories(dict)
+        self.reward_drop_category_ids = {
+            drop["id"]: {
+                category["id"] for category in drop[REWARD_GROUP_KEY]["categories"]
+            }
+            for drop in (dict["timeBasedDrops"] if self.reward_categories else [])
+            if REWARD_GROUP_KEY in drop
+        }
+        # The name of the one category each drop's progress and claim are
+        # reported under: its first, whichever of them a stream was watched
+        # in.
+        self.reward_drop_report_categories = {
+            drop["id"]: (
+                drop[REWARD_GROUP_KEY]["categories"][0].get("displayName")
+                or drop[REWARD_GROUP_KEY]["categories"][0].get("name")
+            )
+            for drop in (dict["timeBasedDrops"] if self.reward_categories else [])
+            if (drop.get(REWARD_GROUP_KEY) or {}).get("categories")
+        }
 
     def __repr__(self):
         return f"Campaign(id={self.id}, name={self.name}, game={self.game}, in_inventory={self.in_inventory})"
@@ -257,19 +296,54 @@ class Campaign(object):
             else self.__repr__()
         )
 
+    def reward_category_for(self, game_id, game_slug, slugify):
+        """The category of this reward campaign a stream of the given game
+        counts in, matched by game ID or else by slugified name; None when it
+        counts in none of them, or this is a Drop campaign."""
+        for category in self.reward_categories:
+            if game_id not in [None, ""] and category["id"] == str(game_id):
+                return category
+        for category in self.reward_categories:
+            if game_slug and slugify(category["displayName"] or category["name"]) == (
+                game_slug
+            ):
+                return category
+        return None
+
+    def in_reward_category(self, category):
+        """This reward campaign as channels of one of its categories earn it:
+        that category as its game, and the drops that count there. The drops
+        are shared with this campaign, so progress synced into either shows in
+        both."""
+        view = object.__new__(Campaign)
+        for slot in Campaign.__slots__:
+            setattr(view, slot, getattr(self, slot))
+        view.game = category
+        view.drops = [
+            drop
+            for drop in self.drops
+            if category["id"] in self.reward_drop_category_ids.get(drop.id, ())
+        ]
+        return view
+
     def clear_drops(self):
         self.drops = list(
             filter(lambda x: x.dt_match is True and x.is_claimed is False, self.drops)
         )
 
-    def has_watchable_drops(self):
-        return any(
-            drop.dt_match is True
+    def watchable_drops(self):
+        """The drops watching can add minutes to now."""
+        return [
+            drop
+            for drop in self.drops
+            if drop.dt_match is True
             and drop.is_claimed is False
             and drop.current_minutes_watched < drop.minutes_required
             and drop.needs_subscription() is False
-            for drop in self.drops
-        )
+        ]
+
+    def has_watchable_drops(self):
+        return bool(self.watchable_drops())
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
@@ -286,6 +360,12 @@ class Campaign(object):
             for i in range(len(self.drops)):
                 current_id = self.drops[i].id
                 if drop["id"] == current_id:
+                    if REWARD_GROUP_KEY in drop:
+                        # A repeat whose window started over is listed
+                        # under the same ID with the new window's dates.
+                        # Left with the old ones, its progress would be
+                        # reported against a deadline already past.
+                        self.drops[i].set_window(drop["startAt"], drop["endAt"])
                     self.drops[i].update(drop["self"])
                     # If after update we all conditions are meet we can claim the drop
                     if self.drops[i].is_claimable is True:

@@ -18,6 +18,7 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _normalize_streams_watched,
     _normalize_watch_status_interval_minutes,
 )
+from TwitchChannelPointsMiner.classes import HttpSession
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.Settings import (
     Events,
@@ -25,7 +26,14 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
+from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
+from TwitchChannelPointsMiner.classes.entities.ChannelBanStatus import (
+    ChannelBanStatus,
+)
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
+from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
+    campaign_from_reward_groups,
+)
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
@@ -113,6 +121,8 @@ def _watch_streamer(
     points=0,
     points_limit=None,
     watch_streak=False,
+    streak_only=False,
+    minute_watched=0,
 ):
     # Production builds wildcard and badge-campaign streamers with
     # from_category=True as well; mirror that so the fakes classify the same.
@@ -127,7 +137,7 @@ def _watch_streamer(
         game={"displayName": username},
         game_name=lambda: username,
         watch_streak_missing=watch_streak,
-        minute_watched=0,
+        minute_watched=minute_watched,
     )
     return SimpleNamespace(
         username=username,
@@ -147,6 +157,7 @@ def _watch_streamer(
             favorite=favorite,
             points_limit=points_limit,
             watch_streak=watch_streak,
+            streak_only=streak_only,
         ),
         drops_condition=lambda: drops_eligible,
     )
@@ -173,9 +184,16 @@ def _run_one_watch_iteration(
     drop_slot_covering_streamer=None,
     category_campaign_eligibility=None,
     on_sleep=None,
+    gql=None,
+    channel_bans=None,
+    post_kwargs=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
+    if gql is not None:
+        twitch.gql = gql
+    if channel_bans is not None:
+        twitch.channel_bans = channel_bans
     twitch.analytics_mutex = Lock()
     twitch.user_agent = "test-agent"
     twitch.completed_drop_campaigns = set(completed_drop_campaigns or [])
@@ -219,20 +237,23 @@ def _run_one_watch_iteration(
 
         def _post(url, **kwargs):
             posted.append(url)
+            if post_kwargs is not None:
+                post_kwargs.append(kwargs)
             assert (
                 responses
-            ), "requests.post called more times than post_side_effects provided"
+            ), "HttpSession.post called more times than post_side_effects provided"
             effect = responses.pop(0)
             if isinstance(effect, Exception):
                 raise effect
             return effect
 
-        monkeypatch.setattr(requests, "post", _post)
+        monkeypatch.setattr(HttpSession, "post", _post)
     else:
         monkeypatch.setattr(
-            requests,
+            HttpSession,
             "post",
             lambda url, **kwargs: posted.append(url)
+            or (post_kwargs is not None and post_kwargs.append(kwargs))
             or SimpleNamespace(status_code=500),
         )
     monkeypatch.setattr(
@@ -343,6 +364,26 @@ def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
     )
 
     assert _entries_by_username()["category-streamer"]["reason"] == "drops"
+
+
+def test_now_watching_analytics_labels_pending_watch_streak(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("streak-streamer", watch_streak=True, points=300),
+            _watch_streamer("points-streamer", points=400),
+        ],
+        streams_watched=2,
+        priority=[Priority.STREAK, Priority.ORDER],
+    )
+
+    entries = json.loads((tmp_path / "now_watching.json").read_text(encoding="utf-8"))
+    entries_by_username = {entry["username"]: entry for entry in entries}
+    assert entries_by_username["streak-streamer"]["reason"] == "streak"
+    assert entries_by_username["points-streamer"]["reason"] == "points"
 
 
 def test_minute_watcher_writes_empty_now_watching_when_nothing_watched(
@@ -463,11 +504,191 @@ def test_pending_watch_streak_bypasses_points_limit(monkeypatch):
     assert posted == ["https://spade.test/capped-streak"]
 
 
-def test_pending_watch_streak_honors_explicit_zero_timestamp():
-    streamer = _watch_streamer("streak", watch_streak=True)
-    streamer.offline_at = -60
+def test_minute_watcher_skips_streak_only_streamers(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("streak-only", streak_only=True),
+            _watch_streamer("eligible"),
+        ],
+        streams_watched=2,
+    )
 
-    assert Twitch._has_pending_watch_streak(streamer, now=0) is False
+    assert posted == ["https://spade.test/eligible"]
+
+
+def test_pending_watch_streak_bypasses_streak_only(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("streak-only", streak_only=True, watch_streak=True)],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/streak-only"]
+
+
+def test_confirmed_watch_streak_drops_streak_only_streamer(monkeypatch):
+    streamer = _watch_streamer("streak-only", streak_only=True, watch_streak=True)
+    streamer.stream.watch_streak_missing = False
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+
+
+def test_streak_only_streamer_stops_after_the_watch_window(monkeypatch):
+    streamer = _watch_streamer(
+        "streak-only",
+        streak_only=True,
+        watch_streak=True,
+        minute_watched=10,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+
+
+def test_streak_only_integer_sets_a_custom_window(monkeypatch):
+    in_window = _watch_streamer(
+        "custom-window",
+        streak_only=5,
+        watch_streak=True,
+        minute_watched=3,
+    )
+    at_window = _watch_streamer(
+        "custom-window-done",
+        streak_only=5,
+        watch_streak=True,
+        minute_watched=5,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [in_window, at_window],
+        streams_watched=2,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/custom-window"]
+
+
+def test_watch_window_applies_only_to_streak_only_streamers(monkeypatch):
+    # A points-capped streamer with a long pending streak still gets watched
+    # (its streak payout may only arrive near the end of the broadcast).
+    streamer = _watch_streamer(
+        "capped-long-streak",
+        points=500,
+        points_limit=500,
+        watch_streak=True,
+        minute_watched=45,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/capped-long-streak"]
+
+
+def test_short_restart_streak_is_immediately_eligible(monkeypatch):
+    streamer = _watch_streamer("short-restart", watch_streak=True)
+    streamer.offline_at = 100
+
+    # A short restart can continue an unclaimed logical stream, so the pending
+    # flag must not wait 30 minutes before the channel can be watched again.
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+        now=160,
+    )
+
+    assert posted == ["https://spade.test/short-restart"]
+
+
+def test_pending_watch_streak_survives_beyond_eleven_minutes():
+    streamer = _watch_streamer("streak", watch_streak=True, minute_watched=45)
+
+    assert Twitch._has_pending_watch_streak(streamer) is True
+
+
+def test_pending_watch_streak_stays_watched_until_confirmed(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("slow-streak", watch_streak=True, minute_watched=30)],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/slow-streak"]
+
+
+def test_minute_watcher_reconciles_a_streak_that_advances_mid_stream(monkeypatch):
+    # The first broadcast of a streak advances the milestone without paying a
+    # WATCH_STREAK bonus, so no points event arrives to clear the pending flag.
+    streamer = _watch_streamer(
+        "mid-stream",
+        watch_streak=True,
+        points=500,
+        points_limit=500,
+        minute_watched=5,
+    )
+    streamer.channel_id = "channel-1"
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.stream.watch_streak_checked_at = 0
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0),
+        expires_at=datetime(2099, 1, 1),
+    )
+    calls = []
+    gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: calls.append("live")
+        or SimpleNamespace(stream=live_stream),
+        get_reward_list=lambda channel_id: calls.append("rewards")
+        or SimpleNamespace(watch_streak_milestone=milestone),
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+        now=1_700_000_000,
+        gql=gql,
+    )
+
+    assert calls == ["live", "rewards"]
+    assert streamer.stream.watch_streak_missing is False
+    # Once the streak is confirmed, the channel no longer bypasses its points
+    # limit, so it does not take a watch slot in this cycle.
+    assert posted == []
+
+
+def test_confirmed_watch_streak_is_no_longer_pending():
+    streamer = _watch_streamer("streak", watch_streak=True, minute_watched=30)
+    streamer.stream.watch_streak_missing = False
+
+    assert Twitch._has_pending_watch_streak(streamer) is False
 
 
 def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
@@ -566,7 +787,7 @@ def test_stale_category_streamer_refresh_flips_it_into_watch_rotation(monkeypatc
 
     posted = []
     monkeypatch.setattr(
-        requests,
+        HttpSession,
         "post",
         lambda url, **kwargs: posted.append(url) or SimpleNamespace(status_code=500),
     )
@@ -996,6 +1217,35 @@ def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     assert "badge (badge drop)" in watch_message
     assert "explicit (streamer)" in watch_message
     assert "badge (badge drop; badge drops)" in watch_message
+
+
+def test_watched_streamer_log_lists_pending_watch_streak(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    streamers = [_watch_streamer("streaky", watch_streak=True)]
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        streamers,
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    watch_message = next(
+        message for message in messages if "Watching for points:" in message
+    )
+    assert "watching for watch streak: streaky (streamer)" in watch_message
+    # A pending streak must not also be listed as a points watch, or the
+    # dashboard/log appears to farm it for the lower-priority fallback reason.
+    points_section = watch_message.split("Watching for points:", 1)[1].split(
+        "; watching for drops:", 1
+    )[0]
+    assert "streaky" not in points_section
 
 
 def test_source_priority_appends_omitted_sources():
@@ -2405,6 +2655,198 @@ def _drop_campaigns(*campaign_ids, channels=()):
     ]
 
 
+def _reward_campaign_view(*drop_ids):
+    # A reward campaign (quest) as one category's streams earn it: the groups
+    # that count there (#348).
+    [view] = _drop_campaigns("quest")
+    view.reward_categories = [{"id": "1", "displayName": "Shared Game"}]
+    view.drops = [SimpleNamespace(id=drop_id) for drop_id in drop_ids]
+    view.watchable_drops = lambda: view.drops
+    return [view]
+
+
+def _quest_group(group_id, category_ids, subs=None, minutes=0):
+    return {
+        "id": group_id,
+        "name": group_id,
+        "track": None,
+        "lane": None,
+        "progressCriteria": {
+            "requirementType": "WATCH",
+            "requirements": {"minutesWatched": 60, "subs": subs},
+            "isRepeatable": False,
+            "repeatableConfig": None,
+            "channels": None,
+            "categories": [
+                {"id": category_id, "displayName": f"Game {category_id}"}
+                for category_id in category_ids
+            ],
+        },
+        "rewards": [{"id": f"reward-{group_id}", "name": "Chest"}],
+        "self": {
+            "status": "IN_PROGRESS",
+            "currentMinutesWatched": minutes,
+            "currentSubs": 0,
+            "grantCount": 0,
+            "nextEligibleAt": None,
+            "currentWindow": None,
+        },
+    }
+
+
+def _quest_category_views(*groups):
+    # The real entities, as the campaign sync hands each stream its
+    # category's part of a reward campaign.
+    campaign = Campaign(
+        campaign_from_reward_groups(
+            {
+                "id": "quest",
+                "name": "Quest",
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+                "game": None,
+                "rewardGroups": list(groups),
+            }
+        )
+    )
+    for drop, group in zip(campaign.drops, groups):
+        drop.update(
+            {
+                "hasPreconditionsMet": True,
+                "currentMinutesWatched": group["self"]["currentMinutesWatched"],
+                "currentSubs": 0,
+                "dropInstanceID": None,
+                "isClaimed": False,
+            }
+        )
+    return {
+        category["id"]: [campaign.in_reward_category(category)]
+        for category in campaign.reward_categories
+    }
+
+
+@pytest.mark.parametrize(
+    "unearnable_group",
+    [
+        # Needs a subscription the account has not made.
+        _quest_group("group-sub", ["1"], subs=1),
+        # Its minutes are in.
+        _quest_group("group-done", ["1"], minutes=60),
+    ],
+)
+def test_reward_group_watching_cannot_add_to_is_no_part_to_cover(
+    monkeypatch, unearnable_group
+):
+    # The discovered pick's category also counts toward a group no stream can
+    # add minutes to. The followed channel, in the other category of the
+    # group both earn, misses nothing by not counting toward that one.
+    messages = _capture_info(monkeypatch)
+    views = _quest_category_views(
+        unearnable_group, _quest_group("group-shared", ["1", "2"])
+    )
+    assert [drop.id for drop in views["1"][0].drops] == [
+        unearnable_group["id"],
+        "group-shared",
+    ]
+    category = _category_drop_streamer("category-streamer")
+    category.stream.campaigns = views["1"]
+    follower = _followed_drop_streamer("followed-streamer", views["2"])
+    points = _watch_streamer("points", from_followers=True)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
+    )
+
+    assert "category-streamer" not in _watched_for_drops(messages)
+    assert "followed-streamer" in _watched_for_drops(messages)
+
+
+@pytest.mark.parametrize(
+    "followed_groups,pick_is_covered",
+    [
+        # The followed channel's category counts toward the same group.
+        (("group-b",), True),
+        # Or toward that group and another one.
+        (("group-a", "group-b"), True),
+        # It counts toward another group of the campaign: the discovered
+        # pick's reward would get no progress from it.
+        (("group-a",), False),
+    ],
+)
+def test_reward_campaign_is_covered_only_by_a_stream_earning_the_same_groups(
+    monkeypatch, followed_groups, pick_is_covered
+):
+    messages = _capture_info(monkeypatch)
+    category = _category_drop_streamer("category-streamer")
+    category.stream.campaigns = _reward_campaign_view("group-b")
+    follower = _followed_drop_streamer(
+        "followed-streamer", _reward_campaign_view(*followed_groups)
+    )
+    points = _watch_streamer("points", from_followers=True)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [category, follower, points],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES, StreamerSource.FOLLOWERS],
+        drop_inventory_progress=_cover_progress(),
+    )
+
+    assert ("category-streamer" not in _watched_for_drops(messages)) is pick_is_covered
+
+
+def test_watcher_reports_a_reward_drop_under_its_one_report_category(monkeypatch):
+    # The stream is in the group's second category; the sync and the claim
+    # report the drop under its first. A different category here would leave
+    # a second, never-finished row in the report.
+    saved = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__save_drop_progress_analytics",
+        lambda self, drop, **kwargs: saved.append(
+            (drop.id, kwargs.get("category_name_override"))
+        ),
+    )
+    drop = SimpleNamespace(
+        id="group#0",
+        has_preconditions_met=True,
+        is_claimed=False,
+        is_printable=False,
+        current_minutes_watched=12,
+        minutes_required=60,
+    )
+    [quest] = _reward_campaign_view()
+    quest.drops = [drop]
+    quest.reward_drop_report_categories = {"group#0": "First Game"}
+    [ordinary] = _drop_campaigns("drop-campaign")
+    ordinary.drops = [SimpleNamespace(**{**vars(drop), "id": "drop-1"})]
+    streamer = _category_drop_streamer("category-streamer")
+    streamer.stream.campaigns = [quest, ordinary]
+
+    class WithSavedProgress(list):
+        def append(self, twitch):
+            twitch.drop_progress_last_saved = {}
+            super().append(twitch)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.DROPS, Priority.ORDER],
+        post_side_effects=[SimpleNamespace(status_code=204)],
+        twitch_out=WithSavedProgress(),
+    )
+
+    # A Drop campaign's drop is reported under the campaign's own game.
+    assert saved == [("group#0", "First Game"), ("drop-1", None)]
+
+
 def test_category_pick_evicted_by_badge_is_logged_as_no_free_slot(monkeypatch):
     messages = []
     twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
@@ -3084,7 +3526,7 @@ def test_unchanged_watch_status_is_logged_once_then_at_debug(monkeypatch):
     assert records[0][1] == records[1][1]
     assert records[0][1] == (
         "Watching for points: one (streamer), two (streamer); "
-        "watching for drops: none"
+        "watching for drops: none; watching for watch streak: none"
     )
 
 
@@ -3109,7 +3551,9 @@ def test_watch_status_logs_change_in_drops_list(monkeypatch):
     _log_watch_status(twitch, streamers, sources, drop_indexes={0})
 
     assert [level for level, _, _ in records] == ["info", "info"]
-    assert records[0][1].endswith("watching for drops: none")
+    assert records[0][1].endswith(
+        "watching for drops: none; watching for watch streak: none"
+    )
     assert "Example Game drop campaign 'Alpha'" in records[1][1]
 
 
@@ -3193,3 +3637,232 @@ def test_watch_status_skips_notifiers_and_uses_palette_color(monkeypatch):
         assert "\x1b[" not in message
         assert extra["default_color"] == WATCH_STATUS_COLOR
         assert WATCH_STATUS_COLOR == Fore.GREEN
+
+
+class _FakeBanGQL:
+    """Answers ChannelBanStatus checks from a dict and records each call."""
+
+    def __init__(self, statuses=None, error=None):
+        self.statuses = statuses or {}
+        self.error = error
+        self.calls = []
+
+    def channel_ban_statuses(self, channel_ids):
+        self.calls.append(list(channel_ids))
+        if self.error is not None:
+            raise self.error
+        return {
+            channel_id: self.statuses[channel_id]
+            for channel_id in channel_ids
+            if channel_id in self.statuses
+        }
+
+
+def _with_channel_id(streamer, channel_id):
+    streamer.channel_id = channel_id
+    return streamer
+
+
+NOW = 1_800_000_000.0
+
+
+def test_minute_watcher_skips_a_channel_the_account_is_banned_in(monkeypatch, caplog):
+    gql = _FakeBanGQL(
+        {"1": ChannelBanStatus(True, permanent=True), "2": ChannelBanStatus(False)}
+    )
+    twitch_out = []
+    with caplog.at_level(logging.INFO):
+        posted = _run_one_watch_iteration(
+            monkeypatch,
+            [
+                _with_channel_id(_watch_streamer("banned"), "1"),
+                _with_channel_id(_watch_streamer("allowed"), "2"),
+            ],
+            streams_watched=1,
+            gql=gql,
+            now=NOW,
+            twitch_out=twitch_out,
+        )
+
+    assert posted == ["https://spade.test/allowed"]
+    assert gql.calls == [["1", "2"]]
+    assert (
+        "Skipping banned for points and Drops: the account is banned in this channel"
+        in caplog.text
+    )
+    status, next_check = twitch_out[0].channel_bans["1"]
+    assert status.permanent is True
+    assert next_check == NOW + 6 * 60 * 60
+    assert twitch_out[0].channel_bans["2"][1] == NOW + 30 * 60
+
+
+def test_a_banned_channel_does_not_take_the_drops_slot(monkeypatch):
+    gql = _FakeBanGQL({"1": ChannelBanStatus(True, permanent=True)})
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _with_channel_id(
+                _watch_streamer(
+                    "banned-drops", from_category=True, drops_eligible=True
+                ),
+                "1",
+            ),
+            _with_channel_id(
+                _watch_streamer("open-drops", from_category=True, drops_eligible=True),
+                "2",
+            ),
+        ],
+        streams_watched=2,
+        priority=[Priority.DROPS, Priority.ORDER],
+        source_priority=[StreamerSource.CATEGORIES],
+        gql=gql,
+        now=NOW,
+    )
+
+    assert posted == ["https://spade.test/open-drops"]
+
+
+def test_a_timeout_in_the_future_skips_the_channel_until_it_ends(monkeypatch):
+    timeout = ChannelBanStatus(True, expires_at=NOW + 600)
+    twitch_out = []
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("timed-out"), "1")],
+        streams_watched=1,
+        gql=_FakeBanGQL({"1": timeout}),
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert posted == []
+    # Checked again when the timeout ends.
+    assert twitch_out[0].channel_bans["1"][1] == NOW + 600
+
+
+def test_a_timeout_that_has_ended_no_longer_skips_the_channel(monkeypatch):
+    # The cached timeout ended before its scheduled recheck came round.
+    gql = _FakeBanGQL()
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("was-timed-out"), "1")],
+        streams_watched=1,
+        gql=gql,
+        channel_bans={
+            "1": (ChannelBanStatus(True, expires_at=NOW - 1), NOW + 60),
+        },
+        now=NOW,
+    )
+
+    assert posted == ["https://spade.test/was-timed-out"]
+    assert gql.calls == []
+
+
+@pytest.mark.parametrize(
+    "gql",
+    [_FakeBanGQL(), _FakeBanGQL(error=RuntimeError("boom"))],
+    ids=["no answer", "check raised"],
+)
+def test_a_failed_ban_check_never_skips_a_channel(monkeypatch, gql):
+    twitch_out = []
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("unknown"), "1")],
+        streams_watched=1,
+        gql=gql,
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert posted == ["https://spade.test/unknown"]
+    if gql.error is None:
+        # Unknown, and checked again a few minutes later.
+        assert twitch_out[0].channel_bans["1"] == (None, NOW + 5 * 60)
+
+
+def test_a_failed_recheck_keeps_the_known_ban(monkeypatch):
+    ban = ChannelBanStatus(True, permanent=True)
+    twitch_out = []
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("banned"), "1")],
+        streams_watched=1,
+        gql=_FakeBanGQL(),
+        channel_bans={"1": (ban, NOW - 1)},
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert posted == []
+    assert twitch_out[0].channel_bans["1"] == (ban, NOW + 5 * 60)
+
+
+def test_a_rediscovered_channel_keeps_its_known_ban(monkeypatch):
+    # A new Streamer object for the same channel (category rediscovery) finds
+    # the cached ban and isn't checked again before it is due.
+    gql = _FakeBanGQL()
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("rediscovered"), "1")],
+        streams_watched=1,
+        gql=gql,
+        channel_bans={
+            "1": (ChannelBanStatus(True, permanent=True), NOW + 3600),
+        },
+        now=NOW,
+    )
+
+    assert posted == []
+    assert gql.calls == []
+
+
+def test_a_lifted_ban_is_logged_and_the_channel_watched_again(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO):
+        posted = _run_one_watch_iteration(
+            monkeypatch,
+            [_with_channel_id(_watch_streamer("unbanned"), "1")],
+            streams_watched=1,
+            gql=_FakeBanGQL({"1": ChannelBanStatus(False)}),
+            channel_bans={"1": (ChannelBanStatus(True, permanent=True), NOW)},
+            now=NOW,
+        )
+
+    assert posted == ["https://spade.test/unbanned"]
+    assert "unbanned can be watched again" in caplog.text
+
+
+def test_the_same_ban_is_logged_only_once(monkeypatch, caplog):
+    ban = ChannelBanStatus(True, permanent=True)
+    with caplog.at_level(logging.INFO):
+        _run_one_watch_iteration(
+            monkeypatch,
+            [_with_channel_id(_watch_streamer("banned"), "1")],
+            streams_watched=1,
+            gql=_FakeBanGQL({"1": ChannelBanStatus(True, permanent=True)}),
+            channel_bans={"1": (ban, NOW)},
+            now=NOW,
+        )
+
+    assert "Skipping banned" not in caplog.text
+
+
+def test_ban_checks_skip_offline_channels_and_forget_departed_ones(monkeypatch):
+    offline = _with_channel_id(_watch_streamer("offline"), "2")
+    offline.is_online = False
+    gql = _FakeBanGQL()
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_with_channel_id(_watch_streamer("online"), "1"), offline],
+        streams_watched=1,
+        gql=gql,
+        channel_bans={
+            # Gone from the list: dropped unless a ban still applies.
+            "9": (ChannelBanStatus(False), NOW + 60),
+            "8": (ChannelBanStatus(True, permanent=True), NOW + 60),
+        },
+        now=NOW,
+        twitch_out=twitch_out,
+    )
+
+    assert gql.calls == [["1"]]
+    assert set(twitch_out[0].channel_bans) == {"1", "8"}
