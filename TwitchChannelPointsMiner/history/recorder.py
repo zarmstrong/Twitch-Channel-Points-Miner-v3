@@ -16,6 +16,11 @@ The optional ``drop_streamers`` callable names the channels the miner only
 discovered to farm Drops (category, wildcard-category and badge campaigns).
 Those watches are not configured streamers, so they are never recorded and
 never appear in the Streamers list.
+
+The optional ``streamers_ready`` callable reports whether the miner has
+finished loading its streamers.  The analytics server, and so the recorder,
+starts before that, when the Drops exclusions above are still empty, so
+nothing is imported until it returns true.
 """
 
 import json
@@ -108,6 +113,41 @@ def _annotation_points(text):
     return int(match.group(1)) if match else None
 
 
+class _ImportPosition(object):
+    """Where an import of an append-only analytics list left off.
+
+    The miner writes ``x`` in whole seconds, so several entries can share one
+    timestamp and ``x`` alone cannot say which of them were imported.  The
+    position is the newest imported ``x`` plus how many entries with that
+    ``x`` were consumed.  A ``count`` of ``None`` comes from an older database
+    that only stored ``x``; it keeps the old behaviour of skipping every entry
+    at that timestamp.
+    """
+
+    __slots__ = ["last_x", "count", "_seen_at_last"]
+
+    def __init__(self, last_x=None, count=None):
+        self.last_x = None if last_x is None else float(last_x)
+        self.count = None if count is None else int(count)
+        self._seen_at_last = 0
+
+    def advance(self, x):
+        """Consume the next entry (in ``x`` order); True when it is new."""
+
+        if self.last_x is not None and x < self.last_x:
+            return False
+        if self.last_x is not None and x == self.last_x:
+            self._seen_at_last += 1
+            if self.count is None or self._seen_at_last <= self.count:
+                return False
+            self.count = self._seen_at_last
+            return True
+        self.last_x = x
+        self.count = 1
+        self._seen_at_last = 1
+        return True
+
+
 class HistoryRecorder(threading.Thread):
     """Poll existing analytics files and persist durable history rows."""
 
@@ -124,6 +164,7 @@ class HistoryRecorder(threading.Thread):
         clock=time.time,
         online_streamers=None,
         drop_streamers=None,
+        streamers_ready=None,
     ):
         super(HistoryRecorder, self).__init__()
         self.daemon = True
@@ -138,7 +179,13 @@ class HistoryRecorder(threading.Thread):
         self.clock = clock
         self.online_streamers = online_streamers
         self.drop_streamers = drop_streamers
+        self.streamers_ready = streamers_ready
         self._stop_event = threading.Event()
+        # Held for a whole poll and for a delete, so a delete never interleaves
+        # with an import that already read the deleted data.
+        self._lock = threading.RLock()
+        self._startup_import_done = False
+        self._deleted_before = {}
         self._active_watch = {}
         self._now_watching_initialized = False
         self._now_watching_mtime = 0.0
@@ -160,10 +207,9 @@ class HistoryRecorder(threading.Thread):
         self._stop_event.set()
 
     def run(self):
-        if not self._initialize_store():
-            return
         try:
-            self._prepare()
+            if not self._start():
+                return
             while not self._stop_event.wait(self.interval):
                 self._poll_guarded()
         except Exception:
@@ -191,6 +237,36 @@ class HistoryRecorder(threading.Thread):
                 )
             else:
                 logger.debug("History recorder poll still failing", exc_info=True)
+
+    def _start(self):
+        """Initialize and prepare, retrying both until they succeed.
+
+        Startup cleanup and the first import write to the database too, so a
+        lock held past the busy timeout there must be retried like one during
+        initialization instead of ending the recorder.
+        """
+
+        warned = False
+        while True:
+            if not self._initialize_store():
+                return False
+            try:
+                with self._lock:
+                    self._prepare()
+                return True
+            except Exception:
+                if warned:
+                    logger.debug(
+                        "History startup is still failing; retrying", exc_info=True
+                    )
+                else:
+                    warned = True
+                    logger.warning(
+                        "Unable to prepare the History database; will retry",
+                        exc_info=True,
+                    )
+            if self._stop_event.wait(self.interval):
+                return False
 
     def _initialize_store(self):
         """Retry initialization so a transient lock does not disable History."""
@@ -238,14 +314,35 @@ class HistoryRecorder(threading.Thread):
         self._tracked_streamers = (
             self.store.watched_streamers() | self.store.known_streamers()
         )
-        self._run_id = self.store.start_run(self.version, started_at=now)
+        self._deleted_before = self.store.deletion_cutoffs()
         self._next_retention_at = now
+        self._baseline_now_watching()
+        self._startup_import_done = False
+        if self._streamers_loaded():
+            self._startup_import(now)
+        # Start the run last: a failed step above is retried from the start,
+        # and must not leave an extra run row behind each time.
+        self._run_id = self.store.start_run(self.version, started_at=now)
+
+    def _streamers_loaded(self):
+        if self.streamers_ready is None:
+            return True
+        try:
+            return bool(self.streamers_ready())
+        except Exception:
+            logger.debug("Unable to read miner startup state", exc_info=True)
+            return False
+
+    def _startup_import(self, now):
+        # Read the Drops exclusions first, so the startup import below does
+        # not record channels the miner only farms for Drops.
+        self._refresh_streamer_state()
         # The cache may carry an open session from an old crash.  Import those
         # as already closed so they cannot become permanent phantom live rows.
         # Watching that streamer again proves the broadcast is live and
         # reopens it.
         self._ingest_streak_cache(now, close_open=True, force=True)
-        self._baseline_now_watching()
+        self._startup_import_done = True
 
     def _guarded_shutdown(self):
         try:
@@ -272,18 +369,73 @@ class HistoryRecorder(threading.Thread):
             self._run_id = None
 
     def poll_once(self):
+        with self._lock:
+            self._poll_once()
+
+    def _poll_once(self):
         if self._run_id is None:
             return
         now = self.clock()
         self.store.heartbeat_run(self._run_id, now)
         self.store.touch_open_streams(now)
-        self._refresh_streamer_state()
-        self._ingest_streak_cache(now)
+        if not self._startup_import_done:
+            if not self._streamers_loaded():
+                return
+            self._startup_import(now)
+        else:
+            self._refresh_streamer_state()
+            self._ingest_streak_cache(now)
         self._poll_now_watching(now)
         self._ingest_analytics(now)
         self._poll_online_streamers(now)
         if now >= self._next_retention_at:
             self._apply_retention(now)
+
+    # -- deletion ----------------------------------------------------------
+    def delete_streamer(self, streamer):
+        """Delete one streamer's history so it is not imported again.
+
+        This waits for a poll in progress, so an import that already read the
+        streamer's files finishes before its rows are deleted.  Afterwards
+        anything older than the delete is skipped, because the analytics JSON
+        and the watch-streak cache may still hold it.
+        """
+
+        streamer = _clean_streamer(streamer)
+        if not streamer:
+            return {}
+        with self._lock:
+            deleted_at = self.clock()
+            counts = self.store.delete_streamer(streamer, deleted_at=deleted_at)
+            self._deleted_before[streamer] = max(
+                deleted_at, self._deleted_before.get(streamer, 0.0)
+            )
+            # The rows behind this in-memory state are gone.  A watch still in
+            # progress starts a new session on the next poll.
+            self._active_watch.pop(streamer, None)
+            self._tracked_streamers.discard(streamer)
+            self._online_live_keys = {
+                key for key in self._online_live_keys if key[0] != streamer
+            }
+            self._cache_startup_closed = {
+                key for key in self._cache_startup_closed if key[0] != streamer
+            }
+            return counts
+
+    def _deleted_since(self, streamer, timestamp):
+        """True when ``timestamp`` predates a delete of this streamer."""
+
+        cutoff = self._deleted_before.get(streamer)
+        return cutoff is not None and float(timestamp) < cutoff
+
+    def _retention_cutoff(self, now):
+        try:
+            days = float(self.retention_days or 0)
+        except (TypeError, ValueError):
+            return None
+        if days <= 0:
+            return None
+        return float(now) - (days * 24 * 60 * 60)
 
     def _apply_retention(self, now):
         self._next_retention_at = now + RETENTION_CHECK_SECONDS
@@ -405,7 +557,9 @@ class HistoryRecorder(threading.Thread):
             active = self._active_watch.get(streamer)
             if active is not None and active["reason"] == reason:
                 self._tick_watch(streamer, now)
-            else:
+            if self._active_watch.get(streamer) is None or (
+                self._active_watch[streamer]["reason"] != reason
+            ):
                 if active is not None:
                     self._close_watch(streamer, now)
                 self._tracked_streamers.add(streamer)
@@ -436,16 +590,22 @@ class HistoryRecorder(threading.Thread):
         delta = max(0.0, float(now) - float(active["last_tick"]))
         delta = min(delta, MAX_WATCH_TICK_SECONDS)
         if delta > 0:
-            self.store.tick_watch_session(
+            if not self.store.tick_watch_session(
                 active["id"], streamer, timestamp=now, delta_seconds=delta
-            )
+            ):
+                # The session row is gone, so start a new one next poll.
+                self._active_watch.pop(streamer, None)
+                return
         active["last_tick"] = float(now)
 
     def _close_watch(self, streamer, ended_at):
-        active = self._active_watch.pop(streamer, None)
+        active = self._active_watch.get(streamer)
         if active is None:
             return
+        # Forget the session only once it is closed, so a failed write is
+        # retried on the next poll instead of leaving it open in the database.
         self.store.end_watch_session(active["id"], ended_at=ended_at)
+        self._active_watch.pop(streamer, None)
 
     # -- live streamers ----------------------------------------------------
     def _poll_online_streamers(self, now):
@@ -459,9 +619,10 @@ class HistoryRecorder(threading.Thread):
         streamer - not only the one currently being watched.
         """
 
-        entries = self._online_stream_entries(now)
-        if not entries:
+        if self._streamer_snapshot is None:
+            # No snapshot has been read yet, so absence proves nothing.
             return
+        entries = self._online_stream_entries(now)
         current = set()
         for entry in entries:
             streamer = entry["streamer"]
@@ -488,6 +649,11 @@ class HistoryRecorder(threading.Thread):
             # must not close the cached session again.
             self._cache_startup_closed.discard(key)
             self._online_live_keys.add(key)
+        # A broadcast this process saw online that is no longer reported, for
+        # example because the streamer was removed from the config, would
+        # otherwise stay live: nothing else writes its end.
+        for streamer, broadcast_id in self._online_live_keys - current:
+            self.store.end_stream_session(streamer, broadcast_id, ended_at=now)
         self._online_live_keys &= current
 
     def _online_stream_entries(self, now):
@@ -563,12 +729,13 @@ class HistoryRecorder(threading.Thread):
                 error,
             )
             return
-        self._streak_cache_key = cache_key
 
         if not isinstance(payload, dict):
+            self._streak_cache_key = cache_key
             return
         sessions = payload.get("sessions")
         if not isinstance(sessions, list):
+            self._streak_cache_key = cache_key
             return
 
         parsed = []
@@ -613,17 +780,27 @@ class HistoryRecorder(threading.Thread):
             if item["streamer"] not in self._tracked_streamers:
                 continue
             self._store_cached_session(item, now, close_open=close_open)
-            self._record_cached_streak(item)
+            self._record_cached_streak(item, now)
+        # Remember the file only once it is imported, so a failed write is
+        # retried on the next poll even if the cache does not change again.
+        self._streak_cache_key = cache_key
 
     def _store_cached_session(self, item, now, close_open=False):
         started_at = item["started_at"]
         ended_at = item["ended_at"]
         key = (item["streamer"], item["broadcast_id"])
+        if self._deleted_since(item["streamer"], started_at):
+            return
         if close_open and ended_at is None:
             ended_at = started_at
             self._cache_startup_closed.add(key)
         elif ended_at is None and key in self._cache_startup_closed:
             ended_at = started_at
+        cutoff = self._retention_cutoff(now)
+        if cutoff is not None and ended_at is not None and ended_at < cutoff:
+            # Retention already pruned this row (or will); importing it again
+            # would count it a second time in the permanent daily rollups.
+            return
 
         self.store.upsert_stream_session(
             item["streamer"],
@@ -638,12 +815,19 @@ class HistoryRecorder(threading.Thread):
             # reports the broadcast as online.
             self._online_live_keys.discard(key)
 
-    def _record_cached_streak(self, item):
+    def _record_cached_streak(self, item, now):
         if not item.get("claimed") or item.get("claimed_at") is None:
             return
         try:
             claimed_at = float(item["claimed_at"])
         except (TypeError, ValueError):
+            return
+        if self._deleted_since(item["streamer"], claimed_at):
+            return
+        cutoff = self._retention_cutoff(now)
+        if cutoff is not None and claimed_at < cutoff:
+            # See _store_cached_session: the pruned event must not be counted
+            # again in the rollups.
             return
         self.store.record_event(
             item["streamer"],
@@ -664,7 +848,7 @@ class HistoryRecorder(threading.Thread):
         for item in self._cached_stream_sessions:
             if item["streamer"] == streamer:
                 self._store_cached_session(item, now, close_open=False)
-                self._record_cached_streak(item)
+                self._record_cached_streak(item, now)
 
     def _resume_cached_live_stream(self, streamer, now):
         """Reopen the broadcast a restarted miner is watching again.
@@ -791,18 +975,17 @@ class HistoryRecorder(threading.Thread):
         usable.sort(key=lambda entry: float(entry["x"]))
 
         last_x = state.get("last_x") if state else None
+        last_x_count = state.get("last_x_count") if state else None
         last_balance = state.get("last_balance") if state else None
         if last_balance is None and usable:
             last_balance = self._baseline_balance(
                 streamer, float(usable[0]["x"]) / 1000.0
             )
 
+        position = _ImportPosition(last_x, last_x_count)
         for entry in usable:
-            try:
-                x = float(entry["x"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if last_x is not None and x <= last_x:
+            x = float(entry["x"])
+            if not position.advance(x):
                 continue
             balance = entry.get("y")
             if balance is None:
@@ -814,10 +997,11 @@ class HistoryRecorder(threading.Thread):
             if last_balance is None:
                 # First observation is the baseline; there is no delta yet.
                 last_balance = balance
-                last_x = x
                 continue
             delta = balance - int(last_balance)
-            if delta != 0:
+            # Entries from before a delete still move the running balance, so
+            # the first change after the delete gets the right delta.
+            if delta != 0 and not self._deleted_since(streamer, x / 1000.0):
                 self.store.record_points(
                     streamer,
                     timestamp=x / 1000.0,
@@ -828,14 +1012,14 @@ class HistoryRecorder(threading.Thread):
                     dedupe_key=f"series:{streamer}:{x:.3f}:{balance}:{delta}",
                 )
             last_balance = balance
-            last_x = x
 
         self.store.set_import_state(
             source,
             mtime=stat.st_mtime,
             size=stat.st_size,
-            last_x=last_x,
+            last_x=position.last_x,
             last_balance=last_balance,
+            last_x_count=position.count,
         )
 
     def _baseline_balance(self, streamer, first_timestamp):
@@ -862,13 +1046,15 @@ class HistoryRecorder(threading.Thread):
             usable.append(entry)
         usable.sort(key=lambda entry: float(entry["x"]))
 
-        last_x = state.get("last_x") if state else None
+        position = _ImportPosition(
+            state.get("last_x") if state else None,
+            state.get("last_x_count") if state else None,
+        )
         for entry in usable:
-            try:
-                x = float(entry["x"])
-            except (KeyError, TypeError, ValueError):
+            x = float(entry["x"])
+            if not position.advance(x):
                 continue
-            if last_x is not None and x <= last_x:
+            if self._deleted_since(streamer, x / 1000.0):
                 continue
             label = ""
             event_type = "points"
@@ -883,14 +1069,14 @@ class HistoryRecorder(threading.Thread):
                 points_delta=_annotation_points(label),
                 dedupe_key=f"annotation:{streamer}:{x:.3f}:{label}",
             )
-            last_x = x
 
         self.store.set_import_state(
             source,
             mtime=stat.st_mtime,
             size=stat.st_size,
-            last_x=last_x,
+            last_x=position.last_x,
             last_balance=None,
+            last_x_count=position.count,
         )
 
 
@@ -904,6 +1090,7 @@ def build_recorder(
     interval=ANALYTICS_POLL_SECONDS,
     online_streamers=None,
     drop_streamers=None,
+    streamers_ready=None,
 ):
     store = HistoryStore(os.path.join(analytics_path, "history.sqlite3"))
     recorder = HistoryRecorder(
@@ -916,5 +1103,6 @@ def build_recorder(
         retention_days=retention_days,
         online_streamers=online_streamers,
         drop_streamers=drop_streamers,
+        streamers_ready=streamers_ready,
     )
     return recorder

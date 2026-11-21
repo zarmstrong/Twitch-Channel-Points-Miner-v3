@@ -25,7 +25,7 @@ from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
 
 logger = logging.getLogger(__name__)
 
-HISTORY_SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 2
 DEFAULT_RETENTION_DAYS = 730
 SECONDS_PER_DAY = 24 * 60 * 60
 
@@ -53,6 +53,30 @@ def day_start(day):
 
 def _clean_streamer(streamer):
     return str(streamer or "").strip().lower()
+
+
+def first_window_day(now, days):
+    """Return the first UTC day of a ``days``-long window ending today.
+
+    ``days=1`` is today only, so every query that takes ``days`` covers the
+    same calendar days as the daily chart.
+    """
+
+    days = max(1, int(days))
+    return utc_day(float(now) - ((days - 1) * SECONDS_PER_DAY))
+
+
+def _import_source_pattern(streamer):
+    """LIKE pattern for a streamer's analytics import sources.
+
+    Usernames may contain ``_``, which LIKE treats as a wildcard, so escape it
+    to keep one streamer's delete from matching another's import state.
+    """
+
+    escaped = (
+        str(streamer).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return f"analytics:{escaped}.json:%"
 
 
 def _event_broadcast_id(raw_metadata):
@@ -250,8 +274,23 @@ _SCHEMA_V1 = (
     """,
 )
 
+# Version 2 remembers how many entries sharing the newest imported timestamp
+# were already imported (the analytics JSON stores whole seconds, so several
+# changes can share one), and when a streamer's history was deleted so data
+# from before the delete is not imported again.
+_SCHEMA_V2 = (
+    "ALTER TABLE import_state ADD COLUMN last_x_count INTEGER",
+    """
+    CREATE TABLE IF NOT EXISTS deleted_streamers (
+        streamer TEXT PRIMARY KEY,
+        deleted_at REAL NOT NULL
+    )
+    """,
+)
+
 _SCHEMA_MIGRATIONS = {
     1: _SCHEMA_V1,
+    2: _SCHEMA_V2,
 }
 
 
@@ -778,15 +817,19 @@ class HistoryStore(object):
         timestamp = float(timestamp)
         delta = max(0.0, float(delta_seconds))
         with self._write_connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE watch_sessions SET
                     watch_seconds = watch_seconds + ?,
                     last_seen_at = MAX(last_seen_at, ?)
-                WHERE id = ?
+                WHERE id = ? AND ended_at IS NULL
                 """,
                 (delta, timestamp, int(session_id)),
             )
+            if cursor.rowcount <= 0:
+                # The session was deleted or closed; do not count watch time
+                # that no session row accounts for.
+                return False
             if delta > 0:
                 self._touch_daily(
                     connection,
@@ -794,6 +837,7 @@ class HistoryStore(object):
                     timestamp,
                     watch_seconds=delta,
                 )
+            return True
 
     def end_watch_session(self, session_id, ended_at):
         with self._write_connection() as connection:
@@ -805,6 +849,24 @@ class HistoryStore(object):
                 """,
                 (float(ended_at), float(ended_at), int(session_id)),
             )
+
+    def end_stream_session(self, streamer, broadcast_id, ended_at):
+        """Close one live session that is no longer reported online."""
+
+        streamer = _clean_streamer(streamer)
+        broadcast_id = str(broadcast_id or "").strip()
+        if not streamer or not broadcast_id:
+            return False
+        with self._write_connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE streams SET ended_at = ?,
+                    last_seen_at = MAX(last_seen_at, ?)
+                WHERE streamer = ? AND broadcast_id = ? AND ended_at IS NULL
+                """,
+                (float(ended_at), float(ended_at), streamer, broadcast_id),
+            )
+            return cursor.rowcount > 0
 
     def close_open_watch_sessions(self, ended_at):
         with self._write_connection() as connection:
@@ -959,8 +1021,8 @@ class HistoryStore(object):
                     )
                     counts[table] += max(0, cursor.rowcount)
                 cursor = connection.execute(
-                    "DELETE FROM import_state WHERE source LIKE ?",
-                    (f"analytics:{streamer}.json:%",),
+                    "DELETE FROM import_state WHERE source LIKE ? ESCAPE '\\'",
+                    (_import_source_pattern(streamer),),
                 )
                 counts["import_state"] += max(0, cursor.rowcount)
         return counts
@@ -990,18 +1052,27 @@ class HistoryStore(object):
                 """)
 
     def set_import_state(
-        self, source, mtime=None, size=None, last_x=None, last_balance=None
+        self,
+        source,
+        mtime=None,
+        size=None,
+        last_x=None,
+        last_balance=None,
+        last_x_count=None,
     ):
         with self._write_connection() as connection:
             connection.execute(
                 """
-                INSERT INTO import_state (source, mtime, size, last_x, last_balance)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO import_state (
+                    source, mtime, size, last_x, last_balance, last_x_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source) DO UPDATE SET
                     mtime = excluded.mtime,
                     size = excluded.size,
                     last_x = excluded.last_x,
-                    last_balance = excluded.last_balance
+                    last_balance = excluded.last_balance,
+                    last_x_count = excluded.last_x_count
                 """,
                 (
                     source,
@@ -1009,8 +1080,18 @@ class HistoryStore(object):
                     None if size is None else int(size),
                     None if last_x is None else float(last_x),
                     None if last_balance is None else int(last_balance),
+                    None if last_x_count is None else int(last_x_count),
                 ),
             )
+
+    def deletion_cutoffs(self):
+        """Return ``{streamer: deleted_at}`` for streamers deleted on request."""
+
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                "SELECT streamer, deleted_at FROM deleted_streamers"
+            ).fetchall()
+        return {row["streamer"]: float(row["deleted_at"]) for row in rows}
 
     # -- maintenance -------------------------------------------------------
     def apply_retention(self, now=None, retention_days=DEFAULT_RETENTION_DAYS):
@@ -1049,7 +1130,7 @@ class HistoryStore(object):
     def overview(self, days=30, now=None):
         now = float(now or time.time())
         today = utc_day(now)
-        cutoff_day = utc_day(now - (int(days) * SECONDS_PER_DAY))
+        cutoff_day = first_window_day(now, days)
         with self._read_connection() as connection:
             window = connection.execute(
                 """
@@ -1113,7 +1194,7 @@ class HistoryStore(object):
 
     def streamers(self, days=30, now=None):
         now = float(now or time.time())
-        cutoff_day = utc_day(now - (int(days) * SECONDS_PER_DAY))
+        cutoff_day = first_window_day(now, days)
         with self._read_connection() as connection:
             rows = connection.execute(
                 """
@@ -1212,7 +1293,7 @@ class HistoryStore(object):
     def streamer_detail(self, streamer, days=90, now=None):
         streamer = _clean_streamer(streamer)
         now = float(now or time.time())
-        cutoff_day = utc_day(now - (int(days) * SECONDS_PER_DAY))
+        cutoff_day = first_window_day(now, days)
         with self._read_connection() as connection:
             daily_rows = connection.execute(
                 """
@@ -1247,7 +1328,7 @@ class HistoryStore(object):
                 SELECT * FROM points WHERE streamer = ? AND ts >= ?
                 ORDER BY ts
                 """,
-                (streamer, now - (int(days) * SECONDS_PER_DAY)),
+                (streamer, day_start(cutoff_day)),
             ).fetchall()
         summary = next(
             (
@@ -1271,7 +1352,7 @@ class HistoryStore(object):
     def daily(self, days=30, streamer=None, now=None):
         now = float(now or time.time())
         days = max(1, int(days))
-        first_day = utc_day(now - ((days - 1) * SECONDS_PER_DAY))
+        first_day = first_window_day(now, days)
         streamer = _clean_streamer(streamer) if streamer else None
         with self._read_connection() as connection:
             if streamer:
@@ -1446,7 +1527,7 @@ class HistoryStore(object):
 
         now = float(now or time.time())
         days = max(1, int(days))
-        first_day = utc_day(now - ((days - 1) * SECONDS_PER_DAY))
+        first_day = first_window_day(now, days)
         cutoff = day_start(first_day)
         streamer = _clean_streamer(streamer) if streamer else None
         day_list = [
@@ -1542,10 +1623,18 @@ class HistoryStore(object):
             ],
         }
 
-    def delete_streamer(self, streamer):
+    def delete_streamer(self, streamer, deleted_at=None):
+        """Delete one streamer's rows and remember when it happened.
+
+        The per-streamer JSON and the watch-streak cache still hold the
+        deleted data, so the recorder skips anything older than
+        ``deleted_at`` instead of importing it again.
+        """
+
         streamer = _clean_streamer(streamer)
         if not streamer:
             return {}
+        deleted_at = float(deleted_at or time.time())
         counts = {}
         with self._write_connection() as connection:
             for table in _STREAMER_TABLES:
@@ -1556,9 +1645,18 @@ class HistoryStore(object):
             cursor = connection.execute(
                 """
                 DELETE FROM import_state
-                WHERE source LIKE ?
+                WHERE source LIKE ? ESCAPE '\\'
                 """,
-                (f"analytics:{streamer}.json:%",),
+                (_import_source_pattern(streamer),),
             )
             counts["import_state"] = max(0, cursor.rowcount)
+            connection.execute(
+                """
+                INSERT INTO deleted_streamers (streamer, deleted_at)
+                VALUES (?, ?)
+                ON CONFLICT(streamer) DO UPDATE SET
+                    deleted_at = MAX(deleted_at, excluded.deleted_at)
+                """,
+                (streamer, deleted_at),
+            )
         return counts

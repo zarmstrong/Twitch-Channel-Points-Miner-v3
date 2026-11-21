@@ -11,7 +11,11 @@ import sqlite3
 
 from flask import Blueprint, jsonify, request
 
-from TwitchChannelPointsMiner.history import get_store
+from TwitchChannelPointsMiner.history import (
+    delete_streamer_history,
+    get_store,
+    is_recording,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +102,8 @@ def delete_streamer(streamer):
     name = str(streamer or "").strip().lower()
     if not name or len(name) > 100:
         raise HistoryApiError("Invalid streamer name")
-    return jsonify({"streamer": name, "deleted": _store().delete_streamer(name)})
+    deleted = delete_streamer_history(name, store=_store())
+    return jsonify({"streamer": name, "deleted": deleted})
 
 
 @bp.route("/daily", methods=["GET"])
@@ -154,7 +159,7 @@ def activity():
 @bp.route("/health", methods=["GET"])
 def health():
     store = _store()
-    return jsonify({"ready": True, "database": store.path})
+    return jsonify({"ready": True, "recording": is_recording(), "database": store.path})
 
 
 def register_history(app):

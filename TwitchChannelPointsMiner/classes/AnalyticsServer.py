@@ -679,11 +679,9 @@ def delete_streamer_analytics(streamer):
     # The optional History tab keeps its own durable copy of point, watch and
     # live-session data, so "delete analytics data" must clear that too.
     try:
-        from TwitchChannelPointsMiner.history import get_store
+        from TwitchChannelPointsMiner.history import delete_streamer_history
 
-        store = get_store()
-        if store is not None:
-            store.delete_streamer(filename[: -len(".json")])
+        delete_streamer_history(filename[: -len(".json")])
     except Exception:
         logger.warning(
             "Unable to delete optional streamer history",

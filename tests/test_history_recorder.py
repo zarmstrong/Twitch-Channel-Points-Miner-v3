@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import os
 from pathlib import Path
 
@@ -782,3 +783,396 @@ def test_retention_days_uses_configured_value(monkeypatch):
 def test_retention_days_rejects_invalid_values(monkeypatch):
     monkeypatch.setenv("TCPM_HISTORY_RETENTION_DAYS", "not-a-number")
     assert history_module._history_retention_days("also-bad") == 730
+
+
+def _cache_payload(*sessions):
+    return {
+        "version": 1,
+        "sessions": [
+            {
+                "account_name": "alice",
+                "claimed": False,
+                "claimed_at": None,
+                "ended_at": None,
+                **session,
+            }
+            for session in sessions
+        ],
+    }
+
+
+def test_series_entries_sharing_a_second_are_all_imported(recorder):
+    # The miner writes x in whole seconds, so a spend written later in the
+    # same second as an earn shares its timestamp.
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 61)
+    recorder._ingest_analytics(NOW + 61)
+
+    series.append({"x": int((NOW + 60) * 1000), "y": 1000, "z": "Prediction"})
+    _write_json(path, {"series": series, "annotations": []}, NOW + 62)
+    recorder._ingest_analytics(NOW + 62)
+    # Re-reading the same entries must not count them again.
+    _write_json(path, {"series": series, "annotations": []}, NOW + 63)
+    recorder._ingest_analytics(NOW + 63)
+
+    window = recorder.store.overview(days=1, now=NOW + 63)["window"]
+    assert window["points_gained"] == 50
+    assert window["points_spent"] == 50
+    assert recorder.store.latest_point("bob")["balance"] == 1000
+
+
+def test_annotations_sharing_a_second_are_all_imported(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    x = int((NOW + 60) * 1000)
+    annotations = [{"x": x, "label": {"text": "+10 - WATCH_STREAK"}}]
+    _write_json(path, {"series": [], "annotations": annotations}, NOW + 61)
+    recorder._ingest_analytics(NOW + 61)
+
+    annotations.append({"x": x, "label": {"text": "Prediction won"}})
+    _write_json(path, {"series": [], "annotations": annotations}, NOW + 62)
+    recorder._ingest_analytics(NOW + 62)
+
+    assert recorder.store.events(days=1, now=NOW + 62)["total"] == 2
+
+
+def test_failed_cache_import_is_retried_without_a_cache_change(recorder, monkeypatch):
+    recorder._tracked_streamers.add("bob")
+    _write_json(
+        recorder.streak_cache_path,
+        _cache_payload(
+            {"streamer_login": "bob", "broadcast_id": "b1", "started_at": NOW}
+        ),
+        NOW + 10,
+    )
+    original = recorder.store.upsert_stream_session
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "upsert_stream_session", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._ingest_streak_cache(NOW + 20)
+
+    monkeypatch.setattr(recorder.store, "upsert_stream_session", original)
+    recorder._ingest_streak_cache(NOW + 35)
+
+    assert recorder.store.sessions(kind="stream", days=1, now=NOW + 35)["total"] == 1
+
+
+def test_startup_failure_after_initialization_is_retried(tmp_path, monkeypatch):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=FakeClock(),
+    )
+    recorder.interval = 0.01
+    original = store.close_open_streams
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "close_open_streams", flaky)
+
+    assert recorder._start() is True
+    try:
+        assert len(calls) == 2
+        assert recorder._run_id is not None
+        # The failed attempt did not leave a run row behind.
+        assert store.sessions(kind="run", days=1, now=NOW)["total"] == 1
+    finally:
+        recorder._shutdown()
+
+
+def test_streamer_removed_from_the_snapshot_is_no_longer_live(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        assert store.overview(days=1, now=clock.value)["live_streams"] == 1
+
+        # bob is removed from the config, so the miner stops reporting him.
+        snapshot.clear()
+        clock.value = NOW + 60
+        recorder.poll_once()
+
+        overview = store.overview(days=1, now=clock.value)
+        assert overview["live_streams"] == 0
+        stream = store.sessions(kind="stream", days=1, now=clock.value)["sessions"][0]
+        assert stream["ended_at"] == NOW + 60
+    finally:
+        recorder._shutdown()
+
+
+def test_deleted_history_is_not_imported_again(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 61)
+    _write_json(
+        recorder.streak_cache_path,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": NOW,
+                "claimed": True,
+                "claimed_at": NOW + 30,
+            }
+        ),
+        NOW + 61,
+    )
+    clock.value = NOW + 70
+    recorder.poll_once()
+    assert recorder.store.overview(days=1, now=clock.value)["window"][
+        "points_gained"
+    ] == (50)
+
+    clock.value = NOW + 100
+    recorder.delete_streamer("bob")
+
+    # The JSON and the cache still hold the deleted data; a later change to
+    # either must only bring in what happened after the delete.
+    series.append({"x": int((NOW + 200) * 1000), "y": 1060, "z": "Watch"})
+    _write_json(path, {"series": series, "annotations": []}, NOW + 201)
+    _write_json(
+        recorder.streak_cache_path,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": NOW,
+                "claimed": True,
+                "claimed_at": NOW + 30,
+            }
+        ),
+        NOW + 202,
+    )
+    clock.value = NOW + 210
+    recorder.poll_once()
+
+    window = recorder.store.overview(days=1, now=clock.value)["window"]
+    assert window["points_gained"] == 10
+    assert window["streak_count"] == 0
+    assert recorder.store.events(days=1, now=clock.value)["total"] == 0
+    assert recorder.store.sessions(kind="stream", days=1, now=clock.value)["total"] == (
+        0
+    )
+
+
+def test_delete_waits_for_an_import_in_progress(recorder, monkeypatch):
+    import threading
+
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 61)
+    recorder.clock.value = NOW + 70
+    read_done = threading.Event()
+    release = threading.Event()
+    original = recorder._ingest_series
+
+    def slow_ingest(*args, **kwargs):
+        # The file is already read; hold the import here like a slow write.
+        read_done.set()
+        release.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(recorder, "_ingest_series", slow_ingest)
+    poll = threading.Thread(target=recorder.poll_once)
+    poll.start()
+    assert read_done.wait(5)
+
+    deleted = []
+    delete = threading.Thread(
+        target=lambda: deleted.append(recorder.delete_streamer("bob"))
+    )
+    delete.start()
+    delete.join(0.2)
+    # The delete must wait for the import, not run in the middle of it.
+    assert delete.is_alive()
+    release.set()
+    poll.join(5)
+    delete.join(5)
+
+    assert deleted and deleted[0]["points"] == 1
+    window = recorder.store.overview(days=1, now=NOW + 70)["window"]
+    assert window["points_gained"] == 0
+
+
+def test_deleting_an_active_watch_starts_a_new_session(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 1
+    recorder._poll_now_watching()
+
+    recorder.delete_streamer("bob")
+
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 61)
+    clock.value = NOW + 61
+    recorder._poll_now_watching()
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 121)
+    clock.value = NOW + 121
+    recorder._poll_now_watching()
+
+    sessions = recorder.store.sessions(kind="watch", days=1, now=clock.value)
+    assert sessions["total"] == 1
+    assert sessions["sessions"][0]["watch_seconds"] == 60
+    window = recorder.store.overview(days=1, now=clock.value)["window"]
+    assert window["watch_seconds"] == 60
+
+
+def test_failed_watch_close_is_retried(recorder, monkeypatch):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 1
+    recorder._poll_now_watching()
+    original = recorder.store.end_watch_session
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "end_watch_session", locked)
+    _write_json(path, [], NOW + 61)
+    clock.value = NOW + 61
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._poll_now_watching()
+    assert "bob" in recorder._active_watch
+
+    monkeypatch.setattr(recorder.store, "end_watch_session", original)
+    _write_json(path, [], NOW + 91)
+    clock.value = NOW + 91
+    recorder._poll_now_watching()
+
+    assert recorder._active_watch == {}
+    assert recorder.store.overview(days=1, now=clock.value)[
+        "active_watch_sessions"
+    ] == (0)
+
+
+def test_startup_import_waits_for_the_miner_streamers(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "carol",
+                "broadcast_id": "c1",
+                "started_at": NOW,
+                "claimed": True,
+                "claimed_at": NOW + 30,
+                "ended_at": NOW + 600,
+            }
+        ),
+        NOW + 600,
+    )
+    loaded = []
+    clock = FakeClock(NOW + 700)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        # Before the miner loads its streamers, no Drops channel is known.
+        drop_streamers=lambda: ["carol"] if loaded else [],
+        streamers_ready=lambda: bool(loaded),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        assert store.events(days=1, now=clock.value)["total"] == 0
+
+        loaded.append(True)
+        clock.value = NOW + 715
+        recorder.poll_once()
+
+        assert store.events(days=1, now=clock.value)["total"] == 0
+        assert store.streamers(days=1, now=clock.value) == []
+    finally:
+        recorder._shutdown()
+
+
+def test_cache_entries_past_retention_are_not_counted_twice(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    payload = _cache_payload(
+        {
+            "streamer_login": "bob",
+            "broadcast_id": "b1",
+            "started_at": NOW,
+            "claimed": True,
+            "claimed_at": NOW + 30,
+            "ended_at": NOW + 600,
+        }
+    )
+    _write_json(cache, payload, NOW + 600)
+    clock = FakeClock(NOW + 700)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        retention_days=1,
+    )
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    recorder._prepare()
+    try:
+        assert store.overview(days=30, now=clock.value)["lifetime"]["streak_count"] == 1
+
+        # Two days later retention prunes the raw rows, and the cache (which
+        # keeps entries for a week) is rewritten.
+        clock.value = NOW + 2 * 24 * 60 * 60
+        recorder.poll_once()
+        _write_json(cache, payload, clock.value + 1)
+        clock.value += 15
+        recorder.poll_once()
+
+        lifetime = store.overview(days=30, now=clock.value)["lifetime"]
+        assert lifetime["streak_count"] == 1
+        streams = store.streamers(days=30, now=clock.value)[0]
+        assert streams["stream_sessions"] == 1
+    finally:
+        recorder._shutdown()

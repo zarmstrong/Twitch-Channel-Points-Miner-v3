@@ -446,3 +446,66 @@ def test_streamers_keep_streak_just_below_the_thirty_minute_boundary(store):
     item = _streamer_rows(store, NOW + 2000)["alice"]
     assert item["live_stream"]["broadcast_id"] == "b2"
     assert item["live_streak_at"] == NOW + 60
+
+
+def test_days_window_matches_the_daily_chart(store):
+    # A change yesterday is outside a one-day window everywhere.
+    store.record_points("alice", NOW - 24 * 60 * 60, 150, 50, "WATCH")
+    store.record_points("alice", NOW, 160, 10, "WATCH")
+
+    overview = store.overview(days=1, now=NOW)
+    daily = store.daily(days=1, now=NOW)
+    streamers = store.streamers(days=1, now=NOW)
+    detail = store.streamer_detail("alice", days=1, now=NOW)
+
+    assert overview["since_day"] == utc_day(NOW)
+    assert overview["window"]["points_gained"] == 10
+    assert sum(item["points_gained"] for item in daily) == 10
+    assert streamers[0]["points_gained"] == 10
+    assert [row["day"] for row in detail["daily"]] == [utc_day(NOW)]
+    assert [row["delta"] for row in detail["points"]] == [10]
+
+
+def test_tick_on_a_deleted_watch_session_counts_nothing(store):
+    session_id = store.start_watch_session("alice", "points", NOW)
+    store.delete_streamer("alice", deleted_at=NOW + 1)
+
+    assert store.tick_watch_session(session_id, "alice", NOW + 60, 60) is False
+    assert store.overview(days=1, now=NOW + 60)["window"]["watch_seconds"] == 0
+
+
+def test_delete_does_not_touch_import_state_of_a_similar_name(store):
+    # "_" is a LIKE wildcard, so "a_b" must not match "axb".
+    store.set_import_state("analytics:a_b.json:series", mtime=1, size=1, last_x=1)
+    store.set_import_state("analytics:axb.json:series", mtime=1, size=1, last_x=1)
+
+    store.delete_streamer("a_b", deleted_at=NOW)
+
+    assert store.get_import_state("analytics:a_b.json:series") is None
+    assert store.get_import_state("analytics:axb.json:series") is not None
+    assert store.deletion_cutoffs() == {"a_b": NOW}
+
+
+def test_version_1_database_migrates_in_place(tmp_path):
+    from TwitchChannelPointsMiner.history.store import _SCHEMA_V1
+
+    path = tmp_path / "history.sqlite3"
+    connection = sqlite3.connect(path)
+    for statement in _SCHEMA_V1:
+        connection.execute(statement)
+    connection.execute(
+        "INSERT INTO import_state (source, mtime, size, last_x) "
+        "VALUES ('analytics:alice.json:series', 1, 1, 5)"
+    )
+    connection.execute("PRAGMA user_version = 1")
+    connection.commit()
+    connection.close()
+
+    store = HistoryStore(path)
+    store.initialize()
+
+    assert not list(tmp_path.glob("history.sqlite3.bak-*"))
+    state = store.get_import_state("analytics:alice.json:series")
+    assert state["last_x"] == 5
+    assert state["last_x_count"] is None
+    assert store.deletion_cutoffs() == {}

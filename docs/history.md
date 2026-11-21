@@ -4,9 +4,10 @@
 
 The optional **History** feature adds durable, account-scoped statistics to the
 analytics server. It records live sessions, watch sessions, point changes and
-streak or prediction events. The dashboard tab presents them as daily charts,
-an activity heatmap, streamer totals and per-streamer drill-down; the same data
-is available through a read-only JSON API.
+streak or prediction events, and serves them through a JSON API: daily totals,
+an activity heatmap, streamer totals and per-streamer drill-down. A History tab
+for the dashboard that shows this data is a separate change; until it ships,
+the data is only available through the [API](#api).
 
 History is opt-in with analytics: it only runs when
 `MINER_CONFIG["enable_analytics"]` is `True`. It runs as a passive recorder.
@@ -72,7 +73,9 @@ backup and a fresh database is created. Locked or unwritable databases are left
 alone; History logs a warning and retries without affecting the miner.
 
 Deleting a streamer's analytics data from the dashboard also clears that
-streamer's History rows.
+streamer's History rows. History remembers when the delete happened and does
+not import anything older again, even though the watch-streak cache may still
+hold it. Data recorded after the delete is kept as usual.
 
 ## Watch streaks
 
@@ -83,9 +86,10 @@ Twitch's watch-streak rules, so a continuation is not shown as unclaimed.
 
 ## API
 
-The endpoints are read-only and use the analytics server's existing
-authentication. They return `503` until the recorder has initialized the
-database.
+The endpoints use the analytics server's existing authentication. All of them
+are read-only except `DELETE /history/streamer/<name>`. They return `503` until
+the recorder has initialized the database. `days=N` covers today and the
+`N - 1` UTC days before it, so `days=1` is today only.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -96,5 +100,5 @@ database.
 | `GET /history/sessions?kind=watch\|stream\|run` | Recent sessions |
 | `GET /history/events?type=<type>` | Recent events |
 | `GET /history/activity?days=30` | Activity heatmap data |
-| `GET /history/health` | Recorder/database readiness |
-| `DELETE /history/streamer/<name>` | Delete one streamer's History rows |
+| `GET /history/health` | Database readiness; `recording` is `false` while the recorder is not running |
+| `DELETE /history/streamer/<name>` | Delete one streamer's History rows, as described in [Schema changes and recovery](#schema-changes-and-recovery) |

@@ -750,6 +750,13 @@ class TwitchChannelPointsMiner:
                         if is_drop_discovered(streamer)
                     ],
                     retention_days=history_retention_days,
+                    # Set once run() has loaded the streamers and their
+                    # Drops discovery sources, which the recorder needs
+                    # before its first import.
+                    streamers_ready=lambda: getattr(
+                        self, "daily_report_balances_loaded", False
+                    )
+                    is True,
                 )
             except Exception:
                 logger.warning(

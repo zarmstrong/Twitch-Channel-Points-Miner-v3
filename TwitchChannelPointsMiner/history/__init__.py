@@ -95,6 +95,7 @@ def start_history(
     online_streamers=None,
     drop_streamers=None,
     retention_days=None,
+    streamers_ready=None,
 ):
     """Start the passive recorder once for this process.
 
@@ -106,6 +107,9 @@ def start_history(
     miner only discovered to farm Drops (category, wildcard-category and badge
     channels).  The History tab only lists configured and follower streamers,
     so those discovery channels are never recorded.
+
+    ``streamers_ready`` is an optional callable that returns true once the
+    miner has loaded its streamers; nothing is imported before then.
 
     ``retention_days`` is the configured raw-row retention window.  The
     ``TCPM_HISTORY_RETENTION_DAYS`` environment variable overrides it.
@@ -131,6 +135,7 @@ def start_history(
                 retention_days=_history_retention_days(retention_days),
                 online_streamers=online_streamers,
                 drop_streamers=drop_streamers,
+                streamers_ready=streamers_ready,
             )
             _store = recorder.store
             recorder.start()
@@ -168,6 +173,34 @@ def stop_history():
         recorder.join(timeout=10)
 
 
+def delete_streamer_history(streamer, store=None):
+    """Delete one streamer's History rows; returns the per-table counts.
+
+    Goes through the recorder so the delete is serialized with its imports and
+    the deleted data is not imported again.  Returns ``None`` while History is
+    unavailable.
+    """
+
+    recorder = _recorder
+    store = get_store() if store is None else store
+    if store is None:
+        return None
+    if recorder is not None and recorder.store is store:
+        return recorder.delete_streamer(streamer)
+    return store.delete_streamer(streamer)
+
+
+def is_recording():
+    """True while the recorder thread is running and has started its run."""
+
+    recorder = _recorder
+    return bool(
+        recorder is not None
+        and recorder.is_alive()
+        and getattr(recorder, "_run_id", None) is not None
+    )
+
+
 def get_store():
     """Return the initialized store, or None while history is unavailable."""
 
@@ -179,7 +212,9 @@ def get_store():
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
+    "delete_streamer_history",
     "get_store",
+    "is_recording",
     "start_history",
     "stop_history",
 ]
