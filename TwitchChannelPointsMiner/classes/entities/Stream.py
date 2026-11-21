@@ -36,6 +36,7 @@ class Stream(object):
         "payload",
         "watch_streak_missing",
         "watch_streak_checked_at",
+        "watch_streak_check_due",
         "minute_watched",
         "live_seen_at",
         "__last_update",
@@ -125,8 +126,24 @@ class Stream(object):
         with _WATCH_STREAK_LOCK:
             self.watch_streak_missing = True
             self.watch_streak_checked_at = 0
+            # A milestone check queued for the minute watcher's budgeted
+            # rechecks, ahead of the usual watched-minutes wait.
+            self.watch_streak_check_due = False
             self.minute_watched = 0
             self.__minute_watched_timestamp = 0
+
+    def confirm_watch_streak_for(self, broadcast_id):
+        """Clear the pending streak if it still belongs to broadcast_id.
+
+        A check started on one broadcast must not clear the next one's
+        streak: the ID test and the clear happen under the lock that the
+        per-broadcast reset also takes.
+        """
+        with _WATCH_STREAK_LOCK:
+            if self.broadcast_id != broadcast_id:
+                return False
+            self.watch_streak_missing = False
+            return True
 
     def stop_waiting_for_watch_streak(self, max_minutes):
         """Stop treating the streak as pending once max_minutes are watched.

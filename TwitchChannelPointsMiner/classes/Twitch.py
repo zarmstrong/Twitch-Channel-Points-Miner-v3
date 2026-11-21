@@ -1965,7 +1965,11 @@ class Twitch(object):
                     seen_live_at=previous_seen_live_at,
                 )
                 streamer.set_online(self.__streamer_drops_description(streamer))
-                self.reconcile_watch_streak(streamer)
+                # Queue the new broadcast's milestone check for the minute
+                # watcher's budgeted rechecks: after an outage many channels
+                # can change broadcast at once, and checking each here would
+                # hold up minute-watched events.
+                streamer.stream.watch_streak_check_due = True
 
     def reconcile_watch_streak(self, streamer):
         """Clear a pending streak Twitch already awarded for this broadcast.
@@ -1986,6 +1990,7 @@ class Twitch(object):
             return False
 
         stream.watch_streak_checked_at = time.time()
+        stream.watch_streak_check_due = False
         # Other threads refresh the stream while the lookups run; everything
         # below is about this broadcast, so never read the live attribute.
         broadcast_id = stream.broadcast_id
@@ -2048,14 +2053,13 @@ class Twitch(object):
             )
             return False
 
-        if stream.broadcast_id != broadcast_id:
+        if self._clear_pending_watch_streak(stream, broadcast_id) is not True:
             logger.debug(
                 "[watch-streak] broadcast changed while checking "
                 f"streamer={streamer.username}; checked={broadcast_id}, "
                 f"now={stream.broadcast_id}"
             )
             return False
-        stream.watch_streak_missing = False
         if getattr(streamer, "watch_streak_cache", None) is not None:
             streamer.watch_streak_cache.mark_claimed(streamer.username, broadcast_id)
         logger.info(
@@ -2086,14 +2090,24 @@ class Twitch(object):
                 streamer.username, broadcast_id, started_at=started_at
             )
             is None
-            or streamer.stream.broadcast_id != broadcast_id
+            or self._clear_pending_watch_streak(streamer.stream, broadcast_id)
+            is not True
         ):
             return False
-        streamer.stream.watch_streak_missing = False
         logger.info(
             "[watch-streak] broadcast continues an already-claimed stream for "
             f"streamer={streamer.username}; broadcast={broadcast_id}"
         )
+        return True
+
+    @staticmethod
+    def _clear_pending_watch_streak(stream, broadcast_id):
+        confirm = getattr(stream, "confirm_watch_streak_for", None)
+        if callable(confirm):
+            return confirm(broadcast_id)
+        if getattr(stream, "broadcast_id", None) != broadcast_id:
+            return False
+        stream.watch_streak_missing = False
         return True
 
     def _reconcile_due_watch_streaks(
@@ -2153,11 +2167,13 @@ class Twitch(object):
                 # so its milestone cannot advance; a late WATCH_STREAK event
                 # still clears it.
                 continue
-            if minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES:
+            check_due = getattr(stream, "watch_streak_check_due", False) is True
+            if not check_due and minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES:
                 continue
             checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0
             if (
-                checked_at
+                not check_due
+                and checked_at
                 and current - checked_at < WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
             ):
                 continue

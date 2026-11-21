@@ -892,7 +892,10 @@ def test_new_broadcast_without_an_offline_gets_fresh_streak_state(
     assert streamer.stream.watch_streak_missing is True
     assert cache.get("channel", "broadcast-1").ended_at == seen_live_at
     assert cache.get("channel", "broadcast-2").claimed is False
-    assert reconciled == [streamer]
+    # The milestone check is queued for the minute watcher's budget rather
+    # than run here.
+    assert reconciled == []
+    assert streamer.stream.watch_streak_check_due is True
 
 
 def test_quick_new_broadcast_without_an_offline_keeps_the_claim(tmp_path, monkeypatch):
@@ -945,3 +948,43 @@ def test_cap_does_not_give_up_a_streak_reset_for_a_new_broadcast(tmp_path, caplo
 
     assert streamer.stream.watch_streak_missing is True
     assert "no longer prioritizing" not in caplog.text
+
+
+def test_queued_milestone_checks_skip_the_wait_but_keep_the_budget(tmp_path):
+    first, _ = make_streak_streamer(tmp_path, username="first")
+    second, _ = make_streak_streamer(tmp_path, username="second")
+    calls = []
+    for streamer in (first, second):
+        streamer.is_online = True
+        streamer.channel_id = f"{streamer.username}-id"
+        # A new broadcast: nothing watched yet, check queued.
+        streamer.stream.watch_streak_check_due = True
+
+    def get_stream_live_status(channel_id):
+        calls.append(channel_id)
+        return SimpleNamespace(stream=None)
+
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+    twitch.gql = SimpleNamespace(get_stream_live_status=get_stream_live_status)
+
+    twitch._reconcile_due_watch_streaks([first, second])
+    assert calls == ["first-id"]
+    assert first.stream.watch_streak_check_due is False
+    twitch._reconcile_due_watch_streaks([first, second])
+    assert calls == ["first-id", "second-id"]
+    # Back to the usual wait for watched minutes.
+    twitch._reconcile_due_watch_streaks([first, second])
+    assert calls == ["first-id", "second-id"]
+
+
+def test_confirming_a_streak_for_an_older_broadcast_changes_nothing():
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    stream.broadcast_id = "broadcast-2"
+
+    assert stream.confirm_watch_streak_for("broadcast-1") is False
+    assert stream.watch_streak_missing is True
+    assert stream.confirm_watch_streak_for("broadcast-2") is True
+    assert stream.watch_streak_missing is False
