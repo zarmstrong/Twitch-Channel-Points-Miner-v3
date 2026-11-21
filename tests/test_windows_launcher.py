@@ -2218,6 +2218,18 @@ def test_run_miner_thread_reports_a_runtime_error_instead_of_crashing_silently(
     assert shown and "boom" in shown[0]
 
 
+def test_run_miner_thread_stops_history_when_the_miner_stops(monkeypatch):
+    import TwitchChannelPointsMiner.history as history_module
+
+    stopped = []
+    monkeypatch.setattr(history_module, "stop_history", lambda: stopped.append(1))
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: None)
+
+    windows_launcher._run_miner_thread(["--config-dir", "x"], None)
+
+    assert stopped == [1]
+
+
 class _FakeEventSlot:
     """Mirrors pywebview's own Event class closely enough for these tests:
     a list of handlers managed via +=/-= (not a single slot), with .set()

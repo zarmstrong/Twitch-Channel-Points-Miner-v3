@@ -168,7 +168,8 @@ def test_recorder_tracks_watch_sessions_from_now_watching(recorder):
 
     sessions = recorder.store.sessions(kind="watch", days=30, now=clock.value)
     assert sessions["total"] == 1
-    assert sessions["sessions"][0]["watch_seconds"] == 30
+    # Watched from the first snapshot until the one that dropped alice.
+    assert sessions["sessions"][0]["watch_seconds"] == 40
     assert sessions["sessions"][0]["ended_at"] == NOW + 50
 
 
@@ -1517,3 +1518,164 @@ def test_delete_without_a_running_recorder_clears_the_database(tmp_path, monkeyp
     assert deleted["points"] == 1
     assert "bob" in store.deletion_cutoffs()
     assert history_module.delete_streamer_history("bob") is None
+
+
+def test_delete_imports_pending_changes_before_the_json_goes(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000},
+        {"x": int((NOW + 60) * 1000), "y": 1010},
+    ]
+    _write_json(path, {"series": series}, NOW + 61)
+    clock.value = NOW + 62
+    recorder.poll_once()
+    # The miner writes 1050, and the dashboard deletes before the next poll.
+    series.append({"x": int((NOW + 70) * 1000), "y": 1050})
+    _write_json(path, {"series": series}, NOW + 71)
+    clock.value = NOW + 72
+    recorder.delete_streamer("bob")
+    os.remove(path)
+
+    _write_json(
+        path, {"series": [{"x": int((NOW + 200) * 1000), "y": 1060}]}, NOW + 201
+    )
+    clock.value = NOW + 210
+    recorder.poll_once()
+
+    assert recorder.store.overview(days=1, now=clock.value)["window"][
+        "points_gained"
+    ] == (10)
+
+
+def test_entries_written_after_a_clock_correction_are_imported(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000},
+        {"x": int((NOW + 60) * 1000), "y": 1010},
+    ]
+    _write_json(path, {"series": series}, NOW + 61)
+    recorder._ingest_analytics(NOW + 61)
+    # The host clock was set back 30 seconds before the next change.
+    series.append({"x": int((NOW + 30) * 1000), "y": 1030})
+    _write_json(path, {"series": series}, NOW + 62)
+    recorder._ingest_analytics(NOW + 62)
+
+    assert recorder.store.overview(days=1, now=NOW + 62)["window"]["points_gained"] == (
+        30
+    )
+
+
+def test_leftover_json_of_an_untracked_channel_is_not_imported(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    for name in ("bob", "oldbadge"):
+        _write_json(
+            analytics / f"{name}.json",
+            {
+                "series": [
+                    {"x": int(NOW * 1000), "y": 1000},
+                    {"x": int((NOW + 60) * 1000), "y": 1050},
+                ]
+            },
+            NOW + 61,
+        )
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=FakeClock(NOW + 100),
+        # oldbadge was farmed for a badge campaign in an earlier run; this
+        # run has not discovered it (yet).
+        online_streamers=lambda: [{"username": "bob"}],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        assert [item["streamer"] for item in store.streamers(days=1, now=NOW)] == [
+            "bob"
+        ]
+    finally:
+        recorder._shutdown()
+
+
+def test_new_broadcast_without_an_offline_gap_starts_when_first_seen(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 600)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        # The stream restarted while the miner kept bob online; online_at
+        # still belongs to b1.
+        snapshot[0] = dict(snapshot[0], broadcast_id="b2")
+        clock.value = NOW + 900
+        recorder.poll_once()
+
+        streams = {
+            item["broadcast_id"]: item
+            for item in store.sessions(kind="stream", days=1, now=clock.value)[
+                "sessions"
+            ]
+        }
+        assert streams["b1"]["started_at"] == NOW
+        assert streams["b1"]["ended_at"] == NOW + 900
+        assert streams["b2"]["started_at"] == NOW + 900
+        assert streams["b2"]["active"] is True
+    finally:
+        recorder._shutdown()
+
+
+def test_failed_snapshot_write_is_retried_without_a_new_snapshot(recorder, monkeypatch):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    original = recorder.store.start_watch_session
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "start_watch_session", locked)
+    clock.value = NOW + 2
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._poll_now_watching()
+
+    monkeypatch.setattr(recorder.store, "start_watch_session", original)
+    clock.value = NOW + 17
+    recorder._poll_now_watching()
+
+    assert recorder.store.overview(days=1, now=clock.value)[
+        "active_watch_sessions"
+    ] == (1)
+
+
+def test_a_short_watch_still_records_its_time(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 2
+    recorder._poll_now_watching()
+    _write_json(path, [], NOW + 61)
+    clock.value = NOW + 62
+    recorder._poll_now_watching()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+        "sessions"
+    ][0]
+    assert session["watch_seconds"] == 60

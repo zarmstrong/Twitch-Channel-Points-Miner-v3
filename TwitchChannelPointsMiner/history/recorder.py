@@ -113,39 +113,50 @@ def _annotation_points(text):
     return int(match.group(1)) if match else None
 
 
-class _ImportPosition(object):
-    """Where an import of an append-only analytics list left off.
+def _pending_entries(entries, state):
+    """Return the analytics entries not imported yet, and the new cursor.
 
-    The miner writes ``x`` in whole seconds, so several entries can share one
-    timestamp and ``x`` alone cannot say which of them were imported.  The
-    position is the newest imported ``x`` plus how many entries with that
-    ``x`` were consumed.  A ``count`` of ``None`` comes from an older database
-    that only stored ``x``; it keeps the old behaviour of skipping every entry
-    at that timestamp.
+    The per-streamer JSON lists are append-only, so the cursor is how many
+    entries were consumed, plus the ``x`` of the last one to notice a file that
+    was deleted and started again.  Timestamps are not the cursor: the miner
+    writes wall-clock seconds, which repeat within one second and go backwards
+    when the host clock is corrected.
+
+    Returns ``(pending, consumed, last_x)`` where ``pending`` holds
+    ``(x, occurrence, entry)`` in file order; ``occurrence`` numbers entries
+    that share one ``x`` so identical changes within a second stay apart.
     """
 
-    __slots__ = ["last_x", "count", "_seen_at_last"]
+    raw = entries if isinstance(entries, list) else []
+    valid = []
+    seen = {}
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            x = float(entry["x"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        seen[x] = seen.get(x, 0) + 1
+        valid.append((index, x, seen[x], entry))
 
-    def __init__(self, last_x=None, count=None):
-        self.last_x = None if last_x is None else float(last_x)
-        self.count = None if count is None else int(count)
-        self._seen_at_last = 0
-
-    def advance(self, x):
-        """Consume the next entry (in ``x`` order); True when it is new."""
-
-        if self.last_x is not None and x < self.last_x:
-            return False
-        if self.last_x is not None and x == self.last_x:
-            self._seen_at_last += 1
-            if self.count is None or self._seen_at_last <= self.count:
-                return False
-            self.count = self._seen_at_last
-            return True
-        self.last_x = x
-        self.count = 1
-        self._seen_at_last = 1
-        return True
+    last_x = state.get("last_x") if state else None
+    consumed = state.get("consumed") if state else 0
+    if state is not None and consumed is None:
+        # A version 1 cursor only stored the newest x.
+        pending = [item for item in valid if last_x is None or item[1] > last_x]
+    else:
+        consumed = int(consumed or 0)
+        before = [item for item in valid if item[0] < consumed]
+        if consumed > len(raw) or (before and before[-1][1] != last_x):
+            # The file was deleted and started again (or rewritten); read it
+            # from the start.  Dedupe keys and delete cutoffs keep already
+            # recorded data from being counted twice.
+            consumed = 0
+        pending = [item for item in valid if item[0] >= consumed]
+    if valid:
+        last_x = valid[-1][1]
+    return [item[1:] for item in pending], len(raw), last_x
 
 
 class HistoryRecorder(threading.Thread):
@@ -441,6 +452,13 @@ class HistoryRecorder(threading.Thread):
         if not streamer:
             return {}
         with self._lock:
+            # Catch up on the streamer's JSON first: the dashboard deletes it
+            # right after this, and the import cursor kept below must hold the
+            # last balance, or the first change in a new file gets a delta
+            # that includes the deleted, never-imported changes.
+            for filename, path in self._analytics_files():
+                if _clean_streamer(filename[: -len(".json")]) == streamer:
+                    self._ingest_analytics_file(filename, path)
             deleted_at = self.clock()
             counts = self.store.delete_streamer(streamer, deleted_at=deleted_at)
             self._deleted_before[streamer] = max(
@@ -614,10 +632,12 @@ class HistoryRecorder(threading.Thread):
                     )
             return
 
-        self._now_watching_mtime = mtime
         entries = _load_list(path)
         if entries is None:
             entries = []
+        # A snapshot written later than the last observation marks when the
+        # watch selection changed; credit watch time up to it.
+        changed_at = min(max(float(mtime), 0.0), now) if mtime > 0 else now
 
         seen = set()
         for entry in entries:
@@ -640,21 +660,22 @@ class HistoryRecorder(threading.Thread):
             if self._active_watch.get(streamer) is None or (
                 self._active_watch[streamer]["reason"] != reason
             ):
-                if active is not None:
-                    self._close_watch(streamer, now)
+                if self._active_watch.get(streamer) is not None:
+                    self._close_watch(streamer, changed_at, credit=True)
                 self._tracked_streamers.add(streamer)
                 self._import_cached_sessions(streamer, now)
+                # The watch began when the snapshot naming it was written.
                 session_id = self.store.start_watch_session(
                     streamer,
                     reason,
-                    started_at=now,
+                    started_at=changed_at,
                     broadcast_id=self.store.open_broadcast(streamer),
                 )
                 if session_id is not None:
                     self._active_watch[streamer] = {
                         "id": session_id,
                         "reason": reason,
-                        "last_tick": now,
+                        "last_tick": changed_at,
                     }
             if game:
                 self.store.update_open_stream_details(
@@ -663,7 +684,10 @@ class HistoryRecorder(threading.Thread):
 
         for streamer in list(self._active_watch):
             if streamer not in seen:
-                self._close_watch(streamer, now)
+                self._close_watch(streamer, changed_at, credit=True)
+        # Only now is the snapshot fully recorded; a failed write above leaves
+        # the old mtime so the same snapshot is processed again next poll.
+        self._now_watching_mtime = mtime
 
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
@@ -678,10 +702,16 @@ class HistoryRecorder(threading.Thread):
                 return
         active["last_tick"] = float(now)
 
-    def _close_watch(self, streamer, ended_at):
+    def _close_watch(self, streamer, ended_at, credit=False):
         active = self._active_watch.get(streamer)
         if active is None:
             return
+        if credit and float(ended_at) > float(active["last_tick"]):
+            # The watch lasted until the snapshot that ended it was written;
+            # count that final interval too.
+            self._tick_watch(streamer, ended_at)
+            if self._active_watch.get(streamer) is None:
+                return
         # Forget the session only once it is closed, so a failed write is
         # retried on the next poll instead of leaving it open in the database.
         self.store.end_watch_session(active["id"], ended_at=ended_at)
@@ -704,6 +734,9 @@ class HistoryRecorder(threading.Thread):
             return
         entries = self._online_stream_entries(now)
         current = set()
+        previous = {}
+        for streamer, broadcast_id in self._online_live_keys:
+            previous[streamer] = broadcast_id
         for entry in entries:
             streamer = entry["streamer"]
             if streamer in self._drop_farmed:
@@ -716,6 +749,11 @@ class HistoryRecorder(threading.Thread):
             if key in self._online_live_keys:
                 continue
             started_at = entry["started_at"]
+            if previous.get(streamer) not in (None, broadcast_id):
+                # The broadcast changed without the miner seeing the stream go
+                # offline, so online_at still belongs to the previous one.
+                # The new broadcast is known to exist only from now.
+                started_at = float(now)
             cutoff = self._deleted_before.get(streamer)
             if cutoff is not None and started_at < cutoff:
                 # History of this broadcast before the delete stays deleted.
@@ -823,6 +861,7 @@ class HistoryRecorder(threading.Thread):
             self._streak_cache_key = cache_key
             return
 
+        configured = self._configured_streamers()
         parsed = []
         for item in sessions:
             if not isinstance(item, dict):
@@ -853,7 +892,11 @@ class HistoryRecorder(threading.Thread):
                 }
             )
 
-            if parsed[-1]["claimed"] and streamer not in self._drop_farmed:
+            if (
+                parsed[-1]["claimed"]
+                and streamer not in self._drop_farmed
+                and (configured is None or streamer in configured)
+            ):
                 # A streak claim proves the streamer was watched, even if this
                 # history database predates the watch-session tables.
                 self._tracked_streamers.add(streamer)
@@ -980,59 +1023,80 @@ class HistoryRecorder(threading.Thread):
                 result.append((name, path))
         return result
 
+    def _configured_streamers(self):
+        """Streamers the miner tracks for their own sake, or None if unknown.
+
+        That is every streamer in the live snapshot that is not tracked only
+        for Drops.  Without a snapshot provider (tests, older callers) there
+        is nothing to compare with, so nothing is filtered.
+        """
+
+        if self.online_streamers is None or self._streamer_snapshot is None:
+            return None
+        return self._live_streamer_names - self._drop_farmed
+
     def _ingest_analytics(self, now=None):
         if not self._streamer_state_ready:
             self._refresh_streamer_state()
         for filename, path in self._analytics_files():
-            streamer = _clean_streamer(filename[: -len(".json")])
-            if not streamer:
-                continue
-            if streamer in self._drop_farmed:
-                # Points written for a channel farmed only for Drops do not
-                # belong to a configured streamer's history.
-                continue
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
+            self._ingest_analytics_file(filename, path)
 
-            series_source = f"analytics:{filename}:series"
-            annotation_source = f"analytics:{filename}:annotations"
-            # A failed read raises and the poll is retried.  Treating it as
-            # "never imported" would replay the whole file, and rows that
-            # retention already pruned would be counted again in the rollups.
-            series_state = self.store.get_import_state(series_source)
-            annotation_state = self.store.get_import_state(annotation_source)
-            series_fresh = self._state_matches(series_state, stat)
-            annotation_fresh = self._state_matches(annotation_state, stat)
-            if series_fresh and annotation_fresh:
-                continue
+    def _ingest_analytics_file(self, filename, path):
+        streamer = _clean_streamer(filename[: -len(".json")])
+        if not streamer:
+            return
+        if streamer in self._drop_farmed:
+            # Points written for a channel farmed only for Drops do not
+            # belong to a configured streamer's history.
+            return
+        configured = self._configured_streamers()
+        if configured is not None and streamer not in configured:
+            # Leftover JSON from a channel the miner no longer tracks, for
+            # example one farmed for Drops before History was enabled, would
+            # otherwise be imported as a configured streamer's history.
+            return
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return
 
-            try:
-                payload = _read_json(path)
-            except (OSError, ValueError, TypeError) as error:
-                logger.warning("Unable to import history from %s: %s", path, error)
-                continue
-            if not isinstance(payload, dict):
-                continue
-            self._tracked_streamers.add(streamer)
+        series_source = f"analytics:{filename}:series"
+        annotation_source = f"analytics:{filename}:annotations"
+        # A failed read raises and the poll is retried.  Treating it as
+        # "never imported" would replay the whole file, and rows that
+        # retention already pruned would be counted again in the rollups.
+        series_state = self.store.get_import_state(series_source)
+        annotation_state = self.store.get_import_state(annotation_source)
+        series_fresh = self._state_matches(series_state, stat)
+        annotation_fresh = self._state_matches(annotation_state, stat)
+        if series_fresh and annotation_fresh:
+            return
 
-            if not series_fresh:
-                self._ingest_series(
-                    streamer,
-                    payload.get("series"),
-                    series_source,
-                    stat,
-                    series_state,
-                )
-            if not annotation_fresh:
-                self._ingest_annotations(
-                    streamer,
-                    payload.get("annotations"),
-                    annotation_source,
-                    stat,
-                    annotation_state,
-                )
+        try:
+            payload = _read_json(path)
+        except (OSError, ValueError, TypeError) as error:
+            logger.warning("Unable to import history from %s: %s", path, error)
+            return
+        if not isinstance(payload, dict):
+            return
+        self._tracked_streamers.add(streamer)
+
+        if not series_fresh:
+            self._ingest_series(
+                streamer,
+                payload.get("series"),
+                series_source,
+                stat,
+                series_state,
+            )
+        if not annotation_fresh:
+            self._ingest_annotations(
+                streamer,
+                payload.get("annotations"),
+                annotation_source,
+                stat,
+                annotation_state,
+            )
 
     @staticmethod
     def _state_matches(state, stat):
@@ -1043,32 +1107,12 @@ class HistoryRecorder(threading.Thread):
         )
 
     def _ingest_series(self, streamer, entries, source, stat, state):
-        if not isinstance(entries, list):
-            entries = []
-        usable = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                float(entry["x"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            usable.append(entry)
-        usable.sort(key=lambda entry: float(entry["x"]))
-
-        last_x = state.get("last_x") if state else None
-        last_x_count = state.get("last_x_count") if state else None
+        pending, consumed, last_x = _pending_entries(entries, state)
         last_balance = state.get("last_balance") if state else None
-        if last_balance is None and usable:
-            last_balance = self._baseline_balance(
-                streamer, float(usable[0]["x"]) / 1000.0
-            )
+        if last_balance is None and pending:
+            last_balance = self._baseline_balance(streamer, pending[0][0] / 1000.0)
 
-        position = _ImportPosition(last_x, last_x_count)
-        for entry in usable:
-            x = float(entry["x"])
-            if not position.advance(x):
-                continue
+        for x, occurrence, entry in pending:
             balance = entry.get("y")
             if balance is None:
                 continue
@@ -1091,11 +1135,10 @@ class HistoryRecorder(threading.Thread):
                     delta=delta,
                     reason=str(entry.get("z") or ""),
                     kind="spend" if delta < 0 else "earn",
-                    # The occurrence index keeps identical changes within
-                    # one second apart (1000 -> 1050 -> 1000 -> 1050).
+                    # The occurrence keeps identical changes within one
+                    # second apart (1000 -> 1050 -> 1000 -> 1050).
                     dedupe_key=(
-                        f"series:{streamer}:{x:.3f}:{position.count}:"
-                        f"{balance}:{delta}"
+                        f"series:{streamer}:{x:.3f}:{occurrence}:{balance}:{delta}"
                     ),
                 )
             last_balance = balance
@@ -1104,9 +1147,9 @@ class HistoryRecorder(threading.Thread):
             source,
             mtime=stat.st_mtime,
             size=stat.st_size,
-            last_x=position.last_x,
+            last_x=last_x,
             last_balance=last_balance,
-            last_x_count=position.count,
+            consumed=consumed,
         )
 
     def _baseline_balance(self, streamer, first_timestamp):
@@ -1120,27 +1163,8 @@ class HistoryRecorder(threading.Thread):
         return None
 
     def _ingest_annotations(self, streamer, entries, source, stat, state):
-        if not isinstance(entries, list):
-            entries = []
-        usable = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                float(entry["x"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            usable.append(entry)
-        usable.sort(key=lambda entry: float(entry["x"]))
-
-        position = _ImportPosition(
-            state.get("last_x") if state else None,
-            state.get("last_x_count") if state else None,
-        )
-        for entry in usable:
-            x = float(entry["x"])
-            if not position.advance(x):
-                continue
+        pending, consumed, last_x = _pending_entries(entries, state)
+        for x, occurrence, entry in pending:
             if self._deleted_since(streamer, x / 1000.0):
                 continue
             label = ""
@@ -1154,16 +1178,16 @@ class HistoryRecorder(threading.Thread):
                 event_type=event_type,
                 label=label,
                 points_delta=_annotation_points(label),
-                dedupe_key=f"annotation:{streamer}:{x:.3f}:{position.count}:{label}",
+                dedupe_key=f"annotation:{streamer}:{x:.3f}:{occurrence}:{label}",
             )
 
         self.store.set_import_state(
             source,
             mtime=stat.st_mtime,
             size=stat.st_size,
-            last_x=position.last_x,
+            last_x=last_x,
             last_balance=None,
-            last_x_count=position.count,
+            consumed=consumed,
         )
 
 

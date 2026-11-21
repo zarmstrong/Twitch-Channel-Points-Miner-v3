@@ -16,10 +16,13 @@ that data without changing the files. Existing point and annotation history is
 backfilled on first start. Watch time starts accumulating when History is first
 enabled because the old JSON does not contain sessions.
 
-Channels the miner tracks only to farm Drops (category, wildcard-category and
-badge discovery) are not recorded. History remembers them after the miner
-stops tracking them, so their leftover analytics JSON is not imported later. A
-channel you also configure or follow is recorded as usual.
+History only imports data for streamers the miner currently tracks for their
+own sake: configured and followed streamers. Channels it tracks only to farm
+Drops (category, wildcard-category and badge discovery) are not recorded, and
+History remembers them after the miner stops tracking them. Leftover analytics
+JSON of a channel the miner no longer tracks, such as one farmed for Drops in
+an earlier run, is not imported; rows already imported stay. A channel you
+also configure or follow is recorded as usual.
 
 ## Storage
 

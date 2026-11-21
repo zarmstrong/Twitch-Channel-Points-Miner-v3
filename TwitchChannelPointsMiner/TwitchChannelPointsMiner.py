@@ -3235,6 +3235,15 @@ class TwitchChannelPointsMiner:
                         "continuing shutdown anyway"
                     )
 
+        # History reads the streamer state the workers above kept current, so
+        # it stops with them instead of recording a stopped miner as live.
+        try:
+            from TwitchChannelPointsMiner.history import stop_history
+
+            stop_history()
+        except Exception:
+            logger.warning("Unable to stop the History recorder", exc_info=True)
+
         self.__save_daily_report_state_safely(retire_all=True)
 
     def __save_daily_report_state_safely(self, retire_all=False):

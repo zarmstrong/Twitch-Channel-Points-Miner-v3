@@ -274,14 +274,14 @@ _SCHEMA_V1 = (
     """,
 )
 
-# Version 2 remembers how many entries sharing the newest imported timestamp
-# were already imported (the analytics JSON stores whole seconds, so several
-# changes can share one), and when a streamer's history was deleted so data
+# Version 2 stores how many entries of each append-only analytics list were
+# imported (timestamps are whole wall-clock seconds, so they repeat and can go
+# backwards), and when a streamer's history was deleted so data
 # from before the delete is not imported again.
 # It also remembers channels the miner only farmed for Drops, so they stay
 # excluded after the miner retires them.
 _SCHEMA_V2 = (
-    "ALTER TABLE import_state ADD COLUMN last_x_count INTEGER",
+    "ALTER TABLE import_state ADD COLUMN consumed INTEGER",
     """
     CREATE TABLE IF NOT EXISTS deleted_streamers (
         streamer TEXT PRIMARY KEY,
@@ -871,13 +871,19 @@ class HistoryStore(object):
                 # The session was deleted or closed; do not count watch time
                 # that no session row accounts for.
                 return False
-            if delta > 0:
+            # Split the interval at UTC midnight so each day gets its part.
+            cursor = timestamp - delta
+            while cursor < timestamp:
+                next_midnight = day_start(utc_day(cursor)) + SECONDS_PER_DAY
+                chunk_end = min(timestamp, next_midnight)
                 self._touch_daily(
                     connection,
                     _clean_streamer(streamer),
-                    timestamp,
-                    watch_seconds=delta,
+                    # The latest moment of this chunk that is still its day.
+                    chunk_end if chunk_end < next_midnight else cursor,
+                    watch_seconds=chunk_end - cursor,
                 )
+                cursor = chunk_end
             return True
 
     def end_watch_session(self, session_id, ended_at):
@@ -1119,13 +1125,13 @@ class HistoryStore(object):
         size=None,
         last_x=None,
         last_balance=None,
-        last_x_count=None,
+        consumed=None,
     ):
         with self._write_connection() as connection:
             connection.execute(
                 """
                 INSERT INTO import_state (
-                    source, mtime, size, last_x, last_balance, last_x_count
+                    source, mtime, size, last_x, last_balance, consumed
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source) DO UPDATE SET
@@ -1133,7 +1139,7 @@ class HistoryStore(object):
                     size = excluded.size,
                     last_x = excluded.last_x,
                     last_balance = excluded.last_balance,
-                    last_x_count = excluded.last_x_count
+                    consumed = excluded.consumed
                 """,
                 (
                     source,
@@ -1141,7 +1147,7 @@ class HistoryStore(object):
                     None if size is None else int(size),
                     None if last_x is None else float(last_x),
                     None if last_balance is None else int(last_balance),
-                    None if last_x_count is None else int(last_x_count),
+                    None if consumed is None else int(consumed),
                 ),
             )
 

@@ -534,7 +534,7 @@ def test_version_1_database_migrates_in_place(tmp_path):
     assert not list(tmp_path.glob("history.sqlite3.bak-*"))
     state = store.get_import_state("analytics:alice.json:series")
     assert state["last_x"] == 5
-    assert state["last_x_count"] is None
+    assert state["consumed"] is None
     assert store.deletion_cutoffs() == {}
 
 
@@ -595,3 +595,16 @@ def test_retention_watermark_only_moves_forward(store):
     store.apply_retention(now=NOW, retention_days=1)
     store.apply_retention(now=NOW, retention_days=30)
     assert store.retention_watermark() == NOW - 24 * 60 * 60
+
+
+def test_watch_tick_across_midnight_is_split_between_days(store):
+    midnight = 1_700_006_400.0  # 2023-11-15T00:00:00Z
+    session_id = store.start_watch_session("alice", "points", midnight - 30)
+
+    store.tick_watch_session(session_id, "alice", midnight + 30, 60)
+
+    daily = {
+        row["day"]: row["watch_seconds"]
+        for row in store.daily(days=2, now=midnight + 30)
+    }
+    assert daily == {utc_day(midnight - 30): 30, utc_day(midnight): 30}
