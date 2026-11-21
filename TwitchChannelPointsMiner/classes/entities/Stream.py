@@ -44,6 +44,7 @@ class Stream(object):
         "watch_slot_minutes",
         "live_seen_at",
         "__last_update",
+        "__refresh_requested",
         "__minute_watched_timestamp",
         "__watch_slot_timestamp",
     ]
@@ -63,6 +64,8 @@ class Stream(object):
 
         self.viewers_count = 0
         self.__last_update = 0
+        # Set by request_refresh(): the next online check must ask Twitch.
+        self.__refresh_requested = False
 
         self.spade_url = None
         self.payload = None
@@ -113,6 +116,7 @@ class Stream(object):
                 DROP_ID in [tag["id"] for tag in self.tags] and self.game != {}
             )
             self.__last_update = now
+            self.__refresh_requested = False
             self.broadcast_id = broadcast_id
             self.live_seen_at = seen
 
@@ -141,15 +145,23 @@ class Stream(object):
         return None if self.game in [{}, None] else self.game["id"]
 
     def update_required(self):
-        return self.__last_update == 0 or self.update_elapsed() >= 120
+        return (
+            self.__last_update == 0
+            or self.__refresh_requested
+            or self.update_elapsed() >= 120
+        )
 
     def update_elapsed(self):
         return 0 if self.__last_update == 0 else (time.time() - self.__last_update)
 
     def request_refresh(self):
-        """Make the next online check fetch stream info again."""
+        """Make the next online check fetch stream info again, including the
+        minute watcher's, which otherwise waits for its staleness window."""
         with _WATCH_STREAK_LOCK:
-            self.__last_update = 0
+            self.__refresh_requested = True
+
+    def refresh_requested(self):
+        return self.__refresh_requested
 
     def live_snapshot(self):
         """Return (broadcast_id, live_seen_at) as one consistent pair."""
@@ -260,7 +272,14 @@ class Stream(object):
             return self.__watch_streak_minutes_locked()
 
     def __watch_streak_minutes_locked(self):
-        return max(self.minute_watched or 0, self.watch_slot_minutes or 0)
+        # Includes the slot time since the last cycle, which hold_watch_slot()
+        # adds only after the cap is checked: a slow cycle would otherwise
+        # keep a capped channel prioritized for one more cycle.
+        slot_minutes = self.watch_slot_minutes or 0
+        if self.__watch_slot_timestamp != 0:
+            elapsed = max(time.monotonic() - self.__watch_slot_timestamp, 0)
+            slot_minutes += round(elapsed / 60, 5)
+        return max(self.minute_watched or 0, slot_minutes)
 
     def hold_watch_slot(self):
         """Count time in a watch slot; called each cycle the stream has one.

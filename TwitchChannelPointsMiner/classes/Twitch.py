@@ -7192,7 +7192,12 @@ class Twitch(object):
                     stale_after_seconds = (
                         120 if is_drop_discovered(streamers_snapshot[i]) else 600
                     )
+                    refresh_requested = getattr(
+                        streamers_snapshot[i].stream, "refresh_requested", None
+                    )
                     if (
+                        callable(refresh_requested) and refresh_requested() is True
+                    ) or (
                         streamers_snapshot[i].stream.update_elapsed()
                         >= stale_after_seconds
                     ):

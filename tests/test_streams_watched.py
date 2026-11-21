@@ -785,6 +785,29 @@ def test_explicit_streamer_is_refreshed_at_ten_minute_gate(monkeypatch):
     assert checked == ["stale-explicit"]
 
 
+def test_streamer_with_a_requested_refresh_is_refreshed_before_its_gate(
+    monkeypatch,
+):
+    # A stream-down sent before the streamer was marked online asks for a
+    # recheck. Waiting for the 10-minute gate (or a viewcount message that
+    # an ended stream no longer sends) would keep it online meanwhile.
+    requested = _watch_streamer("requested")
+    requested.stream.refresh_requested = lambda: True
+    fresh = _watch_streamer("fresh")
+    fresh.stream.refresh_requested = lambda: False
+
+    checked = []
+    monkeypatch.setattr(
+        Twitch,
+        "check_streamer_online",
+        lambda self, streamer: checked.append(streamer.username),
+    )
+
+    _run_one_watch_iteration(monkeypatch, [requested, fresh], streams_watched=2)
+
+    assert checked == ["requested"]
+
+
 def test_stale_category_streamer_refresh_flips_it_into_watch_rotation(monkeypatch):
     # End-to-end companion to test_stale_category_streamer_is_refreshed_even_when_ineligible:
     # that test only proves check_streamer_online gets *called* on a stale,

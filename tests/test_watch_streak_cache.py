@@ -349,6 +349,35 @@ def test_requested_refresh_makes_the_next_online_check_ask_twitch(monkeypatch):
     streamer.stream.request_refresh()
 
     assert streamer.stream.update_required() is True
+    assert streamer.stream.refresh_requested() is True
+    # The age stays real, so staleness gates and logs aren't thrown off.
+    clock[0] += 30
+    assert streamer.stream.update_elapsed() == 30
+
+    _refresh_live_stream(streamer, "broadcast-1")
+
+    assert streamer.stream.refresh_requested() is False
+    assert streamer.stream.update_required() is False
+
+
+def test_cap_counts_slot_time_since_the_last_cycle(monkeypatch):
+    # Cycles are slow (five minutes) and the cap is checked before the
+    # cycle's hold_watch_slot() adds the time since the previous one.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    steady = [1_000.0]
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: steady[0])
+    stream = stream_module.Stream()
+    stream.broadcast_id = "broadcast-1"
+    stream.init_watch_streak()
+    stream.hold_watch_slot()
+    for _ in range(3):
+        steady[0] += 5 * 60
+        stream.hold_watch_slot()
+    steady[0] += 5 * 60
+
+    assert stream.watch_streak_minutes() == pytest.approx(20, abs=1e-3)
+    assert stream.stop_waiting_for_watch_streak(20) is True
 
 
 def test_streak_confirmed_before_previous_broadcast_ended_is_refarmed(
