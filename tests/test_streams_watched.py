@@ -121,6 +121,8 @@ def _watch_streamer(
     points=0,
     points_limit=None,
     watch_streak=False,
+    streak_only=False,
+    minute_watched=0,
 ):
     # Production builds wildcard and badge-campaign streamers with
     # from_category=True as well; mirror that so the fakes classify the same.
@@ -135,7 +137,7 @@ def _watch_streamer(
         game={"displayName": username},
         game_name=lambda: username,
         watch_streak_missing=watch_streak,
-        minute_watched=0,
+        minute_watched=minute_watched,
     )
     return SimpleNamespace(
         username=username,
@@ -155,6 +157,7 @@ def _watch_streamer(
             favorite=favorite,
             points_limit=points_limit,
             watch_streak=watch_streak,
+            streak_only=streak_only,
         ),
         drops_condition=lambda: drops_eligible,
     )
@@ -363,6 +366,26 @@ def test_minute_watcher_persists_now_watching_analytics(monkeypatch, tmp_path):
     assert _entries_by_username()["category-streamer"]["reason"] == "drops"
 
 
+def test_now_watching_analytics_labels_pending_watch_streak(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("streak-streamer", watch_streak=True, points=300),
+            _watch_streamer("points-streamer", points=400),
+        ],
+        streams_watched=2,
+        priority=[Priority.STREAK, Priority.ORDER],
+    )
+
+    entries = json.loads((tmp_path / "now_watching.json").read_text(encoding="utf-8"))
+    entries_by_username = {entry["username"]: entry for entry in entries}
+    assert entries_by_username["streak-streamer"]["reason"] == "streak"
+    assert entries_by_username["points-streamer"]["reason"] == "points"
+
+
 def test_minute_watcher_writes_empty_now_watching_when_nothing_watched(
     monkeypatch, tmp_path
 ):
@@ -481,11 +504,191 @@ def test_pending_watch_streak_bypasses_points_limit(monkeypatch):
     assert posted == ["https://spade.test/capped-streak"]
 
 
-def test_pending_watch_streak_honors_explicit_zero_timestamp():
-    streamer = _watch_streamer("streak", watch_streak=True)
-    streamer.offline_at = -60
+def test_minute_watcher_skips_streak_only_streamers(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [
+            _watch_streamer("streak-only", streak_only=True),
+            _watch_streamer("eligible"),
+        ],
+        streams_watched=2,
+    )
 
-    assert Twitch._has_pending_watch_streak(streamer, now=0) is False
+    assert posted == ["https://spade.test/eligible"]
+
+
+def test_pending_watch_streak_bypasses_streak_only(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("streak-only", streak_only=True, watch_streak=True)],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/streak-only"]
+
+
+def test_confirmed_watch_streak_drops_streak_only_streamer(monkeypatch):
+    streamer = _watch_streamer("streak-only", streak_only=True, watch_streak=True)
+    streamer.stream.watch_streak_missing = False
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+
+
+def test_streak_only_streamer_stops_after_the_watch_window(monkeypatch):
+    streamer = _watch_streamer(
+        "streak-only",
+        streak_only=True,
+        watch_streak=True,
+        minute_watched=10,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+
+
+def test_streak_only_integer_sets_a_custom_window(monkeypatch):
+    in_window = _watch_streamer(
+        "custom-window",
+        streak_only=5,
+        watch_streak=True,
+        minute_watched=3,
+    )
+    at_window = _watch_streamer(
+        "custom-window-done",
+        streak_only=5,
+        watch_streak=True,
+        minute_watched=5,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [in_window, at_window],
+        streams_watched=2,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/custom-window"]
+
+
+def test_watch_window_applies_only_to_streak_only_streamers(monkeypatch):
+    # A points-capped streamer with a long pending streak still gets watched
+    # (its streak payout may only arrive near the end of the broadcast).
+    streamer = _watch_streamer(
+        "capped-long-streak",
+        points=500,
+        points_limit=500,
+        watch_streak=True,
+        minute_watched=45,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/capped-long-streak"]
+
+
+def test_short_restart_streak_is_immediately_eligible(monkeypatch):
+    streamer = _watch_streamer("short-restart", watch_streak=True)
+    streamer.offline_at = 100
+
+    # A short restart can continue an unclaimed logical stream, so the pending
+    # flag must not wait 30 minutes before the channel can be watched again.
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+        now=160,
+    )
+
+    assert posted == ["https://spade.test/short-restart"]
+
+
+def test_pending_watch_streak_survives_beyond_eleven_minutes():
+    streamer = _watch_streamer("streak", watch_streak=True, minute_watched=45)
+
+    assert Twitch._has_pending_watch_streak(streamer) is True
+
+
+def test_pending_watch_streak_stays_watched_until_confirmed(monkeypatch):
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("slow-streak", watch_streak=True, minute_watched=30)],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == ["https://spade.test/slow-streak"]
+
+
+def test_minute_watcher_reconciles_a_streak_that_advances_mid_stream(monkeypatch):
+    # The first broadcast of a streak advances the milestone without paying a
+    # WATCH_STREAK bonus, so no points event arrives to clear the pending flag.
+    streamer = _watch_streamer(
+        "mid-stream",
+        watch_streak=True,
+        points=500,
+        points_limit=500,
+        minute_watched=5,
+    )
+    streamer.channel_id = "channel-1"
+    streamer.stream.broadcast_id = "broadcast-1"
+    streamer.stream.watch_streak_checked_at = 0
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0),
+        expires_at=datetime(2099, 1, 1),
+    )
+    calls = []
+    gql = SimpleNamespace(
+        get_stream_live_status=lambda channel_id: calls.append("live")
+        or SimpleNamespace(stream=live_stream),
+        get_reward_list=lambda channel_id: calls.append("rewards")
+        or SimpleNamespace(watch_streak_milestone=milestone),
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+        now=1_700_000_000,
+        gql=gql,
+    )
+
+    assert calls == ["live", "rewards"]
+    assert streamer.stream.watch_streak_missing is False
+    # Once the streak is confirmed, the channel no longer bypasses its points
+    # limit, so it does not take a watch slot in this cycle.
+    assert posted == []
+
+
+def test_confirmed_watch_streak_is_no_longer_pending():
+    streamer = _watch_streamer("streak", watch_streak=True, minute_watched=30)
+    streamer.stream.watch_streak_missing = False
+
+    assert Twitch._has_pending_watch_streak(streamer) is False
 
 
 def test_minute_watcher_posts_to_two_explicit_streamers(monkeypatch):
@@ -1014,6 +1217,35 @@ def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     assert "badge (badge drop)" in watch_message
     assert "explicit (streamer)" in watch_message
     assert "badge (badge drop; badge drops)" in watch_message
+
+
+def test_watched_streamer_log_lists_pending_watch_streak(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+    streamers = [_watch_streamer("streaky", watch_streak=True)]
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        streamers,
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    watch_message = next(
+        message for message in messages if "Watching for points:" in message
+    )
+    assert "watching for watch streak: streaky (streamer)" in watch_message
+    # A pending streak must not also be listed as a points watch, or the
+    # dashboard/log appears to farm it for the lower-priority fallback reason.
+    points_section = watch_message.split("Watching for points:", 1)[1].split(
+        "; watching for drops:", 1
+    )[0]
+    assert "streaky" not in points_section
 
 
 def test_source_priority_appends_omitted_sources():
@@ -3294,7 +3526,7 @@ def test_unchanged_watch_status_is_logged_once_then_at_debug(monkeypatch):
     assert records[0][1] == records[1][1]
     assert records[0][1] == (
         "Watching for points: one (streamer), two (streamer); "
-        "watching for drops: none"
+        "watching for drops: none; watching for watch streak: none"
     )
 
 
@@ -3319,7 +3551,9 @@ def test_watch_status_logs_change_in_drops_list(monkeypatch):
     _log_watch_status(twitch, streamers, sources, drop_indexes={0})
 
     assert [level for level, _, _ in records] == ["info", "info"]
-    assert records[0][1].endswith("watching for drops: none")
+    assert records[0][1].endswith(
+        "watching for drops: none; watching for watch streak: none"
+    )
     assert "Example Game drop campaign 'Alpha'" in records[1][1]
 
 

@@ -780,6 +780,11 @@ def test_now_watching_widget_jumps_to_drops_tab_on_click():
     # Drops-tab category selection.
     assert "&& entry.game)" in render_now_watching
 
+    # Pending watch streaks are reported separately from points so the widget
+    # names the reason the channel actually holds a watch slot.
+    assert "entry.reason === 'streak'" in render_now_watching
+    assert "for watch streak" in render_now_watching
+
     assert "function findDropCategoryForNowWatching(entry)" in script
     resolver = script.split("function findDropCategoryForNowWatching", 1)[1].split(
         "function changeDropCategory", 1
@@ -943,6 +948,7 @@ def test_config_ui_exposes_requested_management_controls():
         "claim_moments",
         "chat",
         "points_limit",
+        "streak_only",
     ):
         assert setting in script
     assert "reorder_categories" in script
@@ -963,6 +969,25 @@ def test_config_ui_exposes_requested_management_controls():
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "reorder_streamers" in script
     assert "Sortable.create" in script
+
+
+def test_config_ui_preserves_an_integer_streak_only_window():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+
+    render_streamers = script.split("function renderConfiguredStreamers", 1)[1].split(
+        "function renderConfiguredCategories", 1
+    )[0]
+    assert "Number.isInteger(value)" in render_streamers
+    assert ".data('configured-value', value)" in render_streamers
+    assert "(${value} min)" in render_streamers
+
+    save_streamer = script.split("function saveStreamerSettings", 1)[1].split(
+        "function saveCategorySettings", 1
+    )[0]
+    assert "Number.isInteger(configuredValue)" in save_streamer
+    assert "checked === Boolean(configuredValue)" in save_streamer
+    assert "settings[name] = configuredValue;" in save_streamer
 
 
 def test_web_config_lists_support_drag_and_drop_reordering():
