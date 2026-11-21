@@ -159,8 +159,22 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # The source above is the PR's head, which may predate the build
+      # action or carry an older copy of it. Take the action from the commit
+      # this workflow file came from (the merge commit, for a PR), so the
+      # two always match.
+      - name: Checkout build action
+        uses: actions/checkout@v7
+        with:
+          path: automation
+          # Without cone mode, only this directory is checked out; cone mode
+          # would add every file in the repository root.
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Build and smoke-test executable
-        uses: ./.github/actions/build-windows-exe
+        uses: ./automation/.github/actions/build-windows-exe
         with:
           flavor: ${{ matrix.flavor }}
           pip-cache: "true"

@@ -187,10 +187,22 @@ jobs:
         with:
           ref: ${{ needs.resolve_release.outputs.tag_name }}
 
-      # The action comes from the released tag checked out above, so a
-      # release is always built by the steps it was tested with.
+      # A release tagged before the build action existed doesn't contain
+      # it, and this job also rebuilds such a release when its files are
+      # missing. Take the action from this workflow's commit instead.
+      - name: Checkout build action
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          # Without cone mode, only this directory is checked out; cone mode
+          # would add every file in the repository root.
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Build and smoke-test executable
-        uses: ./.github/actions/build-windows-exe
+        uses: ./automation/.github/actions/build-windows-exe
         with:
           flavor: ${{ matrix.flavor }}
 
