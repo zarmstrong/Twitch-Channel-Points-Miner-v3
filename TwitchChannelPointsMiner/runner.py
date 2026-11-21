@@ -393,6 +393,16 @@ def main(argv=None, on_miner_ready=None):
 
     if not config_path.is_file():
         if not args.legacy_runner.is_file():
+            backup = args.legacy_runner.with_name(args.legacy_runner.name + ".bak")
+            if backup.is_file():
+                # A failed conversion that couldn't put the original back.
+                # Don't hide it behind a fresh default configuration.
+                _legacy_runner_stop(
+                    f"{config_path} does not exist and {args.legacy_runner} is "
+                    f"missing, but {backup} exists. Rename {backup.name} back "
+                    f"to {args.legacy_runner.name} to convert it again, or "
+                    "delete the backup to start with a default configuration."
+                )
             try:
                 _create_default_config(config_path)
             except OSError as error:
@@ -414,14 +424,22 @@ def main(argv=None, on_miner_ready=None):
                 "directly: unset TCPM_DISABLE_AUTO_CONVERSION to convert it, or "
                 f"write {config_path} yourself from config.example.py."
             )
+        existing_backups = set(config_path.parent.glob(f"{config_path.name}.v*.bak"))
         try:
             convert_runner(args.legacy_runner, config_path)
             config = _load_config(config_path)
             print(f"Converted {args.legacy_runner} to {config_path}.", flush=True)
         except Exception as error:
+            # _load_config keeps a schema backup of what it migrated. A
+            # leftover one would make the retry refuse to migrate.
+            created_backups = (
+                set(config_path.parent.glob(f"{config_path.name}.v*.bak"))
+                - existing_backups
+            )
             for incomplete in (
                 config_path,
                 args.config_dir / ".converted-from-run-py",
+                *created_backups,
             ):
                 try:
                     incomplete.unlink(missing_ok=True)

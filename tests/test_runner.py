@@ -908,3 +908,54 @@ def test_miner_without_username_points_at_the_username_setting():
 
     assert "run.py" not in log.error.call_args_list[0].args[0]
     assert "username setting" in log.error.call_args_list[0].args[0]
+
+
+BAD_LEGACY_RUNNER = """\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+from TwitchChannelPointsMiner.logger import LoggerSettings
+
+miner = TwitchChannelPointsMiner(
+    "alice", logger_settings=LoggerSettings(date_format="bad")
+)
+miner.mine(["channel_one"])
+"""
+
+
+def test_retry_after_a_failed_load_converts_the_corrected_runner(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text(BAD_LEGACY_RUNNER, encoding="utf-8")
+    args = ("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    assert _run_cli(*args) == 1
+    assert "CONFIGURATION UPDATE REQUIRED" in capsys.readouterr().err
+    assert sorted(path.name for path in config_dir.iterdir()) == []
+    assert legacy_runner.is_file()
+
+    legacy_runner.write_text(
+        BAD_LEGACY_RUNNER.replace('date_format="bad"', 'date_format="dd/mm/yy"'),
+        encoding="utf-8",
+    )
+
+    assert _run_cli(*args, "--convert-only") == 0
+    assert (config_dir / "config.py").is_file()
+
+
+def test_missing_runner_with_a_leftover_backup_stops_instead_of_a_default(
+    tmp_path, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (tmp_path / "run.py.bak").write_text("legacy", encoding="utf-8")
+
+    result = _run_cli(
+        "--config-dir", config_dir, "--legacy-runner", tmp_path / "run.py"
+    )
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert "Rename run.py.bak back to run.py" in error
+    assert not (config_dir / "config.py").exists()
