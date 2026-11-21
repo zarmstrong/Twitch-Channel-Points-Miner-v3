@@ -187,40 +187,24 @@ jobs:
         with:
           ref: ${{ needs.resolve_release.outputs.tag_name }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      # A release tagged before the build action existed doesn't contain
+      # it, and this job also rebuilds such a release when its files are
+      # missing. Take the action from this workflow's commit instead.
+      - name: Checkout build action
+        uses: actions/checkout@v7
         with:
-          python-version: '3.14'
+          ref: ${{ github.sha }}
+          path: automation
+          # Without cone mode, only this directory is checked out; cone mode
+          # would add every file in the repository root.
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
-      - name: Install build dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-windows.txt
-          python -m pip install validators==0.22.0 pyinstaller==6.21.0
-
-      - name: Build Windows executable
-        shell: cmd
-        # Use setup-python's interpreter; the py launcher would pick the
-        # newest Python on the runner, which doesn't have PyInstaller.
-        env:
-          PYINSTALLER_PYTHON: python
-        run: build_windows.bat ${{ matrix.flavor }}
-
-      - name: Smoke-test Windows executable
-        shell: pwsh
-        env:
-          FLAVOR: ${{ matrix.flavor }}
-        run: |
-          $exeName = if ($env:FLAVOR -eq "standard") { "TwitchChannelPointsMiner.exe" } else { "TwitchChannelPointsMiner-Portable.exe" }
-          # --windowed is a GUI-subsystem exe, so a plain call here returns
-          # before the process actually finishes and leaves $LASTEXITCODE
-          # stale/empty; Start-Process -Wait is needed to block on it and
-          # get its real exit code.
-          $proc = Start-Process -FilePath "dist\$exeName" -ArgumentList "--self-test" -Wait -PassThru
-          if ($proc.ExitCode -ne 0) {
-            throw "Smoke test failed (exit code $($proc.ExitCode)) - the built exe is missing a GUI dependency"
-          }
+      - name: Build and smoke-test executable
+        uses: ./automation/.github/actions/build-windows-exe
+        with:
+          flavor: ${{ matrix.flavor }}
 
       - name: Upload built executable
         uses: actions/upload-artifact@v7

@@ -1,11 +1,14 @@
+import functools
 import logging
 import socket
+import sys
 import threading
 import ssl
 import time
 import types
 from unittest.mock import MagicMock, call
 
+import irc.client
 import pytest
 
 from TwitchChannelPointsMiner.classes import Chat
@@ -93,7 +96,10 @@ def test_client_irc_uses_tls_port_and_wrapped_factory_when_available(monkeypatch
 
     server = client.servers.peek()
     assert server.port == IRC_TLS_PORT
-    assert "connect_factory" in client._SingleServerIRCBot__connect_params
+    factory = client._SingleServerIRCBot__connect_params["connect_factory"]
+    assert isinstance(factory, Chat._StoppableConnectFactory)
+    assert factory.wrapper is not None
+    assert factory.timeout == Chat.IRC_CONNECT_TIMEOUT_SECONDS
 
 
 def test_client_irc_uses_plaintext_port_when_explicitly_allowed(monkeypatch):
@@ -104,7 +110,10 @@ def test_client_irc_uses_plaintext_port_when_explicitly_allowed(monkeypatch):
 
     server = client.servers.peek()
     assert server.port == IRC_PORT
-    assert "connect_factory" not in client._SingleServerIRCBot__connect_params
+    # Plaintext gets the same timeout and stop handling, without TLS.
+    factory = client._SingleServerIRCBot__connect_params["connect_factory"]
+    assert isinstance(factory, Chat._StoppableConnectFactory)
+    assert factory.wrapper is None
 
 
 def test_client_irc_refuses_plaintext_when_tls_unavailable(monkeypatch):
@@ -798,3 +807,172 @@ def test_streamer_added_back_with_a_new_chat_can_join(monkeypatch):
 
 def test_thread_chat_is_a_daemon_thread():
     assert ThreadChat("u", "t", "c").daemon is True
+
+
+def _silent_listener():
+    """A loopback listener that accepts TCP but never answers, so a TLS
+    handshake against it stalls."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    server.settimeout(5)
+    return server
+
+
+def _tls_wrapper():
+    return functools.partial(
+        Chat._irc_tls_context().wrap_socket, server_hostname="localhost"
+    )
+
+
+def test_stopping_a_chat_interrupts_a_stalled_tls_handshake(monkeypatch):
+    server = _silent_listener()
+    accepted = []
+    try:
+        monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+        monkeypatch.setattr(Chat, "IRC", "localhost")
+        monkeypatch.setattr(Chat, "IRC_TLS_PORT", server.getsockname()[1])
+        chat = ThreadChat("someuser", "sometoken", "somechannel")
+        chat.start()
+        # The TCP connect has gone through; the handshake now waits for a
+        # server that never answers.
+        accepted.append(server.accept()[0])
+
+        started = time.monotonic()
+        chat.stop()
+        chat.join(timeout=3)
+        stopped_promptly = not chat.is_alive()
+        elapsed = time.monotonic() - started
+    finally:
+        for connection in accepted:
+            connection.close()
+        server.close()
+
+    assert stopped_promptly
+    assert elapsed < Chat.IRC_CONNECT_TIMEOUT_SECONDS
+
+
+def _run_in_thread(target):
+    result = {}
+
+    def runner():
+        try:
+            result["value"] = target()
+        except Exception as error:
+            result["error"] = error
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _wait_for_pending(factory):
+    deadline = time.monotonic() + 5
+    while factory._pending is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert factory._pending is not None
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="relies on Linux dropping SYNs when the accept queue is full",
+)
+def test_cancel_interrupts_a_stalled_tcp_connect():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(0)
+    address = server.getsockname()
+    # Fill the accept queue, so the next connect's SYNs are dropped.
+    fillers = []
+    for _ in range(4):
+        filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        filler.setblocking(False)
+        try:
+            filler.connect(address)
+        except BlockingIOError:
+            pass
+        fillers.append(filler)
+    factory = Chat._StoppableConnectFactory(timeout=30)
+    try:
+        thread, result = _run_in_thread(lambda: factory(address))
+        _wait_for_pending(factory)
+        started = time.monotonic()
+        factory.cancel()
+        thread.join(timeout=3)
+        elapsed = time.monotonic() - started
+    finally:
+        for filler in fillers:
+            filler.close()
+        server.close()
+
+    assert not thread.is_alive()
+    assert isinstance(result.get("error"), OSError)
+    assert elapsed < 3
+
+
+def test_a_stalled_tls_handshake_times_out():
+    server = _silent_listener()
+    factory = Chat._StoppableConnectFactory(wrapper=_tls_wrapper(), timeout=0.5)
+    try:
+        thread, result = _run_in_thread(lambda: factory(server.getsockname()))
+        thread.join(timeout=5)
+    finally:
+        server.close()
+
+    assert not thread.is_alive()
+    assert isinstance(result.get("error"), OSError)
+    assert factory._pending is None
+
+
+def test_a_connected_socket_gets_the_default_timeout_back():
+    server = _silent_listener()
+    factory = Chat._StoppableConnectFactory(timeout=3)
+    try:
+        sock = factory(server.getsockname())
+        try:
+            assert sock.gettimeout() == socket.getdefaulttimeout()
+            assert factory._pending is None
+        finally:
+            sock.close()
+    finally:
+        server.close()
+
+
+def test_a_cancelled_factory_does_not_connect():
+    server = _silent_listener()
+    server.settimeout(0.2)
+    factory = Chat._StoppableConnectFactory(timeout=3)
+    factory.cancel()
+    try:
+        with pytest.raises(OSError, match="stopped before connecting"):
+            factory(server.getsockname())
+        with pytest.raises(socket.timeout):
+            server.accept()
+    finally:
+        server.close()
+
+
+def test_die_cancels_the_connect_factory(monkeypatch):
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    client = ClientIRC("someuser", "sometoken", "somechannel")
+    factory = client._SingleServerIRCBot__connect_params["connect_factory"]
+
+    client.die()
+
+    assert factory._cancelled is True
+
+
+def test_a_chat_that_leaves_does_not_stop_other_chats_reconnecting(monkeypatch):
+    # The leaving chat's disconnect schedules a reconnect check on its own
+    # reactor, which stops and never runs it. Another chat that loses its
+    # connection afterwards must still get a reconnect scheduled.
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    leaving = ClientIRC("someuser", "sometoken", "leaving")
+    staying = ClientIRC("someuser", "sometoken", "staying")
+    disconnect = irc.client.Event("disconnect", "", "", [""])
+
+    leaving._on_disconnect(leaving.connection, disconnect)
+    staying._on_disconnect(staying.connection, disconnect)
+
+    assert len(staying.reactor.scheduler.queue) == 1
+    assert leaving.recon is not staying.recon

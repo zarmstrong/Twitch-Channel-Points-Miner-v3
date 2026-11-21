@@ -247,6 +247,10 @@ WATCH_REWARD_FINISHED_REFRESH_SECONDS = 60 * 60
 # How long before a reward campaign ends a claim Twitch did not accept is
 # sent once more, when the next try would otherwise come after the end.
 WATCH_REWARD_LAST_CLAIM_SECONDS = 2 * 60
+# How often the claim thread, waiting to send a refused claim again, looks
+# whether the miner is stopping. Whatever stops it, the thread is gone
+# within this long, and the shutdown that joins it waits no longer.
+WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS = 1
 # How many channels one such read may ask, in all and per category, before
 # it gives up until the next evaluation.
 WATCH_REWARD_REFRESH_CHANNEL_LIMIT = 4
@@ -391,6 +395,8 @@ class Twitch(object):
         "watch_reward_claim_thread",
         "watch_reward_claim_pass_lock",
         "watch_reward_claim_requested",
+        "watch_reward_claim_retries",
+        "watch_reward_claim_wake",
         "watch_reward_pending_starts",
         "watch_reward_opening_unevaluated",
         "watch_reward_finished_rows",
@@ -588,6 +594,11 @@ class Twitch(object):
         # claim lock, never while holding it or the watch-reward lock.
         self.watch_reward_claim_pass_lock = RLock()
         self.watch_reward_claim_requested = False
+        # When the claim thread sends a refused claim again, by campaign
+        # (see __retry_unaccepted_reward_claims), and what ends its wait
+        # for that moment early: a claim to send now, or a sooner moment.
+        self.watch_reward_claim_retries = {}
+        self.watch_reward_claim_wake = Event()
         self.watch_reward_pending_starts = set()
         self.watch_reward_finished_rows = frozenset()
         self.watch_reward_earned_rows = frozenset()
@@ -3191,7 +3202,8 @@ class Twitch(object):
                 # campaign sync comes along to try it again: a reward waiting
                 # to be claimed gives no reason to load a streamer. Every
                 # stored campaign's, the least time left first, and each once
-                # an evaluation.
+                # an evaluation. What is refused here too is sent again by
+                # the claim thread.
                 self.__claim_waiting_watch_rewards_by_deadline(reward_claims_tried)
                 self.__retry_unaccepted_reward_claims(campaign_id)
                 views = reward_category_views(
@@ -3873,8 +3885,12 @@ class Twitch(object):
 
     def __note_watch_reward_starts(self, moments):
         """Remember when the windows of reward campaign repeats open, for
-        take_opened_watch_reward_start. Called with the watch-reward lock
-        held."""
+        take_opened_watch_reward_start: the moments that call for a category
+        refresh. Called with the watch-reward lock held.
+
+        A claim to send again is not among them. The claim thread keeps
+        those moments itself (see __retry_unaccepted_reward_claims): the
+        main loop can be busy for longer than such a reward has left."""
         pending = getattr(self, "watch_reward_pending_starts", None)
         if pending is None:
             pending = self.watch_reward_pending_starts = set()
@@ -3897,23 +3913,34 @@ class Twitch(object):
                 self.watch_reward_opening_unevaluated = True
         return bool(opened)
 
-    def claim_waiting_watch_rewards(self):
-        """Send the claims of the stored reward campaigns' waiting rewards,
-        on the claim thread. The main loop calls this when a moment noted
-        for it has come, which can be a claim to send again (see
-        __retry_unaccepted_reward_claims). The category refresh made then
-        sends it only for a campaign of a configured category, and none is
-        made without categories: a reward campaign is also earned on a
-        configured streamer's channel."""
-        for campaign in list(self.__watch_reward_campaigns().values()):
-            if self.__is_open_drop_campaign(campaign) is True:
-                self.__claim_watch_reward_drops_soon(campaign)
+    def start_unattended_watch_reward_claims(self):
+        """Start the claim thread if a refused claim is due to be sent
+        again and no thread is there to send it.
+
+        The claim thread waits for those moments itself, so there is
+        nothing to do here unless none could be started when the moment was
+        noted (see __start_reward_claim_thread). The main loop calls this
+        while it waits between passes: it is the one thread sure to be
+        there. It only starts the thread and sends nothing itself. Should
+        none be had this time either, the moment is put off as after a
+        claim that was refused."""
+        now = utc_now()
+        with _watch_reward_lock(self):
+            if (
+                getattr(self, "running", True) is not True
+                or getattr(self, "watch_reward_claim_thread", None) is not None
+                or not any(
+                    moment <= now for moment in self.__reward_claim_retries().values()
+                )
+            ):
+                return
+        self.__start_reward_claim_thread()
 
     def watch_reward_start_due(self) -> bool:
         """Whether take_opened_watch_reward_start has a moment to report.
-        The main loop asks while it waits between passes: a claim due again
-        in a campaign's last minute would be past the campaign's end after
-        the full wait."""
+        The main loop asks while it waits between passes: a window opened
+        in a campaign's last minutes may be closed again after the full
+        wait."""
         now = utc_now()
         with _watch_reward_lock(self):
             return any(
@@ -10799,21 +10826,38 @@ class Twitch(object):
         lock and then for Twitch, which can take over a minute; done there,
         it would stop the watching meanwhile. One thread does the claiming:
         it goes through every stored campaign, and once more when a listing
-        asked for it while it was busy."""
+        asked for it while it was busy. It stays for as long as a claim
+        Twitch refused is to be sent again."""
         if not any(
             (drop.get("self") or {}).get("dropInstanceID")
             and (drop.get("self") or {}).get("isClaimed") is not True
             for drop in campaign.get("timeBasedDrops") or []
         ):
             return
+        if self.__start_reward_claim_thread(requested=True) is not True:
+            # The next channel listing tries again. Should the campaign end
+            # before one comes: noted as a claim to send again, which the
+            # main loop has a thread started for when it is due (see
+            # start_unattended_watch_reward_claims).
+            self.__note_reward_claim_retry(str(campaign.get("id")))
+
+    def __start_reward_claim_thread(self, requested=False) -> bool:
+        """Have a claim thread at work: started here, unless one is there
+        already or the miner is stopping. `requested` asks it for a pass
+        over the waiting rewards now; without it the thread only waits for
+        the claims to send again. False when no thread could be started."""
         with _watch_reward_lock(self):
             if getattr(self, "running", True) is not True:
                 # Shutting down: a thread started now would not be waited
                 # for. The first listing of the next run claims it.
-                return
-            self.watch_reward_claim_requested = True
+                return True
+            if requested is True:
+                self.watch_reward_claim_requested = True
             if getattr(self, "watch_reward_claim_thread", None) is not None:
-                return
+                # It may be waiting for a claim to send again: for a later
+                # moment than the one just noted, or with a pass asked for.
+                self.__reward_claim_wake().set()
+                return True
             thread = Thread(
                 target=self.__claim_stored_watch_reward_drops,
                 name="Reward campaign claim",
@@ -10834,25 +10878,113 @@ class Twitch(object):
                 "the next channel listing tries again",
                 level=logging.DEBUG,
             )
-            # Or the main loop, should the campaign end before one comes.
-            self.__retry_unaccepted_reward_claims(str(campaign.get("id")))
+            # A claim due again that the thread was to send is put off as
+            # after a refusal. Left due, the main loop would ask for a
+            # thread again at once, and again.
+            now = utc_now()
+            with _watch_reward_lock(self):
+                due = [
+                    campaign_id
+                    for campaign_id, moment in self.__reward_claim_retries().items()
+                    if moment <= now
+                ]
+            for campaign_id in due:
+                self.__note_reward_claim_retry(campaign_id)
+            return False
+        return True
 
     def __claim_stored_watch_reward_drops(self):
+        """The claim thread: a pass over the waiting rewards when one was
+        asked for, and another whenever a claim Twitch refused is due again
+        (see __retry_unaccepted_reward_claims). It waits for those moments
+        itself and ends once none is left."""
         try:
             while True:
                 with _watch_reward_lock(self):
+                    requested = (
+                        getattr(self, "watch_reward_claim_requested", False) is True
+                    )
                     self.watch_reward_claim_requested = False
-                self.__claim_waiting_watch_rewards_by_deadline()
+                    due = self.__take_due_reward_claim_retries()
+                if due and not requested:
+                    self.__log_drop_check(
+                        "sending the reward campaign claims Twitch did not "
+                        "accept again",
+                        level=logging.DEBUG,
+                    )
+                if requested or due:
+                    self.__claim_waiting_watch_rewards_by_deadline()
                 with _watch_reward_lock(self):
-                    if self.watch_reward_claim_requested is not True:
+                    if self.watch_reward_claim_requested is True:
+                        continue
+                    retries = self.__reward_claim_retries()
+                    if not retries or getattr(self, "running", True) is not True:
                         # Checked and cleared under the lock a listing asks
                         # under, so none is told a thread is at work that has
                         # already decided to stop.
                         self.watch_reward_claim_thread = None
                         return
+                    retry_at = min(retries.values())
+                    # Cleared under the lock it is set under: whoever asks
+                    # from here on ends the wait below.
+                    wake = self.__reward_claim_wake()
+                    wake.clear()
+                if self.__wait_for_reward_claim_retry(retry_at, wake) is True:
+                    continue
+                with _watch_reward_lock(self):
+                    if (
+                        self.watch_reward_claim_requested is True
+                        and getattr(self, "running", True) is True
+                    ):
+                        continue
+                    self.watch_reward_claim_thread = None
+                    return
         except BaseException:
             self.watch_reward_claim_thread = None
             raise
+
+    def __wait_for_reward_claim_retry(self, retry_at, wake) -> bool:
+        """Wait on the claim thread until `retry_at`, or until `wake` is
+        set: a pass was asked for, or a sooner moment noted. False once the
+        miner is stopping, which ends the thread.
+
+        The stop is looked for every WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS
+        rather than signalled: `running` is cleared in several places, by a
+        shutdown, a restart and a login that failed, and a thread that slept
+        on would hold the shutdown up until the moment it waits for."""
+        while getattr(self, "running", True) is True:
+            left = (retry_at - utc_now()).total_seconds()
+            if left <= 0 or wake.wait(min(left, WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS)):
+                return True
+        return False
+
+    def __reward_claim_retries(self) -> dict:
+        """When the claim of each stored campaign is sent again, by campaign
+        ID. Called with the watch-reward lock held."""
+        retries = getattr(self, "watch_reward_claim_retries", None)
+        if retries is None:
+            retries = self.watch_reward_claim_retries = {}
+        return retries
+
+    def __reward_claim_wake(self):
+        """What ends the claim thread's wait early. Called with the
+        watch-reward lock held."""
+        wake = getattr(self, "watch_reward_claim_wake", None)
+        if wake is None:
+            wake = self.watch_reward_claim_wake = Event()
+        return wake
+
+    def __take_due_reward_claim_retries(self) -> bool:
+        """Whether a claim is due to be sent again. Those due are taken off
+        the list: the pass made for them sends every waiting claim, and
+        notes the next moment for what is refused again. Called with the
+        watch-reward lock held."""
+        now = utc_now()
+        retries = self.__reward_claim_retries()
+        due = [campaign_id for campaign_id, moment in retries.items() if moment <= now]
+        for campaign_id in due:
+            del retries[campaign_id]
+        return bool(due)
 
     def __claim_waiting_watch_rewards_by_deadline(self, tried=None):
         """Send the claim of every reward of the open stored campaigns that
@@ -11009,9 +11141,9 @@ class Twitch(object):
         return [(campaign, drop_dict) for _, _, campaign, drop_dict in found]
 
     def __retry_unaccepted_reward_claims(self, campaign_id):
-        """Have the categories refreshed again when a progress read would
-        next be due, if a reward of the stored campaign is still waiting to
-        be claimed after its claim was sent.
+        """Have the claim thread send the claims again when a progress read
+        would next be due, if a reward of the stored campaign is still
+        waiting to be claimed after its claim was sent.
 
         A reward waiting to be claimed gives no reason to load a streamer,
         so with nothing else to watch no campaign sync runs to send the
@@ -11023,22 +11155,59 @@ class Twitch(object):
 
         The end is the campaign's, or the moment the repeat after a waiting
         one opens, if that comes first: a repeat may not be there to claim
-        once the next has started."""
-        stored = self.__watch_reward_campaigns().get(campaign_id)
-        if stored is None or self.__is_open_drop_campaign(stored) is not True:
-            return
-        now = utc_now()
-        waiting, ends_at = self.__waiting_reward_claims(stored, now)
-        if not waiting:
-            return
-        retry_at = now + timedelta(seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS)
-        if ends_at is not None and retry_at >= ends_at:
-            retry_at = max(
-                ends_at - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
-                now + min(timedelta(seconds=60), (ends_at - now) / 2),
-            )
+        once the next has started.
+
+        The claim thread waits for the moment itself, and is started for
+        it when the claim was sent by another (the campaign sync, the
+        category evaluation). Left to the main loop, the claim would wait
+        for whatever that is busy with: a report written to a stalled disk,
+        or a category refresh, can take longer than the reward has left.
+
+        One wait the thread shares with every other: it takes the
+        watch-reward lock to read these moments, and a row of the report is
+        written under that lock (see __save_drop_snapshot_if_new). A write
+        stalled there holds the claim up for as long."""
+        if self.__note_reward_claim_retry(campaign_id) is True:
+            self.__start_reward_claim_thread()
+
+    def __note_reward_claim_retry(self, campaign_id) -> bool:
+        """Note when the stored campaign's claims are next sent again (see
+        __retry_unaccepted_reward_claims), counted from now. One moment a
+        campaign: the one from its last try. False, and nothing is left
+        noted for it, when no reward of it is waiting to be claimed.
+
+        The record is read under the lock the moment is noted under, which
+        is the one a listing stores a record under. Read before it, a
+        record with nothing to claim could be replaced by one with a reward
+        waiting, that reward's claim be refused and its moment noted, all
+        before the lock was had here: the moment would then be taken away
+        for a record that is no longer the stored one, and the thread
+        waiting for it would end with the claim still to send."""
         with _watch_reward_lock(self):
-            self.__note_watch_reward_starts({retry_at})
+            stored = self.__watch_reward_campaigns().get(campaign_id)
+            retry_at = None
+            if stored is not None and self.__is_open_drop_campaign(stored) is True:
+                now = utc_now()
+                waiting, ends_at = self.__waiting_reward_claims(stored, now)
+                if waiting:
+                    retry_at = now + timedelta(
+                        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS
+                    )
+                    if ends_at is not None and retry_at >= ends_at:
+                        retry_at = max(
+                            ends_at
+                            - timedelta(seconds=WATCH_REWARD_LAST_CLAIM_SECONDS),
+                            now + min(timedelta(seconds=60), (ends_at - now) / 2),
+                        )
+            retries = self.__reward_claim_retries()
+            if retry_at is not None:
+                retries[campaign_id] = retry_at
+                return True
+            if retries.pop(campaign_id, None) is not None:
+                # A thread waiting for this moment alone has nothing left
+                # to wait for.
+                self.__reward_claim_wake().set()
+            return False
 
     def __category_has_watch_reward(self, twitch_campaigns) -> bool:
         """Whether one of the campaigns a category is searched for is a
@@ -13188,6 +13357,142 @@ class Twitch(object):
             self.__remove_ineligible_badge_drops(campaigns)
         return campaigns, last_full_success, now
 
+    @staticmethod
+    def __running_campaign_entity(details):
+        """The entity the campaign sync keeps for a campaign's details: None
+        unless the campaign is running, else the campaign with the drops
+        that are inside their own dates. A campaign with no such drop comes
+        back without drops, for the caller to leave out."""
+        campaign = Campaign(details)
+        if campaign.dt_match is not True:
+            return None
+        # Remove all the drops already claimed or with dt not matching
+        campaign.clear_drops()
+        return campaign
+
+    def __add_opened_watch_reward_drops(self, campaigns, refreshed_ids):
+        """Between two refreshes of the campaigns, add what the stored
+        records of the watch-earned reward campaigns have for the sync to
+        watch that `campaigns` lacks, and return the campaigns.
+
+        A refresh leaves out a drop that is outside its dates, and a
+        campaign with no drop inside them: a repeat waiting for its window
+        to open, once the one before it is claimed. The sync between two
+        refreshes only updates the drops a campaign has. A repeat whose
+        window has opened would then go unwatched until the next refresh, up
+        to 15 minutes away, on a channel with nothing else to earn (#371).
+
+        Nothing is asked of Twitch. The record is what a refresh builds a
+        reward campaign from, and what the sync reads its progress from, so
+        a drop added here is the one a refresh made now would hold after
+        its sync: built by the same step and updated the same way.
+
+        Only added to: a drop that is over or claimed is taken out by the
+        sync, and a campaign by the next refresh. (With a repeat added, the
+        campaign loses a drop the record no longer has, which is the repeat
+        before it.) And only for the campaigns a refresh would take without
+        asking: those the last one took (`refreshed_ids`) and those a
+        channel has listed. A campaign that is over, or that Twitch's
+        account-wide listing named as closed, is left as the last refresh
+        had it."""
+        try:
+            return self.__with_opened_watch_reward_drops(campaigns, refreshed_ids)
+        except Exception as error:
+            # The campaigns are every Drop's: they are synced as they were.
+            self.__log_drop_check(
+                f"unable to add the reward campaign repeats that opened: {error}",
+                level=logging.DEBUG,
+            )
+            return campaigns
+
+    def __with_opened_watch_reward_drops(self, campaigns, refreshed_ids):
+        watch_rewards = self.__watch_reward_campaigns()
+        if not watch_rewards:
+            return campaigns
+        advertised = getattr(self, "advertised_drop_campaigns", None) or {}
+        # Each record whole, as a refresh takes it; a stream then gets its
+        # own category's part (see __campaign_for_stream). Copied under the
+        # lock the records are stored under, and worked on outside it.
+        with _watch_reward_lock(self):
+            records = {
+                campaign_id: copy.deepcopy(stored)
+                for campaign_id, stored in watch_rewards.items()
+            }
+        result = list(campaigns)
+        held = {str(campaign.id): index for index, campaign in enumerate(result)}
+        for campaign_id, details in records.items():
+            listed = advertised.get(campaign_id)
+            if campaign_id not in refreshed_ids and not (
+                isinstance(listed, dict)
+                and self.__is_open_drop_campaign(listed) is True
+            ):
+                continue
+            if (
+                self.__is_open_drop_campaign(details) is not True
+                or (details.get("_watch_reward") or {}).get("named_closed") is True
+            ):
+                continue
+            entity = self.__running_campaign_entity(details)
+            if entity is None:
+                continue
+            # What the sync after a refresh makes of it: the record's own
+            # progress, and a claimed drop taken out. Its claims are sent
+            # from the record, not from here.
+            entity.sync_drops(details["timeBasedDrops"], _reward_claim_already_sent)
+            entity.clear_drops()
+            entity.in_inventory = True
+            index = held.get(campaign_id)
+            current = result[index] if index is not None else None
+            if current is not None and not getattr(current, "reward_categories", None):
+                # Built before the record was stored, from Twitch's details
+                # of the campaign as a Drop campaign, which no stream is
+                # matched to. A refresh puts the record's in its place.
+                current = None
+            known = set() if current is None else {drop.id for drop in current.drops}
+            opened = [
+                drop
+                for drop in entity.drops
+                if drop.id not in known
+                # The sync takes a badge the account has out again.
+                and self.__drop_badge_skip_reason(entity, drop) is None
+            ]
+            if not opened:
+                continue
+            if current is None:
+                entity.drops = opened
+                if index is None:
+                    held[campaign_id] = len(result)
+                    result.append(entity)
+                else:
+                    result[index] = entity
+            else:
+                # In the record's order, as a refresh would hold them. The
+                # drops the campaign has stay the objects they are: the
+                # streams' views share them, with their progress. Except
+                # one the record no longer has: it holds one drop for a
+                # group, so the repeat added takes the place of the one
+                # before it, which the campaign may still hold.
+                order = {
+                    drop["id"]: position
+                    for position, drop in enumerate(details["timeBasedDrops"])
+                }
+                current.reward_categories = entity.reward_categories
+                current.reward_drop_category_ids = entity.reward_drop_category_ids
+                current.reward_drop_report_categories = (
+                    entity.reward_drop_report_categories
+                )
+                current.drops = sorted(
+                    [drop for drop in current.drops if drop.id in order] + opened,
+                    key=lambda drop: order[drop.id],
+                )
+            self.__log_drop_check(
+                f"reward campaign {campaign_id}: watching for "
+                + ", ".join(sorted(drop.name for drop in opened))
+                + " from this sync on; opened since the campaigns were refreshed",
+                level=logging.DEBUG,
+            )
+        return result
+
     def sync_campaigns(self, streamers, chunk_size=3):
         # Full dashboard refresh every 15 minutes. A failed refresh keeps the
         # previous campaigns and is retried after CAMPAIGNS_RETRY_SECONDS
@@ -13196,6 +13501,9 @@ class Twitch(object):
         CAMPAIGNS_RETRY_SECONDS = 5 * 60
         next_campaigns_refresh = 0
         campaigns = []
+        # The watch-earned reward campaigns the last refresh took, with or
+        # without a drop to keep (see __add_opened_watch_reward_drops).
+        refreshed_reward_ids = set()
         last_full_success = None
         previous_progress_step = time.monotonic()
         while self.running:
@@ -13277,6 +13585,11 @@ class Twitch(object):
                         )
                         for details in campaigns_details
                     ]
+                    reward_ids = {
+                        str(details.get("id"))
+                        for details in campaigns_details
+                        if is_watch_reward_campaign(details)
+                    }
 
                     # A reward campaign's drops are reported under the
                     # category each counts in, not all under its first.
@@ -13312,12 +13625,11 @@ class Twitch(object):
                     # Going to clear array and structure. Remove all the timeBasedDrops expired or not started yet
                     for index in range(0, len(campaigns_details)):
                         if campaigns_details[index] is not None:
-                            campaign = Campaign(campaigns_details[index])
-                            if campaign.dt_match is True:
-                                # Remove all the drops already claimed or with dt not matching
-                                campaign.clear_drops()
-                                if campaign.drops != []:
-                                    refreshed_campaigns.append(campaign)
+                            campaign = self.__running_campaign_entity(
+                                campaigns_details[index]
+                            )
+                            if campaign is not None and campaign.drops != []:
+                                refreshed_campaigns.append(campaign)
                         else:
                             continue
                     # Keep what a failed request could not refresh: every
@@ -13332,6 +13644,11 @@ class Twitch(object):
                         and (dashboard_unavailable or campaign.id in failed_detail_ids)
                     ]
                     campaigns = refreshed_campaigns + kept_campaigns
+                    # Without the dashboard, the reward campaigns it named
+                    # last time are kept like the campaigns above.
+                    refreshed_reward_ids = reward_ids | (
+                        refreshed_reward_ids if dashboard_unavailable else set()
+                    )
                     if dashboard_unavailable or failed_detail_ids:
                         logger.warning(
                             "Drops campaign refresh was incomplete; keeping the "
@@ -13340,6 +13657,10 @@ class Twitch(object):
                         )
                     else:
                         next_campaigns_refresh = time.time() + CAMPAIGNS_REFRESH_SECONDS
+                else:
+                    campaigns = self.__add_opened_watch_reward_drops(
+                        campaigns, refreshed_reward_ids
+                    )
 
                 # Divide et impera :)
                 campaigns, last_full_success, previous_progress_step = (

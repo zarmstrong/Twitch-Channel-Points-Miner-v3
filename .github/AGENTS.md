@@ -13,12 +13,14 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
   - A single job can skip itself with `if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}`.
   - A matrix job whose checks are required must keep running and skip its steps instead, as the `pytest` job does. A skipped matrix job never reports its expanded checks (`Python 3.11` and so on), so required checks stay pending.
   - A job that needs another job is skipped when that job fails, and a skipped required check counts as passing. Include `!cancelled()` in its `if:` and fail explicitly, as `windows_installer` does.
+- `actions/build-windows-exe` builds and smoke-tests one Windows executable. `tests.yml`, `release-please.yml` and `nightly.yml` all call it after checking out the source, so change the build steps there, not in a workflow. `tests.yml` and `release-please.yml` check the action out separately, into `automation/`, from the commit the workflow file came from: the source they build (a PR's head, or a release tag) may not contain it. `nightly.yml` builds the commit it runs on, so it uses the copy in its own checkout.
 - `workflows/release-please.yml` creates releases and publishes the Docker image (through `deploy-docker.yml`) and the Windows files.
   - The publishing jobs depend on `resolve_release`, not on `release_please`. It runs even when `release_please` failed. When Release Please reports no new release, `scripts/release-resolve.js` publishes the manifest's release if its Docker notes block or Windows files are missing, whichever commit it is on: another run's Release Please can create it, since it reads `master`, and the release commit's own waiting run can be replaced by a newer push. Only the missing parts are published: Docker when the release has no Docker block, Windows when either file is missing, so a published image is never rebuilt over its version tag. A part whose publishing keeps failing is retried on every push until the next release merges: only the manifest's release is checked, so finish an older release by re-running its release commit's workflow run, which publishes whatever it is missing. A failed attempt of the release commit's own run, or any re-run, also closes the release's issues again (test: `node .github/scripts/release-resolve.test.js`). The Docker block is written only after every Docker step succeeded. Re-running the release commit's workflow run publishes a release whose first run stopped early.
   - The Windows files are added with `gh release upload --clobber`, which never writes the release body.
   - `deploy-docker.yml` doesn't build a version whose images are already on Docker Hub, so retrying a failed `latest`, description or notes step never replaces a published image. When only one of the two repositories has the version, it's copied to the other, and when they hold different builds of it (a `rebuild` that failed partway), `twitch-channel-points-miner` is copied over `twitch-channel-points-miner-v2`. A registry error other than "not found" fails the job instead of rebuilding. Dispatch it with `rebuild` to build one again. If that dispatch fails, dispatch it again: the release notes still hold the Docker block from the earlier publish, so the release workflow treats Docker as published and won't retry it.
   - The jobs run only on `master`, and `master` runs share one concurrency group (`release-please-refs/heads/master`), so two Release Please runs never edit a release body at once. Keep any job that writes the body inside this workflow, or give it the same protection. A manual dispatch of `deploy-docker.yml` runs outside this group, so don't start one while a Release Please run is in progress. Publishes of the same version, by hand or from a release run, queue in their own `deploy-docker-<version>` group, so two never both build it.
 - `workflows/deploy-docker.yml` owns the `<!-- docker-image:start -->` / `<!-- docker-image:end -->` block in release notes. A job that runs alongside it must not write back a copy of the release body it read earlier, or the block can disappear.
+- `workflows/nightly.yml` builds `master` once a day and publishes it as Docker's `nightly` tag and the rolling `nightly` prerelease (portable Windows build only). It must never touch what stable users get: `latest`, the Docker Hub description, or a release that isn't the `nightly` prerelease. A pull request that changes it, or its scripts, gets a dry run that builds without publishing. Publishing itself can only be tested on `master`: run it by hand with **publish** ticked.
 - `workflows/mark-issues-awaiting-release.yml` labels issues fixed on `master` until a release ships them.
 
 ## Supply chain and secrets
@@ -30,16 +32,21 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 
 ## Release scripts
 
-- `scripts/release-linked-issues.js` closes issues a release ships.
+- `scripts/release-linked-issues.js` closes issues a release ships. A release cycle runs from one full release to the next: a GitHub prerelease, such as a nightly build, doesn't end one and closes no issues.
 - `scripts/release-pull-links.js` relinks PR references in release notes.
 - `scripts/docker-latest-tag.js` decides whether a Docker publish moves `latest` and the Docker Hub description. Only the newest plain `MAJOR.MINOR.PATCH` tag does, so a prerelease or an older release published again leaves them alone. `deploy-docker.yml` checks it out from the workflow's commit, because an older release tag doesn't contain it.
+- `scripts/nightly-plan.js` decides whether a nightly run builds and whether it publishes.
+- `scripts/nightly-release.js` runs the publishing steps. The nightly release records, in a block at the top of its notes, which run has started publishing which commit; the last step removes it. Publishing jobs check that block, not only the plan, because "Re-run failed jobs" on an old run re-runs neither the plan nor the first step. Keep every step that publishes behind `assertPublishing`.
+- `scripts/nightly_version.py` computes the nightly version (`3.22.0+nightly.20261119.795629a`) and stamps it into the build's checkout. It is Python because the Windows and Docker builds both run it; its tests are in `tests/test_nightly_version.py`.
 
-Each has a `*.test.js` file using Node's built-in test runner:
+Each JavaScript one has a `*.test.js` file using Node's built-in test runner:
 
 ```
 node .github/scripts/release-linked-issues.test.js
 node .github/scripts/release-pull-links.test.js
 node .github/scripts/docker-latest-tag.test.js
+node .github/scripts/nightly-plan.test.js
+node .github/scripts/nightly-release.test.js
 ```
 
 The scripts receive `github`, `context` and `core` from `actions/github-script`. Tests pass fakes, so they run offline. Add a test with any behaviour change.

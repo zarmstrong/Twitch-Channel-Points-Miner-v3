@@ -267,6 +267,22 @@ test('previous release selection uses publication time and fails safely', async 
   assert.equal(await previousPublishedRelease(github, 'o', 'r', 'missing'), null);
 });
 
+test('previous release selection skips prereleases', async () => {
+  const releases = [
+    { tag_name: '3-rc', draft: false, prerelease: true, published_at: '2026-03-04T00:00:00Z' },
+    { tag_name: '2', draft: false, published_at: '2026-03-03T00:00:00Z' },
+    // The rolling nightly build, published between releases 1 and 2.
+    { tag_name: 'nightly', draft: false, prerelease: true, published_at: '2026-03-01T00:00:00Z' },
+    { tag_name: '1', draft: false, published_at: '2026-02-02T00:00:00Z' },
+  ];
+  const github = {
+    paginate: async () => releases,
+    rest: { repos: { listReleases() {} } },
+  };
+  assert.equal((await previousPublishedRelease(github, 'o', 'r', '2')).tag_name, '1');
+  assert.equal((await previousPublishedRelease(github, 'o', 'r', '3-rc')).tag_name, '2');
+});
+
 test('release orchestration comments, closes, and tolerates an already removed label', async () => {
   const calls = [];
   const listReleases = () => {};
@@ -411,6 +427,7 @@ test('marking skips the compare for a new branch or deleted head', async () => {
 
 function closingGithub({
   issue, issues, comments = [], events = [], calls, released = SHIPPED,
+  prereleases = [], compared = [],
 }) {
   const tags = new Set(['1', '2', '3']);
   const listEvents = () => {};
@@ -428,6 +445,7 @@ function closingGithub({
       if (method === listReleases) {
         return [
           { tag_name: '3', draft: false, published_at: '2026-03-01T00:00:00Z' },
+          ...prereleases,
           ...RELEASES,
         ];
       }
@@ -443,9 +461,12 @@ function closingGithub({
         listReleases,
         listPullRequestsAssociatedWithCommit,
         getCommit: getTagCommit,
-        compareCommitsWithBasehead: async ({ basehead }) => containment(basehead, tags, released) || { data: {
-          status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
-        } },
+        compareCommitsWithBasehead: async ({ basehead }) => {
+          compared.push(basehead);
+          return containment(basehead, tags, released) || { data: {
+            status: 'ahead', total_commits: 1, commits: [{ sha: 'abc' }],
+          } };
+        },
       },
       pulls: { get: getPull },
       issues: {
@@ -802,4 +823,75 @@ test('a rerun of an earlier release keeps a reopened issue marked for a later fi
     events: [{ event: 'reopened', created_at: '2026-02-03T00:00:00Z' }],
   });
   assert.deepEqual(calls, []);
+});
+
+// The rolling nightly build: a prerelease published after release 2 whose
+// tag follows master, so it has no entry in TAG_DATES.
+const NIGHTLY = {
+  tag_name: 'nightly', draft: false, prerelease: true, published_at: '2026-02-20T00:00:00Z',
+};
+
+test('a release closes the fixes since the last full release, not since a prerelease', async () => {
+  const compared = [];
+  const calls = await closeWith({
+    tag: '3',
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [{ name: 'awaiting-release' }] } },
+    comments: [marker('2026-02-10T00:00:00Z')],
+    prereleases: [NIGHTLY],
+    compared,
+  });
+  assert.equal(compared[0], '2...3');
+  assert.ok(!compared.some((basehead) => basehead.includes('nightly')));
+  assert.deepEqual(calls.map(([kind]) => kind), ['comment', 'update', 'remove']);
+  assert.equal(calls[0][1].body, 'Released in 3.');
+});
+
+test('a prerelease that contains the fix does not stop it being marked', async () => {
+  const mutations = [];
+  const compared = [];
+  const github = markingGithub({
+    pulls: [{ number: 9, merged_at: '2026-02-10T00:00:00Z', merge_commit_sha: 'abc', labels: [] }],
+    mutations,
+    releases: [NIGHTLY, ...RELEASES],
+  });
+  // The nightly build has the fix; release 2 doesn't.
+  github.rest.repos.compareCommitsWithBasehead = async ({ basehead }) => {
+    compared.push(basehead);
+    return { data: { status: basehead === 'abc...nightly' ? 'ahead' : 'behind' } };
+  };
+  github.rest.repos.getCommit = async ({ ref }) => (
+    ref === 'nightly'
+      ? { data: { commit: { committer: { date: '2026-02-19T00:00:00Z' } } } }
+      : getTagCommit({ ref })
+  );
+  await markIssuesAwaitingRelease({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' }, payload: { after: 'abc' } },
+    core: { info() {} },
+  });
+  assert.deepEqual(compared, ['abc...2']);
+  assert.deepEqual(mutations.map(([kind]) => kind), ['comment']);
+  assert.match(mutations[0][1].body, /The fix in #9 was merged/);
+});
+
+test('publishing a prerelease closes nothing', async () => {
+  const info = [];
+  const calls = [];
+  const github = closingGithub({
+    issue: { number: 42, state: 'OPEN', labels: { nodes: [{ name: 'awaiting-release' }] } },
+    comments: [marker('2026-02-10T00:00:00Z')],
+    prereleases: [
+      { tag_name: '3-rc', draft: false, prerelease: true, published_at: '2026-02-25T00:00:00Z' },
+    ],
+    calls,
+  });
+  github.graphql = async () => { throw new Error('A prerelease must not look up issues'); };
+  await closeReleasedIssues({
+    github,
+    context: { repo: { owner: 'o', repo: 'r' } },
+    core: { info: (message) => info.push(message) },
+    tag: '3-rc',
+  });
+  assert.deepEqual(calls, []);
+  assert.match(info[0], /3-rc is a prerelease/);
 });

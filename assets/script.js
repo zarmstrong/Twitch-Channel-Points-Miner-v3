@@ -384,6 +384,7 @@ $(document).ready(function () {
     $('#update-settings-form').submit(saveUpdateSettings);
     $('#login-settings-form').submit(saveLoginSettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
+    $('#restart-miner').on('click', restartMiner);
     $('#dismiss-update-banner').click(dismissUpdateBanner);
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
@@ -1637,6 +1638,37 @@ function saveCategorySettings(event) {
             drops_enabled: $('#category-drops-enabled').prop('checked')
         }
     }, 'Category settings were saved. Restart the miner to apply them.', button);
+}
+
+function restartMiner() {
+    function restartRequested() {
+        showConfigMessage('Restart requested. This page reloads when the miner is back.', false);
+        setTimeout(function () { location.reload(); }, 15000);
+    }
+    showConfirmDialog({
+        title: 'Restart the miner?',
+        message: 'Settings that require a restart (per-streamer, constructor, analytics and most mining changes) take effect immediately after it. The dashboard will be briefly unavailable.',
+        confirmLabel: 'Restart',
+        onConfirm: function () {
+            var button = $('#restart-miner').prop('disabled', true);
+            $.ajax({
+                url: '/config/restart',
+                method: 'POST',
+                success: restartRequested,
+                error: function (xhr) {
+                    if (xhr.status === 0) {
+                        // The process was exec'd before the response flushed:
+                        // the restart did happen, this is not a failure.
+                        restartRequested();
+                        return;
+                    }
+                    button.prop('disabled', false);
+                    showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+                        ? xhr.responseJSON.error : 'Unable to request a restart.', true);
+                }
+            });
+        }
+    });
 }
 
 function saveSourceSettings(event) {

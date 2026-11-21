@@ -56,6 +56,9 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 miner_module = importlib.import_module(
     "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
 )
+# The claim thread's wait for a claim it is to send again, which the tests
+# that run the thread inline replace (see claims_run_inline).
+REAL_CLAIM_RETRY_WAIT = Twitch._Twitch__wait_for_reward_claim_retry
 
 # The real clock: the Twitch-level tests convert through the channel listing,
 # which reads it. Windows and waits below are hours away, so a test taking a
@@ -98,6 +101,37 @@ class HeldThread(InlineThread):
 def claims_run_inline(monkeypatch):
     monkeypatch.setattr(InlineThread, "started", [])
     monkeypatch.setattr(twitch_module, "Thread", InlineThread)
+    # Run inline, the claim thread cannot wait for the moment a refused
+    # claim is due again: it ends there, as it does when the miner stops,
+    # and leaves the moment noted (see claim_again_when_due).
+    monkeypatch.setattr(
+        twitch_module.Twitch,
+        "_Twitch__wait_for_reward_claim_retry",
+        lambda self, retry_at, wake: False,
+    )
+
+
+def claim_on_the_claim_thread(twitch):
+    """Ask the claim thread for a pass over the waiting rewards, as a
+    channel listing does for the campaigns it stores."""
+    for campaign in list(twitch.watch_reward_campaigns.values()):
+        twitch._Twitch__claim_watch_reward_drops_soon(campaign)
+
+
+def claim_retries(twitch) -> dict:
+    """When the claim thread sends each campaign's claims again."""
+    return getattr(twitch, "watch_reward_claim_retries", None) or {}
+
+
+def claim_again_when_due(twitch):
+    """The claim thread once the moment has come for every claim it is to
+    send again."""
+    assert claim_retries(twitch)
+    for campaign_id in twitch.watch_reward_claim_retries:
+        twitch.watch_reward_claim_retries[campaign_id] = utc_now() - timedelta(
+            seconds=1
+        )
+    twitch._Twitch__claim_stored_watch_reward_drops()
 
 
 def stamp(moment):
@@ -2495,38 +2529,33 @@ def test_past_window_end_stands_in_for_a_missing_next_eligibility_time():
 
 
 def test_category_refresh_runs_when_a_reward_window_has_opened():
+    # The stand-in has nothing to claim with: the main loop sends no claim
+    # for the moment. A refused one is the claim thread's to send again.
     miner = object.__new__(TwitchChannelPointsMiner)
     opened = []
-    claim_passes = []
     miner.twitch = SimpleNamespace(
         take_opened_watch_reward_start=lambda: bool(opened) and opened.pop(),
-        claim_waiting_watch_rewards=lambda: claim_passes.append(True),
     )
     refresh_at = miner._TwitchChannelPointsMiner__refresh_for_opened_reward_window
     scheduled = time.time() + 6 * 3600
 
     assert refresh_at(scheduled) == scheduled
-    assert claim_passes == []
 
     opened.append(True)
     assert refresh_at(scheduled) <= time.time()
     assert refresh_at(scheduled) == scheduled
-    # The moment may be one to send a refused claim again, of a campaign
-    # the refresh does not look at.
-    assert claim_passes == [True]
 
     # Category refreshes are off (only streamers are configured, whose
-    # channels earn a reward campaign too): the claims are sent all the
-    # same, and the moment is not left to end every wait of the loop.
+    # channels earn a reward campaign too): the moment is not left to end
+    # every wait of the loop.
     opened.append(True)
     assert refresh_at(None) is None
     assert opened == []
-    assert claim_passes == [True, True]
 
 
 def test_main_loop_answers_a_reward_campaign_before_its_other_checks():
-    # A claim to send again can be due seconds before its campaign ends;
-    # the update check and the channel points refresh can each take longer.
+    # A window can open in its campaign's last minutes; the update check
+    # and the channel points refresh can each take that long.
     # The loop runs inside run(), which no test can drive: its order is read
     # from the source.
     loop = inspect.getsource(TwitchChannelPointsMiner.run).split(
@@ -2572,8 +2601,8 @@ def main_loop_miner(monkeypatch, pending_starts, wait_seconds=30):
 
 
 def test_main_loop_wait_ends_when_a_reward_campaign_calls_for_a_refresh(monkeypatch):
-    # A claim Twitch refused seconds before its campaign's end is due again
-    # in less than the loop's wait, and is noted while the loop waits.
+    # A window that opens in less than the loop's wait is learned of from a
+    # channel listing, while the loop waits.
     miner, slept = main_loop_miner(monkeypatch, [])
     wait = miner._TwitchChannelPointsMiner__wait_for_next_pass
     sleep = miner.twitch.restart_requested.wait
@@ -3396,7 +3425,7 @@ def test_claims_keep_their_order_across_a_change_of_the_clocks(monkeypatch):
         with monkeypatch.context() as local_time:
             local_time.setenv("TZ", "America/Denver")
             time.tzset()
-            twitch.claim_waiting_watch_rewards()
+            claim_on_the_claim_thread(twitch)
     finally:
         time.tzset()
 
@@ -3647,7 +3676,7 @@ def test_claim_thread_sends_the_claim_with_the_least_time_left_first(monkeypatch
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-2#group-two",
@@ -3701,7 +3730,7 @@ def test_repeat_about_to_be_followed_is_claimed_before_the_campaigns_other_group
         datetime.now(timezone.utc) + timedelta(seconds=40)
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-1#group-two",
@@ -3748,7 +3777,7 @@ def test_claims_are_ordered_by_time_left_across_campaigns(monkeypatch):
     two_waiting_groups_campaign(twitch, second_opens_again_in=10)
     twitch._Twitch__remember_watch_reward_campaign(third_campaign(claimable, 30))
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-1#group-two",
@@ -3770,7 +3799,7 @@ def test_claim_in_a_campaign_named_as_closed_is_sent_after_the_others(monkeypatc
     twitch._Twitch__remember_watch_reward_campaign(other_campaign(claimable))
     twitch.watch_reward_campaigns["quest-3"]["_watch_reward"]["named_closed"] = True
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-2#group-two",
@@ -3796,7 +3825,7 @@ def test_reward_listed_during_a_claim_is_claimed_next_when_it_has_less_time(
         return accept(instance_id)
 
     gql.claim_drop_rewards = claim_while_another_is_listed
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-1#group-watch",
@@ -3819,7 +3848,7 @@ def test_refused_claim_is_sent_once_in_a_pass_of_the_claim_thread(monkeypatch):
         return refuse(instance_id)
 
     gql.claim_drop_rewards = count
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert len(sent) == 1
 
@@ -4062,7 +4091,7 @@ def test_claim_thread_counts_the_next_repeat_as_the_end_of_a_waiting_one(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_on_the_claim_thread(twitch)
 
     assert gql.claims == [
         "viewer-1#quest-2#group-two",
@@ -5196,13 +5225,13 @@ def test_claim_twitch_did_not_accept_is_tried_again_before_the_campaign_ends(
         status=None, errors=["service unavailable"]
     )
     evaluate(monkeypatch, twitch, [listing()])
-    twitch.watch_reward_pending_starts = set()
     stored = twitch.watch_reward_campaigns["quest-1"]
     stored["endAt"] = stamp(utc_now() + ends_in)
 
     twitch._Twitch__retry_unaccepted_reward_claims("quest-1")
 
-    [retry_at] = twitch.watch_reward_pending_starts
+    # One moment a campaign: the one counted from its last try.
+    [retry_at] = claim_retries(twitch).values()
     assert (retry_at - utc_now()).total_seconds() == pytest.approx(
         retry_in.total_seconds(), abs=3
     )
@@ -5223,20 +5252,39 @@ def test_claim_twitch_did_not_accept_is_tried_again_without_a_streamer(monkeypat
 
     evaluate(monkeypatch, twitch, [listing()])
 
-    # Noted for the listing's claim and for the evaluation's own.
-    assert twitch.watch_reward_pending_starts
-    for retry_at in twitch.watch_reward_pending_starts:
-        assert (retry_at - utc_now()).total_seconds() == pytest.approx(
-            WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
-        )
+    # Noted for the claim thread, once for the campaign, and not as a
+    # moment that calls for the main loop.
+    [retry_at] = claim_retries(twitch).values()
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+    assert not getattr(twitch, "watch_reward_pending_starts", None)
 
-    # Accepted, it leaves nothing to come back for.
-    twitch.watch_reward_pending_starts = set()
+    # Accepted when the thread sends it again, it leaves nothing to come
+    # back for.
+    twitch.gql.claim_drop_rewards = working_claim
+    claim_again_when_due(twitch)
+
+    assert twitch.gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert claim_retries(twitch) == {}
+
+
+def test_claim_the_evaluation_gets_accepted_leaves_no_retry(monkeypatch):
+    twitch, _, _ = evaluation_twitch(
+        watch_group(progress(status="CLAIMABLE", minutes=60), times=1)
+    )
+    working_claim = twitch.gql.claim_drop_rewards
+    twitch.gql.claim_drop_rewards = lambda instance_id: SimpleNamespace(
+        status=None, errors=["service unavailable"]
+    )
+    evaluate(monkeypatch, twitch, [listing()])
+    assert claim_retries(twitch)
+
     twitch.gql.claim_drop_rewards = working_claim
     evaluate(monkeypatch, twitch, [listing()])
 
     assert twitch.gql.claims == ["viewer-1#quest-1#group-watch"]
-    assert twitch.watch_reward_pending_starts == set()
+    assert claim_retries(twitch) == {}
 
 
 def test_claim_a_listing_sent_that_twitch_did_not_accept_is_tried_again(monkeypatch):
@@ -5261,16 +5309,15 @@ def test_claim_a_listing_sent_that_twitch_did_not_accept_is_tried_again(monkeypa
 
     twitch._Twitch__store_listed_watch_rewards([claimable])
 
-    [retry_at] = twitch.watch_reward_pending_starts
+    [retry_at] = claim_retries(twitch).values()
     assert utc_now() < retry_at < ends_at
 
     # Accepted, there is nothing to come back for.
-    twitch.watch_reward_pending_starts = set()
     gql.claim_drop_rewards = accept
     twitch._Twitch__store_listed_watch_rewards([copy.deepcopy(claimable)])
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
-    assert twitch.watch_reward_pending_starts == set()
+    assert claim_retries(twitch) == {}
 
 
 def refused_claim_twitch(monkeypatch, claimable):
@@ -5310,10 +5357,13 @@ def test_refused_claim_is_tried_again_before_the_next_repeat_opens(monkeypatch):
         ),
     )
 
-    # The opening itself, and the claim before it.
-    retries = twitch.watch_reward_pending_starts - {opens}
-    assert len(retries) == 1
-    assert utc_now() < min(retries) < opens
+    # The claim again before the opening, on the claim thread. The opening
+    # itself is the main loop's, for the category refresh.
+    [retry_at] = claim_retries(twitch).values()
+    assert utc_now() < retry_at < opens
+    assert twitch.watch_reward_pending_starts == {opens}
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: opens + timedelta(seconds=1))
+    assert twitch.take_opened_watch_reward_start() is True
 
 
 def test_waiting_claims_are_sent_again_without_a_category_refresh(monkeypatch):
@@ -5325,13 +5375,14 @@ def test_waiting_claims_are_sent_again_without_a_category_refresh(monkeypatch):
     )
     gql.claim_drop_rewards = gql.accept
 
-    twitch.claim_waiting_watch_rewards()
+    claim_again_when_due(twitch)
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
     assert "group-watch" in twitch.accepted_drop_ids
 
-    # Nothing is waiting any more.
-    twitch.claim_waiting_watch_rewards()
+    # Nothing is waiting any more, and no moment is left to wait for.
+    assert claim_retries(twitch) == {}
+    claim_on_the_claim_thread(twitch)
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
 
 
@@ -5345,9 +5396,11 @@ def test_waiting_claim_of_a_campaign_that_is_over_is_not_sent_again(monkeypatch)
         utc_now() - timedelta(minutes=1)
     )
 
-    twitch.claim_waiting_watch_rewards()
+    claim_again_when_due(twitch)
 
     assert gql.claims == []
+    # Nor is its moment kept, to keep a thread waiting for nothing.
+    assert claim_retries(twitch) == {}
 
 
 def test_row_of_a_repeat_lost_waiting_to_be_claimed_is_not_finished(
@@ -5529,16 +5582,383 @@ def test_claim_thread_that_could_not_be_started_has_the_claim_sent_again(
     )
 
     assert gql.claims == []
-    [retry_at] = twitch.watch_reward_pending_starts
+    [retry_at] = claim_retries(twitch).values()
     assert (retry_at - utc_now()).total_seconds() == pytest.approx(
         WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
     )
 
-    # Which is when the main loop has the waiting claims sent.
+    # No thread waits for that moment, so the main loop looks for it. Not
+    # due yet, it starts nothing.
     monkeypatch.setattr(twitch_module, "Thread", InlineThread)
-    twitch.claim_waiting_watch_rewards()
+    twitch.start_unattended_watch_reward_claims()
+    assert gql.claims == []
+
+    # When it is, the loop has a thread started, which sends the claims.
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    twitch.start_unattended_watch_reward_claims()
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    assert claim_retries(twitch) == {}
+
+
+def test_claim_due_again_is_put_off_when_no_thread_can_be_started_for_it(
+    monkeypatch,
+):
+    # Left due, it would have the main loop ask for a thread on every look.
+    class NoThreadLeft(InlineThread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    gql.claim_drop_rewards = gql.accept
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    monkeypatch.setattr(twitch_module, "Thread", NoThreadLeft)
+
+    twitch.start_unattended_watch_reward_claims()
+
+    assert gql.claims == []
+    assert twitch.watch_reward_claim_thread is None
+    [retry_at] = claim_retries(twitch).values()
+    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+        WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
+    )
+
+
+def miner_between_passes(monkeypatch, twitch):
+    """A miner around the Twitch given, whose wait for the next pass of
+    its main loop is over at once."""
+    miner = object.__new__(TwitchChannelPointsMiner)
+    miner.twitch = twitch
+    twitch.restart_requested = SimpleNamespace(wait=lambda seconds: False)
+    monkeypatch.setattr(
+        miner_module, "random", SimpleNamespace(uniform=lambda low, high: 0.01)
+    )
+    return miner
+
+
+def test_main_loop_has_a_thread_started_for_a_claim_due_with_none_to_send_it(
+    monkeypatch,
+):
+    # No thread could be had when the moment was noted, or the one that
+    # waited is gone. The loop is the one thread sure to be there.
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    gql.claim_drop_rewards = gql.accept
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    assert twitch.watch_reward_claim_thread is None
+    miner = miner_between_passes(monkeypatch, twitch)
+
+    assert miner._TwitchChannelPointsMiner__wait_for_next_pass() is False
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+
+
+def test_main_loop_wait_survives_an_error_looking_for_a_claim_due_again(
+    monkeypatch, caplog
+):
+    def fail(self):
+        raise KeyError("timeBasedDrops")
+
+    monkeypatch.setattr(Twitch, "start_unattended_watch_reward_claims", fail)
+    miner = miner_between_passes(monkeypatch, bare_twitch())
+
+    with caplog.at_level(logging.ERROR):
+        assert miner._TwitchChannelPointsMiner__wait_for_next_pass() is False
+
+    assert "reward campaign claim to send again" in caplog.text
+
+
+def test_main_loop_leaves_a_claim_due_again_to_the_thread_that_waits_for_it(
+    monkeypatch,
+):
+    # The claim thread is there, about to send it: the loop neither sends
+    # the claim itself nor takes the moment as a call for a category
+    # refresh, which would send it once more.
+    twitch, gql = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    gql.claim_drop_rewards = gql.accept
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    twitch.watch_reward_claim_thread = HeldThread(target=None)
+    started = list(InlineThread.started)
+    miner = miner_between_passes(monkeypatch, twitch)
+
+    assert miner._TwitchChannelPointsMiner__wait_for_next_pass() is False
+    scheduled = time.time() + 3600
+    refresh_at = miner._TwitchChannelPointsMiner__refresh_for_opened_reward_window
+    assert refresh_at(scheduled) == scheduled
+
+    assert twitch.watch_reward_start_due() is False
+    assert gql.claims == []
+    assert InlineThread.started == started
+    assert list(claim_retries(twitch)) == ["quest-1"]
+
+
+def test_no_thread_is_started_for_a_claim_to_send_again_once_the_miner_stops(
+    monkeypatch,
+):
+    twitch, _ = refused_claim_twitch(
+        monkeypatch,
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1)),
+    )
+    started = list(InlineThread.started)
+    twitch.running = False
+
+    twitch._Twitch__retry_unaccepted_reward_claims("quest-1")
+    twitch.watch_reward_claim_retries["quest-1"] = utc_now() - timedelta(seconds=1)
+    twitch.start_unattended_watch_reward_claims()
+
+    assert InlineThread.started == started
+
+
+def eventually(condition, seconds=5.0) -> bool:
+    """Whether the condition comes true within the seconds given. For what
+    another thread is about to do."""
+    until = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() >= until:
+            return False
+        time.sleep(0.002)
+    return True
+
+
+@pytest.fixture
+def real_claim_thread(monkeypatch):
+    """Claims run on a real thread, which waits for the moments it is to
+    send a refused claim again. `ahead` moves the miner's clock on to bring
+    such a moment about; `started` holds the threads started; `twitches`
+    are stopped when the test is over."""
+    clock = SimpleNamespace(ahead=timedelta(0), started=[], twitches=[])
+
+    class CountedThread(threading.Thread):
+        def start(self):
+            clock.started.append(self)
+            super().start()
+
+    monkeypatch.setattr(twitch_module, "Thread", CountedThread)
+    monkeypatch.setattr(
+        Twitch, "_Twitch__wait_for_reward_claim_retry", REAL_CLAIM_RETRY_WAIT
+    )
+    # How often the waiting thread reads the clock.
+    monkeypatch.setattr(twitch_module, "WATCH_REWARD_CLAIM_STOP_CHECK_SECONDS", 0.005)
+    monkeypatch.setattr(twitch_module, "utc_now", lambda: utc_now() + clock.ahead)
+    yield clock
+    for twitch in clock.twitches:
+        twitch.running = False
+    for thread in clock.started:
+        thread.join(timeout=5)
+
+
+def refusing_gql():
+    """A gql stub that refuses every claim, and the claims it was sent.
+    gql.accept is a claim that goes through."""
+    gql, _ = channel_listing()
+    gql.accept = gql.claim_drop_rewards
+    sent = []
+
+    def refuse(instance_id):
+        sent.append(instance_id)
+        return SimpleNamespace(status=None, errors=["service unavailable"])
+
+    gql.claim_drop_rewards = refuse
+    return gql, sent
+
+
+def waiting_claim_thread(monkeypatch, clock):
+    """A Twitch whose claim thread has had the claim of quest-1 refused and
+    is to send it again, with the gql stub and the claims sent so far."""
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, sent = refusing_gql()
+    twitch = bare_twitch(gql)
+    clock.twitches.append(twitch)
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))]
+    )
+    assert eventually(lambda: len(sent) == 1 and claim_retries(twitch))
+    return twitch, gql, sent
+
+
+def test_claim_thread_sends_a_refused_claim_again_with_no_main_loop_to_ask(
+    monkeypatch, real_claim_thread
+):
+    # No main loop runs here: it may be busy for longer than the reward
+    # has left. The thread that sent the claim waits for the moment itself.
+    twitch, _, sent = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS - 30
+    )
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert len(sent) == 1
+
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS + 1
+    )
+    assert eventually(lambda: len(sent) == 2)
+    assert sent == ["viewer-1#quest-1#group-watch"] * 2
+
+    # Refused again, it is waited for again, by the same thread. The main
+    # loop was never called for.
+    assert eventually(lambda: bool(claim_retries(twitch)))
+    assert thread.is_alive()
+    assert real_claim_thread.started == [thread]
+    assert not getattr(twitch, "watch_reward_pending_starts", None)
+
+
+def test_claim_thread_is_started_to_wait_for_a_claim_another_had_refused(
+    monkeypatch, real_claim_thread
+):
+    # The campaign sync's pass, say, on its own thread. The claim thread it
+    # starts waits for the moment: it does not send the claim again at once.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, sent = refusing_gql()
+    twitch = bare_twitch(gql)
+    real_claim_thread.twitches.append(twitch)
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))
+    )
+
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline()
+
+    [thread] = real_claim_thread.started
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert len(sent) == 1
+
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS + 1
+    )
+    assert eventually(lambda: len(sent) == 2)
+
+
+def test_stopping_ends_a_claim_thread_that_waits_to_send_a_claim_again(
+    monkeypatch, real_claim_thread
+):
+    # The shutdown joins the thread before it saves the report for the
+    # last time: it is not kept waiting for a moment minutes off.
+    twitch, _, sent = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+    assert thread.is_alive()
+
+    twitch.running = False
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert twitch.watch_reward_claim_thread is None
+    # Nor is the claim sent when its moment comes.
+    real_claim_thread.ahead = timedelta(
+        seconds=WATCH_REWARD_PROGRESS_REFRESH_SECONDS + 1
+    )
+    twitch.start_unattended_watch_reward_claims()
+    assert len(sent) == 1
+    assert real_claim_thread.started == [thread]
+
+
+def test_reward_listed_while_the_claim_thread_waits_is_claimed_at_once(
+    monkeypatch, real_claim_thread
+):
+    # The thread waits ten minutes to send a refused claim again. A reward
+    # a channel lists meanwhile is not held up behind that.
+    twitch, gql, _ = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+    gql.claim_drop_rewards = gql.accept
+    claimable = progress(status="CLAIMABLE", minutes=60, window=open_window())
+
+    twitch._Twitch__store_listed_watch_rewards([other_campaign(claimable)])
+
+    # The pass it asks for sends every waiting claim.
+    assert eventually(lambda: len(gql.claims) == 2)
+    assert set(gql.claims) == {
+        "viewer-1#quest-2#group-two",
+        "viewer-1#quest-1#group-watch",
+    }
+    assert real_claim_thread.ahead == timedelta(0)
+    # With nothing left to claim or to send again, the thread ends.
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert twitch.watch_reward_claim_thread is None
+    assert claim_retries(twitch) == {}
+    assert real_claim_thread.started == [thread]
+
+
+def test_claim_thread_ends_when_another_gets_the_claim_it_waited_to_send_again(
+    monkeypatch, real_claim_thread
+):
+    twitch, gql, _ = waiting_claim_thread(monkeypatch, real_claim_thread)
+    [thread] = real_claim_thread.started
+    gql.claim_drop_rewards = gql.accept
+
+    # The campaign sync's pass, say.
+    twitch._Twitch__claim_waiting_watch_rewards_by_deadline()
+
+    assert gql.claims == ["viewer-1#quest-1#group-watch"]
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert twitch.watch_reward_claim_thread is None
+    assert real_claim_thread.started == [thread]
+
+
+def test_claim_to_send_again_is_not_dropped_for_a_record_replaced_meanwhile(
+    monkeypatch,
+):
+    # The category evaluation, say, finds nothing of the campaign waiting to
+    # be claimed and so has nothing to send again. Before it has acted on
+    # that, a channel listing stores the reward as claimable, its claim is
+    # refused and the moment to send it again is noted. That moment belongs
+    # to the record now stored, not to the one the evaluation read.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    twitch = bare_twitch()
+    twitch._Twitch__remember_watch_reward_campaign(
+        convert(watch_group(progress(minutes=30, window=open_window()), times=1))
+    )
+    assert claim_retries(twitch) == {}
+    claimable = convert(watch_group(progress(status="CLAIMABLE", minutes=60), times=1))
+    # As a listing stores it: with the ID its claim is sent under.
+    claimable["timeBasedDrops"][0]["self"]["dropInstanceID"] = "claim-id"
+    evaluation = threading.current_thread()
+    listed = threading.Event()
+    seen = []
+
+    def listing_stores_the_reward_and_its_claim_is_refused():
+        with twitch_module._watch_reward_lock(twitch):
+            twitch.watch_reward_campaigns["quest-1"] = claimable
+        seen.append(twitch._Twitch__note_reward_claim_retry("quest-1"))
+        listed.set()
+
+    listing_thread = threading.Thread(
+        target=listing_stores_the_reward_and_its_claim_is_refused
+    )
+    is_open = Twitch._Twitch__is_open_drop_campaign
+
+    def record_is_read(self, campaign):
+        if threading.current_thread() is evaluation and not listing_thread.ident:
+            # The evaluation has its record. The listing gets its turn here
+            # if it can have one: not while the record is being decided on.
+            listing_thread.start()
+            listed.wait(0.2)
+        return is_open(self, campaign)
+
+    monkeypatch.setattr(Twitch, "_Twitch__is_open_drop_campaign", record_is_read)
+
+    assert twitch._Twitch__note_reward_claim_retry("quest-1") is False
+
+    listing_thread.join(timeout=5)
+    assert seen == [True]
+    assert list(claim_retries(twitch)) == ["quest-1"]
 
 
 def test_claim_thread_that_could_not_be_started_does_not_block_the_next_one(
@@ -5566,3 +5986,589 @@ def test_claim_thread_that_could_not_be_started_does_not_block_the_next_one(
     twitch._Twitch__get_campaigns_from_channel_id("1")
 
     assert gql.claims == ["viewer-1#quest-1#group-watch"]
+
+
+# The campaign sync between two refreshes of its campaigns (#371).
+
+campaign_module = importlib.import_module(
+    "TwitchChannelPointsMiner.classes.entities.Campaign"
+)
+drop_module = importlib.import_module("TwitchChannelPointsMiner.classes.entities.Drop")
+
+
+def ordinary_campaign(minutes=0):
+    """A Drop campaign as the dashboard, its details and the inventory list
+    it."""
+    return {
+        "id": "campaign-1",
+        "game": {"id": "777", "displayName": "Example Game"},
+        "name": "Example Campaign",
+        "status": "ACTIVE",
+        "allow": {"channels": None},
+        "startAt": START_AT,
+        "endAt": END_AT,
+        "timeBasedDrops": [
+            {
+                "id": "drop-1",
+                "name": "Reward",
+                "benefitEdges": [{"benefit": {"name": "Skin"}}],
+                "requiredMinutesWatched": 100,
+                "startAt": START_AT,
+                "endAt": END_AT,
+                "self": {
+                    "hasPreconditionsMet": True,
+                    "currentMinutesWatched": minutes,
+                    "dropInstanceID": None,
+                    "isClaimed": False,
+                },
+            }
+        ],
+    }
+
+
+def entity_state(campaign):
+    """All a campaign entity and its drops hold."""
+    return {
+        **{
+            slot: getattr(campaign, slot)
+            for slot in Campaign.__slots__
+            if slot != "drops"
+        },
+        "drops": [
+            {slot: getattr(drop, slot) for slot in Drop.__slots__}
+            for drop in campaign.drops
+        ],
+    }
+
+
+class CampaignSyncLoop:
+    """The real campaign sync loop, a pass a minute, on a clock the test
+    moves. Its first pass refreshes the campaigns, and the next refresh is
+    15 minutes on. What a pass asks of Twitch is recorded in `asked`."""
+
+    def __init__(self, monkeypatch, twitch, campaigns_ids=("quest-1",)):
+        self.twitch = twitch
+        self.now = NOW
+        self.seconds = 0
+        self.passes = 0
+        self.asked = []
+        self.dashboard = []
+        self.details = {}
+        self.inventory = []
+        self.before_pass = {}
+        # By pass: the loop's campaigns, all they held, and the stream's.
+        self.campaigns = []
+        self.states = []
+        self.stream_campaigns = []
+        self.streamer = SimpleNamespace(
+            username="quest-channel",
+            channel_id="4242",
+            is_online=True,
+            is_watching=False,
+            from_category=True,
+            settings=SimpleNamespace(claim_drops=True),
+            stream=SimpleNamespace(
+                campaigns=[], campaigns_ids=list(campaigns_ids), game=dict(CATEGORY)
+            ),
+        )
+        twitch.running = True
+        twitch.prompt_claim_pass_lock = threading.Lock()
+        twitch.campaign_details_withheld_streak = 0
+        for name, request in list(vars(twitch.gql).items()):
+            if callable(request):
+                setattr(twitch.gql, name, self.recorded(name, request))
+        twitch.gql.post_gql_request_batch_raw = self.campaign_details
+        for module in (twitch_module, campaign_module, drop_module):
+            monkeypatch.setattr(module, "utc_now", lambda: self.now)
+        monkeypatch.setattr(time, "time", lambda: 1_700_000_000 + self.seconds)
+        monkeypatch.setattr(time, "monotonic", lambda: 50_000 + self.seconds)
+        sync_drop_progress = Twitch._Twitch__sync_drop_progress
+
+        def synced(twitch, campaigns, *args):
+            result = sync_drop_progress(twitch, campaigns, *args)
+            self.synced = result[0]
+            return result
+
+        for name, stand_in in {
+            "claim_all_drops_from_inventory": lambda twitch: None,
+            "_Twitch__get_drops_dashboard": lambda twitch: self.drops_dashboard(),
+            "_Twitch__get_inventory": lambda twitch: self.get_inventory(),
+            "_Twitch__save_drop_snapshot_from_dict": lambda *args, **kwargs: None,
+            "_Twitch__drop_variant_entries_from_drop": lambda twitch, drop: [],
+            "_Twitch__sync_drop_progress": synced,
+            "_Twitch__chuncked_sleep": lambda twitch, seconds, chunk_size=3: (
+                self.slept()
+            ),
+        }.items():
+            monkeypatch.setattr(Twitch, name, stand_in)
+
+    def recorded(self, name, request):
+        def asked(*args, **kwargs):
+            self.asked.append((self.passes, name))
+            return request(*args, **kwargs)
+
+        return asked
+
+    def drops_dashboard(self):
+        self.asked.append((self.passes, "dashboard"))
+        twitch_module._drops_dashboard_state.unavailable = False
+        return copy.deepcopy(self.dashboard)
+
+    def campaign_details(self, operation, requests):
+        self.asked.append((self.passes, "details"))
+        return [
+            {
+                "data": {
+                    "user": {
+                        "dropCampaign": copy.deepcopy(
+                            self.details.get(request["variables"]["dropID"])
+                        )
+                    }
+                }
+            }
+            for request in requests
+        ]
+
+    def get_inventory(self):
+        self.asked.append((self.passes, "inventory"))
+        return {"dropCampaignsInProgress": copy.deepcopy(self.inventory)}
+
+    def slept(self):
+        self.campaigns.append(list(self.synced))
+        self.states.append([entity_state(campaign) for campaign in self.synced])
+        self.stream_campaigns.append(list(self.streamer.stream.campaigns))
+        self.passes += 1
+        self.seconds += 60
+        self.now += timedelta(seconds=60)
+        if self.passes >= self.limit:
+            self.twitch.running = False
+        else:
+            self.before_pass.get(self.passes, lambda: None)()
+
+    def run(self, passes):
+        self.limit = passes
+        self.twitch.sync_campaigns([self.streamer])
+        return self
+
+    def asked_in(self, number):
+        return [what for asked_in, what in self.asked if asked_in == number]
+
+    def move_clock_before_pass(self, number, moment):
+        self.before_pass[number] = lambda: setattr(self, "now", moment)
+
+
+def list_on_a_channel(twitch, campaign_id="quest-1"):
+    """File the stored campaign as a channel's check does for a campaign
+    the channel lists with something to watch for."""
+    twitch.advertised_drop_campaigns[campaign_id] = (
+        twitch._Twitch__normalize_advertised_campaign(
+            with_reward_category(
+                twitch.watch_reward_campaigns[campaign_id], game_id=CATEGORY["id"]
+            )
+        )
+    )
+
+
+OPENS_AT = NOW + timedelta(hours=1)
+OPENED = OPENS_AT + timedelta(minutes=1)
+
+
+def waiting_repeat_twitch(monkeypatch, listed=True):
+    """A Twitch that claimed the first repeat of a group, the next to be
+    earned from OPENS_AT. The campaign was listed on a channel while the
+    first was watched for."""
+    twitch, _, _ = claimed_repeat_twitch(
+        monkeypatch, OPENS_AT.replace(tzinfo=timezone.utc)
+    )
+    if listed:
+        list_on_a_channel(twitch)
+    return twitch
+
+
+def waiting_repeat_loop(monkeypatch, listed=True):
+    return CampaignSyncLoop(monkeypatch, waiting_repeat_twitch(monkeypatch, listed))
+
+
+def drop_ids(campaigns):
+    return [[drop.id for drop in campaign.drops] for campaign in campaigns]
+
+
+def state_drop_ids(states):
+    return [[drop["id"] for drop in state["drops"]] for state in states]
+
+
+def test_repeat_whose_window_opens_between_refreshes_is_watched_from_the_next_sync(
+    monkeypatch, caplog
+):
+    # The refresh found nothing to watch for and left the campaign out. The
+    # next one is 15 minutes away.
+    loop = waiting_repeat_loop(monkeypatch)
+    loop.twitch.log_drop_checks = True
+    loop.move_clock_before_pass(2, OPENED)
+
+    with caplog.at_level(logging.DEBUG):
+        loop.run(5)
+
+    assert loop.stream_campaigns[:2] == [[], []]
+    for watched in loop.stream_campaigns[2:]:
+        [campaign] = watched
+        assert campaign.game["id"] == CATEGORY["id"]
+        assert [drop.id for drop in campaign.drops] == ["group-watch#1"]
+        assert campaign.has_watchable_drops() is True
+    # Without a word to Twitch: only the refresh asked it anything.
+    assert [asked_in for asked_in, _ in loop.asked] == [0, 0]
+    # Added once: the passes after it find the repeat there.
+    [campaign] = loop.campaigns[2]
+    assert loop.campaigns[4] == [campaign]
+    assert loop.campaigns[4][0].drops[0] is campaign.drops[0]
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if "from this sync on" in record.getMessage()
+    ] == [
+        "[drops-check] reward campaign quest-1: watching for Daily Chest "
+        "(repeat 2 of 6) from this sync on; opened since the campaigns were "
+        "refreshed"
+    ]
+
+
+def two_group_listing(first, second):
+    return convert(
+        watch_group(first),
+        watch_group(second) | {"id": "group-two", "name": "Weekly Chest"},
+    )
+
+
+def test_repeat_that_opens_is_added_to_the_campaign_the_sync_holds(monkeypatch):
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            two_group_listing(
+                progress(
+                    status="CLAIMED",
+                    minutes=60,
+                    grants=1,
+                    window=open_window(),
+                    next_at=stamp(OPENS_AT),
+                ),
+                progress(minutes=12, window=open_window()),
+            )
+        ]
+    )
+    list_on_a_channel(twitch)
+    loop = CampaignSyncLoop(monkeypatch, twitch)
+    loop.move_clock_before_pass(1, OPENED)
+
+    loop.run(2)
+
+    assert state_drop_ids(loop.states[0]) == [["group-two#0"]]
+    # In the order of the record, which is the order a refresh holds them
+    # in, and beside the drop the campaign had: the same object, with the
+    # progress the streams' views of it share.
+    assert state_drop_ids(loop.states[1]) == [["group-watch#1", "group-two#0"]]
+    assert loop.campaigns[1][0] is loop.campaigns[0][0]
+    assert loop.campaigns[1][0].drops[1] is loop.stream_campaigns[0][0].drops[0]
+    assert drop_ids(loop.stream_campaigns[0]) == [["group-two#0"]]
+    assert drop_ids(loop.stream_campaigns[1]) == [["group-watch#1", "group-two#0"]]
+    assert loop.asked_in(1) == []
+
+
+def test_repeat_first_stored_after_the_refresh_reaches_the_stream_of_its_category(
+    monkeypatch,
+):
+    # The refresh knew the first repeat only. The campaign it built says
+    # which category each of its drops counts in, and the stream gets the
+    # drops that count in its own.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(progress(minutes=12, window=open_window())))]
+    )
+    list_on_a_channel(twitch)
+    loop = CampaignSyncLoop(monkeypatch, twitch)
+    # Twitch counted the repeat by itself, and the next window has begun.
+    loop.before_pass[1] = lambda: twitch._Twitch__store_listed_watch_rewards(
+        [convert(watch_group(progress(minutes=0, grants=1, window=open_window())))]
+    )
+
+    loop.run(2)
+
+    assert drop_ids(loop.stream_campaigns[0]) == [["group-watch#0"]]
+    [campaign] = loop.stream_campaigns[1]
+    watched_for = {drop.id: drop for drop in campaign.drops}["group-watch#1"]
+    assert watched_for in campaign.watchable_drops()
+    assert loop.asked_in(1) == []
+
+
+def refreshed_at(monkeypatch, loop):
+    """What a refresh made at the loop's last pass holds, from the records
+    the loop's Twitch has."""
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch.watch_reward_campaigns = copy.deepcopy(loop.twitch.watch_reward_campaigns)
+    twitch.advertised_drop_campaigns = copy.deepcopy(
+        loop.twitch.advertised_drop_campaigns
+    )
+    refresh = CampaignSyncLoop(monkeypatch, twitch)
+    refresh.now = loop.now - timedelta(seconds=60)
+    refresh.run(1)
+    return refresh.states[0]
+
+
+def test_campaign_added_between_refreshes_is_the_one_a_refresh_builds(monkeypatch):
+    loop = waiting_repeat_loop(monkeypatch)
+    loop.move_clock_before_pass(1, OPENED)
+    loop.run(2)
+
+    assert state_drop_ids(loop.states[1]) == [["group-watch#1"]]
+    assert loop.states[1] == refreshed_at(monkeypatch, loop)
+
+
+def test_repeat_added_to_a_held_campaign_leaves_it_as_a_refresh_builds_it(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    twitch._Twitch__store_listed_watch_rewards(
+        [
+            two_group_listing(
+                progress(
+                    status="CLAIMED",
+                    minutes=60,
+                    grants=1,
+                    window=open_window(),
+                    next_at=stamp(OPENS_AT),
+                ),
+                progress(minutes=12, window=open_window()),
+            )
+        ]
+    )
+    list_on_a_channel(twitch)
+    loop = CampaignSyncLoop(monkeypatch, twitch)
+    loop.move_clock_before_pass(1, OPENED)
+    loop.run(2)
+
+    assert state_drop_ids(loop.states[1]) == [["group-watch#1", "group-two#0"]]
+    assert loop.states[1] == refreshed_at(monkeypatch, loop)
+
+
+def test_repeat_added_takes_the_place_of_the_one_before_it_in_the_campaign(
+    monkeypatch,
+):
+    # The refresh built the campaign while the first repeat was watched
+    # for. That one was claimed since, and the record has the next in its
+    # place; the campaign still holds the first, at the minutes it had.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    window = open_window()
+
+    def listed(group_self):
+        twitch._Twitch__store_listed_watch_rewards([convert(watch_group(group_self))])
+
+    listed(progress(minutes=50, window=window))
+    list_on_a_channel(twitch)
+    loop = CampaignSyncLoop(monkeypatch, twitch)
+    loop.before_pass[1] = lambda: [
+        listed(group_self)
+        for group_self in (
+            progress(status="CLAIMABLE", minutes=60, grants=1, window=window),
+            progress(
+                status="CLAIMED",
+                minutes=60,
+                grants=1,
+                window=window,
+                next_at=stamp(OPENS_AT),
+            ),
+        )
+    ]
+    loop.move_clock_before_pass(2, OPENED)
+
+    loop.run(3)
+
+    assert state_drop_ids(loop.states[1]) == [["group-watch#0"]]
+    assert state_drop_ids(loop.states[2]) == [["group-watch#1"]]
+    assert drop_ids(loop.stream_campaigns[2]) == [["group-watch#1"]]
+    assert loop.asked_in(2) == []
+    assert loop.states[2] == refreshed_at(monkeypatch, loop)
+
+
+def test_campaign_the_dashboard_named_comes_back_without_a_channel_listing_it(
+    monkeypatch,
+):
+    # The refresh took it on the dashboard's word, and would again.
+    loop = waiting_repeat_loop(monkeypatch, listed=False)
+    loop.dashboard = [listing()]
+    loop.move_clock_before_pass(1, OPENED)
+
+    loop.run(2)
+
+    assert [drop_ids(watched) for watched in loop.stream_campaigns] == [
+        [],
+        [["group-watch#1"]],
+    ]
+    assert loop.asked_in(1) == []
+
+
+def test_record_takes_the_place_of_the_campaign_as_twitch_details_it(monkeypatch):
+    # Before any channel listed it, the refresh had the campaign from the
+    # dashboard, with the details Twitch gives of it as a Drop campaign:
+    # filed under a category of its own that no stream is in.
+    monkeypatch.setattr(
+        Twitch, "_Twitch__drop_variant_entries_from_drop", lambda self, drop: []
+    )
+    gql, _ = channel_listing()
+    twitch = bare_twitch(gql)
+    loop = CampaignSyncLoop(monkeypatch, twitch)
+    loop.dashboard = [listing()]
+    loop.details["quest-1"] = ordinary_campaign() | {
+        "id": "quest-1",
+        "game": {"id": "509663", "displayName": "Special Events"},
+    }
+
+    def channel_lists_it():
+        twitch._Twitch__store_listed_watch_rewards(
+            [convert(watch_group(progress(minutes=12, window=open_window())))]
+        )
+        list_on_a_channel(twitch)
+
+    loop.before_pass[1] = channel_lists_it
+
+    loop.run(2)
+
+    assert [campaign.reward_categories for campaign in loop.campaigns[0]] == [[]]
+    assert loop.stream_campaigns[0] == []
+    [campaign] = loop.campaigns[1]
+    assert campaign.reward_categories != []
+    assert drop_ids(loop.stream_campaigns[1]) == [["group-watch#0"]]
+    assert loop.stream_campaigns[1][0].drops[0].current_minutes_watched == 12
+    assert loop.asked_in(1) == []
+
+
+@pytest.mark.parametrize("why", ["named as closed", "over", "not taken by a refresh"])
+def test_campaign_a_refresh_would_not_take_is_not_added_between_refreshes(
+    monkeypatch, why
+):
+    loop = waiting_repeat_loop(monkeypatch, listed=why != "not taken by a refresh")
+    opened = OPENED
+    if why == "named as closed":
+        # By Twitch's account-wide listing, ahead of its end date.
+        loop.twitch._Twitch__reward_campaign_named_closed(
+            "quest-1", named_open=False, named_closed=True
+        )
+    elif why == "over":
+        loop.twitch.watch_reward_campaigns["quest-1"]["endAt"] = stamp(
+            OPENS_AT + timedelta(seconds=30)
+        )
+    loop.move_clock_before_pass(1, opened)
+
+    loop.run(3)
+
+    assert loop.campaigns == [[], [], []]
+    assert loop.stream_campaigns == [[], [], []]
+
+
+def test_reward_the_account_has_the_badge_of_is_not_added_every_sync(
+    monkeypatch, caplog
+):
+    # The sync takes such a drop out again: added back, it would come and go
+    # with every pass.
+    loop = waiting_repeat_loop(monkeypatch)
+    loop.twitch.log_drop_checks = True
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__drop_badge_skip_reason",
+        lambda self, campaign, drop: "badge already owned",
+    )
+    loop.move_clock_before_pass(1, OPENED)
+
+    with caplog.at_level(logging.DEBUG):
+        loop.run(3)
+
+    assert loop.campaigns == [[], [], []]
+    assert not [record for record in caplog.records if "quest-1" in record.getMessage()]
+
+
+def drop_campaign_loop(monkeypatch, twitch):
+    """A sync loop over a Drop campaign the dashboard names, on a watched
+    channel that lists it and the reward campaign. Twitch reports a minute
+    more of its drop with every pass."""
+    loop = CampaignSyncLoop(monkeypatch, twitch, ("campaign-1", "quest-1"))
+    loop.dashboard = [ordinary_campaign()]
+    loop.details["campaign-1"] = ordinary_campaign()
+    loop.inventory = [ordinary_campaign(minutes=3)]
+    loop.streamer.is_watching = True
+    twitch.gql.get_drop_current_session = loop.recorded(
+        "session",
+        lambda channel_id: SimpleNamespace(
+            has_session=True,
+            drop_id="drop-1",
+            current_minutes_watched=3 + loop.passes,
+            required_minutes_watched=100,
+            errors=[],
+        ),
+    )
+    return loop
+
+
+def test_drop_campaigns_are_synced_the_same_beside_a_reward_campaign(monkeypatch):
+    gql, _ = channel_listing()
+    alone = drop_campaign_loop(monkeypatch, bare_twitch(gql)).run(6)
+
+    beside = drop_campaign_loop(monkeypatch, waiting_repeat_twitch(monkeypatch))
+    beside.move_clock_before_pass(3, OPENED)
+    beside.run(6)
+
+    # The reward campaign came in between two refreshes.
+    assert [[campaign.id for campaign in held] for held in beside.campaigns] == (
+        [["campaign-1"]] * 3 + [["campaign-1", "quest-1"]] * 3
+    )
+    # The Drop campaign is the object the refresh built, asked about and
+    # updated as it is without a reward campaign.
+    assert all(held[0] is beside.campaigns[0][0] for held in beside.campaigns)
+    assert [state[0] for state in beside.states] == [state[0] for state in alone.states]
+    assert beside.states[5][0]["drops"][0]["current_minutes_watched"] == 8
+    assert beside.asked == alone.asked
+    assert beside.asked_in(0) == ["dashboard", "details", "inventory"]
+    assert all("session" in beside.asked_in(number) for number in range(1, 6))
+    assert [
+        [campaign.id for campaign in watched] for watched in beside.stream_campaigns
+    ] == [["campaign-1"]] * 3 + [["campaign-1", "quest-1"]] * 3
+
+
+def test_sync_goes_on_when_an_opened_repeat_cannot_be_added(monkeypatch, caplog):
+    beside = drop_campaign_loop(monkeypatch, waiting_repeat_twitch(monkeypatch))
+    beside.twitch.log_drop_checks = True
+    beside.move_clock_before_pass(1, OPENED)
+
+    def fails(self, campaigns, refreshed_ids):
+        raise KeyError("timeBasedDrops")
+
+    monkeypatch.setattr(Twitch, "_Twitch__with_opened_watch_reward_drops", fails)
+
+    with caplog.at_level(logging.DEBUG):
+        beside.run(3)
+
+    assert [[campaign.id for campaign in held] for held in beside.campaigns] == (
+        [["campaign-1"]] * 3
+    )
+    assert [drop_ids(watched) for watched in beside.stream_campaigns] == (
+        [[["drop-1"]]] * 3
+    )
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert (
+        "[drops-check] unable to add the reward campaign repeats that opened: "
+        "'timeBasedDrops'"
+    ) in [record.getMessage() for record in caplog.records]
