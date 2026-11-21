@@ -136,6 +136,13 @@ class Drop(object):
             self.is_claimed is False and self.drop_instance_id is not None
         )
 
+    def set_window(self, start_at, end_at):
+        """Take the dates a later record gives the drop. A reward campaign's
+        repeat keeps its drop ID when its window closes short of its minutes
+        and the next one opens."""
+        self.start_at, self.end_at = parse_datetime(start_at), parse_datetime(end_at)
+        self.dt_match = self.start_at < utc_now() < self.end_at
+
     def update_minutes(self, current_minutes):
         """Update watch progress without changing inventory-only claim state."""
         updated_percentage = percentage(current_minutes, self.minutes_required)
