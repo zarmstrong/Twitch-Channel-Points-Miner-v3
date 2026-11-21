@@ -165,6 +165,7 @@ class HistoryRecorder(threading.Thread):
         online_streamers=None,
         drop_streamers=None,
         streamers_ready=None,
+        is_drop_streamer=None,
     ):
         super(HistoryRecorder, self).__init__()
         self.daemon = True
@@ -180,6 +181,7 @@ class HistoryRecorder(threading.Thread):
         self.online_streamers = online_streamers
         self.drop_streamers = drop_streamers
         self.streamers_ready = streamers_ready
+        self.is_drop_streamer = is_drop_streamer
         self._stop_event = threading.Event()
         # Held for a whole poll and for a delete, so a delete never interleaves
         # with an import that already read the deleted data.
@@ -188,6 +190,7 @@ class HistoryRecorder(threading.Thread):
         self._deleted_before = {}
         self._persisted_drop_farmed = set()
         self._retention_watermark = None
+        self._prepared_once = False
         self._active_watch = {}
         self._now_watching_initialized = False
         self._now_watching_mtime = 0.0
@@ -352,6 +355,7 @@ class HistoryRecorder(threading.Thread):
         # Start the run last: a failed step above is retried from the start,
         # and must not leave an extra run row behind each time.
         self._run_id = self.store.start_run(self.version, started_at=now)
+        self._prepared_once = True
 
     def _streamers_loaded(self):
         if self.streamers_ready is None:
@@ -403,7 +407,10 @@ class HistoryRecorder(threading.Thread):
 
     def _poll_once(self):
         if self._run_id is None:
-            return
+            if not self._prepared_once:
+                return
+            # A rebuild after corruption failed part way; prepare again.
+            self._prepare()
         now = self.clock()
         self.store.heartbeat_run(self._run_id, now)
         self.store.touch_open_streams(now)
@@ -495,12 +502,19 @@ class HistoryRecorder(threading.Thread):
         """
 
         streamers = self._provider_value(self.online_streamers)
+        drop_streamers = None
         if streamers is not None:
             self._streamer_snapshot = streamers
             self._live_streamer_names = {
                 name for name in (_streamer_name(item) for item in streamers) if name
             }
-        drop_streamers = self._provider_value(self.drop_streamers)
+            if self.is_drop_streamer is not None:
+                # Classify the same snapshot: reading a second list later
+                # could miss a channel retired in between and count it as
+                # configured.
+                drop_streamers = self._classify_drop_streamers(streamers)
+        if drop_streamers is None and self.is_drop_streamer is None:
+            drop_streamers = self._provider_value(self.drop_streamers)
         if drop_streamers is not None:
             current = {
                 name
@@ -523,6 +537,17 @@ class HistoryRecorder(threading.Thread):
                 self._persisted_drop_farmed = wanted
             self._drop_farmed = set(wanted)
         self._streamer_state_ready = True
+
+    def _classify_drop_streamers(self, streamers):
+        try:
+            return [
+                _streamer_name(item)
+                for item in streamers
+                if self.is_drop_streamer(item)
+            ]
+        except Exception:
+            logger.debug("Unable to classify miner streamers", exc_info=True)
+            return None
 
     @staticmethod
     def _provider_value(provider):
@@ -973,8 +998,11 @@ class HistoryRecorder(threading.Thread):
 
             series_source = f"analytics:{filename}:series"
             annotation_source = f"analytics:{filename}:annotations"
-            series_state = self._safe_import_state(series_source)
-            annotation_state = self._safe_import_state(annotation_source)
+            # A failed read raises and the poll is retried.  Treating it as
+            # "never imported" would replay the whole file, and rows that
+            # retention already pruned would be counted again in the rollups.
+            series_state = self.store.get_import_state(series_source)
+            annotation_state = self.store.get_import_state(annotation_source)
             series_fresh = self._state_matches(series_state, stat)
             annotation_fresh = self._state_matches(annotation_state, stat)
             if series_fresh and annotation_fresh:
@@ -1013,12 +1041,6 @@ class HistoryRecorder(threading.Thread):
             and state.get("mtime") == stat.st_mtime
             and state.get("size") == stat.st_size
         )
-
-    def _safe_import_state(self, source):
-        try:
-            return self.store.get_import_state(source)
-        except Exception:
-            return None
 
     def _ingest_series(self, streamer, entries, source, stat, state):
         if not isinstance(entries, list):
@@ -1156,6 +1178,7 @@ def build_recorder(
     online_streamers=None,
     drop_streamers=None,
     streamers_ready=None,
+    is_drop_streamer=None,
 ):
     store = HistoryStore(os.path.join(analytics_path, "history.sqlite3"))
     recorder = HistoryRecorder(
@@ -1169,5 +1192,6 @@ def build_recorder(
         online_streamers=online_streamers,
         drop_streamers=drop_streamers,
         streamers_ready=streamers_ready,
+        is_drop_streamer=is_drop_streamer,
     )
     return recorder

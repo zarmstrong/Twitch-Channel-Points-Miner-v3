@@ -96,6 +96,7 @@ def start_history(
     drop_streamers=None,
     retention_days=None,
     streamers_ready=None,
+    is_drop_streamer=None,
 ):
     """Start the passive recorder once for this process.
 
@@ -107,6 +108,11 @@ def start_history(
     miner only discovered to farm Drops (category, wildcard-category and badge
     channels).  The History tab only lists configured and follower streamers,
     so those discovery channels are never recorded.
+
+    ``is_drop_streamer`` optionally classifies one ``online_streamers`` item
+    as tracked only for Drops.  It replaces ``drop_streamers`` and reads the
+    same snapshot, so a channel retired between two reads is not mistaken for
+    a configured one.
 
     ``streamers_ready`` is an optional callable that returns true once the
     miner has loaded its streamers; nothing is imported before then.
@@ -136,6 +142,7 @@ def start_history(
                 online_streamers=online_streamers,
                 drop_streamers=drop_streamers,
                 streamers_ready=streamers_ready,
+                is_drop_streamer=is_drop_streamer,
             )
             _store = recorder.store
             recorder.start()
@@ -173,21 +180,37 @@ def stop_history():
         recorder.join(timeout=10)
 
 
-def delete_streamer_history(streamer, store=None):
+class HistoryUnavailableError(RuntimeError):
+    """History is starting and cannot delete anything yet."""
+
+
+def delete_streamer_history(streamer, store=None, database_path=None):
     """Delete one streamer's History rows; returns the per-table counts.
 
     Goes through the recorder so the delete is serialized with its imports and
-    the deleted data is not imported again.  Returns ``None`` while History is
-    unavailable.
+    the deleted data is not imported again.  Raises
+    :class:`HistoryUnavailableError` while the recorder is still starting, so
+    callers can refuse the delete instead of leaving History behind.  When
+    History is not running in this process at all, ``database_path`` (the
+    account's database, if any) is cleared directly; ``None`` is returned when
+    there is nothing to clear.
     """
 
     recorder = _recorder
     store = get_store() if store is None else store
-    if store is None:
-        return None
-    if recorder is not None and recorder.store is store:
-        return recorder.delete_streamer(streamer)
-    return store.delete_streamer(streamer)
+    if store is not None:
+        if recorder is not None and recorder.store is store:
+            return recorder.delete_streamer(streamer)
+        return store.delete_streamer(streamer)
+    if recorder is not None and recorder.is_alive():
+        raise HistoryUnavailableError("History is still starting")
+    if database_path and os.path.isfile(database_path):
+        from TwitchChannelPointsMiner.history.store import HistoryStore
+
+        standalone = HistoryStore(database_path)
+        standalone.initialize()
+        return standalone.delete_streamer(streamer)
+    return None
 
 
 def is_recording():
@@ -212,6 +235,7 @@ def get_store():
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
+    "HistoryUnavailableError",
     "delete_streamer_history",
     "get_store",
     "is_recording",

@@ -663,7 +663,10 @@ def delete_streamer_analytics(streamer):
     try:
         from TwitchChannelPointsMiner.history import delete_streamer_history
 
-        delete_streamer_history(filename[: -len(".json")])
+        delete_streamer_history(
+            filename[: -len(".json")],
+            database_path=os.path.join(Settings.analytics_path, "history.sqlite3"),
+        )
     except Exception:
         logger.warning("Unable to delete optional streamer history", exc_info=True)
         return Response(

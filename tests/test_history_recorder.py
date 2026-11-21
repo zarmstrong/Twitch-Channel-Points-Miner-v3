@@ -1364,3 +1364,156 @@ def test_corruption_found_while_running_rebuilds_the_database(recorder, monkeypa
     # The rebuilt database still knows bob was deleted.
     assert "bob" in recorder.store.deletion_cutoffs()
     recorder.poll_once()
+
+
+def test_first_change_after_a_dashboard_delete_is_counted(recorder):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    _write_json(
+        path,
+        {
+            "series": [
+                {"x": int(NOW * 1000), "y": 1000},
+                {"x": int((NOW + 60) * 1000), "y": 1050},
+            ]
+        },
+        NOW + 61,
+    )
+    clock.value = NOW + 70
+    recorder.poll_once()
+
+    # The dashboard deletes History and the JSON; the miner then starts a new
+    # file with its next change.
+    clock.value = NOW + 100
+    recorder.delete_streamer("bob")
+    os.remove(path)
+    _write_json(
+        path, {"series": [{"x": int((NOW + 200) * 1000), "y": 1060}]}, NOW + 201
+    )
+    clock.value = NOW + 210
+    recorder.poll_once()
+
+    window = recorder.store.overview(days=1, now=clock.value)["window"]
+    assert window["points_gained"] == 10
+
+
+def test_import_cursor_read_failure_does_not_replay_the_file(recorder, monkeypatch):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    _write_json(
+        path,
+        {
+            "series": [
+                {"x": int(NOW * 1000), "y": 1000},
+                {"x": int((NOW + 60) * 1000), "y": 1050},
+            ]
+        },
+        NOW + 61,
+    )
+    recorder._ingest_analytics(NOW + 61)
+    _write_json(
+        path,
+        {
+            "series": [
+                {"x": int(NOW * 1000), "y": 1000},
+                {"x": int((NOW + 60) * 1000), "y": 1050},
+                {"x": int((NOW + 120) * 1000), "y": 1060},
+            ]
+        },
+        NOW + 121,
+    )
+
+    def locked(source):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "get_import_state", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._ingest_analytics(NOW + 121)
+
+
+def test_a_failed_rebuild_is_prepared_again_on_the_next_poll(recorder, monkeypatch):
+    original = recorder._prepare
+    attempts = []
+
+    def flaky_prepare():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        original()
+
+    def corrupt():
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    poll = recorder.poll_once
+    monkeypatch.setattr(recorder, "_prepare", flaky_prepare)
+    monkeypatch.setattr(recorder, "poll_once", corrupt)
+    recorder._poll_guarded()
+    assert recorder._run_id is None
+
+    monkeypatch.setattr(recorder, "poll_once", poll)
+    recorder._poll_guarded()
+    assert len(attempts) == 2
+    assert recorder._run_id is not None
+
+
+def test_drop_classifier_reads_the_same_snapshot(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    snapshot = [
+        {"username": "bob", "drops": False},
+        {"username": "carol", "drops": True},
+    ]
+
+    def drop_list():
+        raise AssertionError("the separate Drops list must not be read")
+
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=FakeClock(NOW + 100),
+        online_streamers=lambda: list(snapshot),
+        drop_streamers=drop_list,
+        is_drop_streamer=lambda item: item["drops"],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        assert recorder._drop_farmed == {"carol"}
+        # carol is retired: she leaves the snapshot but stays excluded.
+        snapshot.pop()
+        recorder.poll_once()
+        assert recorder._drop_farmed == {"carol"}
+        assert store.drop_farmed_streamers() == {"carol"}
+    finally:
+        recorder._shutdown()
+
+
+def test_delete_while_history_is_starting_is_refused(monkeypatch):
+    class Starting:
+        store = None
+
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(history_module, "_recorder", Starting())
+    monkeypatch.setattr(history_module, "_store", None)
+
+    with pytest.raises(history_module.HistoryUnavailableError):
+        history_module.delete_streamer_history("bob")
+
+
+def test_delete_without_a_running_recorder_clears_the_database(tmp_path, monkeypatch):
+    path = tmp_path / "history.sqlite3"
+    store = HistoryStore(path)
+    store.initialize()
+    store.record_points("bob", NOW, 100, 10)
+    monkeypatch.setattr(history_module, "_recorder", None)
+    monkeypatch.setattr(history_module, "_store", None)
+
+    deleted = history_module.delete_streamer_history("bob", database_path=str(path))
+
+    assert deleted["points"] == 1
+    assert "bob" in store.deletion_cutoffs()
+    assert history_module.delete_streamer_history("bob") is None

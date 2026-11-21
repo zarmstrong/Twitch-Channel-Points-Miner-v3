@@ -1422,6 +1422,7 @@ class HistoryStore(object):
         streamer = _clean_streamer(streamer)
         now = float(now or time.time())
         cutoff_day = first_window_day(now, days)
+        cutoff = day_start(cutoff_day)
         with self._read_connection() as connection:
             daily_rows = connection.execute(
                 """
@@ -1430,33 +1431,34 @@ class HistoryStore(object):
                 """,
                 (streamer, cutoff_day),
             ).fetchall()
+            # The newest 100 of each within the same window as the totals.
             watch_rows = connection.execute(
                 """
-                SELECT * FROM watch_sessions WHERE streamer = ?
+                SELECT * FROM watch_sessions WHERE streamer = ? AND started_at >= ?
                 ORDER BY started_at DESC LIMIT 100
                 """,
-                (streamer,),
+                (streamer, cutoff),
             ).fetchall()
             stream_rows = connection.execute(
                 """
-                SELECT * FROM streams WHERE streamer = ?
+                SELECT * FROM streams WHERE streamer = ? AND started_at >= ?
                 ORDER BY started_at DESC LIMIT 100
                 """,
-                (streamer,),
+                (streamer, cutoff),
             ).fetchall()
             event_rows = connection.execute(
                 """
-                SELECT * FROM events WHERE streamer = ?
+                SELECT * FROM events WHERE streamer = ? AND ts >= ?
                 ORDER BY ts DESC LIMIT 100
                 """,
-                (streamer,),
+                (streamer, cutoff),
             ).fetchall()
             point_rows = connection.execute(
                 """
                 SELECT * FROM points WHERE streamer = ? AND ts >= ?
                 ORDER BY ts
                 """,
-                (streamer, day_start(cutoff_day)),
+                (streamer, cutoff),
             ).fetchall()
         summary = next(
             (
@@ -1756,7 +1758,10 @@ class HistoryStore(object):
 
         The per-streamer JSON and the watch-streak cache still hold the
         deleted data, so the recorder skips anything older than
-        ``deleted_at`` instead of importing it again.
+        ``deleted_at`` instead of importing it again.  The import cursors are
+        kept: they say how far the JSON was read and its last balance, so the
+        first change written after the delete still gets the right delta, even
+        when the dashboard deleted the JSON and the miner starts a new one.
         """
 
         streamer = _clean_streamer(streamer)
@@ -1770,14 +1775,6 @@ class HistoryStore(object):
                     f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
                 )
                 counts[table] = max(0, cursor.rowcount)
-            cursor = connection.execute(
-                """
-                DELETE FROM import_state
-                WHERE source LIKE ? ESCAPE '\\'
-                """,
-                (_import_source_pattern(streamer),),
-            )
-            counts["import_state"] = max(0, cursor.rowcount)
             connection.execute(
                 """
                 INSERT INTO deleted_streamers (streamer, deleted_at)

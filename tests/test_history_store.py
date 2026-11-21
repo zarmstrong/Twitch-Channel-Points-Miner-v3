@@ -474,16 +474,43 @@ def test_tick_on_a_deleted_watch_session_counts_nothing(store):
     assert store.overview(days=1, now=NOW + 60)["window"]["watch_seconds"] == 0
 
 
-def test_delete_does_not_touch_import_state_of_a_similar_name(store):
+def test_drop_cleanup_does_not_touch_import_state_of_a_similar_name(store):
     # "_" is a LIKE wildcard, so "a_b" must not match "axb".
+    store.start_watch_session("a_b", "drops", NOW)
     store.set_import_state("analytics:a_b.json:series", mtime=1, size=1, last_x=1)
     store.set_import_state("analytics:axb.json:series", mtime=1, size=1, last_x=1)
 
-    store.delete_streamer("a_b", deleted_at=NOW)
+    store.prune_drop_farmed_streamers()
 
     assert store.get_import_state("analytics:a_b.json:series") is None
     assert store.get_import_state("analytics:axb.json:series") is not None
-    assert store.deletion_cutoffs() == {"a_b": NOW}
+
+
+def test_delete_keeps_the_import_cursor_and_records_the_cutoff(store):
+    store.set_import_state(
+        "analytics:alice.json:series", mtime=1, size=1, last_x=5, last_balance=1050
+    )
+
+    store.delete_streamer("alice", deleted_at=NOW)
+
+    assert store.get_import_state("analytics:alice.json:series")["last_balance"] == (
+        1050
+    )
+    assert store.deletion_cutoffs() == {"alice": NOW}
+
+
+def test_streamer_detail_lists_use_the_days_window(store):
+    yesterday = NOW - 24 * 60 * 60
+    store.record_event("alice", yesterday, "win", "won")
+    store.record_event("alice", NOW, "lose", "lost")
+    store.upsert_stream_session("alice", "b0", yesterday, ended_at=yesterday + 60)
+    store.start_watch_session("alice", "points", yesterday)
+
+    detail = store.streamer_detail("alice", days=1, now=NOW)
+
+    assert [item["type"] for item in detail["events"]] == ["lose"]
+    assert detail["streams"] == []
+    assert detail["watch_sessions"] == []
 
 
 def test_version_1_database_migrates_in_place(tmp_path):

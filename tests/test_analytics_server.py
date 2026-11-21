@@ -1366,7 +1366,7 @@ def test_analytics_delete_keeps_the_file_when_history_cannot_be_cleared(
     monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
     (tmp_path / "alice.json").write_text("{}", encoding="utf-8")
 
-    def locked(streamer):
+    def locked(streamer, **kwargs):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(history_module, "delete_streamer_history", locked)
@@ -1376,7 +1376,11 @@ def test_analytics_delete_keeps_the_file_when_history_cannot_be_cleared(
     assert (tmp_path / "alice.json").exists()
 
     deleted = []
-    monkeypatch.setattr(history_module, "delete_streamer_history", deleted.append)
+    monkeypatch.setattr(
+        history_module,
+        "delete_streamer_history",
+        lambda streamer, **kwargs: deleted.append(streamer),
+    )
     response = server_module.delete_streamer_analytics("alice")
 
     assert response.status_code == 204
@@ -1431,7 +1435,8 @@ def test_history_ignores_only_streamers_tracked_just_for_drops(monkeypatch):
 
     miner.analytics()
 
-    assert started["drop_streamers"]() == ["drops"]
+    classify = started["is_drop_streamer"]
+    assert [item.username for item in miner.streamers if classify(item)] == ["drops"]
     assert started["streamers_ready"]() is False
     miner.daily_report_balances_loaded = True
     assert started["streamers_ready"]() is True
