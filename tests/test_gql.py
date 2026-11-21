@@ -2095,6 +2095,37 @@ def test_category_search_ignores_the_drops_tag_for_a_reward_campaign_category(
     }
 
 
+@pytest.mark.parametrize(
+    "directory_logins,expected", [(["tagged"], ["tagged"]), ([], [])]
+)
+def test_search_for_a_badge_drop_keeps_to_tagged_channels_beside_a_reward_campaign(
+    monkeypatch, directory_logins, expected
+):
+    # The account's campaign list names only the quest in this game; the
+    # badge Drop the search is for comes from the badge catalog. Only a
+    # Drops-tagged channel earns it, however many others are live.
+    twitch = _mixed_campaign_twitch(
+        monkeypatch,
+        live={"big": 300, "mid": 200, "tagged": 5},
+        allow_listed=(),
+        campaigns=[
+            {"id": "quest-1", "name": "Quest", "all_channels": True, "channels": []}
+        ],
+        directory_logins=directory_logins,
+    )
+    twitch.watch_reward_campaigns = {"quest-1": {}}
+
+    usernames = twitch.get_live_streamers_for_category(
+        "Gray Zone Warfare",
+        drops_enabled=True,
+        limit=1,
+        respect_campaign_restrictions=False,
+        include_watch_rewards=False,
+    )
+
+    assert usernames == expected
+
+
 def _quest_beside_a_drop_campaign(monkeypatch, directory_logins):
     twitch = _mixed_campaign_twitch(
         monkeypatch,

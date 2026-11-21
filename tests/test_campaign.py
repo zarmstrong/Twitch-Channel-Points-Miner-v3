@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 
 from TwitchChannelPointsMiner.classes.Settings import Settings
@@ -129,6 +131,16 @@ def test_has_watchable_drops_without_required_subs_is_unchanged():
     assert Campaign(data).has_watchable_drops() is True
 
 
+def test_watchable_drops_are_the_ones_watching_can_add_to():
+    data = campaign_data()
+    data["timeBasedDrops"].append(drop_data("drop-3"))
+    data["timeBasedDrops"][2]["requiredSubs"] = 1
+    campaign = Campaign(data)
+    campaign.drops[0].current_minutes_watched = 10
+
+    assert [drop.id for drop in campaign.watchable_drops()] == ["drop-2"]
+
+
 @pytest.mark.parametrize(
     "campaign, expected",
     [
@@ -232,3 +244,56 @@ def test_campaign_and_drop_windows_compare_against_utc(monkeypatch):
 
     assert campaign.dt_match is True
     assert [drop.dt_match for drop in campaign.drops] == [True, True]
+
+
+def reward_progress(minutes, end_at, start_at="2020-01-01T00:00:00Z"):
+    return {
+        "id": "drop-1",
+        "startAt": start_at,
+        "endAt": end_at,
+        "_reward_group": {"id": "drop-1"},
+        "self": {
+            "hasPreconditionsMet": True,
+            "currentMinutesWatched": minutes,
+            "dropInstanceID": None,
+            "isClaimed": False,
+        },
+    }
+
+
+def test_sync_drops_gives_a_reward_drop_the_dates_of_its_new_window():
+    # A reward campaign's repeat whose window closed short of its minutes
+    # starts over under the same drop ID, with the new window's deadline.
+    data = campaign_data()
+    data["timeBasedDrops"][0]["endAt"] = "2020-01-02T00:00:00Z"
+    campaign = Campaign(data)
+    assert campaign.drops[0].dt_match is False
+
+    campaign.sync_drops(
+        [reward_progress(3, "2099-06-01T00:00:00Z")], lambda *a, **k: False
+    )
+
+    drop = campaign.drops[0]
+    assert drop.current_minutes_watched == 3
+    assert drop.end_at == datetime(2099, 6, 1)
+    assert drop.dt_match is True
+
+    # And the dates of a window that has yet to open: nothing counts now.
+    campaign.sync_drops(
+        [reward_progress(0, "2099-06-01T00:00:00Z", start_at="2099-05-01T00:00:00Z")],
+        lambda *a, **k: False,
+    )
+
+    assert drop.start_at == datetime(2099, 5, 1)
+    assert drop.dt_match is False
+
+
+def test_sync_drops_leaves_the_dates_of_an_inventory_drop():
+    campaign = Campaign(campaign_data())
+    progress = reward_progress(3, "2020-01-02T00:00:00Z")
+    del progress["_reward_group"]
+
+    campaign.sync_drops([progress], lambda *a, **k: False)
+
+    assert campaign.drops[0].end_at == datetime(2099, 1, 1)
+    assert campaign.drops[0].dt_match is True

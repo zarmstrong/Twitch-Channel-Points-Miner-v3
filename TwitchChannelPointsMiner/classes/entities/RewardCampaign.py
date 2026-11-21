@@ -183,7 +183,15 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
     claimed = False
     claimable = False
     expired = False
-    if status in EARNED_GROUP_STATUSES:
+    # Twitch names the moment a repeating group can be earned again: a
+    # repeat reported claimed is then not the group's last, whatever its
+    # status says, before that moment or after it. Its minutes are the
+    # claimed repeat's, not the next one's.
+    reopens = grants < times and not complete_all and next_window is not None
+    earned_before = status in EARNED_GROUP_STATUSES and reopens
+    if earned_before:
+        watched = 0
+    if status in EARNED_GROUP_STATUSES and not reopens:
         claimed = True
         watched = required
     elif status == "EXPIRED":
@@ -220,6 +228,12 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             campaign_end = _parse_datetime(end_at)
             if campaign_end is None or window_expires < campaign_end:
                 end_at = window_expires.strftime(TWITCH_DATETIME_FORMAT)
+    elif complete_all and watched >= required:
+        # A group that pays out once every repeat is in, with repeats still
+        # to come and no window named to wait out: the minutes are those of
+        # the repeat counted last. Left in, the next repeat would read as
+        # earned by them, and as nothing left to watch for.
+        watched = 0
 
     # When the repeat after a claimable one opens, as far as Twitch says:
     # once claimed, the group has nothing to watch for until then. A moment
@@ -294,8 +308,13 @@ def _reward_group_drop(group, campaign, progress_known, now) -> Optional[dict]:
             # earned once.
             "repeat": repeat_number,
             "times": times,
+            # The reward comes with the last repeat, not with each one.
+            "complete_all": complete_all,
             "name": name,
             "next_start": next_start,
+            # Twitch reports the repeat before this drop's as earned: the
+            # drop stands for the one after it.
+            "earned_before": earned_before,
             "categories": categories,
         },
     }
@@ -360,6 +379,12 @@ def campaign_from_reward_groups(campaign, now: Optional[datetime] = None):
     categories = [first] + [
         category for category in categories.values() if category["id"] != first["id"]
     ]
+    # A group watching could earn that Twitch reports no progress on, while
+    # it does on others: one left out above until something unlocks it.
+    locked = progress_known and any(
+        not isinstance(group.get("self"), dict) and _watch_group_categories(group)
+        for group in groups
+    )
     return {
         **base,
         "status": "ACTIVE",
@@ -371,6 +396,7 @@ def campaign_from_reward_groups(campaign, now: Optional[datetime] = None):
         WATCH_REWARD_KEY: {
             "categories": categories,
             "progress_known": progress_known,
+            "locked_groups": locked,
         },
     }
 
