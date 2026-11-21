@@ -1656,13 +1656,15 @@ function restartMiner() {
                 method: 'POST',
                 success: restartRequested,
                 error: function (xhr) {
+                    button.prop('disabled', false);
                     if (xhr.status === 0) {
-                        // The process was exec'd before the response flushed:
-                        // the restart did happen, this is not a failure.
-                        restartRequested();
+                        // No answer at all. The server answers before it
+                        // restarts (RESTART_REQUEST_DELAY_SECONDS), so this
+                        // means the request may never have reached it, not
+                        // that the restart happened.
+                        showConfigMessage('No answer from the miner, so the restart may not have been requested. Check the connection, then try again.', true);
                         return;
                     }
-                    button.prop('disabled', false);
                     showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
                         ? xhr.responseJSON.error : 'Unable to request a restart.', true);
                 }
