@@ -216,7 +216,6 @@ class Streamer(object):
         "mutex",
         "last_drop_watch_signature",
         "watch_streak_cache",
-        "watch_streak_confirmed_at",
     ]
 
     def __init__(
@@ -262,7 +261,6 @@ class Streamer(object):
         self.history = {}
         self.last_drop_watch_signature = None
         self.watch_streak_cache = None
-        self.watch_streak_confirmed_at = 0
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -333,17 +331,12 @@ class Streamer(object):
                     self.stream.broadcast_id,
                     started_at=self.online_at,
                 )
+                # An award processed before this transition is not carried
+                # over: receipt order can't tell this broadcast's award from a
+                # late one for the previous broadcast. The milestone check
+                # that follows going online confirms it from Twitch's data.
                 if session is not None and session.claimed is True:
                     self.stream.watch_streak_missing = False
-                elif self._watch_streak_confirmed_for_current_broadcast():
-                    # Twitch can confirm the streak before the miner notices the
-                    # channel is live, while broadcast_id still points at the
-                    # previous broadcast. Carry that confirmation over to the
-                    # broadcast we just started tracking instead of re-arming.
-                    self.stream.watch_streak_missing = False
-                    self.watch_streak_cache.mark_claimed(
-                        self.username, self.stream.broadcast_id
-                    )
                 elif (
                     self.watch_streak_cache.claimed_at_for_logical_stream(
                         self.username,
@@ -395,29 +388,6 @@ class Streamer(object):
             return last_seen, True
         return self.offline_at, False
 
-    def _watch_streak_confirmed_for_current_broadcast(self):
-        """Is the last streak confirmation from the broadcast being tracked?
-
-        Twitch may award the streak for a broadcast before the miner has
-        refreshed ``stream.broadcast_id`` (or before any broadcast id is known).
-        The confirmation timestamp is compared against the point where the
-        current broadcast started so a previous broadcast's streak is not
-        mistaken for this one.
-        """
-        confirmed_at = self.watch_streak_confirmed_at
-        if confirmed_at == 0:
-            return False
-
-        if self.offline_at == 0:
-            # Not seen offline in this process, so there is no earlier
-            # broadcast here to mistake it for.
-            return self.stream_up == 0 or confirmed_at >= self.stream_up
-        # After an offline, only a stream-up seen since then marks where the
-        # new broadcast began. A WATCH_STREAK event for the previous broadcast
-        # can arrive after its stream-down, so being later than offline_at
-        # alone proves nothing when the new stream-up was missed.
-        return self.stream_up > self.offline_at and confirmed_at >= self.stream_up
-
     def print_history(self):
         return "; ".join(
             [
@@ -435,11 +405,15 @@ class Streamer(object):
 
         if reason_code == "WATCH_STREAK":
             self.stream.watch_streak_missing = False
-            self.watch_streak_confirmed_at = time.time()
             if self.watch_streak_cache is not None:
-                self.watch_streak_cache.mark_claimed(
-                    self.username, self.stream.broadcast_id
+                # The broadcast the streak state belongs to: a refresh may
+                # already show the next broadcast's ID before the miner runs
+                # its transition, and this award can't be for that one yet.
+                broadcast_id = (
+                    getattr(self.stream, "watch_streak_broadcast_id", None)
+                    or self.stream.broadcast_id
                 )
+                self.watch_streak_cache.mark_claimed(self.username, broadcast_id)
             logger.info(
                 "[watch-streak] "
                 f"Twitch confirmed streak for streamer={self.username}; "

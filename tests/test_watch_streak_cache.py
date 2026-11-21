@@ -191,7 +191,7 @@ def test_short_restart_after_a_claim_does_not_rearm_the_streamer(tmp_path, monke
     assert cache.get("channel", "broadcast-2").claimed is False
 
 
-def test_streak_confirmed_before_online_transition_is_not_refarmed(
+def test_award_before_online_transition_waits_for_the_milestone_check(
     tmp_path, monkeypatch
 ):
     cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
@@ -212,20 +212,47 @@ def test_streak_confirmed_before_online_transition_is_not_refarmed(
     streamer.set_online()
     streamer.set_offline()
 
-    # The next broadcast starts, but Twitch confirms the streak before the
-    # miner has refreshed broadcast_id past the previous broadcast. The
-    # confirmation must still count for the broadcast about to be tracked.
+    # An award arrives after a stream-up but before the miner has moved to
+    # the next broadcast. Receipt order can't show whether it is the new
+    # broadcast's or a late one for the old, so it is credited to the old one
+    # and the new broadcast stays pending until Twitch's milestone says so.
     current_time[0] += 200
     streamer.stream_up = current_time[0] - 50
     streamer.update_history("WATCH_STREAK", earned=450)
-    assert streamer.watch_streak_confirmed_at == current_time[0]
 
     current_time[0] += 1
     streamer.stream.broadcast_id = "broadcast-2"
     streamer.set_online()
 
-    assert streamer.stream.watch_streak_missing is False
-    assert cache.get("channel", "broadcast-2").claimed is True
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert cache.get("channel", "broadcast-2").claimed is False
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_award_between_refresh_and_transition_stays_with_the_old_broadcast(
+    tmp_path, monkeypatch
+):
+    # A refresh already shows broadcast B (an hour after A was last seen
+    # live) when a late award for A is processed, before the miner runs the
+    # A-to-B transition. B must not be recorded as claimed.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    previous_id, previous_seen = streamer.stream.live_snapshot()
+
+    clock[0] += 60 * 60
+    _refresh_live_stream(streamer, "broadcast-2")
+    streamer.update_history("WATCH_STREAK", earned=450)
+    streamer.set_offline(broadcast_id=previous_id, seen_live_at=previous_seen)
+    streamer.set_online()
+
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert cache.get("channel", "broadcast-2").claimed is False
+    assert streamer.stream.watch_streak_missing is True
 
 
 def test_streak_confirmed_before_previous_broadcast_ended_is_refarmed(
@@ -1191,3 +1218,42 @@ def test_a_reset_during_a_counter_step_does_not_carry_the_step_over(monkeypatch)
     resetter.join(2)
 
     assert stream.minute_watched == 0
+
+
+def test_cap_counts_slot_time_whose_posts_failed(tmp_path, monkeypatch):
+    # Minute-watched posts never succeed, so the credited count stays at
+    # zero; the channel still holds its slot, and the cap must let it go.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.is_online = True
+    for _ in range(int(21 * 60 / 20)):
+        streamer.stream.hold_watch_slot()
+        clock[0] += 20
+    streamer.stream.hold_watch_slot()
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+
+    assert streamer.stream.minute_watched == 0
+    assert streamer.stream.watch_streak_missing is False
+
+
+def test_slot_time_counts_the_last_cycle_and_skips_time_out_of_a_slot(monkeypatch):
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    stream = stream_module.Stream()
+    stream.hold_watch_slot()
+    clock[0] += 20
+    stream.pause_minute_watched()
+    clock[0] += 600
+    stream.hold_watch_slot()
+    clock[0] += 20
+    stream.hold_watch_slot()
+
+    assert stream.watch_slot_minutes == pytest.approx(40 / 60, abs=1e-4)

@@ -2154,7 +2154,11 @@ class Twitch(object):
                 continue
             stream = getattr(streamer, "stream", None)
             minutes = getattr(stream, "minute_watched", 0) or 0
-            if minutes >= max_minutes:
+            # The cap also counts slot time whose minute-watched posts failed,
+            # so a channel Twitch isn't crediting can't keep its slot.
+            cap_minutes = getattr(stream, "watch_streak_minutes", None)
+            cap_minutes = cap_minutes() if callable(cap_minutes) else minutes
+            if cap_minutes >= max_minutes:
                 stop_waiting = getattr(stream, "stop_waiting_for_watch_streak", None)
                 if callable(stop_waiting):
                     if stop_waiting(max_minutes) is not True:
@@ -2164,8 +2168,9 @@ class Twitch(object):
                     stream.watch_streak_missing = False
                 logger.info(
                     "[watch-streak] Twitch has not confirmed the streak for "
-                    f"streamer={streamer.username} after {minutes:.0f} watched "
-                    f"minutes (watch_streak_max_minutes={max_minutes:g}); "
+                    f"streamer={streamer.username} after {cap_minutes:.0f} "
+                    "minutes in a watch slot "
+                    f"(watch_streak_max_minutes={max_minutes:g}); "
                     "no longer prioritizing it for this broadcast"
                 )
                 continue
@@ -7997,7 +8002,15 @@ class Twitch(object):
                 watched_indexes = set(streamers_watching)
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
-                    if streamer.is_watching is not True:
+                    if streamer.is_watching is True:
+                        hold = getattr(
+                            getattr(streamer, "stream", None),
+                            "hold_watch_slot",
+                            None,
+                        )
+                        if callable(hold):
+                            hold()
+                    else:
                         # Time out of a watch slot is not watch time: the next
                         # post after the channel gets a slot back starts
                         # counting again instead of adding the whole gap.

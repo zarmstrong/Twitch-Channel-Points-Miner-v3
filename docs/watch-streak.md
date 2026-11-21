@@ -4,7 +4,8 @@
 
 The miner prioritizes a streamer with a pending watch streak so the streak is
 not missed. A pending streak can bypass `points_limit` until Twitch confirms the
-streak, for at most `watch_streak_max_minutes` watched minutes per broadcast.
+streak, for at most `watch_streak_max_minutes` minutes in a watch slot per
+broadcast.
 
 Before treating a streak as pending, the miner checks Twitch's milestone for the
 current broadcast. A streak already awarded before startup, or on a first visit,
@@ -21,11 +22,13 @@ spends waiting for a slot doesn't count.
 
 Some streaks are never confirmed. A channel without channel points has no
 streak, and watch time that Twitch doesn't credit never advances one. After
-`watch_streak_max_minutes` watched minutes without a confirmation, the miner
-stops prioritizing the streak for the rest of that broadcast. The channel then
+`watch_streak_max_minutes` minutes in a watch slot without a confirmation, the
+miner stops prioritizing the streak for the rest of that broadcast. These
+minutes include time whose minute-watched events Twitch didn't accept, so a
+channel that isn't being credited can't keep its slot either. The channel then
 competes for a slot like any other, and `points_limit` applies to it again.
 
-Watched minutes are counted in memory. If the miner restarts while the same
+Watched minutes and slot time are counted in memory. If the miner restarts while the same
 broadcast is live, the count starts again from zero, and so does a `streak_only`
 window.
 

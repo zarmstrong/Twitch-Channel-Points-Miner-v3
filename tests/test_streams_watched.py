@@ -4023,11 +4023,15 @@ def test_minute_watched_counts_at_most_a_minute_for_a_stalled_watcher(monkeypatc
 
 def test_watch_cycle_pauses_counters_of_unwatched_streams(monkeypatch):
     paused = []
+    held = []
     watched = _watch_streamer("watched", points=100)
     waiting = _watch_streamer("waiting", points=50)
     for streamer in (watched, waiting):
         streamer.stream.pause_minute_watched = (
             lambda name=streamer.username: paused.append(name)
+        )
+        streamer.stream.hold_watch_slot = lambda name=streamer.username: held.append(
+            name
         )
 
     _run_one_watch_iteration(
@@ -4038,6 +4042,7 @@ def test_watch_cycle_pauses_counters_of_unwatched_streams(monkeypatch):
     )
 
     assert paused == ["waiting"]
+    assert held == ["watched"]
 
 
 def test_minute_watched_ignores_a_clock_step_backwards(monkeypatch):

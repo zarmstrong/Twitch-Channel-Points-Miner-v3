@@ -37,10 +37,13 @@ class Stream(object):
         "watch_streak_missing",
         "watch_streak_checked_at",
         "watch_streak_check_due",
+        "watch_streak_broadcast_id",
         "minute_watched",
+        "watch_slot_minutes",
         "live_seen_at",
         "__last_update",
         "__minute_watched_timestamp",
+        "__watch_slot_timestamp",
     ]
 
     def __init__(self):
@@ -132,6 +135,10 @@ class Stream(object):
 
     def init_watch_streak(self):
         with _WATCH_STREAK_LOCK:
+            # The broadcast this state belongs to. broadcast_id itself can
+            # move to the next broadcast on a refresh before the transition
+            # resets this state for it.
+            self.watch_streak_broadcast_id = self.broadcast_id
             self.watch_streak_missing = True
             self.watch_streak_checked_at = 0
             # A milestone check queued for the minute watcher's budgeted
@@ -139,6 +146,11 @@ class Stream(object):
             self.watch_streak_check_due = False
             self.minute_watched = 0
             self.__minute_watched_timestamp = 0
+            # Time holding a watch slot, whether or not Twitch accepted the
+            # minute-watched posts: what watch_streak_max_minutes measures,
+            # so a channel whose posts keep failing still lets its slot go.
+            self.watch_slot_minutes = 0
+            self.__watch_slot_timestamp = 0
 
     def confirm_watch_streak_for(self, broadcast_id):
         """Clear the pending streak if it still belongs to broadcast_id.
@@ -161,22 +173,47 @@ class Stream(object):
         """
         with _WATCH_STREAK_LOCK:
             if self.watch_streak_missing is not True or (
-                (self.minute_watched or 0) < max_minutes
+                self.__watch_streak_minutes_locked() < max_minutes
             ):
                 return False
             self.watch_streak_missing = False
             return True
 
+    def watch_streak_minutes(self):
+        """Minutes that count toward watch_streak_max_minutes."""
+        with _WATCH_STREAK_LOCK:
+            return self.__watch_streak_minutes_locked()
+
+    def __watch_streak_minutes_locked(self):
+        return max(self.minute_watched or 0, self.watch_slot_minutes or 0)
+
+    def hold_watch_slot(self):
+        """Count time in a watch slot; called each cycle the stream has one."""
+        with _WATCH_STREAK_LOCK:
+            now = time.time()
+            if self.__watch_slot_timestamp != 0:
+                self.watch_slot_minutes += self.__step_minutes(
+                    now, self.__watch_slot_timestamp
+                )
+            self.__watch_slot_timestamp = now
+
     def pause_minute_watched(self):
         """Stop counting: the stream is out of a watch slot.
 
-        The time from the last successful post until the slot was lost was
-        still watched, so it is counted first. Otherwise a channel that only
-        gets single-cycle slots would never count any time at all.
+        The time from the last successful post (and the last cycle in the
+        slot) until the slot was lost was still watched, so it is counted
+        first. Otherwise a channel that only gets single-cycle slots would
+        never count any time at all.
         """
         with _WATCH_STREAK_LOCK:
-            self.__count_minute_watched_step(time.time())
+            now = time.time()
+            self.__count_minute_watched_step(now)
             self.__minute_watched_timestamp = 0
+            if self.__watch_slot_timestamp != 0:
+                self.watch_slot_minutes += self.__step_minutes(
+                    now, self.__watch_slot_timestamp
+                )
+            self.__watch_slot_timestamp = 0
 
     def update_minute_watched(self):
         # Under the lock the per-broadcast reset takes, so a step measured on
@@ -188,8 +225,11 @@ class Stream(object):
 
     def __count_minute_watched_step(self, now):
         if self.__minute_watched_timestamp != 0:
-            elapsed = min(
-                max(now - self.__minute_watched_timestamp, 0),
-                MINUTE_WATCHED_MAX_STEP_SECONDS,
+            self.minute_watched += self.__step_minutes(
+                now, self.__minute_watched_timestamp
             )
-            self.minute_watched += round(elapsed / 60, 5)
+
+    @staticmethod
+    def __step_minutes(now, since):
+        elapsed = min(max(now - since, 0), MINUTE_WATCHED_MAX_STEP_SECONDS)
+        return round(elapsed / 60, 5)
