@@ -281,15 +281,23 @@ class Streamer(object):
     def discovery_source(self):
         return discovery_source(self)
 
-    def set_offline(self):
-        broadcast_id = self.stream.broadcast_id
+    def set_offline(self, broadcast_id=None, seen_live_at=None):
+        """Mark the streamer offline.
+
+        broadcast_id and seen_live_at describe the broadcast that ended when
+        the stream already shows a newer one (an offline the miner missed).
+        """
+        if broadcast_id is None:
+            broadcast_id = self.stream.broadcast_id
         if self.is_online is True:
             self.offline_at = time.time()
             self.is_online = False
 
             if self.watch_streak_cache is not None:
                 self.watch_streak_cache.mark_ended(
-                    self.username, broadcast_id, ended_at=self._last_seen_live_at()
+                    self.username,
+                    broadcast_id,
+                    ended_at=self._last_seen_live_at(seen_live_at),
                 )
 
         self.toggle_chat()
@@ -353,7 +361,7 @@ class Streamer(object):
             },
         )
 
-    def _last_seen_live_at(self):
+    def _last_seen_live_at(self, seen_live_at=None):
         """The earliest the broadcast that just went offline can have ended.
 
         offline_at is when the miner noticed, which can be any amount later
@@ -363,7 +371,11 @@ class Streamer(object):
         claim is never carried into a broadcast that started 30 or more
         minutes after the previous one ended.
         """
-        last_seen = getattr(self.stream, "live_seen_at", 0) or 0
+        last_seen = (
+            getattr(self.stream, "live_seen_at", 0)
+            if seen_live_at is None
+            else seen_live_at
+        ) or 0
         if 0 < last_seen <= self.offline_at:
             return last_seen
         return self.offline_at

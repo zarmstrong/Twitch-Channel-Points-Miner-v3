@@ -1935,6 +1935,8 @@ class Twitch(object):
             except StreamerIsOfflineException:
                 streamer.set_offline()
         else:
+            previous_broadcast_id = streamer.stream.broadcast_id
+            previous_seen_live_at = getattr(streamer.stream, "live_seen_at", 0)
             try:
                 self.update_stream(streamer)
                 # A failed extraction while going online is otherwise never
@@ -1943,6 +1945,27 @@ class Twitch(object):
                     self.get_spade_url(streamer)
             except StreamerIsOfflineException:
                 streamer.set_offline()
+                return
+            if previous_broadcast_id not in (
+                None,
+                "",
+            ) and streamer.stream.broadcast_id not in (None, "", previous_broadcast_id):
+                # A new broadcast without the offline in between (a missed
+                # stream-down while the machine slept or the network was
+                # out). Run the transition the miner missed, so the new
+                # broadcast gets its own watch-streak state instead of
+                # inheriting the previous one's watched minutes and claim.
+                logger.info(
+                    f"{streamer.username} started a new broadcast while the miner "
+                    "still saw the previous one live",
+                    extra={"emoji": ":arrows_counterclockwise:"},
+                )
+                streamer.set_offline(
+                    broadcast_id=previous_broadcast_id,
+                    seen_live_at=previous_seen_live_at,
+                )
+                streamer.set_online(self.__streamer_drops_description(streamer))
+                self.reconcile_watch_streak(streamer)
 
     def reconcile_watch_streak(self, streamer):
         """Clear a pending streak Twitch already awarded for this broadcast.
@@ -2109,7 +2132,13 @@ class Twitch(object):
             stream = getattr(streamer, "stream", None)
             minutes = getattr(stream, "minute_watched", 0) or 0
             if minutes >= max_minutes:
-                stream.watch_streak_missing = False
+                stop_waiting = getattr(stream, "stop_waiting_for_watch_streak", None)
+                if callable(stop_waiting):
+                    if stop_waiting(max_minutes) is not True:
+                        # A new broadcast reset the state meanwhile.
+                        continue
+                else:
+                    stream.watch_streak_missing = False
                 logger.info(
                     "[watch-streak] Twitch has not confirmed the streak for "
                     f"streamer={streamer.username} after {minutes:.0f} watched "

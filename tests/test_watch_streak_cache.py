@@ -838,3 +838,110 @@ def test_reconcile_ignores_a_milestone_after_the_broadcast_changed(tmp_path):
     assert streamer.stream.watch_streak_missing is True
     assert cache.get("channel", "broadcast-1") is None
     assert cache.get("channel", "broadcast-2") is None
+
+
+def _twitch_moving_to_broadcast(monkeypatch, clock, broadcast_id, gap_seconds):
+    """A Twitch whose next stream refresh shows a new broadcast."""
+    reconciled = []
+
+    def update_stream(self, streamer):
+        clock[0] += gap_seconds
+        _refresh_live_stream(streamer, broadcast_id)
+
+    monkeypatch.setattr(Twitch, "update_stream", update_stream)
+    monkeypatch.setattr(
+        Twitch, "reconcile_watch_streak", lambda self, s: reconciled.append(s)
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.Twitch.time.time", lambda: clock[0]
+    )
+    twitch = Twitch.__new__(Twitch)
+    twitch.category_campaign_eligibility = {}
+    return twitch, reconciled
+
+
+def _claimed_live_streamer(tmp_path, monkeypatch, clock):
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.minute_watched = 15
+    streamer.update_history("WATCH_STREAK", earned=450)
+    return streamer, cache
+
+
+def test_new_broadcast_without_an_offline_gets_fresh_streak_state(
+    tmp_path, monkeypatch
+):
+    # The machine slept through A's end; when it wakes, B is live and the
+    # miner never saw an offline. B must not inherit A's minutes or claim.
+    clock = [2_000_000_000.0]
+    streamer, cache = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    seen_live_at = streamer.stream.live_seen_at
+    twitch, reconciled = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-2", gap_seconds=3 * 60 * 60
+    )
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.is_online is True
+    assert streamer.stream.broadcast_id == "broadcast-2"
+    assert streamer.stream.minute_watched == 0
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-1").ended_at == seen_live_at
+    assert cache.get("channel", "broadcast-2").claimed is False
+    assert reconciled == [streamer]
+
+
+def test_quick_new_broadcast_without_an_offline_keeps_the_claim(tmp_path, monkeypatch):
+    clock = [2_000_000_000.0]
+    streamer, _ = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    twitch, _ = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-2", gap_seconds=5 * 60
+    )
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.stream.broadcast_id == "broadcast-2"
+    assert streamer.stream.watch_streak_missing is False
+
+
+def test_same_broadcast_refresh_keeps_streak_state(tmp_path, monkeypatch):
+    clock = [2_000_000_000.0]
+    streamer, _ = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    twitch, reconciled = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-1", gap_seconds=120
+    )
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.stream.minute_watched == 15
+    assert streamer.stream.watch_streak_missing is False
+    assert reconciled == []
+
+
+def test_cap_does_not_give_up_a_streak_reset_for_a_new_broadcast(tmp_path, caplog):
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    class ResetDuringCheck(Stream):
+        # Another thread starts the next broadcast between the minute count
+        # being read and the streak being given up.
+        def stop_waiting_for_watch_streak(self, max_minutes):
+            self.init_watch_streak()
+            return super().stop_waiting_for_watch_streak(max_minutes)
+
+    caplog.set_level("INFO")
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.stream = ResetDuringCheck()
+    streamer.stream.broadcast_id = "broadcast-2"
+    streamer.stream.minute_watched = 25
+    streamer.is_online = True
+    twitch = Twitch.__new__(Twitch)
+    twitch.running = True
+
+    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+
+    assert streamer.stream.watch_streak_missing is True
+    assert "no longer prioritizing" not in caplog.text

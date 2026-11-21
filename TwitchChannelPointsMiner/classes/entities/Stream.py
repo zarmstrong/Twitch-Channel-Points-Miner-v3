@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import time
 from base64 import b64encode
 
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 # slot (or the watcher stalled), and that time was not watched: count at most
 # this much of it so minute_watched tracks real watch time.
 MINUTE_WATCHED_MAX_STEP_SECONDS = 60
+
+# Guards a stream's per-broadcast watch-streak state, so giving up on one
+# broadcast's streak can't land after another thread has reset the state for
+# the next broadcast.
+_WATCH_STREAK_LOCK = threading.Lock()
 
 
 class Stream(object):
@@ -116,10 +122,25 @@ class Stream(object):
         return 0 if self.__last_update == 0 else (time.time() - self.__last_update)
 
     def init_watch_streak(self):
-        self.watch_streak_missing = True
-        self.watch_streak_checked_at = 0
-        self.minute_watched = 0
-        self.__minute_watched_timestamp = 0
+        with _WATCH_STREAK_LOCK:
+            self.watch_streak_missing = True
+            self.watch_streak_checked_at = 0
+            self.minute_watched = 0
+            self.__minute_watched_timestamp = 0
+
+    def stop_waiting_for_watch_streak(self, max_minutes):
+        """Stop treating the streak as pending once max_minutes are watched.
+
+        Checked and changed together under the lock, so the minutes read are
+        the current broadcast's. Returns whether the streak was given up.
+        """
+        with _WATCH_STREAK_LOCK:
+            if self.watch_streak_missing is not True or (
+                (self.minute_watched or 0) < max_minutes
+            ):
+                return False
+            self.watch_streak_missing = False
+            return True
 
     def pause_minute_watched(self):
         """Stop counting: the stream is out of a watch slot."""
