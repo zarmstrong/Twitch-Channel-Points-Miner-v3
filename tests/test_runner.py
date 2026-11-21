@@ -315,8 +315,44 @@ def test_failed_load_after_conversion_names_the_kept_original(
 
     error = capsys.readouterr().err
     assert result == 1
-    assert f"Your original file is kept as {tmp_path / 'run.py.bak'}" in error
+    assert f"Your original file was restored as {legacy_runner}" in error
+    assert legacy_runner.read_text(encoding="utf-8") == "legacy"
+    assert not (tmp_path / "run.py.bak").exists()
     assert not (config_dir / "config.py").exists()
+
+
+def test_failed_load_names_the_backup_when_it_cannot_be_restored(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text("legacy", encoding="utf-8")
+
+    def convert(source, destination):
+        destination.write_text("broken = (\n", encoding="utf-8")
+        source.rename(source.with_name("run.py.bak"))
+
+    def load(path):
+        raise RuntimeError("bad")
+
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self.name == "run.py.bak":
+            raise OSError("read-only")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(runner, "convert_runner", convert)
+    monkeypatch.setattr(runner, "_load_config", load)
+    monkeypatch.setattr(Path, "rename", rename)
+
+    result = _run_cli("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert f"Your original file is kept as {tmp_path / 'run.py.bak'}" in error
+    assert "rename it back to run.py" in error
 
 
 def test_miner_no_longer_reads_the_legacy_runner_notice():
@@ -854,3 +890,21 @@ def test_cli_reports_an_invalid_interval_and_exits_with_1(monkeypatch, capsys):
 
     assert runner.cli([]) == 1
     assert "TCPM_CONFIG_RELOAD_SECONDS" in capsys.readouterr().err
+
+
+def test_miner_without_username_points_at_the_username_setting():
+    from unittest.mock import patch
+
+    import importlib
+
+    miner_module = importlib.import_module(
+        "TwitchChannelPointsMiner.TwitchChannelPointsMiner"
+    )
+    TwitchChannelPointsMiner = miner_module.TwitchChannelPointsMiner
+
+    with patch.object(miner_module, "logger") as log:
+        with pytest.raises(SystemExit):
+            TwitchChannelPointsMiner("")
+
+    assert "run.py" not in log.error.call_args_list[0].args[0]
+    assert "username setting" in log.error.call_args_list[0].args[0]

@@ -489,7 +489,10 @@ class TwitchChannelPointsMiner:
 
         # Fixes TypeError: 'NoneType' object is not subscriptable
         if not username or username == "your-twitch-username":
-            logger.error("Please set your Twitch username in config.py and try again.")
+            logger.error(
+                "Please set your Twitch username (the username setting in "
+                "config.py) and try again."
+            )
             logger.error("No username, exiting...")
             sys.exit(0)
         if (

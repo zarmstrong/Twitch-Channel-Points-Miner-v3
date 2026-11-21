@@ -335,7 +335,18 @@ def _conversion_failed(runner, config_path, error):
     )
     backup = runner.with_name(runner.name + ".bak")
     if not runner.exists() and backup.exists():
-        message += f" Your original file is kept as {backup}."
+        # The converter had already renamed the original. Put it back, so
+        # that correcting the error and starting again converts it again
+        # instead of finding neither file and creating a default config.
+        try:
+            backup.rename(runner)
+        except OSError:
+            message += (
+                f" Your original file is kept as {backup}: rename it back to "
+                f"{runner.name} before starting again."
+            )
+        else:
+            message += f" Your original file was restored as {runner}."
     _legacy_runner_stop(message)
 
 

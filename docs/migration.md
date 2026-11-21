@@ -79,7 +79,8 @@ message that says what to do, in these cases:
   `/usr/src/app/config` and recreate the container. The mounted `run.py` is
   then converted automatically.
 - **Conversion fails.** Any incomplete output is removed and the message names
-  the error. Correct the legacy file and start again, or create
+  the error. If the original had already been renamed to `run.py.bak`, it is
+  put back as `run.py`. Correct the legacy file and start again, or create
   `config/config.py` manually from [config.example.py](../config.example.py).
 - **`TCPM_DISABLE_AUTO_CONVERSION=1` is set** and `config/config.py` doesn't
   exist. Remove the variable to let the container convert `run.py`, or create
