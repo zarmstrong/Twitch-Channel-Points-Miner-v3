@@ -1640,10 +1640,60 @@ function saveCategorySettings(event) {
     }, 'Category settings were saved. Restart the miner to apply them.', button);
 }
 
+var RESTART_POLL_INTERVAL_MS = 2000;
+var RESTART_GIVE_UP_MS = 3 * 60 * 1000;
+
+// Calls onBack once a new miner process answers, or onGiveUp after
+// RESTART_GIVE_UP_MS. Each process sends its own X-Miner-Instance header;
+// polling a static file (served without authentication) until that header
+// differs from the one this page was served with tells the new process from
+// the old one, which keeps answering until the restart lands. If the header
+// is missing (a proxy that drops it), the server going away and answering
+// again is taken as the restart instead.
+function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
+    var started = Date.now();
+    var sawServerDown = false;
+    function schedule() {
+        if (Date.now() - started >= RESTART_GIVE_UP_MS) {
+            onGiveUp();
+            return;
+        }
+        setTimeout(poll, RESTART_POLL_INTERVAL_MS);
+    }
+    function poll() {
+        $.ajax({
+            url: './static/style.css',
+            method: 'HEAD',
+            cache: false,
+            timeout: 5000
+        }).done(function (data, status, xhr) {
+            var instance = xhr.getResponseHeader('X-Miner-Instance');
+            var back = instance && previousInstance
+                ? instance !== previousInstance
+                : sawServerDown;
+            if (back) {
+                onBack();
+                return;
+            }
+            schedule();
+        }).fail(function () {
+            sawServerDown = true;
+            schedule();
+        });
+    }
+    schedule();
+}
+
 function restartMiner() {
     function restartRequested() {
         showConfigMessage('Restart requested. This page reloads when the miner is back.', false);
-        setTimeout(function () { location.reload(); }, 15000);
+        var servedBy = typeof minerInstance === 'undefined' ? null : minerInstance;
+        waitForMinerRestart(servedBy, function () {
+            location.reload();
+        }, function () {
+            $('#restart-miner').prop('disabled', false);
+            showConfigMessage('The miner has not come back after 3 minutes. Check its logs, then reload this page.', true);
+        });
     }
     showConfirmDialog({
         title: 'Restart the miner?',

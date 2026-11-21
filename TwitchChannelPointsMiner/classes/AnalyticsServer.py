@@ -31,6 +31,9 @@ RESPONSE_CACHE_TTL_SECONDS = 10.0
 # event wakes the main loop: the restart execs the process once it lands, and
 # a connection reset on the request that triggered it would look like a failure.
 RESTART_REQUEST_DELAY_SECONDS = 0.5
+# Response header naming this server process. It changes when the miner
+# restarts, which is how the dashboard tells the new process from the old one.
+MINER_INSTANCE_HEADER = "X-Miner-Instance"
 
 # Extensions the static-file route serves without authentication (see
 # require_authentication() below) - the assets folder this route reads from
@@ -547,7 +550,7 @@ def read_dashboard_prefs():
     }
 
 
-def index(refresh=5, days_ago=7, log_poll_interval=5):
+def index(refresh=5, days_ago=7, log_poll_interval=5, miner_instance=None):
     assets_folder = get_assets_folder()
     asset_version = max(
         os.path.getmtime(os.path.join(assets_folder, filename))
@@ -572,6 +575,7 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
         dashboardPrefs=read_dashboard_prefs(),
         buildCommit=os.environ.get(BUILD_COMMIT_ENV_VAR),
+        minerInstance=miner_instance,
     )
 
 
@@ -847,6 +851,7 @@ class AnalyticsServer(Thread):
         )
         self.on_restart = on_restart
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
+        self.instance_id = secrets.token_hex(8)
 
         if host not in LOOPBACK_HOSTS and not password and not trust_proxy_auth:
             raise ValueError(
@@ -1030,6 +1035,11 @@ class AnalyticsServer(Thread):
                 )
             return response
 
+        @self.app.after_request
+        def add_miner_instance_header(response):
+            response.headers[MINER_INSTANCE_HEADER] = self.instance_id
+            return response
+
         def request_miner_restart():
             if self.on_restart is None:
                 return Response(
@@ -1056,6 +1066,7 @@ class AnalyticsServer(Thread):
                 "refresh": refresh,
                 "days_ago": days_ago,
                 "log_poll_interval": log_poll_interval,
+                "miner_instance": self.instance_id,
             },
             methods=["GET"],
         )
