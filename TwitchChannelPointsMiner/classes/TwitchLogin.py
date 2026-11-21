@@ -177,6 +177,18 @@ class TwitchLogin(object):
     def login_flow(self):
         if self.client_id == ANDROID_CLIENT_ID:
             return self.android_login_flow()
+        try:
+            return self.__tv_login_flow()
+        except Exception:
+            # A restart requested while a request was in flight must not be
+            # lost to that request failing: the runner restarts the miner,
+            # while the exception would end it instead.
+            if self.__stop_requested():
+                logger.info("Stopping the TV login: the miner is restarting")
+                return False
+            raise
+
+    def __tv_login_flow(self):
         logger.info("You'll have to login to Twitch!")
 
         post_data = {

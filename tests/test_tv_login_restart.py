@@ -140,3 +140,40 @@ def test_run_returns_right_after_a_login_stopped_for_a_restart():
 
     # Nothing after the login ran: run() didn't configure the Twitch client.
     assert not hasattr(miner.twitch, "track_drop_item_art")
+
+
+def test_tv_login_request_failing_after_a_restart_is_not_a_crash(monkeypatch):
+    # The restart lands while the token request is in flight, and the request
+    # then times out: the login ends quietly so the runner can restart.
+    stop_event = threading.Event()
+    calls = []
+
+    def send_oauth_request(self, url, json_data):
+        calls.append(url)
+        if url.endswith("/device"):
+            return FakeResponse(200, DEVICE_CODE_RESPONSE)
+        stop_event.set()
+        raise ConnectionError("timed out")
+
+    monkeypatch.setattr(TwitchLogin, "send_oauth_request", send_oauth_request)
+    monkeypatch.setattr(twitch_login_module, "sleep", lambda seconds: None)
+    login = TwitchLogin(CLIENT_ID, "device", "miner", "agent")
+    # Not a real wait: the poll interval passes without the restart.
+    login.stop_event = SimpleNamespace(
+        wait=lambda timeout=None: stop_event.is_set(), is_set=stop_event.is_set
+    )
+
+    assert login.login_flow() is False
+    assert calls[-1].endswith("/token")
+
+
+def test_tv_login_request_failing_without_a_restart_still_raises(monkeypatch):
+    def send_oauth_request(self, url, json_data):
+        raise ConnectionError("timed out")
+
+    monkeypatch.setattr(TwitchLogin, "send_oauth_request", send_oauth_request)
+    login = TwitchLogin(CLIENT_ID, "device", "miner", "agent")
+    login.stop_event = threading.Event()
+
+    with pytest.raises(ConnectionError):
+        login.login_flow()
