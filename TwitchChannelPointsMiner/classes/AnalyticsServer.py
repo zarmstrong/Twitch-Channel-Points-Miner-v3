@@ -168,7 +168,7 @@ def _secret_matches(supplied, expected):
 _IDNA_IGNORED_RE = re.compile(
     "[\u00ad\u034f\u180b-\u180d\u200b\u2060\ufe00-\ufe0f\ufeff]"
 )
-_IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}")
+_IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}\.?")
 _HOSTNAME_RE = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?\.?")
 
 
@@ -197,13 +197,23 @@ def _canonical_hostname(hostname):
     except ValueError:
         pass
     if _IPV4_NUMBERS_RE.fullmatch(hostname):
-        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address.
+        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address,
+        # and drop a trailing dot.
         try:
-            return socket.inet_ntoa(socket.inet_aton(hostname))
+            return socket.inet_ntoa(socket.inet_aton(hostname.rstrip(".")))
         except OSError:
             return hostname
     if hostname.isascii():
         return hostname
+    try:
+        import idna
+
+        return idna.encode(hostname, uts46=True, transitional=False).decode("ascii")
+    except (ImportError, UnicodeError):
+        # idna.IDNAError is a UnicodeError. Without the package (requests
+        # depends on it, so it is normally there) or for a name it refuses,
+        # fall back to the plain mapping below.
+        pass
     # Punycode each non-ASCII label as browsers do (UTS 46, non-transitional),
     # not with the stdlib "idna" codec, which folds "ß" into "ss" and would
     # allow a different domain.
@@ -253,9 +263,12 @@ def _allowed_hostname(entry):
         except ValueError:
             hostname = _request_hostname(entry)
     # Anything else is no host name: spaces, "%", "@" and the like.
-    if _HOSTNAME_RE.fullmatch(hostname) or ":" in hostname:
+    if _HOSTNAME_RE.fullmatch(hostname):
         return hostname
-    return ""
+    try:
+        return str(ipaddress.ip_address(hostname))
+    except ValueError:
+        return ""
 
 
 def _is_cross_site_request():
