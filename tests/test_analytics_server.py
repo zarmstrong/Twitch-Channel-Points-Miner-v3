@@ -410,6 +410,12 @@ def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_aut
         ("https://%6Diner.example.com/", "miner.example.com"),
         ("https://miner\u3002example.com/", "miner.example.com"),
         ("https://\uff4diner.example.com/", "miner.example.com"),
+        ("https://mi\u00adner.example/", "miner.example"),
+        ("https://mi\u200bner.example/", "miner.example"),
+        ("https://192.168.257/", "192.168.1.1"),
+        ("https://0300.0250.1.1/", "192.168.1.1"),
+        ("https://miner.example/path\\file", "miner.example"),
+        ("localhost.", "localhost."),
     ],
 )
 def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
@@ -494,6 +500,9 @@ def test_allowed_hosts_url_entry_admits_its_host_not_the_scheme():
         "https://",
         "[not-an-ip]",
         "https://miner.example.com\\@attacker.example/",
+        "https://miner example.com/",
+        "https://%FF.example/",
+        "miner example.com",
     ],
 )
 def test_allowed_hosts_warns_about_and_skips_unusable_entries(entry, caplog):

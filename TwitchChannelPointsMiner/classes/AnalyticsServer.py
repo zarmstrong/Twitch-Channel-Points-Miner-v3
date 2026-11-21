@@ -3,7 +3,9 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
+import socket
 import time
 import unicodedata
 from datetime import datetime
@@ -163,6 +165,13 @@ def _secret_matches(supplied, expected):
     )
 
 
+_IDNA_IGNORED_RE = re.compile(
+    "[\u00ad\u034f\u180b-\u180d\u200b\u2060\ufe00-\ufe0f\ufeff]"
+)
+_IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}")
+_HOSTNAME_RE = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?\.?")
+
+
 def _canonical_hostname(hostname):
     """Lowercase host in one spelling: IP addresses compressed, names as IDNA.
 
@@ -178,12 +187,21 @@ def _canonical_hostname(hostname):
         hostname = unicodedata.normalize("NFKC", hostname).lower()
         for stop in "\u3002\uff0e\uff61":
             hostname = hostname.replace(stop, ".")
+        # ... and soft hyphens, zero-width spaces and variation selectors are
+        # dropped.
+        hostname = _IDNA_IGNORED_RE.sub("", hostname)
     if not hostname:
         return ""
     try:
         return str(ipaddress.ip_address(hostname))
     except ValueError:
         pass
+    if _IPV4_NUMBERS_RE.fullmatch(hostname):
+        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address.
+        try:
+            return socket.inet_ntoa(socket.inet_aton(hostname))
+        except OSError:
+            return hostname
     if hostname.isascii():
         return hostname
     # Punycode each non-ASCII label as browsers do (UTS 46, non-transitional),
@@ -217,20 +235,27 @@ def _allowed_hostname(entry):
     """
     entry = str(entry).strip()
     if "://" in entry:
-        if "\\" in entry:
+        if "\\" in re.split(r"[/?#]", entry.split("://", 1)[1], maxsplit=1)[0]:
             # Browsers read a backslash as a slash, urlsplit does not, so the
             # two would disagree about which host the URL names.
             return ""
         try:
             # Clients percent-decode the host of a URL.
-            return _canonical_hostname(unquote(urlsplit(entry).hostname or ""))
+            hostname = _canonical_hostname(
+                unquote(urlsplit(entry).hostname or "", errors="strict")
+            )
         except ValueError:
             return ""
-    try:
-        # A bare IPv6 address has colons that urlsplit would take for a port.
-        return str(ipaddress.ip_address(entry))
-    except ValueError:
-        return _request_hostname(entry)
+    else:
+        try:
+            # A bare IPv6 address has colons that urlsplit would take for a port.
+            return str(ipaddress.ip_address(entry))
+        except ValueError:
+            hostname = _request_hostname(entry)
+    # Anything else is no host name: spaces, "%", "@" and the like.
+    if _HOSTNAME_RE.fullmatch(hostname) or ":" in hostname:
+        return hostname
+    return ""
 
 
 def _is_cross_site_request():
