@@ -38,6 +38,7 @@ class Stream(object):
         "watch_streak_checked_at",
         "watch_streak_check_due",
         "watch_streak_broadcast_id",
+        "watch_streak_transition_to",
         "minute_watched",
         "watch_slot_minutes",
         "live_seen_at",
@@ -65,6 +66,8 @@ class Stream(object):
         self.spade_url = None
         self.payload = None
         self.live_seen_at = 0
+        # The broadcast a missed-offline transition was last claimed for.
+        self.watch_streak_transition_to = None
 
         self.init_watch_streak()
 
@@ -151,6 +154,22 @@ class Stream(object):
             # so a channel whose posts keep failing still lets its slot go.
             self.watch_slot_minutes = 0
             self.__watch_slot_timestamp = 0
+
+    def claim_broadcast_transition(self, previous_broadcast_id, broadcast_id):
+        """Claim the missed-offline move from one broadcast to the next.
+
+        Several threads refresh a stream, and each can see the same change.
+        Only the first claim wins, and only while the streak state still
+        belongs to the previous broadcast, so the next broadcast's counters
+        are reset once, not again by a slower check.
+        """
+        with _WATCH_STREAK_LOCK:
+            if self.watch_streak_broadcast_id != previous_broadcast_id:
+                return False
+            if self.watch_streak_transition_to == broadcast_id:
+                return False
+            self.watch_streak_transition_to = broadcast_id
+            return True
 
     def credit_watch_streak(self):
         """Clear the pending streak for an award; return its broadcast.

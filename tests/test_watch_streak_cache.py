@@ -1310,3 +1310,34 @@ def test_award_credit_belongs_to_the_tracked_broadcast():
 
     stream.init_watch_streak()
     assert stream.credit_watch_streak() == "broadcast-2"
+
+
+def test_a_slower_overlapping_check_does_not_reset_the_new_broadcast(
+    tmp_path, monkeypatch
+):
+    # The minute watcher and the websocket thread both took their snapshot
+    # while A was live and both fetch B. The faster one runs the A-to-B
+    # transition and B starts counting; the slower one must leave B alone.
+    clock = [2_000_000_000.0]
+    streamer, _ = _claimed_live_streamer(tmp_path, monkeypatch, clock)
+    twitch, _ = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-2", gap_seconds=60 * 60
+    )
+    depth = []
+
+    def overlapping_update_stream(self, streamer):
+        depth.append(1)
+        if len(depth) == 1:
+            # The faster check runs start to finish inside this fetch.
+            twitch.check_streamer_online(streamer)
+            streamer.stream.minute_watched = 2
+        else:
+            clock[0] += 60 * 60
+        _refresh_live_stream(streamer, "broadcast-2")
+
+    monkeypatch.setattr(Twitch, "update_stream", overlapping_update_stream)
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.stream.broadcast_id == "broadcast-2"
+    assert streamer.stream.minute_watched == 2

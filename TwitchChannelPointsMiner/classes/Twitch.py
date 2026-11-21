@@ -1953,10 +1953,20 @@ class Twitch(object):
             except StreamerIsOfflineException:
                 streamer.set_offline()
                 return
-            if previous_broadcast_id not in (
-                None,
-                "",
-            ) and streamer.stream.broadcast_id not in (None, "", previous_broadcast_id):
+            claim_transition = getattr(
+                streamer.stream, "claim_broadcast_transition", None
+            )
+            if (
+                previous_broadcast_id not in (None, "")
+                and streamer.stream.broadcast_id
+                not in (None, "", previous_broadcast_id)
+                and (
+                    not callable(claim_transition)
+                    or claim_transition(
+                        previous_broadcast_id, streamer.stream.broadcast_id
+                    )
+                )
+            ):
                 # A new broadcast without the offline in between (a missed
                 # stream-down while the machine slept or the network was
                 # out). Run the transition the miner missed, so the new
