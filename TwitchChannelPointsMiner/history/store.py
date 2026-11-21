@@ -278,6 +278,8 @@ _SCHEMA_V1 = (
 # were already imported (the analytics JSON stores whole seconds, so several
 # changes can share one), and when a streamer's history was deleted so data
 # from before the delete is not imported again.
+# It also remembers channels the miner only farmed for Drops, so they stay
+# excluded after the miner retires them.
 _SCHEMA_V2 = (
     "ALTER TABLE import_state ADD COLUMN last_x_count INTEGER",
     """
@@ -286,7 +288,17 @@ _SCHEMA_V2 = (
         deleted_at REAL NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS drop_farmed_streamers (
+        streamer TEXT PRIMARY KEY,
+        seen_at REAL NOT NULL
+    )
+    """,
 )
+
+# import_state rows that are not per-file import cursors.
+_RETENTION_WATERMARK_SOURCE = "maintenance:retention_cutoff"
+_LEGACY_CLEANUP_SOURCE = "maintenance:legacy_cleanup"
 
 _SCHEMA_MIGRATIONS = {
     1: _SCHEMA_V1,
@@ -405,6 +417,11 @@ class HistoryStore(object):
 
     def _initialize_schema(self):
         with self._write_connection() as connection:
+            # Python's sqlite3 does not open a transaction for DDL, so each
+            # ALTER/CREATE would commit on its own.  An interrupted migration
+            # would then leave the new columns behind an old user_version and
+            # fail on every retry.  Run the whole upgrade as one transaction.
+            connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > HISTORY_SCHEMA_VERSION:
                 raise HistorySchemaError(
@@ -438,6 +455,30 @@ class HistoryStore(object):
                 self._backup_database()
                 self._initialize_schema()
             self.ready = True
+
+    def recover_if_corrupt(self, error):
+        """Rebuild the database after a corruption error seen while running.
+
+        Returns True when the file was moved aside and recreated.  Startup
+        handles corruption in :meth:`initialize`; this covers corruption that
+        only shows up once History is running.
+        """
+
+        if not isinstance(error, sqlite3.DatabaseError) or not self._is_corruption(
+            error
+        ):
+            return False
+        with self._write_lock:
+            logger.warning(
+                "History database %s is corrupt (%s); rebuilding the derived database",
+                self.path,
+                error,
+            )
+            self.ready = False
+            self._backup_database()
+            self._initialize_schema()
+            self.ready = True
+        return True
 
     # -- daily rollups -----------------------------------------------------
     @staticmethod
@@ -1027,6 +1068,26 @@ class HistoryStore(object):
                 counts["import_state"] += max(0, cursor.rowcount)
         return counts
 
+    def run_legacy_cleanup(self):
+        """Remove rows older History builds wrote, once per database.
+
+        The checks below look at raw watch sessions, which retention prunes.
+        Running them again later would treat a streamer whose old sessions
+        were pruned as never watched and drop its kept rollups.
+        """
+
+        with self._read_connection() as connection:
+            done = connection.execute(
+                "SELECT 1 FROM import_state WHERE source = ?",
+                (_LEGACY_CLEANUP_SOURCE,),
+            ).fetchone()
+        if done is not None:
+            return False
+        self.prune_untracked_streams()
+        self.prune_drop_farmed_streamers()
+        self.set_import_state(_LEGACY_CLEANUP_SOURCE, mtime=time.time())
+        return True
+
     def prune_untracked_streams(self):
         """Drop live-session data for streamers that were never watched.
 
@@ -1123,8 +1184,75 @@ class HistoryStore(object):
             ):
                 cursor = connection.execute(statement, (cutoff,))
                 counts[name] = max(0, cursor.rowcount)
+            # Remember the oldest data ever pruned, so a later, longer
+            # retention window does not import it again from the cache and
+            # count it twice in the kept rollups.
+            connection.execute(
+                """
+                INSERT INTO import_state (source, last_x) VALUES (?, ?)
+                ON CONFLICT(source) DO UPDATE SET
+                    last_x = MAX(COALESCE(last_x, excluded.last_x), excluded.last_x)
+                """,
+                (_RETENTION_WATERMARK_SOURCE, cutoff),
+            )
             connection.execute("PRAGMA optimize")
         return counts
+
+    def retention_watermark(self):
+        """Return the newest retention cutoff ever applied, or None."""
+
+        state = self.get_import_state(_RETENTION_WATERMARK_SOURCE)
+        if state is None or state.get("last_x") is None:
+            return None
+        return float(state["last_x"])
+
+    def restore_deletion_cutoffs(self, cutoffs):
+        """Write deletion cutoffs back, for example after a rebuild."""
+
+        if not cutoffs:
+            return
+        with self._write_connection() as connection:
+            for streamer, deleted_at in cutoffs.items():
+                connection.execute(
+                    """
+                    INSERT INTO deleted_streamers (streamer, deleted_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(streamer) DO UPDATE SET
+                        deleted_at = MAX(deleted_at, excluded.deleted_at)
+                    """,
+                    (_clean_streamer(streamer), float(deleted_at)),
+                )
+
+    def drop_farmed_streamers(self):
+        """Return the channels remembered as farmed only for Drops."""
+
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                "SELECT streamer FROM drop_farmed_streamers"
+            ).fetchall()
+        return {row["streamer"] for row in rows}
+
+    def update_drop_farmed_streamers(self, add=(), remove=(), seen_at=None):
+        add = {_clean_streamer(name) for name in add} - {""}
+        remove = {_clean_streamer(name) for name in remove} - {""}
+        if not add and not remove:
+            return
+        seen_at = float(seen_at or time.time())
+        with self._write_connection() as connection:
+            for streamer in add:
+                connection.execute(
+                    """
+                    INSERT INTO drop_farmed_streamers (streamer, seen_at)
+                    VALUES (?, ?)
+                    ON CONFLICT(streamer) DO UPDATE SET seen_at = excluded.seen_at
+                    """,
+                    (streamer, seen_at),
+                )
+            for streamer in remove:
+                connection.execute(
+                    "DELETE FROM drop_farmed_streamers WHERE streamer = ?",
+                    (streamer,),
+                )
 
     # -- queries -----------------------------------------------------------
     def overview(self, days=30, now=None):
@@ -1409,7 +1537,7 @@ class HistoryStore(object):
         now=None,
     ):
         now = float(now or time.time())
-        cutoff = now - (int(days) * SECONDS_PER_DAY)
+        cutoff = day_start(first_window_day(now, days))
         streamer = _clean_streamer(streamer) if streamer else None
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
@@ -1496,7 +1624,7 @@ class HistoryStore(object):
         now=None,
     ):
         now = float(now or time.time())
-        cutoff = now - (int(days) * SECONDS_PER_DAY)
+        cutoff = day_start(first_window_day(now, days))
         streamer = _clean_streamer(streamer) if streamer else None
         event_type = str(event_type).strip().lower() if event_type else None
         limit = max(1, min(int(limit), 500))

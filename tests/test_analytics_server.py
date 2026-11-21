@@ -1341,6 +1341,11 @@ def test_miner_passes_its_log_file_to_the_dashboard(monkeypatch):
             pass
 
     monkeypatch.setattr(server_module, "AnalyticsServer", FakeServer)
+    # analytics() also starts the History recorder, which would write a
+    # database into the working directory.
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.history.start_history", lambda *a, **k: None
+    )
     monkeypatch.setattr(Settings, "enable_analytics", True, raising=False)
     miner = object.__new__(TwitchChannelPointsMiner)
     miner.username = "someone"
@@ -1349,3 +1354,84 @@ def test_miner_passes_its_log_file_to_the_dashboard(monkeypatch):
     miner.analytics()
 
     assert created[0]["logs_file"] == "/logs/someone.20260101-120000.log"
+
+
+def test_analytics_delete_keeps_the_file_when_history_cannot_be_cleared(
+    monkeypatch, tmp_path
+):
+    import TwitchChannelPointsMiner.history as history_module
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "alice.json").write_text("{}", encoding="utf-8")
+
+    def locked(streamer):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(history_module, "delete_streamer_history", locked)
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 503
+    assert (tmp_path / "alice.json").exists()
+
+    deleted = []
+    monkeypatch.setattr(history_module, "delete_streamer_history", deleted.append)
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 204
+    assert deleted == ["alice"]
+    assert not (tmp_path / "alice.json").exists()
+
+
+def test_history_ignores_only_streamers_tracked_just_for_drops(monkeypatch):
+    from types import SimpleNamespace
+
+    import TwitchChannelPointsMiner.history as history_module
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+    from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+        TwitchChannelPointsMiner,
+    )
+
+    class FakeServer:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    started = {}
+    monkeypatch.setattr(server_module, "AnalyticsServer", FakeServer)
+    monkeypatch.setattr(
+        history_module, "start_history", lambda *a, **k: started.update(k)
+    )
+    monkeypatch.setattr(Settings, "enable_analytics", True, raising=False)
+    miner = object.__new__(TwitchChannelPointsMiner)
+    miner.username = "someone"
+    miner.logs_file = None
+
+    def streamer(username, **flags):
+        values = {
+            "from_category": False,
+            "explicitly_configured": False,
+            "from_followers": False,
+        }
+        values.update(flags)
+        return SimpleNamespace(username=username, **values)
+
+    miner.streamers = [
+        streamer("drops", from_category=True),
+        # Found by category discovery, then also added to the config.
+        streamer("configured", from_category=True, explicitly_configured=True),
+        streamer("followed", from_badge_campaign=True, from_followers=True),
+        streamer("plain", explicitly_configured=True),
+    ]
+    miner.daily_report_balances_loaded = False
+
+    miner.analytics()
+
+    assert started["drop_streamers"]() == ["drops"]
+    assert started["streamers_ready"]() is False
+    miner.daily_report_balances_loaded = True
+    assert started["streamers_ready"]() is True

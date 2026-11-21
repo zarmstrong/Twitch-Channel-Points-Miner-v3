@@ -186,6 +186,8 @@ class HistoryRecorder(threading.Thread):
         self._lock = threading.RLock()
         self._startup_import_done = False
         self._deleted_before = {}
+        self._persisted_drop_farmed = set()
+        self._retention_watermark = None
         self._active_watch = {}
         self._now_watching_initialized = False
         self._now_watching_mtime = 0.0
@@ -223,7 +225,9 @@ class HistoryRecorder(threading.Thread):
     def _poll_guarded(self):
         try:
             self.poll_once()
-        except Exception:
+        except Exception as error:
+            if self._recover_from_corruption(error):
+                return
             # A locked, corrupt or temporarily unwritable database must pause
             # History, never the miner or its existing analytics.  Keep the
             # warning rate-limited so a persistent failure does not flood the
@@ -268,6 +272,28 @@ class HistoryRecorder(threading.Thread):
             if self._stop_event.wait(self.interval):
                 return False
 
+    def _recover_from_corruption(self, error):
+        """Rebuild a database that turned out corrupt while running."""
+
+        try:
+            with self._lock:
+                if not self.store.recover_if_corrupt(error):
+                    return False
+                # The rebuilt file is empty.  Keep what only lives in memory
+                # or in the old file, then start over as after a restart.
+                self.store.restore_deletion_cutoffs(self._deleted_before)
+                self.store.update_drop_farmed_streamers(add=self._drop_farmed)
+                self._active_watch.clear()
+                self._online_live_keys.clear()
+                self._cache_startup_closed.clear()
+                self._streak_cache_key = None
+                self._run_id = None
+                self._prepare()
+            return True
+        except Exception:
+            logger.warning("Unable to rebuild the History database", exc_info=True)
+            return False
+
     def _initialize_store(self):
         """Retry initialization so a transient lock does not disable History."""
 
@@ -304,17 +330,20 @@ class HistoryRecorder(threading.Thread):
         self.store.close_open_watch_sessions(now)
         self.store.close_open_streams(now)
         self.store.close_open_runs()
-        self.store.prune_untracked_streams()
-        # Older builds recorded every drop-farmed channel, but the History tab
-        # only lists configured and follower streamers.  Drop those legacy rows
+        # Older builds recorded live sessions for unwatched channels and every
+        # drop-farmed channel, but the History tab only lists configured and
+        # follower streamers.  Drop those legacy rows (once per database)
         # before the tracked set is rebuilt from what remains.
-        self.store.prune_drop_farmed_streamers()
+        self.store.run_legacy_cleanup()
         # Point/watch history can predate the watch-session tables, so keep
         # live state for every streamer the History tab can display.
         self._tracked_streamers = (
             self.store.watched_streamers() | self.store.known_streamers()
         )
         self._deleted_before = self.store.deletion_cutoffs()
+        self._persisted_drop_farmed = self.store.drop_farmed_streamers()
+        self._drop_farmed |= self._persisted_drop_farmed
+        self._retention_watermark = self.store.retention_watermark()
         self._next_retention_at = now
         self._baseline_now_watching()
         self._startup_import_done = False
@@ -429,18 +458,29 @@ class HistoryRecorder(threading.Thread):
         return cutoff is not None and float(timestamp) < cutoff
 
     def _retention_cutoff(self, now):
+        """Return the time before which cached data must not be imported.
+
+        That is the current retention window, or the oldest data an earlier,
+        shorter window already pruned: its rollups were kept, so importing it
+        again would count it twice.
+        """
+
+        cutoffs = []
         try:
             days = float(self.retention_days or 0)
         except (TypeError, ValueError):
-            return None
-        if days <= 0:
-            return None
-        return float(now) - (days * 24 * 60 * 60)
+            days = 0
+        if days > 0:
+            cutoffs.append(float(now) - (days * 24 * 60 * 60))
+        if self._retention_watermark is not None:
+            cutoffs.append(self._retention_watermark)
+        return max(cutoffs) if cutoffs else None
 
     def _apply_retention(self, now):
         self._next_retention_at = now + RETENTION_CHECK_SECONDS
         try:
             self.store.apply_retention(now=now, retention_days=self.retention_days)
+            self._retention_watermark = self.store.retention_watermark()
         except Exception as error:
             logger.warning("Unable to apply history retention: %s", error)
 
@@ -462,11 +502,26 @@ class HistoryRecorder(threading.Thread):
             }
         drop_streamers = self._provider_value(self.drop_streamers)
         if drop_streamers is not None:
-            self._drop_farmed = {
+            current = {
                 name
                 for name in (_clean_streamer(value) for value in drop_streamers)
                 if name
             }
+            # A channel the miner retires drops out of the provider, but its
+            # analytics JSON stays behind.  Remember it as a Drops channel
+            # until the miner tracks it for another reason (configured or
+            # followed), so that JSON is never imported.
+            configured = (
+                self._live_streamer_names - current if streamers is not None else set()
+            )
+            persisted = self._persisted_drop_farmed
+            wanted = (persisted | current) - configured
+            if wanted != persisted:
+                self.store.update_drop_farmed_streamers(
+                    add=wanted - persisted, remove=persisted - wanted
+                )
+                self._persisted_drop_farmed = wanted
+            self._drop_farmed = set(wanted)
         self._streamer_state_ready = True
 
     @staticmethod
@@ -635,10 +690,15 @@ class HistoryRecorder(threading.Thread):
             current.add(key)
             if key in self._online_live_keys:
                 continue
+            started_at = entry["started_at"]
+            cutoff = self._deleted_before.get(streamer)
+            if cutoff is not None and started_at < cutoff:
+                # History of this broadcast before the delete stays deleted.
+                started_at = cutoff
             self.store.upsert_stream_session(
                 streamer,
                 broadcast_id,
-                started_at=entry["started_at"],
+                started_at=started_at,
                 last_seen_at=now,
                 title=entry["title"],
                 game=entry["game"],
@@ -1009,7 +1069,12 @@ class HistoryRecorder(threading.Thread):
                     delta=delta,
                     reason=str(entry.get("z") or ""),
                     kind="spend" if delta < 0 else "earn",
-                    dedupe_key=f"series:{streamer}:{x:.3f}:{balance}:{delta}",
+                    # The occurrence index keeps identical changes within
+                    # one second apart (1000 -> 1050 -> 1000 -> 1050).
+                    dedupe_key=(
+                        f"series:{streamer}:{x:.3f}:{position.count}:"
+                        f"{balance}:{delta}"
+                    ),
                 )
             last_balance = balance
 
@@ -1067,7 +1132,7 @@ class HistoryRecorder(threading.Thread):
                 event_type=event_type,
                 label=label,
                 points_delta=_annotation_points(label),
-                dedupe_key=f"annotation:{streamer}:{x:.3f}:{label}",
+                dedupe_key=f"annotation:{streamer}:{x:.3f}:{position.count}:{label}",
             )
 
         self.store.set_import_state(

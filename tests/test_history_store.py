@@ -509,3 +509,62 @@ def test_version_1_database_migrates_in_place(tmp_path):
     assert state["last_x"] == 5
     assert state["last_x_count"] is None
     assert store.deletion_cutoffs() == {}
+
+
+def test_interrupted_migration_can_be_retried(tmp_path, monkeypatch):
+    from TwitchChannelPointsMiner.history import store as store_module
+
+    path = tmp_path / "history.sqlite3"
+    connection = sqlite3.connect(path)
+    for statement in store_module._SCHEMA_V1:
+        connection.execute(statement)
+    connection.execute("PRAGMA user_version = 1")
+    connection.commit()
+    connection.close()
+
+    # Fail right after the first statement of the upgrade.
+    broken = store_module._SCHEMA_V2[:1] + ("THIS IS NOT SQL",)
+    monkeypatch.setitem(store_module._SCHEMA_MIGRATIONS, 2, broken)
+    with pytest.raises(sqlite3.OperationalError):
+        HistoryStore(path).initialize()
+    monkeypatch.setitem(store_module._SCHEMA_MIGRATIONS, 2, store_module._SCHEMA_V2)
+
+    store = HistoryStore(path)
+    store.initialize()
+    with store._read_connection() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_legacy_cleanup_runs_once_so_pruned_watches_keep_their_rollups(store):
+    old = NOW - 10 * 24 * 60 * 60
+    session_id = store.start_watch_session("alice", "points", old)
+    store.end_watch_session(session_id, old + 60)
+    store.upsert_stream_session("alice", "b1", old, ended_at=old + 60)
+    assert store.run_legacy_cleanup() is True
+
+    store.apply_retention(now=NOW, retention_days=1)
+    # A restart after retention removed alice's last raw watch session.
+    assert store.run_legacy_cleanup() is False
+
+    streamers = store.streamers(days=30, now=NOW)
+    assert streamers[0]["stream_sessions"] == 1
+    assert streamers[0]["watch_sessions"] == 1
+
+
+def test_sessions_and_events_use_the_same_days_window(store):
+    yesterday = NOW - 24 * 60 * 60
+    store.record_event("alice", yesterday, "win", "won")
+    store.upsert_stream_session("alice", "b1", yesterday, ended_at=yesterday + 60)
+    store.start_watch_session("alice", "points", yesterday)
+
+    assert store.events(days=1, now=NOW)["total"] == 0
+    assert store.sessions(kind="stream", days=1, now=NOW)["total"] == 0
+    assert store.sessions(kind="watch", days=1, now=NOW)["total"] == 0
+    assert store.events(days=2, now=NOW)["total"] == 1
+
+
+def test_retention_watermark_only_moves_forward(store):
+    assert store.retention_watermark() is None
+    store.apply_retention(now=NOW, retention_days=1)
+    store.apply_retention(now=NOW, retention_days=30)
+    assert store.retention_watermark() == NOW - 24 * 60 * 60

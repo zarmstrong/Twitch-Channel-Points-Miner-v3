@@ -744,10 +744,14 @@ class TwitchChannelPointsMiner:
                 start_history(
                     self.username,
                     online_streamers=lambda: list(self.streamers),
+                    # Channels tracked only for Drops.  One that is also
+                    # configured or followed keeps its History.
                     drop_streamers=lambda: [
                         streamer.username
                         for streamer in self.streamers
                         if is_drop_discovered(streamer)
+                        and not streamer.explicitly_configured
+                        and not streamer.from_followers
                     ],
                     retention_days=history_retention_days,
                     # Set once run() has loaded the streamers and their

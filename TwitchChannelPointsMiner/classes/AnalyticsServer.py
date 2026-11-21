@@ -656,6 +656,24 @@ def delete_streamer_analytics(streamer):
             mimetype="application/json",
         )
 
+    # The optional History tab keeps its own durable copy of point, watch and
+    # live-session data, so "delete analytics data" must clear that too.  Do
+    # it first: if History cannot be cleared, keep the file so the delete can
+    # be retried, instead of reporting success with History left behind.
+    try:
+        from TwitchChannelPointsMiner.history import delete_streamer_history
+
+        delete_streamer_history(filename[: -len(".json")])
+    except Exception:
+        logger.warning("Unable to delete optional streamer history", exc_info=True)
+        return Response(
+            json.dumps(
+                {"error": "Unable to delete streamer history. Try again shortly."}
+            ),
+            status=503,
+            mimetype="application/json",
+        )
+
     with ANALYTICS_FILE_MUTEX:
         try:
             os.remove(os.path.join(Settings.analytics_path, filename))
@@ -675,18 +693,6 @@ def delete_streamer_analytics(streamer):
 
     logger.info(f"Deleted analytics data in '{filename}'")
     response_cache.clear()
-
-    # The optional History tab keeps its own durable copy of point, watch and
-    # live-session data, so "delete analytics data" must clear that too.
-    try:
-        from TwitchChannelPointsMiner.history import delete_streamer_history
-
-        delete_streamer_history(filename[: -len(".json")])
-    except Exception:
-        logger.warning(
-            "Unable to delete optional streamer history",
-            exc_info=True,
-        )
 
     return Response(status=204)
 

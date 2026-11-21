@@ -16,6 +16,11 @@ that data without changing the files. Existing point and annotation history is
 backfilled on first start. Watch time starts accumulating when History is first
 enabled because the old JSON does not contain sessions.
 
+Channels the miner tracks only to farm Drops (category, wildcard-category and
+badge discovery) are not recorded. History remembers them after the miner
+stops tracking them, so their leftover analytics JSON is not imported later. A
+channel you also configure or follow is recorded as usual.
+
 ## Storage
 
 Data is stored in `analytics/<username>/history.sqlite3`, beside the existing
@@ -75,7 +80,10 @@ alone; History logs a warning and retries without affecting the miner.
 Deleting a streamer's analytics data from the dashboard also clears that
 streamer's History rows. History remembers when the delete happened and does
 not import anything older again, even though the watch-streak cache may still
-hold it. Data recorded after the delete is kept as usual.
+hold it. Data recorded after the delete is kept as usual. If the History rows
+cannot be cleared, for example because another process holds a lock on the
+database, the analytics data is kept too and the delete returns an error, so
+you can retry it.
 
 ## Watch streaks
 

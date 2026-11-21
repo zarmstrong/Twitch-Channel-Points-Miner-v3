@@ -1176,3 +1176,191 @@ def test_cache_entries_past_retention_are_not_counted_twice(tmp_path):
         assert streams["stream_sessions"] == 1
     finally:
         recorder._shutdown()
+
+
+def test_repeated_identical_changes_in_one_second_all_count(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    x = int((NOW + 60) * 1000)
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": x, "y": 1050, "z": "Watch"},
+        {"x": x, "y": 1000, "z": "Prediction"},
+        {"x": x, "y": 1050, "z": "Refund"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 61)
+    recorder._ingest_analytics(NOW + 61)
+
+    window = recorder.store.overview(days=1, now=NOW + 61)["window"]
+    assert window["points_gained"] == 100
+    assert window["points_spent"] == 50
+
+
+def test_live_snapshot_after_a_delete_does_not_restore_the_deleted_part(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 600)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        clock.value = NOW + 900
+        recorder.delete_streamer("bob")
+
+        # bob is still watched and still live.
+        _write_json(
+            analytics / "now_watching.json",
+            [{"username": "bob", "reason": "points"}],
+            NOW + 915,
+        )
+        clock.value = NOW + 915
+        recorder.poll_once()
+
+        streams = store.sessions(kind="stream", days=1, now=clock.value)["sessions"]
+        assert [item["started_at"] for item in streams] == [NOW + 900]
+    finally:
+        recorder._shutdown()
+
+
+def test_retired_drops_channel_stays_excluded(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    drops = ["carol"]
+    snapshot = [{"username": "bob"}, {"username": "carol"}]
+    clock = FakeClock(NOW + 100)
+
+    def make_recorder():
+        return HistoryRecorder(
+            store,
+            analytics_path=analytics,
+            streak_cache_path=tmp_path / "missing.json",
+            username="alice",
+            clock=clock,
+            online_streamers=lambda: list(snapshot),
+            drop_streamers=lambda: list(drops),
+        )
+
+    recorder = make_recorder()
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        # The miner retires carol, but her analytics JSON stays behind.
+        drops.clear()
+        snapshot[:] = [{"username": "bob"}]
+        _write_json(
+            analytics / "carol.json",
+            {
+                "series": [
+                    {"x": int(NOW * 1000), "y": 1000},
+                    {"x": int((NOW + 60) * 1000), "y": 1050},
+                ]
+            },
+            NOW + 61,
+        )
+        clock.value = NOW + 115
+        recorder.poll_once()
+        assert store.streamers(days=1, now=clock.value) == []
+    finally:
+        recorder._shutdown()
+
+    # A restart remembers her too.
+    recorder = make_recorder()
+    recorder._prepare()
+    try:
+        clock.value = NOW + 130
+        recorder.poll_once()
+        assert store.streamers(days=1, now=clock.value) == []
+
+        # Adding her to the config makes her a tracked streamer again.
+        snapshot.append({"username": "carol"})
+        clock.value = NOW + 145
+        recorder.poll_once()
+        assert [item["streamer"] for item in store.streamers(days=1, now=NOW)] == [
+            "carol"
+        ]
+    finally:
+        recorder._shutdown()
+
+
+def test_longer_retention_after_a_restart_does_not_recount_pruned_streaks(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": NOW,
+                "claimed": True,
+                "claimed_at": NOW + 30,
+                "ended_at": NOW + 600,
+            }
+        ),
+        NOW + 600,
+    )
+    clock = FakeClock(NOW + 700)
+
+    def make_recorder(retention_days):
+        return HistoryRecorder(
+            store,
+            analytics_path=analytics,
+            streak_cache_path=cache,
+            username="alice",
+            clock=clock,
+            retention_days=retention_days,
+        )
+
+    recorder = make_recorder(1)
+    recorder._prepare()
+    clock.value = NOW + 2 * 24 * 60 * 60
+    recorder.poll_once()
+    recorder._shutdown()
+
+    # Restart with a longer window; the cache still holds the claim.
+    recorder = make_recorder(0)
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        lifetime = store.overview(days=30, now=clock.value)["lifetime"]
+        assert lifetime["streak_count"] == 1
+    finally:
+        recorder._shutdown()
+
+
+def test_corruption_found_while_running_rebuilds_the_database(recorder, monkeypatch):
+    recorder.delete_streamer("bob")
+    original = recorder.poll_once
+    calls = []
+
+    def corrupt():
+        calls.append(1)
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(recorder, "poll_once", corrupt)
+    recorder._poll_guarded()
+    monkeypatch.setattr(recorder, "poll_once", original)
+
+    folder = Path(recorder.store.path).parent
+    assert list(folder.glob("history.sqlite3.bak-*"))
+    assert recorder._run_id is not None
+    # The rebuilt database still knows bob was deleted.
+    assert "bob" in recorder.store.deletion_cutoffs()
+    recorder.poll_once()
