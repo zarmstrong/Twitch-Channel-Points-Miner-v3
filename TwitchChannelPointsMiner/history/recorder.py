@@ -90,14 +90,24 @@ def _analytics_file_lock():
         yield
 
 
+_READ_FAILED = object()
+
+
 def _load_list(path):
+    """Return the JSON list at ``path``.
+
+    A missing file or one that is not a list is an empty snapshot.  A file
+    that cannot be read returns ``_READ_FAILED``, so it is read again later
+    instead of being taken as "nothing is watched".
+    """
+
     try:
         payload = _read_json(path)
     except FileNotFoundError:
         return None
     except (OSError, ValueError, TypeError) as error:
         logger.warning("Unable to read history source %s: %s", path, error)
-        return None
+        return _READ_FAILED
     if isinstance(payload, list):
         return payload
     return None
@@ -452,13 +462,24 @@ class HistoryRecorder(threading.Thread):
     def _shutdown(self):
         now = self.clock()
         if self._run_id is not None:
-            try:
-                # Take in the miner's last snapshot, which confirms the
-                # watches up to when it was written.
-                with self._lock:
-                    self._poll_now_watching(now)
-            except Exception:
-                logger.debug("Unable to read the last watch snapshot", exc_info=True)
+            # Take in what the miner wrote after the last poll: the last watch
+            # snapshot confirms the watches up to when it was written, and the
+            # last points and events would otherwise wait for the next start.
+            # Before the startup import the streamers are not known yet, so
+            # only the watch snapshot is read.
+            ready = self._startup_import_done
+            for name, step in (
+                ("watch streak cache", self._ingest_streak_cache if ready else None),
+                ("watch snapshot", self._poll_now_watching),
+                ("analytics files", self._ingest_analytics if ready else None),
+            ):
+                if step is None:
+                    continue
+                try:
+                    with self._lock:
+                        step(now)
+                except Exception:
+                    logger.debug("Unable to read the last %s", name, exc_info=True)
         for streamer in list(self._active_watch):
             try:
                 self._close_watch(streamer, self._active_watch[streamer]["last_tick"])
@@ -748,6 +769,9 @@ class HistoryRecorder(threading.Thread):
                     )
             return
 
+        if entries is _READ_FAILED:
+            # Keep the old mtime, so the same snapshot is read again.
+            return
         if entries is None:
             entries = []
         # A snapshot written later than the last observation marks when the
@@ -1126,6 +1150,9 @@ class HistoryRecorder(threading.Thread):
             ended_at=ended_at,
             last_seen_at=now if ended_at is None else ended_at,
             source="streak_cache",
+            # Only an end the cache recorded was observed; the others above
+            # are estimates.
+            observed_end=item["ended_at"] is not None and ended_at == item["ended_at"],
         )
         if ended_at is not None:
             # Let the next live snapshot reopen the row when the miner still

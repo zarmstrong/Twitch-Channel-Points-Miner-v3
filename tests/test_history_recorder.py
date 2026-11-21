@@ -2553,3 +2553,118 @@ def test_cleared_live_category_is_recorded(tmp_path):
         assert (live["title"], live["game"]) == ("Morning", None)
     finally:
         recorder._shutdown()
+
+
+def test_unreadable_watch_snapshot_is_read_again(recorder, monkeypatch):
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 2
+    recorder._poll_now_watching()
+
+    _write_json(
+        path,
+        [
+            {"username": "bob", "reason": "points"},
+            {"username": "carol", "reason": "points"},
+        ],
+        NOW + 30,
+    )
+    original = recorder_module._read_json
+
+    def denied(target):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(recorder_module, "_read_json", denied)
+    clock.value = NOW + 31
+    recorder._poll_now_watching()
+    monkeypatch.setattr(recorder_module, "_read_json", original)
+    clock.value = NOW + 46
+    recorder._poll_now_watching()
+
+    overview = recorder.store.overview(days=1, now=clock.value)
+    assert overview["active_watch_sessions"] == 2
+
+
+def test_observed_end_replaces_one_inferred_from_the_next_broadcast(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        # The cache could not be written across a short restart.
+        snapshot[0] = {
+            "username": "bob",
+            "broadcast_id": "b2",
+            "online_at": NOW + 1000,
+            "is_online": True,
+        }
+        clock.value = NOW + 1010
+        recorder.poll_once()
+
+        _write_json(
+            cache,
+            _cache_payload(
+                {
+                    "streamer_login": "bob",
+                    "broadcast_id": "b1",
+                    "started_at": NOW,
+                    "ended_at": NOW + 900,
+                    "claimed": True,
+                    "claimed_at": NOW + 60,
+                },
+                {
+                    "streamer_login": "bob",
+                    "broadcast_id": "b2",
+                    "started_at": NOW + 1000,
+                },
+            ),
+            NOW + 1020,
+        )
+        clock.value = NOW + 1030
+        recorder.poll_once()
+
+        streams = store.sessions(kind="stream", days=1, now=clock.value)["sessions"]
+        ended = {item["broadcast_id"]: item["ended_at"] for item in streams}
+        assert ended["b1"] == NOW + 900
+        assert store.streamers(days=1, now=clock.value)[0]["live_streak_at"] == (
+            NOW + 60
+        )
+    finally:
+        recorder._shutdown()
+
+
+def test_shutdown_imports_changes_written_after_the_last_poll(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 61)
+    recorder.clock.value = NOW + 62
+    recorder.poll_once()
+
+    series.append({"x": int((NOW + 120) * 1000), "y": 1075, "z": "Watch"})
+    _write_json(path, {"series": series, "annotations": []}, NOW + 121)
+    recorder.clock.value = NOW + 122
+    recorder._shutdown()
+
+    assert recorder.store.latest_point("bob")["balance"] == 1075

@@ -638,3 +638,24 @@ def test_retention_keeps_the_streak_claim_of_a_broadcast_still_live(store):
     item = store.streamers(days=1, now=later)[0]
     assert item["live_stream"] is not None
     assert item["live_streak_at"] == NOW + 60
+
+
+def test_retention_keeps_claims_of_earlier_parts_of_a_live_stream(store):
+    first_end = NOW + 20 * 60 * 60
+    store.upsert_stream_session("alice", "b1", NOW, ended_at=first_end)
+    store.record_event(
+        "alice",
+        NOW + 60,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": NOW},
+    )
+    # A short restart continues the same stream.
+    store.upsert_stream_session("alice", "b2", first_end + 600)
+    later = first_end + 36 * 60 * 60
+    store.touch_open_streams(later)
+    assert store.streamers(days=7, now=later)[0]["live_streak_at"] == NOW + 60
+
+    store.apply_retention(now=later, retention_days=1)
+
+    assert store.streamers(days=7, now=later)[0]["live_streak_at"] == NOW + 60

@@ -740,12 +740,17 @@ class HistoryStore(object):
         title=None,
         game=None,
         source="observed",
+        observed_end=False,
     ):
         """Create or update one observed live session.
 
         A cache file keeps sessions open until the miner notices the channel
         went offline, so an upsert with ``ended_at=None`` must never reopen a
         session that was closed at recorder startup.
+
+        An end only moves forward, except that ``observed_end`` (the miner saw
+        the stream go offline then) replaces an end inferred from the next
+        broadcast's start, which may be later than the real one.
         """
 
         streamer = _clean_streamer(streamer)
@@ -760,7 +765,9 @@ class HistoryStore(object):
                 (streamer, broadcast_id),
             ).fetchone()
             if existing is None:
-                # A new broadcast supersedes anything still marked live.
+                # A new broadcast supersedes anything still marked live.  The
+                # inferred end is the new broadcast's start; an observed end
+                # can replace it later (see ``observed_end``).
                 connection.execute(
                     """
                     UPDATE streams SET ended_at = ?
@@ -802,6 +809,15 @@ class HistoryStore(object):
                 UPDATE streams SET
                     ended_at = CASE
                         WHEN ? IS NULL THEN streams.ended_at
+                        WHEN ? AND streams.ended_at IS NOT NULL
+                            AND ? >= streams.started_at
+                            AND EXISTS (
+                                SELECT 1 FROM streams AS next
+                                WHERE next.streamer = streams.streamer
+                                  AND next.id <> streams.id
+                                  AND next.started_at = streams.ended_at
+                            )
+                        THEN ?
                         ELSE MAX(COALESCE(streams.ended_at, ?), ?)
                     END,
                     last_seen_at = MAX(streams.last_seen_at, ?),
@@ -811,6 +827,9 @@ class HistoryStore(object):
                 WHERE id = ?
                 """,
                 (
+                    None if ended_at is None else float(ended_at),
+                    1 if observed_end else 0,
+                    None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
@@ -1311,21 +1330,16 @@ class HistoryStore(object):
         cutoff = float(now or time.time()) - (float(retention_days) * SECONDS_PER_DAY)
         counts = {}
         with self._write_connection() as connection:
+            self._mark_live_stream_rows(connection)
             for name, statement in (
                 ("points", "DELETE FROM points WHERE ts < ?"),
                 (
                     "events",
-                    # The streak claim of a broadcast still live is kept, so
-                    # the current stream keeps showing its claimed streak.
-                    f"""
-                    DELETE FROM events WHERE ts < ? AND NOT (
-                        type = 'watch_streak' AND EXISTS (
-                            SELECT 1 FROM streams
-                            WHERE streams.streamer = events.streamer
-                              AND streams.ended_at IS NULL
-                              AND events.ts >= streams.started_at
-                                  - {float(WATCH_STREAK_STREAM_GAP_SECONDS)}
-                        )
+                    # The streak claims of a stream still live are kept (see
+                    # _live_stream_rows), so it keeps showing its streak.
+                    """
+                    DELETE FROM events WHERE ts < ? AND id NOT IN (
+                        SELECT id FROM temp.history_kept_events
                     )
                     """,
                 ),
@@ -1338,7 +1352,10 @@ class HistoryStore(object):
                 ),
                 (
                     "streams",
-                    "DELETE FROM streams WHERE ended_at IS NOT NULL AND ended_at < ?",
+                    """
+                    DELETE FROM streams WHERE ended_at IS NOT NULL AND ended_at < ?
+                      AND id NOT IN (SELECT id FROM temp.history_kept_streams)
+                    """,
                 ),
                 (
                     "runs",
@@ -1358,8 +1375,76 @@ class HistoryStore(object):
                 """,
                 (_RETENTION_WATERMARK_SOURCE, cutoff),
             )
+            connection.execute("DROP TABLE temp.history_kept_streams")
+            connection.execute("DROP TABLE temp.history_kept_events")
             connection.execute("PRAGMA optimize")
         return counts
+
+    @staticmethod
+    def _mark_live_stream_rows(connection):
+        """Mark the rows a live stream's streak state is read from.
+
+        A broadcast still live belongs to a logical stream that may include
+        earlier broadcasts (see ``_logical_stream_window``).  Those broadcasts
+        and the streak claims made on them stay until the stream ends, so
+        retention does not change whether the live stream shows its streak.
+        """
+
+        connection.execute("DROP TABLE IF EXISTS temp.history_kept_streams")
+        connection.execute("DROP TABLE IF EXISTS temp.history_kept_events")
+        connection.execute("CREATE TEMP TABLE history_kept_streams (id INTEGER)")
+        connection.execute("CREATE TEMP TABLE history_kept_events (id INTEGER)")
+        live = connection.execute("""
+            SELECT streamer, broadcast_id, started_at FROM streams
+            WHERE ended_at IS NULL ORDER BY started_at DESC, id DESC
+            """).fetchall()
+        seen = set()
+        for row in live:
+            streamer = row["streamer"]
+            if streamer in seen:
+                continue
+            seen.add(streamer)
+            history = [
+                dict(item)
+                for item in connection.execute(
+                    """
+                    SELECT id, streamer, broadcast_id, started_at, ended_at
+                    FROM streams WHERE streamer = ?
+                    ORDER BY started_at, id
+                    """,
+                    (streamer,),
+                ).fetchall()
+            ]
+            broadcast_ids, logical_started_at = _logical_stream_window(
+                dict(row), history
+            )
+            connection.executemany(
+                "INSERT INTO temp.history_kept_streams (id) VALUES (?)",
+                [
+                    (item["id"],)
+                    for item in history
+                    if str(item["broadcast_id"] or "").strip() in broadcast_ids
+                ],
+            )
+            claims = connection.execute(
+                """
+                SELECT id, ts, metadata FROM events
+                WHERE type = 'watch_streak' AND streamer = ?
+                """,
+                (streamer,),
+            ).fetchall()
+            kept = []
+            for claim in claims:
+                claim_broadcast_id = _event_broadcast_id(claim["metadata"])
+                if claim_broadcast_id is not None:
+                    keep = claim_broadcast_id in broadcast_ids
+                else:
+                    keep = float(claim["ts"]) >= float(logical_started_at)
+                if keep:
+                    kept.append((claim["id"],))
+            connection.executemany(
+                "INSERT INTO temp.history_kept_events (id) VALUES (?)", kept
+            )
 
     def retention_watermark(self):
         """Return the newest retention cutoff ever applied, or None."""
