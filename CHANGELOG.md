@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.23.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.22.0...3.23.0) (2026-11-21)
+
+
+### Features
+
+* **watch-streak:** farm pending streaks until Twitch confirms ([#349](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/349)) ([f66b5c2](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/f66b5c21961a294ac594d43ef83a6b84624c0480))
+
+
+### Bug Fixes
+
+* **drops:** quest claim, repeat-window and report fixes from review of [#348](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/348) ([#372](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/372)) ([1cde640](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/1cde64036ed42b8b17d2bcee1cbecefaa34fce20))
+* **drops:** send a refused reward claim again from the claim thread, not the main loop ([#370](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/370)) ([#375](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/375)) ([5cd152a](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5cd152a7af9907f3315b89f625e8d19e862f5f1e))
+* **drops:** watch a reward repeat from the sync pass after its window opens ([#371](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/371)) ([#376](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/376)) ([8fc33fd](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/8fc33fdf60663b635c3397356890a430563bed1d))
+* **release:** keep Docker notes and publish releases left by a failed run ([#275](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/275)) ([#343](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/343)) ([8165cd0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/8165cd0085e82c6e20b9e656496ac6408e765e77))
+
+
+### Documentation
+
+* explain the nightly builds ([#359](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/359)) ([#365](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/365)) ([ec0b715](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/ec0b7150419fa59acf903b2fe3fe5760a9e27e2a))
+* point project contact and links at the current maintainer ([#367](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/367)) ([12ac984](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/12ac9847772b19b519ace11d9d3398c42306c17f))
+
 ## [3.22.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.21.1...3.22.0) (2026-11-19)
 
 
