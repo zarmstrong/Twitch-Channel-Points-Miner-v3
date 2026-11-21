@@ -281,6 +281,10 @@ STREAK_ONLY_WATCH_MINUTES = 10
 # milestone that advances mid-broadcast does not stay pending all stream long.
 WATCH_STREAK_RECONCILE_AFTER_MINUTES = 5
 WATCH_STREAK_RECONCILE_INTERVAL_SECONDS = 3 * 60
+# Answered milestone checks a streak_only channel gets after its window
+# closes, a cooldown apart: Twitch may not have processed the window's last
+# minutes by the first one.
+WATCH_STREAK_FINAL_CHECKS = 3
 
 
 class Twitch(object):
@@ -2011,9 +2015,17 @@ class Twitch(object):
 
         stream.watch_streak_checked_at = time.time()
         stream.watch_streak_check_due = False
-        # Recorded only once Twitch has answered, so a failed final check of a
-        # streak_only window is retried.
-        checked_minutes = getattr(stream, "minute_watched", 0) or 0
+        snapshot = getattr(stream, "watch_streak_check_snapshot", None)
+        if callable(snapshot):
+            state_broadcast_id, checked_minutes = snapshot()
+        else:
+            state_broadcast_id = stream.broadcast_id
+            checked_minutes = getattr(stream, "minute_watched", 0) or 0
+        # A check after a streak_only window closed counts as one of its final
+        # checks only once Twitch has answered, so a failed one is retried.
+        final_check = self._is_streak_only(streamer) is True and (
+            checked_minutes or 0
+        ) >= self._streak_only_watch_window(streamer)
         # Other threads refresh the stream while the lookups run; everything
         # below is about this broadcast, so never read the live attribute.
         broadcast_id = stream.broadcast_id
@@ -2038,12 +2050,14 @@ class Twitch(object):
             if self._watch_streak_continues_claimed_stream(
                 streamer, broadcast_id, live_stream.created_at
             ):
-                self._record_watch_streak_check(stream, broadcast_id, checked_minutes)
+                if final_check:
+                    self._record_final_watch_streak_check(stream, state_broadcast_id)
                 return True
             milestone = self.gql.get_reward_list(
                 streamer.channel_id
             ).watch_streak_milestone
-            self._record_watch_streak_check(stream, broadcast_id, checked_minutes)
+            if final_check:
+                self._record_final_watch_streak_check(stream, state_broadcast_id)
         except GQLError as error:
             logger.warning(
                 "[watch-streak] unable to check Twitch milestone for "
@@ -2101,13 +2115,15 @@ class Twitch(object):
         return True
 
     @staticmethod
-    def _record_watch_streak_check(stream, broadcast_id, minutes):
-        record = getattr(stream, "record_watch_streak_check", None)
+    def _record_final_watch_streak_check(stream, broadcast_id):
+        record = getattr(stream, "record_final_watch_streak_check", None)
         if callable(record):
-            return record(broadcast_id, minutes)
+            return record(broadcast_id)
         if getattr(stream, "broadcast_id", None) != broadcast_id:
             return False
-        stream.watch_streak_checked_minutes = minutes
+        stream.watch_streak_final_checks = (
+            getattr(stream, "watch_streak_final_checks", 0) or 0
+        ) + 1
         return True
 
     def _watch_streak_continues_claimed_stream(
@@ -2215,13 +2231,11 @@ class Twitch(object):
                 window = self._streak_only_watch_window(streamer)
                 if minutes >= window:
                     # Past its window a streak-only channel is no longer
-                    # watched, so its milestone can't advance any more. One
-                    # last check covers the window's final minutes; after
+                    # watched, so its milestone can't advance any more. A few
+                    # last checks cover the window's final minutes; after
                     # that only a late WATCH_STREAK event clears it.
-                    checked_minutes = (
-                        getattr(stream, "watch_streak_checked_minutes", 0) or 0
-                    )
-                    if checked_minutes >= window:
+                    final_checks = getattr(stream, "watch_streak_final_checks", 0) or 0
+                    if final_checks >= WATCH_STREAK_FINAL_CHECKS:
                         continue
                     final_check = True
             if (

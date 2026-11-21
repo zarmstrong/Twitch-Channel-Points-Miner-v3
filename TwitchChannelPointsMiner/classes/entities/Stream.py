@@ -36,7 +36,7 @@ class Stream(object):
         "payload",
         "watch_streak_missing",
         "watch_streak_checked_at",
-        "watch_streak_checked_minutes",
+        "watch_streak_final_checks",
         "watch_streak_check_due",
         "watch_streak_broadcast_id",
         "watch_streak_transition_to",
@@ -178,8 +178,8 @@ class Stream(object):
             self.watch_streak_broadcast_id = self.broadcast_id
             self.watch_streak_missing = True
             self.watch_streak_checked_at = 0
-            # Watched minutes covered by the last milestone check.
-            self.watch_streak_checked_minutes = 0
+            # Answered milestone checks after a streak_only window closed.
+            self.watch_streak_final_checks = 0
             # A milestone check queued for the minute watcher's budgeted
             # rechecks, ahead of the usual watched-minutes wait.
             self.watch_streak_check_due = False
@@ -207,15 +207,27 @@ class Stream(object):
             self.watch_streak_transition_to = broadcast_id
             return True
 
-    def record_watch_streak_check(self, broadcast_id, minutes):
-        """Record the watched minutes a milestone check for broadcast_id
-        covered, unless the state has been reset for another broadcast since:
-        a slow check of the old broadcast must not mark the new one checked.
+    def watch_streak_check_snapshot(self):
+        """Return (broadcast the streak state belongs to, watched minutes).
+
+        Read together, so a check never pairs one broadcast's minutes with
+        the next broadcast's state.
+        """
+        with _WATCH_STREAK_LOCK:
+            return (
+                self.watch_streak_broadcast_id or self.broadcast_id,
+                self.minute_watched,
+            )
+
+    def record_final_watch_streak_check(self, broadcast_id):
+        """Count an answered check made after a streak_only window closed,
+        unless the state has been reset for another broadcast since: a slow
+        check of the old broadcast must not count for the new one.
         """
         with _WATCH_STREAK_LOCK:
             if (self.watch_streak_broadcast_id or self.broadcast_id) != broadcast_id:
                 return False
-            self.watch_streak_checked_minutes = minutes
+            self.watch_streak_final_checks += 1
             return True
 
     def credit_watch_streak(self):
@@ -267,11 +279,12 @@ class Stream(object):
     def hold_watch_slot(self):
         """Count time in a watch slot; called each cycle the stream has one.
 
-        Wall-clock time, unlike minute_watched: a slow cycle still held the
-        slot for all of it. Counting a stall can only end the cap early.
+        Elapsed time in full, unlike minute_watched: a slow cycle still held
+        the slot for all of it. Measured on the monotonic clock, so a wall
+        clock correction can't add or remove slot time.
         """
         with _WATCH_STREAK_LOCK:
-            now = time.time()
+            now = time.monotonic()
             self.__count_watch_slot_step(now)
             self.__watch_slot_timestamp = now
 
@@ -289,10 +302,9 @@ class Stream(object):
         never count any time at all.
         """
         with _WATCH_STREAK_LOCK:
-            now = time.time()
-            self.__count_minute_watched_step(now)
+            self.__count_minute_watched_step(time.time())
             self.__minute_watched_timestamp = 0
-            self.__count_watch_slot_step(now)
+            self.__count_watch_slot_step(time.monotonic())
             self.__watch_slot_timestamp = 0
 
     def update_minute_watched(self):

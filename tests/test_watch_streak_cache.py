@@ -770,8 +770,8 @@ def test_streak_only_channel_past_its_window_is_not_rechecked(tmp_path):
     streamer.settings.streak_only = True
     streamer.is_online = True
     streamer.stream.minute_watched = 10
-    # The window's final check already ran.
-    streamer.stream.watch_streak_checked_minutes = 10
+    # The window's final checks already ran.
+    streamer.stream.watch_streak_final_checks = 3
     twitch = Twitch.__new__(Twitch)
     twitch.gql = SimpleNamespace(
         get_stream_live_status=lambda channel_id: pytest.fail(
@@ -1223,6 +1223,7 @@ def test_a_reset_during_a_counter_step_does_not_carry_the_step_over(monkeypatch)
     stream = stream_module.Stream()
     clock = [2_000_000_000.0]
     monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
     stream.update_minute_watched()
     clock[0] += 60
     measuring = threading.Event()
@@ -1256,6 +1257,7 @@ def test_cap_counts_slot_time_whose_posts_failed(tmp_path, monkeypatch):
 
     clock = [2_000_000_000.0]
     monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
     streamer, _ = make_streak_streamer(tmp_path)
     streamer.is_online = True
     for _ in range(int(21 * 60 / 20)):
@@ -1276,6 +1278,7 @@ def test_slot_time_counts_the_last_cycle_and_skips_time_out_of_a_slot(monkeypatc
 
     clock = [2_000_000_000.0]
     monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
     stream = stream_module.Stream()
     stream.hold_watch_slot()
     clock[0] += 20
@@ -1315,6 +1318,7 @@ def test_slot_time_counts_slow_cycles_in_full(monkeypatch):
 
     clock = [2_000_000_000.0]
     monkeypatch.setattr(stream_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
     stream = stream_module.Stream()
     stream.hold_watch_slot()
     for _ in range(4):
@@ -1372,10 +1376,10 @@ def test_a_slower_overlapping_check_does_not_reset_the_new_broadcast(
     assert streamer.stream.minute_watched == 2
 
 
-def test_streak_only_window_end_gets_one_final_check(tmp_path, monkeypatch):
+def test_streak_only_window_end_gets_bounded_final_checks(tmp_path, monkeypatch):
     # streak_only=5: the usual recheck waits for five watched minutes, which
     # is exactly when the window closes. The window's last minutes still get
-    # one milestone check; once Twitch has answered, no more.
+    # milestone checks, a bounded number of answered ones.
     streamer, _ = make_streak_streamer(tmp_path)
     streamer.settings.streak_only = 5
     streamer.is_online = True
@@ -1396,11 +1400,13 @@ def test_streak_only_window_end_gets_one_final_check(tmp_path, monkeypatch):
         get_reward_list=lambda channel_id: SimpleNamespace(watch_streak_milestone=None),
     )
 
-    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
-    clock[0] += 10 * 60
-    twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+    for _ in range(5):
+        twitch._reconcile_due_watch_streaks([streamer], max_minutes=20)
+        clock[0] += 10 * 60
 
-    assert calls == ["live"]
+    # Three answered final checks, in case Twitch was still processing the
+    # window's last minutes at the first; then no more.
+    assert calls == ["live", "live", "live"]
 
 
 def test_failed_final_streak_only_check_is_retried(tmp_path, monkeypatch):
@@ -1512,6 +1518,7 @@ def test_slow_check_of_the_old_broadcast_does_not_mark_the_new_one_checked(
     # A's check is still waiting on Twitch when the stream moves to B and B's
     # state is reset. A's answer must not count as B's final check.
     streamer, _ = make_streak_streamer(tmp_path)
+    streamer.settings.streak_only = 5
     streamer.stream.init_watch_streak()
     streamer.stream.minute_watched = 5
     live_stream = SimpleNamespace(
@@ -1529,4 +1536,59 @@ def test_slow_check_of_the_old_broadcast_does_not_mark_the_new_one_checked(
     twitch.reconcile_watch_streak(streamer)
 
     assert streamer.stream.watch_streak_broadcast_id == "broadcast-2"
-    assert streamer.stream.watch_streak_checked_minutes == 0
+    assert streamer.stream.watch_streak_final_checks == 0
+
+
+def test_slot_time_ignores_a_wall_clock_jump_forward(monkeypatch):
+    # The host clock is corrected an hour forward between two cycles that
+    # are really 20 seconds apart.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    wall = [2_000_000_000.0]
+    steady = [1_000.0]
+    monkeypatch.setattr(stream_module.time, "time", lambda: wall[0])
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: steady[0])
+    stream = stream_module.Stream()
+    stream.hold_watch_slot()
+    wall[0] += 60 * 60 + 20
+    steady[0] += 20
+    stream.hold_watch_slot()
+
+    assert stream.watch_slot_minutes == pytest.approx(20 / 60, abs=1e-4)
+
+
+class _ResetOnMinutesRead(_RefreshBetweenReads):
+    """A stream reset for the next broadcast right after minutes are read."""
+
+    def __getattr__(self, name):
+        value = getattr(self._stream, name)
+        if name == "minute_watched" and self._on_id_read is not None:
+            on_read = self._on_id_read
+            object.__setattr__(self, "_on_id_read", None)
+            on_read()
+        return value
+
+
+def test_check_pairs_minutes_with_the_broadcast_they_belong_to(tmp_path):
+    # A's five watched minutes are read, then the stream moves to B before
+    # the check reads which broadcast it is about. A's minutes must not make
+    # the check count as B's final one.
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.settings.streak_only = 5
+    real_stream = streamer.stream
+    real_stream.init_watch_streak()
+    real_stream.minute_watched = 5
+
+    def move_to_next_broadcast():
+        real_stream.broadcast_id = "broadcast-2"
+        real_stream.init_watch_streak()
+
+    streamer.stream = _ResetOnMinutesRead(real_stream, move_to_next_broadcast)
+    live_stream = SimpleNamespace(
+        id="broadcast-2", created_at=datetime(2026, 10, 26, 17, 45, 7)
+    )
+    twitch = twitch_with_streak_responses(live_stream, None)
+
+    twitch.reconcile_watch_streak(streamer)
+
+    assert real_stream.watch_streak_final_checks == 0
