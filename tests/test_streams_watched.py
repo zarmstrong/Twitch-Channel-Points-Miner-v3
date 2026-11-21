@@ -17,6 +17,7 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
     _normalize_streamer_source_priority,
     _normalize_streams_watched,
     _normalize_watch_status_interval_minutes,
+    _normalize_watch_streak_max_minutes,
 )
 from TwitchChannelPointsMiner.classes import HttpSession
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
@@ -34,6 +35,7 @@ from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     campaign_from_reward_groups,
 )
+from TwitchChannelPointsMiner.classes.entities.Stream import Stream
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
@@ -187,6 +189,7 @@ def _run_one_watch_iteration(
     gql=None,
     channel_bans=None,
     post_kwargs=None,
+    watch_streak_max_minutes=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
@@ -264,6 +267,9 @@ def _run_one_watch_iteration(
         on_sleep or (lambda self, *args, **kwargs: setattr(self, "running", False)),
     )
 
+    extra_kwargs = {}
+    if watch_streak_max_minutes is not None:
+        extra_kwargs["watch_streak_max_minutes"] = watch_streak_max_minutes
     twitch.send_minute_watched_events(
         streamers,
         priority or [Priority.ORDER],
@@ -271,6 +277,7 @@ def _run_one_watch_iteration(
         source_priority=source_priority,
         drop_progress_stall_minutes=drop_progress_stall_minutes,
         drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
+        **extra_kwargs,
     )
     return posted
 
@@ -586,7 +593,7 @@ def test_streak_only_integer_sets_a_custom_window(monkeypatch):
 
 def test_watch_window_applies_only_to_streak_only_streamers(monkeypatch):
     # A points-capped streamer with a long pending streak still gets watched
-    # (its streak payout may only arrive near the end of the broadcast).
+    # up to watch_streak_max_minutes, past any streak_only window.
     streamer = _watch_streamer(
         "capped-long-streak",
         points=500,
@@ -600,9 +607,30 @@ def test_watch_window_applies_only_to_streak_only_streamers(monkeypatch):
         [streamer],
         streams_watched=1,
         priority=[Priority.STREAK],
+        watch_streak_max_minutes=60,
     )
 
     assert posted == ["https://spade.test/capped-long-streak"]
+
+
+def test_unconfirmed_streak_stops_bypassing_points_limit_at_the_cap(monkeypatch):
+    streamer = _watch_streamer(
+        "capped-long-streak",
+        points=500,
+        points_limit=500,
+        watch_streak=True,
+        minute_watched=20,
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        priority=[Priority.STREAK],
+    )
+
+    assert posted == []
+    assert streamer.stream.watch_streak_missing is False
 
 
 def test_short_restart_streak_is_immediately_eligible(monkeypatch):
@@ -629,14 +657,18 @@ def test_pending_watch_streak_survives_beyond_eleven_minutes():
 
 
 def test_pending_watch_streak_stays_watched_until_confirmed(monkeypatch):
+    # Past the old 11-minute limit but under the default cap: still pending,
+    # so Priority.STREAK keeps the slot.
+    streamer = _watch_streamer("slow-streak", watch_streak=True, minute_watched=15)
     posted = _run_one_watch_iteration(
         monkeypatch,
-        [_watch_streamer("slow-streak", watch_streak=True, minute_watched=30)],
+        [streamer],
         streams_watched=1,
         priority=[Priority.STREAK],
     )
 
     assert posted == ["https://spade.test/slow-streak"]
+    assert streamer.stream.watch_streak_missing is True
 
 
 def test_minute_watcher_reconciles_a_streak_that_advances_mid_stream(monkeypatch):
@@ -1217,6 +1249,67 @@ def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     assert "badge (badge drop)" in watch_message
     assert "explicit (streamer)" in watch_message
     assert "badge (badge drop; badge drops)" in watch_message
+
+
+def test_pending_streak_is_labelled_points_without_streak_priority(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("points-channel", watch_streak=True, points=100)],
+        streams_watched=1,
+        priority=[Priority.ORDER],
+    )
+
+    watch_message = next(
+        message for message in messages if "Watching for points:" in message
+    )
+    assert "Watching for points: points-channel (streamer)" in watch_message
+    assert "watching for watch streak: none" in watch_message
+    entries = json.loads((tmp_path / "now_watching.json").read_text(encoding="utf-8"))
+    assert entries[0]["reason"] == "points"
+
+
+def test_pending_streak_past_points_limit_is_labelled_streak(monkeypatch, tmp_path):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("capped", watch_streak=True, points=500, points_limit=500)],
+        streams_watched=1,
+        priority=[Priority.ORDER],
+    )
+
+    entries = json.loads((tmp_path / "now_watching.json").read_text(encoding="utf-8"))
+    assert entries[0]["reason"] == "streak"
+
+
+def test_pending_streak_picked_by_an_earlier_priority_is_labelled_points(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Settings, "enable_analytics", True)
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [_watch_streamer("ordered", watch_streak=True, points=100)],
+        streams_watched=1,
+        priority=[Priority.ORDER, Priority.STREAK],
+    )
+
+    entries = json.loads((tmp_path / "now_watching.json").read_text(encoding="utf-8"))
+    assert entries[0]["reason"] == "points"
 
 
 def test_watched_streamer_log_lists_pending_watch_streak(monkeypatch):
@@ -3866,3 +3959,156 @@ def test_ban_checks_skip_offline_channels_and_forget_departed_ones(monkeypatch):
 
     assert gql.calls == [["1"]]
     assert set(twitch_out[0].channel_bans) == {"1", "8"}
+
+
+def test_minute_watched_skips_time_out_of_a_watch_slot(monkeypatch):
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    stream = Stream()
+
+    for _ in range(3):
+        stream.update_minute_watched()
+        clock[0] += 20
+    # The channel loses its watch slot for ten minutes, then gets it back.
+    # The 20 seconds from the last post until the slot was lost count; the
+    # ten minutes out of the slot don't.
+    stream.pause_minute_watched()
+    clock[0] += 600
+    stream.update_minute_watched()
+    clock[0] += 20
+    stream.update_minute_watched()
+
+    assert stream.minute_watched == pytest.approx(80 / 60, abs=1e-4)
+
+
+def test_minute_watched_counts_single_cycle_slots(monkeypatch):
+    # Two channels take turns holding one slot, a 20-second cycle each.
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    first, second = Stream(), Stream()
+
+    for _ in range(45):
+        first.update_minute_watched()
+        clock[0] += 20
+        first.pause_minute_watched()
+        second.update_minute_watched()
+        clock[0] += 20
+        second.pause_minute_watched()
+
+    # 45 slots of 20 seconds each: 15 minutes apiece.
+    assert first.minute_watched == pytest.approx(15, abs=1e-3)
+    assert second.minute_watched == pytest.approx(15, abs=1e-3)
+
+
+def test_minute_watched_counts_at_most_a_minute_for_a_stalled_watcher(monkeypatch):
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    stream = Stream()
+    stream.update_minute_watched()
+    clock[0] += 600
+
+    stream.update_minute_watched()
+
+    assert stream.minute_watched == pytest.approx(1, abs=1e-4)
+
+
+def test_watch_cycle_pauses_counters_of_unwatched_streams(monkeypatch):
+    paused = []
+    held = []
+    watched = _watch_streamer("watched", points=100)
+    waiting = _watch_streamer("waiting", points=50)
+    for streamer in (watched, waiting):
+        streamer.stream.pause_minute_watched = (
+            lambda name=streamer.username: paused.append(name)
+        )
+        streamer.stream.hold_watch_slot = lambda name=streamer.username: held.append(
+            name
+        )
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [watched, waiting],
+        streams_watched=1,
+        priority=[Priority.ORDER],
+    )
+
+    assert paused == ["waiting"]
+    assert held == ["watched"]
+
+
+def test_minute_watched_ignores_a_clock_step_backwards(monkeypatch):
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        lambda: clock[0],
+    )
+    stream = Stream()
+    stream.update_minute_watched()
+    clock[0] -= 300
+
+    stream.update_minute_watched()
+
+    assert stream.minute_watched == 0
+
+
+def test_streamer_settings_keep_their_positional_order():
+    settings = StreamerSettings(None, None, None, None, True, False, 1000)
+
+    assert settings.watch_streak is True
+    assert settings.favorite is False
+    assert settings.points_limit == 1000
+    assert settings.streak_only is None
+
+
+def test_watch_streak_max_minutes_defaults_to_twenty():
+    mine_parameter = inspect.signature(TwitchChannelPointsMiner.mine).parameters[
+        "watch_streak_max_minutes"
+    ]
+    run_parameter = inspect.signature(TwitchChannelPointsMiner.run).parameters[
+        "watch_streak_max_minutes"
+    ]
+    watcher_parameter = inspect.signature(Twitch.send_minute_watched_events).parameters[
+        "watch_streak_max_minutes"
+    ]
+
+    assert mine_parameter.default == 20
+    assert run_parameter.default == 20
+    assert watcher_parameter.default == 20
+
+
+@pytest.mark.parametrize("value", [11, 20, 45.5, 60])
+def test_watch_streak_max_minutes_in_range_is_kept(caplog, value):
+    assert _normalize_watch_streak_max_minutes(value) == float(value)
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize("value, expected", [(0, 11), (10.9, 11), (61, 60), (600, 60)])
+def test_watch_streak_max_minutes_out_of_range_is_clamped(caplog, value, expected):
+    assert _normalize_watch_streak_max_minutes(value) == expected
+    assert "watch_streak_max_minutes must be between 11 and 60" in caplog.text
+
+
+@pytest.mark.parametrize("value", [True, "20", None, float("nan"), float("inf")])
+def test_watch_streak_max_minutes_invalid_values_use_default(caplog, value):
+    assert _normalize_watch_streak_max_minutes(value) == 20
+    assert "watch_streak_max_minutes must be a number of minutes" in caplog.text
+
+
+@pytest.mark.parametrize("method", ["mine", "run"])
+def test_watch_streak_max_minutes_is_the_last_parameter(method):
+    # Appended so existing positional calls keep their meaning.
+    parameters = list(
+        inspect.signature(getattr(TwitchChannelPointsMiner, method)).parameters
+    )
+
+    assert parameters[-1] == "watch_streak_max_minutes"
+    assert parameters[-2] == "wildcard_category_pin_active"

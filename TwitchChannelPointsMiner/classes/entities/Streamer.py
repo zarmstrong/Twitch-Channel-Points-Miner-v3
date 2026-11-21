@@ -133,7 +133,6 @@ class StreamerSettings(object):
         claim_drops: bool = None,
         claim_moments: bool = None,
         watch_streak: bool = None,
-        streak_only: bool | int = None,
         favorite: bool = None,
         points_limit: int = None,
         community_goals: bool = None,
@@ -141,6 +140,9 @@ class StreamerSettings(object):
         chat: ChatPresence = None,
         gift_sub_thanks: bool = None,
         gift_sub_message: str = None,
+        # Last, so configs that pass the earlier settings positionally keep
+        # their meaning.
+        streak_only: bool | int = None,
     ):
         self.make_predictions = make_predictions
         self.follow_raid = follow_raid
@@ -214,7 +216,6 @@ class Streamer(object):
         "mutex",
         "last_drop_watch_signature",
         "watch_streak_cache",
-        "watch_streak_confirmed_at",
     ]
 
     def __init__(
@@ -260,7 +261,6 @@ class Streamer(object):
         self.history = {}
         self.last_drop_watch_signature = None
         self.watch_streak_cache = None
-        self.watch_streak_confirmed_at = 0
 
         self.streamer_url = f"{URL}/{self.username}"
 
@@ -279,15 +279,35 @@ class Streamer(object):
     def discovery_source(self):
         return discovery_source(self)
 
-    def set_offline(self):
-        broadcast_id = self.stream.broadcast_id
+    def set_offline(self, broadcast_id=None, seen_live_at=None):
+        """Mark the streamer offline.
+
+        broadcast_id and seen_live_at describe the broadcast that ended when
+        the stream already shows a newer one (an offline the miner missed).
+        """
+        if broadcast_id is None:
+            live_snapshot = getattr(self.stream, "live_snapshot", None)
+            if callable(live_snapshot):
+                # One read of both: a refresh on another thread landing
+                # between two reads would pair this broadcast's ID with the
+                # next broadcast's last-seen time and record a late end.
+                broadcast_id, snapshot_seen_live_at = live_snapshot()
+                if seen_live_at is None:
+                    # 0 (never seen live) still means "unknown" downstream.
+                    seen_live_at = snapshot_seen_live_at or 0
+            else:
+                broadcast_id = self.stream.broadcast_id
         if self.is_online is True:
             self.offline_at = time.time()
             self.is_online = False
 
             if self.watch_streak_cache is not None:
+                ended_at, seen_live = self._last_seen_live_at(seen_live_at)
                 self.watch_streak_cache.mark_ended(
-                    self.username, broadcast_id, ended_at=self.offline_at
+                    self.username,
+                    broadcast_id,
+                    ended_at=ended_at,
+                    seen_live=seen_live,
                 )
 
         self.toggle_chat()
@@ -311,17 +331,12 @@ class Streamer(object):
                     self.stream.broadcast_id,
                     started_at=self.online_at,
                 )
+                # An award processed before this transition is not carried
+                # over: receipt order can't tell this broadcast's award from a
+                # late one for the previous broadcast. The milestone check
+                # that follows going online confirms it from Twitch's data.
                 if session is not None and session.claimed is True:
                     self.stream.watch_streak_missing = False
-                elif self._watch_streak_confirmed_for_current_broadcast():
-                    # Twitch can confirm the streak before the miner notices the
-                    # channel is live, while broadcast_id still points at the
-                    # previous broadcast. Carry that confirmation over to the
-                    # broadcast we just started tracking instead of re-arming.
-                    self.stream.watch_streak_missing = False
-                    self.watch_streak_cache.mark_claimed(
-                        self.username, self.stream.broadcast_id
-                    )
                 elif (
                     self.watch_streak_cache.claimed_at_for_logical_stream(
                         self.username,
@@ -351,21 +366,27 @@ class Streamer(object):
             },
         )
 
-    def _watch_streak_confirmed_for_current_broadcast(self):
-        """Is the last streak confirmation from the broadcast being tracked?
+    def _last_seen_live_at(self, seen_live_at=None):
+        """The earliest the broadcast that just went offline can have ended.
 
-        Twitch may award the streak for a broadcast before the miner has
-        refreshed ``stream.broadcast_id`` (or before any broadcast id is known).
-        The confirmation timestamp is compared against the point where the
-        current broadcast started so a previous broadcast's streak is not
-        mistaken for this one.
+        offline_at is when the miner noticed, which can be any amount later
+        (a missed stream-down, a network outage, a suspended machine). The
+        last stream-info refresh proves the broadcast was still live then,
+        so a gap measured from it is never shorter than the real one and a
+        claim is never carried into a broadcast that started 30 or more
+        minutes after the previous one ended.
+
+        Returns (time, seen_live): seen_live is False when no live refresh is
+        known and offline_at, which may be late, is the only time available.
         """
-        confirmed_at = self.watch_streak_confirmed_at
-        if confirmed_at == 0:
-            return False
-
-        broadcast_started_at = max(self.stream_up, self.offline_at)
-        return broadcast_started_at == 0 or confirmed_at >= broadcast_started_at
+        last_seen = (
+            getattr(self.stream, "live_seen_at", 0)
+            if seen_live_at is None
+            else seen_live_at
+        ) or 0
+        if 0 < last_seen <= self.offline_at:
+            return last_seen, True
+        return self.offline_at, False
 
     def print_history(self):
         return "; ".join(
@@ -383,12 +404,17 @@ class Streamer(object):
         self.history[reason_code]["amount"] += earned
 
         if reason_code == "WATCH_STREAK":
-            self.stream.watch_streak_missing = False
-            self.watch_streak_confirmed_at = time.time()
+            # Credited to the broadcast the streak state belongs to: a refresh
+            # may already show the next broadcast's ID before the miner runs
+            # its transition, and this award can't be for that one yet.
+            credit = getattr(self.stream, "credit_watch_streak", None)
+            if callable(credit):
+                broadcast_id = credit()
+            else:
+                self.stream.watch_streak_missing = False
+                broadcast_id = self.stream.broadcast_id
             if self.watch_streak_cache is not None:
-                self.watch_streak_cache.mark_claimed(
-                    self.username, self.stream.broadcast_id
-                )
+                self.watch_streak_cache.mark_claimed(self.username, broadcast_id)
             logger.info(
                 "[watch-streak] "
                 f"Twitch confirmed streak for streamer={self.username}; "
