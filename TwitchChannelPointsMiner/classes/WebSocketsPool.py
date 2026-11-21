@@ -28,6 +28,26 @@ from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_ava
 logger = logging.getLogger(__name__)
 
 
+def _stream_down_predates_online(message, streamer):
+    """Whether Twitch sent this stream-down before the miner last marked the
+    streamer online, so it is about an earlier broadcast.
+
+    A stream-down delayed in delivery, or waiting for a refresh that found
+    the next broadcast, would otherwise take that next broadcast offline.
+    Compares Twitch's server time with the local clock: with the local clock
+    ahead, a real stream-down right after the miner went online can be
+    ignored too, and the next online check finds the stream offline instead.
+    """
+    online_at = getattr(streamer, "online_at", 0) or 0
+    if online_at <= 0:
+        return False
+    try:
+        sent_at = parser.parse(message.timestamp).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return sent_at < online_at
+
+
 class WebSocketsPool:
     __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
 
@@ -406,7 +426,15 @@ class WebSocketsPool:
                             # thread, which would otherwise put the ended
                             # broadcast back online after this.
                             with streamer_state_lock(streamer.username):
-                                if streamer.is_online is True:
+                                if streamer.is_online is not True:
+                                    pass
+                                elif _stream_down_predates_online(message, streamer):
+                                    logger.debug(
+                                        "Ignoring a stream-down for "
+                                        f"{streamer.username} sent before it "
+                                        "was last marked online"
+                                    )
+                                else:
                                     streamer.set_offline()
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():

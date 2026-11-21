@@ -146,6 +146,30 @@ def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
     assert held == [True]
 
 
+@pytest.mark.parametrize(
+    ("online_at", "expected_calls"),
+    [
+        pytest.param(1700000000.0 + 30, [], id="sent-before-online"),
+        pytest.param(1700000000.0 - 30, ["set_offline"], id="sent-after-online"),
+        pytest.param(0, ["set_offline"], id="online-time-unknown"),
+    ],
+)
+def test_stream_down_sent_before_the_streamer_went_online_is_ignored(
+    logger, online_at, expected_calls
+):
+    # A's stream-down was delayed (or waited for a refresh that found B and
+    # set B online). Twitch sent it before B went online, so it isn't B's.
+    target = FakeStreamer("predates-target", "2")
+    target.online_at = online_at
+
+    WebSocketsPool.on_message(
+        _websocket([target]),
+        _pubsub("video-playback-by-id", "2", {"type": "stream-down"}),
+    )
+
+    assert target.calls == expected_calls
+
+
 GOAL = {
     "id": "goal-1",
     "title": "Goal",
