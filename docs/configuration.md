@@ -123,8 +123,9 @@ Docker, Windows, and source checkouts all use the stable application runner. It
 loads `config/config.py`, starts analytics when configured, applies supported
 configuration migrations, watches for supported live changes, and starts
 mining. Directly constructing `TwitchChannelPointsMiner` and calling `.mine(...)`
-is the legacy `run.py` workflow; existing installations can
-[migrate from run.py](migration.md#migrating-from-runpy).
+is the legacy `run.py` workflow. The runner no longer runs a `run.py` itself: it
+converts one to `config/config.py`, and stops with an explanation when it can't.
+Existing installations can [migrate from run.py](migration.md#migrating-from-runpy).
 
 The runner checks `config/config.py` every five seconds. Set
 `TCPM_CONFIG_RELOAD_SECONDS` to change the interval in seconds. Values below one

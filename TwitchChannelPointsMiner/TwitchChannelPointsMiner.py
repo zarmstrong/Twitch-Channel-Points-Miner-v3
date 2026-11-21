@@ -489,7 +489,7 @@ class TwitchChannelPointsMiner:
 
         # Fixes TypeError: 'NoneType' object is not subscriptable
         if not username or username == "your-twitch-username":
-            logger.error("Please edit your runner file (usually run.py) and try again.")
+            logger.error("Please set your Twitch username in config.py and try again.")
             logger.error("No username, exiting...")
             sys.exit(0)
         if (
@@ -685,18 +685,6 @@ class TwitchChannelPointsMiner:
         if self._daily_report_enabled():
             self.twitch.restore_drop_report_state(
                 self.daily_report_drop_progress_latest
-            )
-
-        if os.environ.pop("TCPM_LEGACY_CONFIG_NOTICE", None):
-            logger.warning(
-                "Docker configuration update required: mount "
-                "/usr/src/app/config to enable automatic conversion from run.py. "
-                "The existing run.py is still running and has not been modified.",
-                extra={
-                    "emoji": ":warning:",
-                    "event": Events.CONFIGURATION,
-                    "force_alert": True,
-                },
             )
 
         logger.info(f"Twitch Channel Points Miner - {__version__}")

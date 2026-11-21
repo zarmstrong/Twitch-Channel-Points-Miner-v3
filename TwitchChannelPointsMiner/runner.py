@@ -318,23 +318,25 @@ def restart_process():
     return os.execv(sys.executable, [sys.executable, "-u", *sys.orig_argv[1:]])
 
 
-def _run_legacy(runner, reason):
-    print(
-        f"CONFIGURATION UPDATE REQUIRED: {reason} The existing {runner} will "
-        "run unchanged. Mount a persistent config directory at "
-        "/usr/src/app/config and recreate the container.",
-        file=sys.stderr,
-        flush=True,
+def _legacy_runner_stop(message):
+    """Stop instead of starting. A legacy run.py is only converted to
+    config.py now; it is never run unchanged."""
+    raise RuntimeError(
+        f"CONFIGURATION UPDATE REQUIRED: {message} See "
+        "docs/migration.md#migrating-from-runpy."
     )
-    if not runner.is_file():
-        raise RuntimeError(f"Legacy runner not found: {runner}")
-    environment = os.environ.copy()
-    environment["TCPM_LEGACY_CONFIG_NOTICE"] = "1"
-    os.execve(
-        sys.executable,
-        [sys.executable, "-u", str(runner)],
-        environment,
+
+
+def _conversion_failed(runner, config_path, error):
+    message = (
+        f"Couldn't convert {runner} to {config_path}: {error}. run.py is no "
+        "longer run directly: correct it and start again, or write "
+        f"{config_path} yourself from config.example.py."
     )
+    backup = runner.with_name(runner.name + ".bak")
+    if not runner.exists() and backup.exists():
+        message += f" Your original file is kept as {backup}."
+    _legacy_runner_stop(message)
 
 
 def _create_default_config(config_path, template=None):
@@ -364,7 +366,19 @@ def main(argv=None, on_miner_ready=None):
     if not args.config_dir.is_dir():
         if args.convert_only:
             parser.error(f"configuration directory does not exist: {args.config_dir}")
-        return _run_legacy(args.legacy_runner, "The config directory is not mounted.")
+        if args.legacy_runner.is_file():
+            _legacy_runner_stop(
+                f"The config directory {args.config_dir} does not exist. Mount a "
+                "persistent config directory there (in Docker, "
+                "/usr/src/app/config) and start again: "
+                f"{args.legacy_runner} is then converted to config.py "
+                "automatically. run.py is no longer run directly."
+            )
+        _legacy_runner_stop(
+            f"The config directory {args.config_dir} does not exist. Create it "
+            "(in Docker, mount a persistent directory at /usr/src/app/config) "
+            "and start again."
+        )
 
     if not config_path.is_file():
         if not args.legacy_runner.is_file():
@@ -382,7 +396,13 @@ def main(argv=None, on_miner_ready=None):
             )
             return 0
         if os.environ.get("TCPM_DISABLE_AUTO_CONVERSION") == "1":
-            return _run_legacy(args.legacy_runner, "Automatic conversion is disabled.")
+            _legacy_runner_stop(
+                f"{config_path} does not exist, and automatic conversion of "
+                f"{args.legacy_runner} is turned off "
+                "(TCPM_DISABLE_AUTO_CONVERSION=1). run.py is no longer run "
+                "directly: unset TCPM_DISABLE_AUTO_CONVERSION to convert it, or "
+                f"write {config_path} yourself from config.example.py."
+            )
         try:
             convert_runner(args.legacy_runner, config_path)
             config = _load_config(config_path)
@@ -396,7 +416,7 @@ def main(argv=None, on_miner_ready=None):
                     incomplete.unlink(missing_ok=True)
                 except OSError:
                     pass
-            return _run_legacy(args.legacy_runner, f"Conversion failed: {error}")
+            _conversion_failed(args.legacy_runner, config_path, error)
 
     if args.convert_only:
         return 0

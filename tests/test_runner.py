@@ -197,6 +197,139 @@ def test_main_still_converts_existing_legacy_runner(tmp_path, monkeypatch):
     ]
 
 
+@pytest.fixture
+def no_legacy_exec(monkeypatch):
+    """Record any attempt to replace the runner with run.py, and check after
+    the test that there was none. It never raises, so the environment passed
+    to execve (which can hold secrets) never shows up in a traceback."""
+    launched = []
+    monkeypatch.setattr(
+        runner.os, "execve", lambda path, argv, env: launched.append(argv[1:])
+    )
+    yield
+    assert launched == [], "the runner ran a legacy runner"
+
+
+def _run_cli(*args):
+    return runner.cli([str(arg) for arg in args])
+
+
+def test_missing_config_dir_with_run_py_stops_instead_of_running_it(
+    tmp_path, no_legacy_exec, capsys
+):
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text("legacy", encoding="utf-8")
+
+    result = _run_cli(
+        "--config-dir", tmp_path / "config", "--legacy-runner", legacy_runner
+    )
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert "CONFIGURATION UPDATE REQUIRED" in error
+    assert "Mount a persistent config directory" in error
+    assert "run.py is no longer run directly" in error
+    assert "docs/migration.md#migrating-from-runpy" in error
+
+
+def test_missing_config_dir_without_run_py_says_to_create_it(
+    tmp_path, no_legacy_exec, capsys
+):
+    result = _run_cli(
+        "--config-dir",
+        tmp_path / "config",
+        "--legacy-runner",
+        tmp_path / "run.py",
+    )
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert "does not exist. Create it" in error
+    assert "Legacy runner not found" not in error
+
+
+def test_disabled_conversion_stops_and_leaves_run_py_alone(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text("legacy", encoding="utf-8")
+    monkeypatch.setenv("TCPM_DISABLE_AUTO_CONVERSION", "1")
+    monkeypatch.setattr(
+        runner,
+        "convert_runner",
+        lambda *args: pytest.fail("converted although conversion is disabled"),
+    )
+
+    result = _run_cli("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert "TCPM_DISABLE_AUTO_CONVERSION=1" in error
+    assert legacy_runner.read_text(encoding="utf-8") == "legacy"
+    assert not (config_dir / "config.py").exists()
+
+
+@pytest.mark.parametrize("convert_only", [False, True])
+def test_failed_conversion_stops_and_removes_the_partial_config(
+    tmp_path, no_legacy_exec, capsys, convert_only
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    # Not a conventional runner: no TwitchChannelPointsMiner(...) call.
+    legacy_runner.write_text("print('hello')\n", encoding="utf-8")
+    args = ["--config-dir", config_dir, "--legacy-runner", legacy_runner]
+
+    result = _run_cli(*args, *(["--convert-only"] if convert_only else []))
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert f"Couldn't convert {legacy_runner}" in error
+    assert "write" in error and "config.example.py" in error
+    assert legacy_runner.is_file()
+    assert not (config_dir / "config.py").exists()
+    assert not (config_dir / ".converted-from-run-py").exists()
+
+
+def test_failed_load_after_conversion_names_the_kept_original(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text("legacy", encoding="utf-8")
+
+    def convert(source, destination):
+        destination.write_text("broken = (\n", encoding="utf-8")
+        source.rename(source.with_name("run.py.bak"))
+
+    def load(path):
+        raise RuntimeError(f"Unable to migrate configuration {path}")
+
+    monkeypatch.setattr(runner, "convert_runner", convert)
+    monkeypatch.setattr(runner, "_load_config", load)
+
+    result = _run_cli("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert f"Your original file is kept as {tmp_path / 'run.py.bak'}" in error
+    assert not (config_dir / "config.py").exists()
+
+
+def test_miner_no_longer_reads_the_legacy_runner_notice():
+    source = (Path(runner.__file__).with_name("TwitchChannelPointsMiner.py")).read_text(
+        encoding="utf-8"
+    )
+
+    assert "TCPM_LEGACY_CONFIG_NOTICE" not in source
+    assert "TCPM_LEGACY_CONFIG_NOTICE" not in Path(runner.__file__).read_text(
+        encoding="utf-8"
+    )
+
+
 def test_load_config_reports_missing_import(tmp_path):
     config = tmp_path / "config.py"
     config.write_text(
