@@ -161,6 +161,9 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
                 "limit": 2,
                 "sort_by": "VIEWERS_DESC",
                 "respect_campaign_restrictions": False,
+                # A reward campaign in the game does not open a badge
+                # Drop's search to channels without the Drops tag (#348).
+                "include_watch_rewards": False,
             },
         ),
         (
@@ -176,6 +179,7 @@ def test_auto_mine_badge_campaigns_adds_drop_streamers_and_honors_blacklist():
                         "drops": [],
                     }
                 ],
+                "include_watch_rewards": False,
             },
         ),
     ]
