@@ -2433,3 +2433,34 @@ def test_deferred_stream_down_yields_to_a_later_refresh_that_found_it_live():
     _join_threads_named("stream-down-overtaken")
 
     assert streamer.is_online is True
+
+
+def test_broadcast_still_live_after_a_restart_reopens_its_session(
+    tmp_path, monkeypatch
+):
+    # The miner marked the broadcast offline, restarted, and finds it live:
+    # its session must record the real end later, not the stale one.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    path = tmp_path / "watch-streak.json"
+    cache = WatchStreakCache.load(path, "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    clock[0] += 60
+    streamer.set_offline()
+
+    clock[0] += 5 * 60
+    restarted = make_streamer("channel")
+    restarted.watch_streak_cache = WatchStreakCache.load(path, "viewer")
+    _refresh_live_stream(restarted, "broadcast-1")
+    restarted.set_online()
+
+    assert restarted.watch_streak_cache.get("channel", "broadcast-1").ended_at is None
+    clock[0] += 60 * 60
+    _refresh_live_stream(restarted, "broadcast-1")
+    restarted.set_offline()
+    assert restarted.watch_streak_cache.get("channel", "broadcast-1").ended_at == (
+        clock[0]
+    )

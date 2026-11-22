@@ -449,6 +449,13 @@ class Streamer(object):
                     self.stream.broadcast_id,
                     started_at=self.online_at,
                 )
+                if session is not None and session.ended_at is not None:
+                    # A broadcast the cache had seen end is live again (marked
+                    # offline before the miner restarted): reopen it, so its
+                    # real end is recorded when it comes.
+                    self.watch_streak_cache.reopen(
+                        self.username, self.stream.broadcast_id
+                    )
                 # An award processed before this transition is not carried
                 # over: receipt order can't tell this broadcast's award from a
                 # late one for the previous broadcast. The milestone check
