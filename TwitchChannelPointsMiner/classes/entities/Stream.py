@@ -20,6 +20,9 @@ MINUTE_WATCHED_MAX_STEP_SECONDS = 60
 # the next broadcast.
 _WATCH_STREAK_LOCK = threading.Lock()
 
+# Stream.update_minute_watched() without a broadcast to check.
+_ANY_BROADCAST = object()
+
 
 class Stream(object):
     __slots__ = [
@@ -352,13 +355,22 @@ class Stream(object):
         self.__count_watch_slot_step(time.monotonic())
         self.__watch_slot_timestamp = 0
 
-    def update_minute_watched(self):
+    def update_minute_watched(self, broadcast_id=_ANY_BROADCAST):
+        """Count a successful minute-watched post.
+
+        broadcast_id is the broadcast the streak state belonged to when the
+        post went out: a reply that arrives after the state was reset for
+        the next broadcast is not that broadcast's watch time.
+        """
         # Under the lock the per-broadcast reset takes, so a step measured on
         # one broadcast can't be added to the next broadcast's fresh count.
         # On the monotonic clock, like the slot time: a wall clock correction
         # can't add or remove watched time.
         with _WATCH_STREAK_LOCK:
-            if self.__timers_stopped:
+            if self.__timers_stopped or (
+                broadcast_id is not _ANY_BROADCAST
+                and broadcast_id != self.watch_streak_broadcast_id
+            ):
                 return
             now = time.monotonic()
             self.__count_minute_watched_step(now)

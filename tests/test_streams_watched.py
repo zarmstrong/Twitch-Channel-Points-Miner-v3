@@ -131,7 +131,7 @@ def _watch_streamer(
     from_category = from_category or from_wildcard_category or from_badge_campaign
     stream = SimpleNamespace(
         update_elapsed=lambda: 0,
-        update_minute_watched=lambda: None,
+        update_minute_watched=lambda **kwargs: None,
         spade_url=f"https://spade.test/{username}",
         encode_payload=lambda: "payload",
         campaigns=[],
@@ -4146,3 +4146,47 @@ def test_watch_streak_max_minutes_is_the_last_parameter(method):
 
     assert parameters[-1] == "watch_streak_max_minutes"
     assert parameters[-2] == "wildcard_category_pin_active"
+
+
+def test_minute_watched_reply_names_the_broadcast_it_was_posted_for(monkeypatch):
+    # The streak state is reset for the next broadcast while the post is out:
+    # the reply's watch time is the previous broadcast's.
+    streamer = _watch_streamer("resetting", points=100)
+    streamer.stream.watch_streak_broadcast_id = "broadcast-1"
+    counted = []
+    streamer.stream.update_minute_watched = lambda **kwargs: counted.append(kwargs)
+
+    class AnsweredAfterTheReset:
+        @property
+        def status_code(self):
+            streamer.stream.watch_streak_broadcast_id = "broadcast-2"
+            return 204
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [streamer],
+        streams_watched=1,
+        post_side_effects=[AnsweredAfterTheReset()],
+    )
+
+    assert counted == [{"broadcast_id": "broadcast-1"}]
+
+
+def test_minute_watched_reply_for_a_previous_broadcast_is_not_counted(monkeypatch):
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.monotonic",
+        lambda: clock[0],
+    )
+    stream = Stream()
+    stream.broadcast_id = "broadcast-2"
+    stream.init_watch_streak()
+
+    stream.update_minute_watched(broadcast_id="broadcast-1")
+    clock[0] += 20
+    stream.pause_minute_watched()
+    stream.update_minute_watched(broadcast_id="broadcast-2")
+    clock[0] += 20
+    stream.update_minute_watched(broadcast_id="broadcast-2")
+
+    assert stream.minute_watched == pytest.approx(20 / 60, abs=1e-4)

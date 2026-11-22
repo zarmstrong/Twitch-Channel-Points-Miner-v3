@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import random
@@ -17,7 +18,7 @@ from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     bump_streamer_state,
     is_drop_discovered,
-    streamer_state_lock,
+    run_under_state_lock,
 )
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
@@ -44,6 +45,24 @@ def _sent_at(message):
         return sent.timestamp()
     except (ValueError, OverflowError, OSError):
         return None
+
+
+def _apply_stream_down(message, streamer):
+    """Handle a stream-down; called under the streamer's state lock."""
+    if streamer.is_online is not True:
+        return
+    if _stream_down_predates_online(message, streamer):
+        # Ask Twitch on the next online check instead of ending a broadcast
+        # that may still be live.
+        request_refresh = getattr(streamer.stream, "request_refresh", None)
+        if callable(request_refresh):
+            request_refresh()
+        logger.debug(
+            f"Rechecking a stream-down for {streamer.username} sent before "
+            "it was last marked online"
+        )
+        return
+    streamer.set_offline()
 
 
 def _check_online_in_background(twitch, streamer):
@@ -458,32 +477,20 @@ class WebSocketsPool:
                         if message.type == "stream-up":
                             streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            # Only the state lock: a refresh holds it just to
-                            # apply its reply, never across its requests. The
-                            # bump makes a refresh whose requests are out drop
-                            # its reply, which may predate this stream-down,
-                            # instead of putting the ended broadcast back
-                            # online.
-                            with streamer_state_lock(streamer.username):
-                                bump_streamer_state(streamer.username)
-                                if streamer.is_online is not True:
-                                    pass
-                                elif _stream_down_predates_online(message, streamer):
-                                    # Ask Twitch on the next online check
-                                    # instead of ending a broadcast that may
-                                    # still be live.
-                                    request_refresh = getattr(
-                                        streamer.stream, "request_refresh", None
-                                    )
-                                    if callable(request_refresh):
-                                        request_refresh()
-                                    logger.debug(
-                                        "Rechecking a stream-down for "
-                                        f"{streamer.username} sent before it "
-                                        "was last marked online"
-                                    )
-                                else:
-                                    streamer.set_offline()
+                            # The bump makes a refresh whose requests are out
+                            # drop its reply, which may predate this
+                            # stream-down, instead of putting the ended
+                            # broadcast back online. The rest runs under the
+                            # state lock, deferred if a refresh is applying
+                            # its reply right now.
+                            bump_streamer_state(streamer.username)
+                            run_under_state_lock(
+                                streamer.username,
+                                functools.partial(
+                                    _apply_stream_down, message, streamer
+                                ),
+                                "stream-down",
+                            )
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():
                                 _check_online_in_background(ws.twitch, streamer)

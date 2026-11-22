@@ -8289,6 +8289,12 @@ class Twitch(object):
                             )
                             continue
                         spade_url_warned.discard(streamer.username)
+                        # The broadcast this post's watch time belongs to,
+                        # in case the state is reset for the next one before
+                        # Twitch answers.
+                        posted_for = getattr(
+                            streamer.stream, "watch_streak_broadcast_id", None
+                        )
                         for attempt in range(2):
                             try:
                                 response = HttpSession.post(
@@ -8311,7 +8317,9 @@ class Twitch(object):
                             f"Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
-                            streamer.stream.update_minute_watched()
+                            streamer.stream.update_minute_watched(
+                                broadcast_id=posted_for
+                            )
 
                             """
                             Remember, you can only earn progress towards a time-based Drop on one participating channel at a time.  [ ! ! ! ]

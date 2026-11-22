@@ -2330,3 +2330,59 @@ def test_a_reply_in_flight_at_offline_and_a_cycle_while_offline_count_nothing(
 
     assert streamer.stream.minute_watched == pytest.approx(0.5, abs=1e-3)
     assert streamer.stream.watch_streak_minutes() == pytest.approx(0.5, abs=1e-3)
+
+
+def _join_threads_named(prefix):
+    for thread in threading.enumerate():
+        if thread.name.startswith(prefix):
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+
+def test_stream_down_while_a_reply_is_applied_does_not_hold_up_the_socket(
+    monkeypatch,
+):
+    # Another thread holds the state lock while it applies a refresh (which
+    # saves the cache and joins chat). The stream-down returns at once and is
+    # applied when that thread is done.
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        streamer_state_lock,
+    )
+    from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+
+    streamer = make_streamer("busy-state")
+    streamer.channel_id = "45"
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.online_at -= 60 * 60
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with streamer_state_lock("busy-state"):
+            holding.set()
+            assert release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert holding.wait(timeout=5)
+    try:
+        handled = _run_with_timeout(
+            WebSocketsPool.on_message,
+            _websocket_for(streamer),
+            _stream_down("45", time.time()),
+        )
+        awarded = _run_with_timeout(
+            streamer.update_history, "WATCH_STREAK", 450, 1, time.time()
+        )
+        assert streamer.is_online is True
+        assert streamer.stream.watch_streak_missing is True
+    finally:
+        release.set()
+        holder.join(timeout=5)
+    _join_threads_named("stream-down-busy-state")
+    _join_threads_named("watch-streak-award-busy-state")
+
+    assert handled and awarded
+    assert streamer.is_online is False
+    assert streamer.stream.watch_streak_missing is False

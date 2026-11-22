@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from threading import Lock, RLock
+from threading import Lock, RLock, Thread
 
 from TwitchChannelPointsMiner.classes.Chat import (
     DEFAULT_GIFT_SUB_MESSAGE,
@@ -151,6 +151,34 @@ def streamer_refresh_lock(username):
 def streamer_state_lock(username):
     """Return the lock that guards this channel's online state."""
     return _keyed_lock(_streamer_state_locks, username)
+
+
+def run_under_state_lock(username, action, name):
+    """Run action() under the channel's state lock without waiting for it.
+
+    At once when the lock is free; otherwise on a short-lived thread that
+    waits for it. A refresh applying its reply holds the lock while it saves
+    the watch-streak cache and joins or leaves chat, and a websocket handler
+    must not wait for that: the socket's later messages would wait too.
+    """
+    lock = streamer_state_lock(username)
+    if lock.acquire(blocking=False):
+        try:
+            action()
+        finally:
+            lock.release()
+        return
+
+    def deferred():
+        with lock:
+            try:
+                action()
+            except Exception:
+                logger.error(
+                    f"Exception raised in {name} for {username}", exc_info=True
+                )
+
+    Thread(target=deferred, name=f"{name}-{username}", daemon=True).start()
 
 
 def streamer_state_generation(username):
@@ -524,8 +552,11 @@ class Streamer(object):
         if reason_code == "WATCH_STREAK":
             # The channel lock keeps a broadcast transition from landing
             # between deciding which broadcast earned this and crediting it.
-            with streamer_state_lock(self.username):
-                self.__credit_watch_streak(awarded_at)
+            run_under_state_lock(
+                self.username,
+                lambda: self.__credit_watch_streak(awarded_at),
+                "watch-streak-award",
+            )
 
     def __credit_watch_streak(self, awarded_at):
         if self.sent_before_online(awarded_at):
