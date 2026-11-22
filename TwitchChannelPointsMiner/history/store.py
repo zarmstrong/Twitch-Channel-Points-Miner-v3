@@ -338,6 +338,12 @@ class HistorySchemaError(RuntimeError):
     """The database was written by a newer build than this one."""
 
 
+# A session listed for a window started in it or was still going in it, so a
+# watch or broadcast that began before midnight is listed for today too.  Takes
+# the window start twice.
+_OVERLAPS_WINDOW = "(started_at >= ? OR ended_at IS NULL OR ended_at >= ?)"
+
+
 class HistoryStore(object):
     """Small, thread-safe SQLite history store.
 
@@ -1964,18 +1970,19 @@ class HistoryStore(object):
             ).fetchall()
             # The newest 100 of each within the same window as the totals.
             watch_rows = connection.execute(
-                """
-                SELECT * FROM watch_sessions WHERE streamer = ? AND started_at >= ?
+                f"""
+                SELECT * FROM watch_sessions
+                WHERE streamer = ? AND {_OVERLAPS_WINDOW}
                 ORDER BY started_at DESC LIMIT 100
                 """,
-                (streamer, cutoff),
+                (streamer, cutoff, cutoff),
             ).fetchall()
             stream_rows = connection.execute(
-                """
-                SELECT * FROM streams WHERE streamer = ? AND started_at >= ?
+                f"""
+                SELECT * FROM streams WHERE streamer = ? AND {_OVERLAPS_WINDOW}
                 ORDER BY started_at DESC LIMIT 100
                 """,
-                (streamer, cutoff),
+                (streamer, cutoff, cutoff),
             ).fetchall()
             event_rows = connection.execute(
                 """
@@ -2079,8 +2086,8 @@ class HistoryStore(object):
         offset = max(0, int(offset))
         with self._read_connection() as connection:
             if kind == "stream":
-                where = "started_at >= ? AND (? IS NULL OR streamer = ?)"
-                params = (cutoff, streamer, streamer)
+                where = f"{_OVERLAPS_WINDOW} AND (? IS NULL OR streamer = ?)"
+                params = (cutoff, cutoff, streamer, streamer)
                 total = connection.execute(
                     f"SELECT COUNT(*) FROM streams WHERE {where}", params
                 ).fetchone()[0]
@@ -2102,14 +2109,15 @@ class HistoryStore(object):
                     items.append(item)
             elif kind == "run":
                 total = connection.execute(
-                    "SELECT COUNT(*) FROM runs WHERE started_at >= ?", (cutoff,)
+                    f"SELECT COUNT(*) FROM runs WHERE {_OVERLAPS_WINDOW}",
+                    (cutoff, cutoff),
                 ).fetchone()[0]
                 rows = connection.execute(
-                    """
-                    SELECT * FROM runs WHERE started_at >= ?
+                    f"""
+                    SELECT * FROM runs WHERE {_OVERLAPS_WINDOW}
                     ORDER BY started_at DESC LIMIT ? OFFSET ?
                     """,
-                    (cutoff, limit, offset),
+                    (cutoff, cutoff, limit, offset),
                 ).fetchall()
                 items = []
                 for row in rows:
@@ -2119,8 +2127,8 @@ class HistoryStore(object):
                     item["active"] = item["ended_at"] is None
                     items.append(item)
             else:
-                where = "started_at >= ? AND (? IS NULL OR streamer = ?)"
-                params = (cutoff, streamer, streamer)
+                where = f"{_OVERLAPS_WINDOW} AND (? IS NULL OR streamer = ?)"
+                params = (cutoff, cutoff, streamer, streamer)
                 total = connection.execute(
                     f"SELECT COUNT(*) FROM watch_sessions WHERE {where}", params
                 ).fetchone()[0]

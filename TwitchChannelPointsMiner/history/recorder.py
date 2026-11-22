@@ -1478,9 +1478,15 @@ class HistoryRecorder(threading.Thread):
             if isinstance(streamer, dict):
                 username = streamer.get("username") or streamer.get("streamer")
                 balance = streamer.get("channel_points")
+                loaded = streamer.get("channel_points_loaded", True)
             else:
                 username = getattr(streamer, "username", None)
                 balance = getattr(streamer, "channel_points", None)
+                loaded = getattr(streamer, "channel_points_loaded", True)
+            if loaded is False:
+                # The 0 a streamer starts with is not a balance until the
+                # miner read one from Twitch.
+                continue
             username = _clean_streamer(username)
             if username not in configured or isinstance(balance, bool):
                 continue

@@ -510,7 +510,21 @@ def test_streamer_detail_lists_use_the_days_window(store):
 
     assert [item["type"] for item in detail["events"]] == ["lose"]
     assert detail["streams"] == []
-    assert detail["watch_sessions"] == []
+    # Still going today, so it is listed for today.
+    assert [item["started_at"] for item in detail["watch_sessions"]] == [yesterday]
+
+
+def test_session_lists_include_sessions_still_going_in_the_window(store):
+    yesterday = NOW - 24 * 60 * 60
+    store.upsert_stream_session("alice", "b0", yesterday - 600, ended_at=yesterday)
+    store.upsert_stream_session("alice", "b1", yesterday + 60)
+    store.start_watch_session("alice", "points", yesterday + 60)
+    store.start_run("1.0", started_at=yesterday + 30)
+
+    streams = store.sessions(kind="stream", days=1, now=NOW)
+    assert [item["broadcast_id"] for item in streams["sessions"]] == ["b1"]
+    assert store.sessions(kind="watch", days=1, now=NOW)["total"] == 1
+    assert store.sessions(kind="run", days=1, now=NOW)["total"] == 1
 
 
 def test_version_1_database_migrates_in_place(tmp_path):
@@ -588,7 +602,8 @@ def test_sessions_and_events_use_the_same_days_window(store):
 
     assert store.events(days=1, now=NOW)["total"] == 0
     assert store.sessions(kind="stream", days=1, now=NOW)["total"] == 0
-    assert store.sessions(kind="watch", days=1, now=NOW)["total"] == 0
+    # The watch is still open, so it is listed for today.
+    assert store.sessions(kind="watch", days=1, now=NOW)["total"] == 1
     assert store.events(days=2, now=NOW)["total"] == 1
 
 

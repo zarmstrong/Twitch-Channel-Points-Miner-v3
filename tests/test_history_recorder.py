@@ -4011,3 +4011,69 @@ def test_a_balance_read_mid_write_is_replaced_by_the_files_start(tmp_path):
         assert window["points_spent"] == 0
     finally:
         recorder._shutdown()
+
+
+def test_a_balance_never_loaded_from_twitch_is_not_a_baseline(tmp_path):
+    from types import SimpleNamespace
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    # Loading bob's balance failed, so the miner still holds its initial 0.
+    bob = SimpleNamespace(
+        username="bob", channel_points=0, channel_points_loaded=False, is_online=False
+    )
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: [bob],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        # PubSub then reports the real balance, with no Start entry.
+        _write_json(
+            analytics / "bob.json",
+            {"series": [{"x": int(NOW * 1000), "y": 10050, "z": "Watch"}]},
+            NOW + 1,
+        )
+        clock.value = NOW + 15
+        recorder.poll_once()
+
+        window = store.overview(days=1, now=clock.value)["window"]
+        assert window["points_gained"] == 0
+    finally:
+        recorder._shutdown()
+
+
+def test_stopping_history_again_gives_up_on_a_stuck_drain(monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    class StoppedRecorder:
+        ident = 1
+
+        def is_alive(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def drain(self):
+            release.wait(5)
+
+    monkeypatch.setattr(history_module, "_recorder", StoppedRecorder())
+    try:
+        assert history_module.stop_history(timeout=0.05) is False
+    finally:
+        release.set()

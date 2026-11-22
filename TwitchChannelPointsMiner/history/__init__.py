@@ -197,9 +197,22 @@ def stop_history(timeout=10):
         if already_stopped:
             # Stopped earlier (the Windows shell stops it when the runner
             # returns, before the workers finish); take in what they wrote
-            # since.
-            recorder.drain()
+            # since, within the same timeout.
+            drainer = threading.Thread(
+                target=_drain, args=(recorder,), name="HistoryDrain", daemon=True
+            )
+            drainer.start()
+            drainer.join(timeout=timeout)
+            if drainer.is_alive():
+                return False
     return True
+
+
+def _drain(recorder):
+    try:
+        recorder.drain()
+    except Exception:
+        logger.warning("Unable to import the last History changes", exc_info=True)
 
 
 class HistoryUnavailableError(RuntimeError):
