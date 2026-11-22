@@ -968,7 +968,7 @@ class HistoryRecorder(threading.Thread):
             # An earlier close failed after crediting the watch up to its end;
             # retrying with a later time would credit time not watched.
             ended_at = min(float(ended_at), active["closing_at"])
-        if credit and float(ended_at) > float(active["last_tick"]):
+        if credit:
             # The watch lasted until the snapshot that ended it was written;
             # count that final interval too.
             self._tick_watch(streamer, ended_at)
@@ -1050,6 +1050,8 @@ class HistoryRecorder(threading.Thread):
                 title=entry["title"],
                 game=entry["game"],
                 source="online",
+                # The live snapshot is current: no category means none.
+                clear_game=entry["game"] is None,
             )
             self.store.resume_stream_session(streamer, broadcast_id, timestamp=now)
             # The snapshot proves the broadcast is live, so the startup guard

@@ -518,3 +518,24 @@ def test_unsupported_cache_version_starts_empty(tmp_path, caplog):
 
     assert cache.get("channel", "broadcast-1") is None
     assert "Unsupported watch-streak cache version 999" in caplog.text
+
+
+def test_reconciled_streak_keeps_the_time_twitch_awarded_it(tmp_path):
+    from datetime import timezone
+
+    streamer, cache = make_streak_streamer(tmp_path)
+    awarded = datetime(2026, 10, 26, 17, 50, 0)
+    live_stream = SimpleNamespace(
+        id="broadcast-1",
+        created_at=datetime(2026, 10, 26, 17, 45, 7),
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=awarded,
+        expires_at=datetime(2099, 1, 1, 0, 0, 0),
+    )
+    twitch = twitch_with_streak_responses(live_stream, milestone)
+
+    assert twitch.reconcile_watch_streak(streamer) is True
+    assert cache.get("channel", "broadcast-1").claimed_at == (
+        awarded.replace(tzinfo=timezone.utc).timestamp()
+    )

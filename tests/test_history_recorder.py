@@ -3538,3 +3538,75 @@ def test_a_backward_clock_correction_keeps_the_watch_time(tmp_path):
         assert session["watch_seconds"] == 20
     finally:
         recorder._shutdown()
+
+
+def test_a_watch_closed_after_the_clock_was_set_back_keeps_its_time(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    clock = FakeClock(NOW)
+    elapsed = FakeClock(1000.0)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        monotonic=elapsed,
+    )
+    recorder._prepare()
+    path = analytics / "now_watching.json"
+    try:
+        _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+        clock.value = NOW + 1
+        elapsed.value = 1001.0
+        recorder._poll_now_watching()
+        # 20 seconds later, with the clock set back 120 seconds, bob is no
+        # longer watched.
+        clock.value = NOW - 99
+        elapsed.value = 1021.0
+        _write_json(path, [], NOW - 99)
+        recorder._poll_now_watching()
+
+        session = store.sessions(kind="watch", days=1, now=NOW + 1)["sessions"][0]
+        assert session["watch_seconds"] == 20
+        assert session["ended_at"] >= session["started_at"]
+    finally:
+        recorder._shutdown()
+
+
+def test_a_category_cleared_while_stopped_is_cleared_on_restart(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    store.upsert_stream_session("bob", "b1", NOW, game="Chess")
+    # The miner restarts during b1, whose category was cleared meanwhile.
+    snapshot = [
+        {
+            "username": "bob",
+            "broadcast_id": "b1",
+            "online_at": NOW,
+            "is_online": True,
+            "game": {},
+        }
+    ]
+    clock = FakeClock(NOW + 600)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        clock.value = NOW + 630
+        recorder.poll_once()
+        live = store.streamers(days=1, now=clock.value)[0]["live_stream"]
+        assert live["game"] is None
+    finally:
+        recorder._shutdown()

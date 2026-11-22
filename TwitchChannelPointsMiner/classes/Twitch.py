@@ -2026,8 +2026,14 @@ class Twitch(object):
 
         stream.watch_streak_missing = False
         if getattr(streamer, "watch_streak_cache", None) is not None:
+            # Record when Twitch awarded it, not now: the claim may be long
+            # past (a rebuilt cache), and History matches claims by time.
             streamer.watch_streak_cache.mark_claimed(
-                streamer.username, stream.broadcast_id
+                streamer.username,
+                stream.broadcast_id,
+                claimed_at=milestone.achievement_timestamp.replace(
+                    tzinfo=timezone.utc
+                ).timestamp(),
             )
         logger.info(
             "[watch-streak] Twitch already confirmed streak for "

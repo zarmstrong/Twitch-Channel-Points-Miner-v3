@@ -871,6 +871,7 @@ class HistoryStore(object):
         source="observed",
         observed_end=False,
         estimated_end=False,
+        clear_game=False,
     ):
         """Create or update one observed live session.
 
@@ -962,7 +963,7 @@ class HistoryStore(object):
                     END,
                     last_seen_at = MAX(streams.last_seen_at, ?),
                     title = COALESCE(?, streams.title),
-                    game = COALESCE(?, streams.game),
+                    game = CASE WHEN ? THEN NULL ELSE COALESCE(?, streams.game) END,
                     source = ?
                 WHERE id = ?
                 """,
@@ -980,6 +981,7 @@ class HistoryStore(object):
                     1,
                     last_seen_at,
                     title,
+                    1 if clear_game and game is None else 0,
                     game,
                     source,
                     int(existing["id"]),
@@ -1201,7 +1203,8 @@ class HistoryStore(object):
         with self._write_connection() as connection:
             connection.execute(
                 """
-                UPDATE watch_sessions SET ended_at = COALESCE(ended_at, ?),
+                UPDATE watch_sessions
+                SET ended_at = COALESCE(ended_at, MAX(started_at, ?)),
                     last_seen_at = MAX(last_seen_at, ?)
                 WHERE id = ?
                 """,
