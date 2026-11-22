@@ -525,6 +525,8 @@
     var logPollInterval = parseInt("{{ logPollInterval }}");
     var dateFormat = {{ dateFormat | tojson }};
     var updateDismissalCookie = {{ updateDismissalCookie | tojson }};
+    var minerInstance = {{ minerInstance | tojson }};
+    var minerProbeUrl = {{ url_for('static', filename='style.css') | tojson }};
 </script>
 <script type="text/javascript" src="{{url_for('static', filename='tail_buffer.js', v=assetVersion)}}"></script>
 <script type="text/javascript" src="{{url_for('static', filename='script.js', v=assetVersion)}}"></script>
