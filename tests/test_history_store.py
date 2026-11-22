@@ -750,3 +750,22 @@ def test_one_read_sees_one_snapshot_while_the_recorder_writes(store):
         store.record_points("alice", NOW + 60, 160, 10, "WATCH")
         second = connection.execute("SELECT COUNT(*) FROM points").fetchone()[0]
     assert first == second == 1
+
+
+def test_streamer_detail_summary_reads_the_same_snapshot(store, monkeypatch):
+    store.record_points("alice", NOW, 100, 40, "WATCH")
+    original = store.streamers
+    written = []
+
+    def write_then_read(*args, **kwargs):
+        if not written:
+            written.append(1)
+            store.record_points("alice", NOW + 60, 150, 50, "WATCH")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "streamers", write_then_read)
+    detail = store.streamer_detail("alice", days=1, now=NOW + 120)
+
+    assert detail["summary"]["points_gained"] == sum(
+        row["points_gained"] for row in detail["daily"]
+    )

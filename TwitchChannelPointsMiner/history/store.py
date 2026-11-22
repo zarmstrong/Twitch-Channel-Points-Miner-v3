@@ -17,7 +17,7 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1084,6 +1084,18 @@ class HistoryStore(object):
             ).fetchall()
         return [(row["streamer"], row["broadcast_id"]) for row in rows]
 
+    def has_rollups(self, streamer):
+        """True once anything of this streamer was counted in the rollups."""
+
+        streamer = _clean_streamer(streamer)
+        if not streamer:
+            return False
+        with self._read_connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM daily_stats WHERE streamer = ? LIMIT 1", (streamer,)
+            ).fetchone()
+        return row is not None
+
     def stream_start(self, streamer, broadcast_id):
         """Return when a recorded broadcast started, or None."""
 
@@ -1753,10 +1765,17 @@ class HistoryStore(object):
             "current_run": dict(current_run) if current_run is not None else None,
         }
 
-    def streamers(self, days=30, now=None):
+    def streamers(self, days=30, now=None, connection=None):
+        """Per-streamer totals; ``connection`` reads within a caller's snapshot."""
+
         now = float(now or time.time())
         cutoff_day = first_window_day(now, days)
-        with self._read_connection() as connection:
+        reading = (
+            nullcontext(connection)
+            if connection is not None
+            else self._read_connection()
+        )
+        with reading as connection:
             rows = connection.execute(
                 """
                 SELECT streamer,
@@ -1911,14 +1930,17 @@ class HistoryStore(object):
                 """,
                 (streamer, cutoff),
             ).fetchall()
-        summary = next(
-            (
-                item
-                for item in self.streamers(days=days, now=now)
-                if item["streamer"] == streamer
-            ),
-            None,
-        )
+            # The summary comes from the same snapshot as the rows above.
+            summary = next(
+                (
+                    item
+                    for item in self.streamers(
+                        days=days, now=now, connection=connection
+                    )
+                    if item["streamer"] == streamer
+                ),
+                None,
+            )
         return {
             "streamer": streamer,
             "days": int(days),

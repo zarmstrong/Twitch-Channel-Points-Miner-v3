@@ -3399,3 +3399,80 @@ def test_first_backfill_counts_cached_history_older_than_retention(tmp_path):
         assert sum(row["streak_count"] for row in daily) == 1
     finally:
         recorder._shutdown()
+
+
+def test_a_new_streamers_backfill_is_counted_after_retention_ran(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        retention_days=1,
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        assert store.retention_watermark() is not None
+        # bob is configured later; his cache holds a two-day-old broadcast.
+        old = NOW - 2 * 24 * 60 * 60
+        _write_json(
+            cache,
+            _cache_payload(
+                {
+                    "streamer_login": "bob",
+                    "broadcast_id": "b1",
+                    "started_at": old,
+                    "ended_at": old + 3600,
+                    "claimed": True,
+                    "claimed_at": old + 60,
+                }
+            ),
+            NOW + 10,
+        )
+        clock.value = NOW + 20
+        recorder.poll_once()
+
+        daily = store.daily(days=3650, now=clock.value, streamer="bob")
+        assert sum(row["stream_sessions"] for row in daily) == 1
+        assert sum(row["streak_count"] for row in daily) == 1
+    finally:
+        recorder._shutdown()
+
+
+def test_a_forward_clock_correction_is_not_watch_time(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    clock = FakeClock(NOW)
+    elapsed = FakeClock(1000.0)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        monotonic=elapsed,
+    )
+    recorder._prepare()
+    path = analytics / "now_watching.json"
+    try:
+        _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+        clock.value = NOW + 1
+        elapsed.value = 1001.0
+        recorder._poll_now_watching()
+        # 20 seconds pass while the host clock also jumps 120 seconds ahead.
+        clock.value = NOW + 141
+        elapsed.value = 1021.0
+        _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 141)
+        recorder._poll_now_watching()
+
+        session = store.sessions(kind="watch", days=1, now=clock.value)["sessions"][0]
+        assert session["watch_seconds"] == 20
+    finally:
+        recorder._shutdown()

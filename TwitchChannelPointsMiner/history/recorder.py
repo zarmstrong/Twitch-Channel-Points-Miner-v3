@@ -214,6 +214,7 @@ class HistoryRecorder(threading.Thread):
         interval=ANALYTICS_POLL_SECONDS,
         retention_days=DEFAULT_RETENTION_DAYS,
         clock=time.time,
+        monotonic=None,
         online_streamers=None,
         drop_streamers=None,
         streamers_ready=None,
@@ -231,6 +232,11 @@ class HistoryRecorder(threading.Thread):
         self.interval = max(1.0, float(interval))
         self.retention_days = retention_days
         self.clock = clock
+        # Elapsed time, unaffected by system clock corrections.  A test clock
+        # is its own elapsed time.
+        if monotonic is None:
+            monotonic = time.monotonic if clock is time.time else clock
+        self.monotonic = monotonic
         self.online_streamers = online_streamers
         self.drop_streamers = drop_streamers
         self.streamers_ready = streamers_ready
@@ -886,6 +892,7 @@ class HistoryRecorder(threading.Thread):
                         "reason": reason,
                         "broadcast_id": broadcast_id,
                         "last_tick": started_at,
+                        "last_tick_elapsed": self._elapsed_at(started_at),
                     }
             if game and not any(key[0] == streamer for key in self._online_live_keys):
                 # The live snapshot (read first) is the newer source of the
@@ -923,10 +930,20 @@ class HistoryRecorder(threading.Thread):
         current = active.get("broadcast_id")
         return broadcast_id is None or current is None or broadcast_id == current
 
+    def _elapsed_at(self, timestamp):
+        """Map a wall-clock time near now onto the monotonic clock."""
+
+        return float(self.monotonic()) - (float(self.clock()) - float(timestamp))
+
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
         delta = max(0.0, float(now) - float(active["last_tick"]))
         delta = min(delta, MAX_WATCH_TICK_SECONDS)
+        elapsed_now = self._elapsed_at(now)
+        last_elapsed = active.get("last_tick_elapsed")
+        if last_elapsed is not None:
+            # A system clock moved forward between ticks is not watch time.
+            delta = min(delta, max(0.0, elapsed_now - last_elapsed))
         if delta > 0:
             if not self.store.tick_watch_session(
                 active["id"], streamer, timestamp=now, delta_seconds=delta
@@ -935,6 +952,7 @@ class HistoryRecorder(threading.Thread):
                 self._active_watch.pop(streamer, None)
                 return
         active["last_tick"] = float(now)
+        active["last_tick_elapsed"] = elapsed_now
 
     def _close_watch(self, streamer, ended_at, credit=False):
         active = self._active_watch.get(streamer)
@@ -1242,18 +1260,34 @@ class HistoryRecorder(threading.Thread):
                     self._cache_startup_closed.add(
                         (item["streamer"], item["broadcast_id"])
                     )
+        cutoffs = {}
         for item in parsed:
             if item["streamer"] in self._drop_farmed:
                 continue
             if item["streamer"] not in self._tracked_streamers:
                 continue
-            self._store_cached_session(item, now, close_open=close_open)
-            self._record_cached_streak(item, now)
+            if item["streamer"] not in cutoffs:
+                cutoffs[item["streamer"]] = self._streamer_cutoff(item["streamer"], now)
+            cutoff = cutoffs[item["streamer"]]
+            self._store_cached_session(item, now, close_open=close_open, cutoff=cutoff)
+            self._record_cached_streak(item, now, cutoff=cutoff)
         # Remember the file only once it is imported, so a failed write is
         # retried on the next poll even if the cache does not change again.
         self._streak_cache_key = cache_key
 
-    def _store_cached_session(self, item, now, close_open=False):
+    def _streamer_cutoff(self, streamer, now):
+        """Retention cutoff for one streamer's cached data, read before a batch.
+
+        Nothing of a streamer without rollups was counted yet, so none of its
+        data can be a pruned duplicate and all of it is imported.
+        """
+
+        cutoff = self._retention_cutoff(now)
+        if cutoff is None or not self.store.has_rollups(streamer):
+            return None
+        return cutoff
+
+    def _store_cached_session(self, item, now, close_open=False, cutoff=None):
         started_at = item["started_at"]
         ended_at = item["ended_at"]
         key = (item["streamer"], item["broadcast_id"])
@@ -1268,7 +1302,6 @@ class HistoryRecorder(threading.Thread):
             # This process already ended the broadcast; an open cache entry
             # must not reopen it, or recreate it once retention pruned it.
             ended_at = max(started_at, self._online_ended[key])
-        cutoff = self._retention_cutoff(now)
         if cutoff is not None and ended_at is not None and ended_at < cutoff:
             # Retention already pruned this row (or will); importing it again
             # would count it a second time in the permanent daily rollups.
@@ -1293,7 +1326,7 @@ class HistoryRecorder(threading.Thread):
             # reports the broadcast as online.
             self._online_live_keys.discard(key)
 
-    def _record_cached_streak(self, item, now):
+    def _record_cached_streak(self, item, now, cutoff=None):
         if not item.get("claimed") or item.get("claimed_at") is None:
             return
         try:
@@ -1302,7 +1335,6 @@ class HistoryRecorder(threading.Thread):
             return
         if self._deleted_since(item["streamer"], claimed_at):
             return
-        cutoff = self._retention_cutoff(now)
         if cutoff is not None and claimed_at < cutoff:
             # See _store_cached_session: the pruned event must not be counted
             # again in the rollups.
@@ -1323,10 +1355,11 @@ class HistoryRecorder(threading.Thread):
     def _import_cached_sessions(self, streamer, now):
         """Backfill live sessions once a streamer is first watched."""
 
+        cutoff = self._streamer_cutoff(streamer, now)
         for item in self._cached_stream_sessions:
             if item["streamer"] == streamer:
-                self._store_cached_session(item, now, close_open=False)
-                self._record_cached_streak(item, now)
+                self._store_cached_session(item, now, close_open=False, cutoff=cutoff)
+                self._record_cached_streak(item, now, cutoff=cutoff)
 
     def _resume_cached_live_stream(self, streamer, now):
         """Reopen the broadcast a restarted miner is watching again.
