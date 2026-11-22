@@ -3987,7 +3987,7 @@ def test_ban_checks_skip_offline_channels_and_forget_departed_ones(monkeypatch):
 def test_minute_watched_skips_time_out_of_a_watch_slot(monkeypatch):
     clock = [1_000.0]
     monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.monotonic",
         lambda: clock[0],
     )
     stream = Stream()
@@ -4011,7 +4011,7 @@ def test_minute_watched_counts_single_cycle_slots(monkeypatch):
     # Two channels take turns holding one slot, a 20-second cycle each.
     clock = [1_000.0]
     monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.monotonic",
         lambda: clock[0],
     )
     first, second = Stream(), Stream()
@@ -4032,7 +4032,7 @@ def test_minute_watched_counts_single_cycle_slots(monkeypatch):
 def test_minute_watched_counts_at_most_a_minute_for_a_stalled_watcher(monkeypatch):
     clock = [1_000.0]
     monkeypatch.setattr(
-        "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.monotonic",
         lambda: clock[0],
     )
     stream = Stream()
@@ -4068,19 +4068,30 @@ def test_watch_cycle_pauses_counters_of_unwatched_streams(monkeypatch):
     assert held == ["watched"]
 
 
-def test_minute_watched_ignores_a_clock_step_backwards(monkeypatch):
-    clock = [1_000.0]
+def test_minute_watched_ignores_wall_clock_corrections(monkeypatch):
+    # The wall clock steps back five minutes, then forward ten, between
+    # posts 20 seconds apart: only the 40 seconds count.
+    wall = [2_000_000_000.0]
+    steady = [1_000.0]
     monkeypatch.setattr(
         "TwitchChannelPointsMiner.classes.entities.Stream.time.time",
-        lambda: clock[0],
+        lambda: wall[0],
+    )
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.classes.entities.Stream.time.monotonic",
+        lambda: steady[0],
     )
     stream = Stream()
     stream.update_minute_watched()
-    clock[0] -= 300
+    wall[0] -= 300
+    steady[0] += 20
+    stream.update_minute_watched()
+    wall[0] += 600
+    steady[0] += 20
 
     stream.update_minute_watched()
 
-    assert stream.minute_watched == 0
+    assert stream.minute_watched == pytest.approx(40 / 60, abs=1e-4)
 
 
 def test_streamer_settings_keep_their_positional_order():

@@ -364,6 +364,12 @@ class Streamer(object):
             self.offline_at = time.time()
             self.is_online = False
             bump_streamer_state(self.username)
+            # Stop the watch timers now rather than at the watcher's next
+            # cycle: if the same broadcast comes back online first, its
+            # streak state carries on, and the offline time must not count.
+            pause = getattr(self.stream, "pause_minute_watched", None)
+            if callable(pause):
+                pause()
 
             if self.watch_streak_cache is not None:
                 ended_at, seen_live = self._last_seen_live_at(seen_live_at)

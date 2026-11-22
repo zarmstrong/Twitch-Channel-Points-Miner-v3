@@ -327,7 +327,7 @@ class Stream(object):
         never count any time at all.
         """
         with _WATCH_STREAK_LOCK:
-            self.__count_minute_watched_step(time.time())
+            self.__count_minute_watched_step(time.monotonic())
             self.__minute_watched_timestamp = 0
             self.__count_watch_slot_step(time.monotonic())
             self.__watch_slot_timestamp = 0
@@ -335,8 +335,10 @@ class Stream(object):
     def update_minute_watched(self):
         # Under the lock the per-broadcast reset takes, so a step measured on
         # one broadcast can't be added to the next broadcast's fresh count.
+        # On the monotonic clock, like the slot time: a wall clock correction
+        # can't add or remove watched time.
         with _WATCH_STREAK_LOCK:
-            now = time.time()
+            now = time.monotonic()
             self.__count_minute_watched_step(now)
             self.__minute_watched_timestamp = now
 

@@ -54,11 +54,11 @@ The miner measures that gap itself, from the last time it saw the previous
 broadcast live to the start time Twitch reports for the new one. It may notice
 a broadcast end late, for example when a reconnect drops Twitch's offline
 message or the machine was asleep, so it never measures from that moment. The
-measured gap is therefore never shorter than the real one. The start comes from
-Twitch's clock and the end from this machine's, so only a gap under 28 minutes
-counts as a continuation: with the host clock within 2 minutes of the real time
-(as NTP keeps it), a claim is never carried into a broadcast that really started
-30 or more minutes later. A
+measured gap is therefore never shorter than the real one. Either end can come
+from this machine's clock, and the clock can be corrected between the two, so
+only a gap under 26 minutes counts as a continuation: with the host clock within
+2 minutes of the real time (as NTP keeps it), a claim is never carried into a
+broadcast that really started 30 or more minutes later. A
 continuation the miner can't prove is watched again, for at most
 `watch_streak_max_minutes`, rather than risking a broken streak.
 

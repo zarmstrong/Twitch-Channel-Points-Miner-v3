@@ -209,7 +209,8 @@ class WatchStreakCache:
                 # the new broadcast's start time. Never infer a continuation
                 # from that unknown gap; only an observed end is trustworthy.
                 if gap <= 0 or gap >= (
-                    WATCH_STREAK_STREAM_GAP_SECONDS - WATCH_STREAK_CLOCK_SKEW_SECONDS
+                    WATCH_STREAK_STREAM_GAP_SECONDS
+                    - 2 * WATCH_STREAK_CLOCK_SKEW_SECONDS
                 ):
                     break
                 if previous.claimed:

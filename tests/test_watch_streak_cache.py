@@ -1437,8 +1437,9 @@ def test_slot_time_counts_the_last_cycle_and_skips_time_out_of_a_slot(monkeypatc
 
 
 def test_gap_just_under_thirty_minutes_is_not_trusted_across_clocks(tmp_path):
-    # Twitch's start time against this machine's end time: a host clock two
-    # minutes fast turns a real 31-minute gap into 29 measured minutes.
+    # Both ends can be this machine's readings, with a clock correction in
+    # between: two minutes fast at the end and two minutes slow at the start
+    # turn a real 30-minute gap into 26 measured minutes.
     start = 2_000_000_000.0
     cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
     cache.ensure("channel", "broadcast-1", started_at=start)
@@ -1447,12 +1448,12 @@ def test_gap_just_under_thirty_minutes_is_not_trusted_across_clocks(tmp_path):
 
     assert (
         cache.claimed_at_for_logical_stream(
-            "channel", "broadcast-2", started_at=start + 1000 + 29 * 60
+            "channel", "broadcast-2", started_at=start + 1000 + 26 * 60
         )
         is None
     )
     assert cache.claimed_at_for_logical_stream(
-        "channel", "broadcast-2", started_at=start + 1000 + 27 * 60
+        "channel", "broadcast-2", started_at=start + 1000 + 25 * 60
     ) == (start + 60)
 
 
@@ -2230,3 +2231,31 @@ def test_milestone_confirmation_goes_to_the_broadcast_the_state_belongs_to():
     assert stream.confirm_watch_streak_for("broadcast-2") is False
     assert stream.watch_streak_missing is True
     assert stream.confirm_watch_streak_for("broadcast-1") is True
+
+
+def test_offline_time_does_not_count_when_the_same_broadcast_resumes(monkeypatch):
+    # The channel goes offline mid-slot and comes back on the same broadcast
+    # before the minute watcher's next cycle: the offline minutes are not
+    # slot time, so they must not use up the cap.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
+    _pin_clock(monkeypatch, clock)
+    streamer = make_streamer("channel")
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.hold_watch_slot()
+    streamer.stream.update_minute_watched()
+    clock[0] += 60
+    streamer.stream.hold_watch_slot()
+    streamer.stream.update_minute_watched()
+    clock[0] += 30
+
+    streamer.set_offline()
+    clock[0] += 10 * 60
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+
+    assert streamer.stream.watch_streak_minutes() == pytest.approx(1.5, abs=1e-3)
+    assert streamer.stream.minute_watched == pytest.approx(1.5, abs=1e-3)
