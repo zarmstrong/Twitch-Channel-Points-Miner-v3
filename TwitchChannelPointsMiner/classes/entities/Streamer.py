@@ -18,7 +18,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
-from TwitchChannelPointsMiner.constants import URL
+from TwitchChannelPointsMiner.constants import URL, WATCH_STREAK_CLOCK_SKEW_SECONDS
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import _millify
 
@@ -111,23 +111,60 @@ _chat_lifecycle_lock = RLock()
 # How many online transitions Streamer.online_history keeps.
 ONLINE_HISTORY_SIZE = 5
 
-# One reentrant lock per channel, held across a stream-info refresh and the
-# online/offline change it leads to, and by the websocket's stream-down. The
-# main loop, the minute watcher and the websockets all refresh streamers, and
-# overlapping refreshes could apply their replies in another order than Twitch
-# answered them. Keyed by username, so a reloaded Streamer object for the same
-# channel shares it; module-level for the same reason as the chat lock.
+# Two reentrant locks per channel, keyed by username so a reloaded Streamer
+# object for the same channel shares them; module-level for the same reason
+# as the chat lock.
+#
+# The refresh lock is held for a whole stream-info refresh, network requests
+# included. The main loop, the minute watcher and the websockets all refresh
+# streamers, and overlapping refreshes could apply their replies in another
+# order than Twitch answered them.
+#
+# The state lock is held only while a refresh applies its reply and runs the
+# online/offline change it leads to, and by the websocket handlers that change
+# or read that state. It is never held across a network request, so a
+# websocket message never waits for Twitch. Take the refresh lock first when
+# both are needed.
+#
+# The generation counts websocket stream-downs, requested refreshes and
+# online/offline changes. A refresh that sees it move while its requests were
+# out drops the reply: something newer than that reply happened meanwhile.
+_streamer_refresh_locks = {}
 _streamer_state_locks = {}
+_streamer_state_generations = {}
 _streamer_state_locks_guard = Lock()
 
 
-def streamer_state_lock(username):
-    """Return the lock that serializes this channel's online state."""
+def _keyed_lock(locks, username):
     with _streamer_state_locks_guard:
-        lock = _streamer_state_locks.get(username)
+        lock = locks.get(username)
         if lock is None:
-            lock = _streamer_state_locks[username] = RLock()
+            lock = locks[username] = RLock()
         return lock
+
+
+def streamer_refresh_lock(username):
+    """Return the lock that serializes this channel's stream-info refreshes."""
+    return _keyed_lock(_streamer_refresh_locks, username)
+
+
+def streamer_state_lock(username):
+    """Return the lock that guards this channel's online state."""
+    return _keyed_lock(_streamer_state_locks, username)
+
+
+def streamer_state_generation(username):
+    """Return this channel's state generation (see bump_streamer_state())."""
+    with _streamer_state_locks_guard:
+        return _streamer_state_generations.get(username, 0)
+
+
+def bump_streamer_state(username):
+    """Mark that something newer than any refresh reply in flight happened."""
+    with _streamer_state_locks_guard:
+        _streamer_state_generations[username] = (
+            _streamer_state_generations.get(username, 0) + 1
+        )
 
 
 class StreamerSettings(object):
@@ -326,6 +363,7 @@ class Streamer(object):
         if self.is_online is True:
             self.offline_at = time.time()
             self.is_online = False
+            bump_streamer_state(self.username)
 
             if self.watch_streak_cache is not None:
                 ended_at, seen_live = self._last_seen_live_at(seen_live_at)
@@ -354,8 +392,23 @@ class Streamer(object):
             )
             self.online_history = self.online_history[-ONLINE_HISTORY_SIZE:]
             self.is_online = True
-            self.stream.init_watch_streak()
-            if self.watch_streak_cache is not None:
+            bump_streamer_state(self.username)
+            resume = getattr(self.stream, "resume_watch_streak", None)
+            if callable(resume):
+                resumed = resume() is True
+            else:
+                self.stream.init_watch_streak()
+                resumed = False
+            if resumed:
+                # Back online on the broadcast the streak state belongs to (a
+                # brief stream-down, or a refresh that failed): the same
+                # broadcast, so its watched minutes, cap and claim carry on,
+                # and its cache session is live again.
+                if self.watch_streak_cache is not None:
+                    self.watch_streak_cache.reopen(
+                        self.username, self.stream.broadcast_id
+                    )
+            elif self.watch_streak_cache is not None:
                 session = self.watch_streak_cache.ensure(
                     self.username,
                     self.stream.broadcast_id,
@@ -433,10 +486,17 @@ class Streamer(object):
 
         Before that moment the miner may not have known about the current
         broadcast yet, so such a message can be about an earlier one. Compares
-        Twitch's clock with the local one.
+        Twitch's clock with the local one, so anything sent up to
+        WATCH_STREAK_CLOCK_SKEW_SECONDS after counts too: a stream-down that
+        may be stale is rechecked rather than applied, and an award that may
+        be late is not credited to a broadcast the miner had only just found.
         """
         since = getattr(self, "online_at", 0) or 0
-        return sent_at is not None and since > 0 and sent_at < since
+        return (
+            sent_at is not None
+            and since > 0
+            and sent_at < since + WATCH_STREAK_CLOCK_SKEW_SECONDS
+        )
 
     def broadcast_online_at(self, sent_at):
         """The broadcast the miner had marked online when Twitch sent
@@ -463,11 +523,16 @@ class Streamer(object):
     def __credit_watch_streak(self, awarded_at):
         if self.sent_before_online(awarded_at):
             # Delivered after the miner marked the current broadcast online,
-            # but sent before: earned on whichever broadcast was online then.
-            # Credit it only if the cache tracks that one (creating a session
-            # now would close the current broadcast's), and leave the current
-            # broadcast's streak pending.
-            earned_on = self.broadcast_online_at(awarded_at)
+            # but sent before (or too close to tell, on two clocks): earned on
+            # whichever broadcast was online then, taking the earlier one when
+            # it is too close to tell and the miner knew one. Credit it only if the cache tracks that
+            # one (creating a session now would close the current
+            # broadcast's), and leave the current broadcast's streak pending:
+            # if the award was its own after all, the milestone check finds
+            # it in Twitch's data.
+            earned_on = self.broadcast_online_at(
+                awarded_at - WATCH_STREAK_CLOCK_SKEW_SECONDS
+            ) or self.broadcast_online_at(awarded_at)
             current = self.stream.watch_streak_broadcast_id or self.stream.broadcast_id
             if (
                 earned_on not in (None, "", current)
@@ -483,9 +548,13 @@ class Streamer(object):
                     "this one"
                 )
                 return
-        # Credited to the broadcast the streak state belongs to: a refresh
-        # may already show the next broadcast's ID before the miner runs
-        # its transition, and this award can't be for that one yet.
+        # Credited to the broadcast the streak state belongs to. A refresh
+        # that found the next broadcast runs its transition in the same hold
+        # of the state lock this runs under, so the two are never split. An
+        # award processed just before such a refresh can still be the next
+        # broadcast's (Twitch started it before the miner noticed): the
+        # transition queues a milestone check, which confirms it from
+        # Twitch's data instead of farming that broadcast up to the cap.
         credit = getattr(self.stream, "credit_watch_streak", None)
         if callable(credit):
             broadcast_id = credit()

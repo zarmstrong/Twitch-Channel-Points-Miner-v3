@@ -60,6 +60,8 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_sources,
     is_category_tier,
     is_drop_discovered,
+    streamer_refresh_lock,
+    streamer_state_generation,
     streamer_state_lock,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import (
@@ -1814,58 +1816,123 @@ class Twitch(object):
     # === STREAMER / STREAM / INFO === #
     @staticmethod
     def _streamer_state_lock(streamer):
-        """The lock that serializes this streamer's refreshes and online
-        state (see streamer_state_lock())."""
+        """The lock that guards this streamer's online state (see
+        streamer_state_lock())."""
         username = getattr(streamer, "username", None)
         if username is None:
             return nullcontext()
         return streamer_state_lock(username)
 
+    @staticmethod
+    def _streamer_refresh_lock(streamer):
+        """The lock that serializes this streamer's refreshes (see
+        streamer_refresh_lock()); a private one for a streamer without a
+        username."""
+        username = getattr(streamer, "username", None)
+        if username is None:
+            return RLock()
+        return streamer_refresh_lock(username)
+
+    @staticmethod
+    def _streamer_state_generation(streamer):
+        username = getattr(streamer, "username", None)
+        return 0 if username is None else streamer_state_generation(username)
+
+    def _refresh_superseded(self, streamer, generation):
+        """Whether the streamer's state moved on since generation was read,
+        while a refresh's requests were out (see bump_streamer_state()).
+
+        The reply is then older than what happened meanwhile, so it is
+        dropped and the next online check asks Twitch again. Called under
+        the state lock.
+        """
+        if self._streamer_state_generation(streamer) == generation:
+            return False
+        request_refresh = getattr(streamer.stream, "request_refresh", None)
+        if callable(request_refresh):
+            request_refresh()
+        logger.debug(
+            f"Dropping a stream refresh for {streamer.username}: its online "
+            "state changed while Twitch answered"
+        )
+        return True
+
     def update_stream(self, streamer):
-        with self._streamer_state_lock(streamer):
-            self._update_stream_locked(streamer)
+        """Refresh the stream info if it is due.
 
-    def _update_stream_locked(self, streamer):
-        if streamer.stream.update_required() is True:
-            # The response proves the stream was live at some point after the
-            # request went out, so the request time is a safe "seen live".
-            requested_at = time.time()
-            stream_info = self.get_stream_info(streamer)
-            if stream_info is not None:
-                streamer.stream.update(
-                    seen_live_at=requested_at,
-                    broadcast_id=stream_info["stream"]["id"],
-                    title=stream_info["broadcastSettings"]["title"],
-                    game=stream_info["broadcastSettings"]["game"],
-                    tags=stream_info["stream"]["tags"],
-                    viewers_count=stream_info["stream"]["viewersCount"],
-                )
+        Raises StreamerIsOfflineException when Twitch reports the stream
+        offline. The requests run outside the state lock, so websocket
+        handlers never wait for Twitch; a reply that something newer
+        overtook meanwhile is dropped.
+        """
+        with self._streamer_refresh_lock(streamer):
+            generation = self._streamer_state_generation(streamer)
+            fetched = self._fetch_stream_update(streamer)
+            if fetched is None:
+                return
+            with self._streamer_state_lock(streamer):
+                if self._refresh_superseded(streamer, generation):
+                    return
+                self._apply_stream_update(streamer, fetched)
+            self._update_stream_campaigns(streamer)
 
-                event_properties = {
-                    "channel_id": streamer.channel_id,
-                    "broadcast_id": streamer.stream.broadcast_id,
-                    "player": "site",
-                    "user_id": self.twitch_login.get_user_id(),
-                    "live": True,
-                    "channel": streamer.username,
-                }
+    def _fetch_stream_update(self, streamer):
+        """Fetch the stream info if a refresh is due.
 
-                if (
-                    streamer.stream.game_name() is not None
-                    and streamer.stream.game_id() is not None
-                ):
-                    event_properties["game"] = streamer.stream.game_name()
-                    event_properties["game_id"] = streamer.stream.game_id()
+        Returns (request time, stream info), or None when no refresh is due
+        or the request failed. Raises StreamerIsOfflineException.
+        """
+        if streamer.stream.update_required() is not True:
+            return None
+        # The response proves the stream was live at some point after the
+        # request went out, so the request time is a safe "seen live".
+        requested_at = time.time()
+        stream_info = self.get_stream_info(streamer)
+        if stream_info is None:
+            return None
+        return requested_at, stream_info
 
-                if streamer.settings.claim_drops is True:
-                    # Update also the campaigns_ids so we are sure to tracking the correct campaign
-                    streamer.stream.campaigns_ids = (
-                        self.__get_campaign_ids_from_streamer(streamer)
-                    )
+    def _apply_stream_update(self, streamer, fetched):
+        """Apply a _fetch_stream_update() reply. Called under the state
+        lock; makes no requests."""
+        requested_at, stream_info = fetched
+        streamer.stream.update(
+            seen_live_at=requested_at,
+            broadcast_id=stream_info["stream"]["id"],
+            title=stream_info["broadcastSettings"]["title"],
+            game=stream_info["broadcastSettings"]["game"],
+            tags=stream_info["stream"]["tags"],
+            viewers_count=stream_info["stream"]["viewersCount"],
+        )
 
-                streamer.stream.payload = [
-                    {"event": "minute-watched", "properties": event_properties}
-                ]
+        event_properties = {
+            "channel_id": streamer.channel_id,
+            "broadcast_id": streamer.stream.broadcast_id,
+            "player": "site",
+            "user_id": self.twitch_login.get_user_id(),
+            "live": True,
+            "channel": streamer.username,
+        }
+
+        if (
+            streamer.stream.game_name() is not None
+            and streamer.stream.game_id() is not None
+        ):
+            event_properties["game"] = streamer.stream.game_name()
+            event_properties["game_id"] = streamer.stream.game_id()
+
+        streamer.stream.payload = [
+            {"event": "minute-watched", "properties": event_properties}
+        ]
+
+    def _update_stream_campaigns(self, streamer):
+        """Resolve the campaigns of the stream info just applied. Makes
+        requests, so it runs outside the state lock."""
+        if streamer.settings.claim_drops is True:
+            # Update also the campaigns_ids so we are sure to tracking the correct campaign
+            streamer.stream.campaigns_ids = self.__get_campaign_ids_from_streamer(
+                streamer
+            )
 
     def get_spade_url(self, streamer):
         try:
@@ -1946,84 +2013,125 @@ class Twitch(object):
             },
         }
 
-    def check_streamer_online(self, streamer):
-        # Held from the refresh through the online/offline change it leads to,
-        # so another thread's refresh or a websocket stream-down can't land in
-        # between and be undone by a decision made on older information.
-        with self._streamer_state_lock(streamer):
-            self._check_streamer_online_locked(streamer)
+    def check_streamer_online(self, streamer, blocking=True):
+        """Refresh the streamer and mark it online or offline to match.
+
+        Refreshes of one streamer run one at a time (the refresh lock). With
+        blocking=False, return at once when another thread is already
+        refreshing it: a websocket handler must not wait for Twitch.
+        """
+        refresh_lock = self._streamer_refresh_lock(streamer)
+        if not refresh_lock.acquire(blocking=blocking):
+            return
+        try:
+            went_online = self._check_streamer_online_locked(streamer)
+        finally:
+            refresh_lock.release()
+        if went_online is True:
+            # After both locks: two GQL requests, and the check already
+            # handles the broadcast changing while they run.
+            self.reconcile_watch_streak(streamer)
 
     def _check_streamer_online_locked(self, streamer):
+        """Called under the refresh lock. Returns whether the streamer went
+        online. The requests run outside the state lock, and each reply is
+        applied, with the online/offline change it leads to, in one hold of
+        it, unless the state moved on while the requests were out."""
         if time.time() < streamer.offline_at + 60:
-            return
+            return False
 
+        generation = self._streamer_state_generation(streamer)
         if streamer.is_online is False:
             try:
                 self.get_spade_url(streamer)
-                self.update_stream(streamer)
-                # get_stream_info() returns None on a transient GQL failure
-                # instead of raising, which leaves the stream un-updated. Only
-                # announce the streamer online once its stream info loaded;
-                # otherwise the next check retries.
-                if streamer.stream.update_required() is True:
-                    return
-                streamer.set_online(self.__streamer_drops_description(streamer))
-                self.reconcile_watch_streak(streamer)
+                fetched = self._fetch_stream_update(streamer)
             except StreamerIsOfflineException:
-                streamer.set_offline()
+                with self._streamer_state_lock(streamer):
+                    if not self._refresh_superseded(streamer, generation):
+                        streamer.set_offline()
+                return False
+            if fetched is not None:
+                with self._streamer_state_lock(streamer):
+                    if self._refresh_superseded(streamer, generation):
+                        return False
+                    self._apply_stream_update(streamer, fetched)
+                self._update_stream_campaigns(streamer)
+            # get_stream_info() returns None on a transient GQL failure
+            # instead of raising, which leaves the stream un-updated. Only
+            # announce the streamer online once its stream info loaded;
+            # otherwise the next check retries.
+            if streamer.stream.update_required() is True:
+                return False
+            with self._streamer_state_lock(streamer):
+                # Checked again: a stream-down can arrive while the
+                # campaigns load, and the stream is not online yet, so the
+                # handler leaves it to this check.
+                if self._refresh_superseded(streamer, generation):
+                    return False
+                streamer.set_online(self.__streamer_drops_description(streamer))
+            return True
+
+        try:
+            fetched = self._fetch_stream_update(streamer)
+        except StreamerIsOfflineException:
+            with self._streamer_state_lock(streamer):
+                if not self._refresh_superseded(streamer, generation):
+                    streamer.set_offline()
+            return False
+        if fetched is not None:
+            with self._streamer_state_lock(streamer):
+                if self._refresh_superseded(streamer, generation):
+                    return False
+                self._apply_stream_update_and_transition(streamer, fetched)
+            self._update_stream_campaigns(streamer)
+        # A failed extraction while going online is otherwise never
+        # retried for this broadcast, and minute-watched events need it.
+        if streamer.stream.spade_url is None:
+            self.get_spade_url(streamer)
+        return False
+
+    def _apply_stream_update_and_transition(self, streamer, fetched):
+        """Apply a refresh of an online streamer and, when it shows a new
+        broadcast, run the offline/online change the miner missed. Called
+        under the state lock."""
+        live_snapshot = getattr(streamer.stream, "live_snapshot", None)
+        if callable(live_snapshot):
+            # One read of both, so this broadcast's ID is never paired with
+            # another broadcast's last-seen time, inventing a short gap.
+            previous_broadcast_id, previous_seen_live_at = live_snapshot()
         else:
-            live_snapshot = getattr(streamer.stream, "live_snapshot", None)
-            if callable(live_snapshot):
-                # One read of both: another thread's refresh landing between
-                # two reads would pair this broadcast's ID with the next
-                # broadcast's last-seen time, inventing a short gap.
-                previous_broadcast_id, previous_seen_live_at = live_snapshot()
-            else:
-                previous_broadcast_id = streamer.stream.broadcast_id
-                previous_seen_live_at = getattr(streamer.stream, "live_seen_at", 0)
-            try:
-                self.update_stream(streamer)
-                # A failed extraction while going online is otherwise never
-                # retried for this broadcast, and minute-watched events need it.
-                if streamer.stream.spade_url is None:
-                    self.get_spade_url(streamer)
-            except StreamerIsOfflineException:
-                streamer.set_offline()
-                return
-            claim_transition = getattr(
-                streamer.stream, "claim_broadcast_transition", None
+            previous_broadcast_id = streamer.stream.broadcast_id
+            previous_seen_live_at = getattr(streamer.stream, "live_seen_at", 0)
+        self._apply_stream_update(streamer, fetched)
+        claim_transition = getattr(streamer.stream, "claim_broadcast_transition", None)
+        if (
+            previous_broadcast_id not in (None, "")
+            and streamer.stream.broadcast_id not in (None, "", previous_broadcast_id)
+            and (
+                not callable(claim_transition)
+                or claim_transition(previous_broadcast_id, streamer.stream.broadcast_id)
             )
-            if (
-                previous_broadcast_id not in (None, "")
-                and streamer.stream.broadcast_id
-                not in (None, "", previous_broadcast_id)
-                and (
-                    not callable(claim_transition)
-                    or claim_transition(
-                        previous_broadcast_id, streamer.stream.broadcast_id
-                    )
-                )
-            ):
-                # A new broadcast without the offline in between (a missed
-                # stream-down while the machine slept or the network was
-                # out). Run the transition the miner missed, so the new
-                # broadcast gets its own watch-streak state instead of
-                # inheriting the previous one's watched minutes and claim.
-                logger.info(
-                    f"{streamer.username} started a new broadcast while the miner "
-                    "still saw the previous one live",
-                    extra={"emoji": ":arrows_counterclockwise:"},
-                )
-                streamer.set_offline(
-                    broadcast_id=previous_broadcast_id,
-                    seen_live_at=previous_seen_live_at,
-                )
-                streamer.set_online(self.__streamer_drops_description(streamer))
-                # Queue the new broadcast's milestone check for the minute
-                # watcher's budgeted rechecks: after an outage many channels
-                # can change broadcast at once, and checking each here would
-                # hold up minute-watched events.
-                streamer.stream.watch_streak_check_due = True
+        ):
+            # A new broadcast without the offline in between (a missed
+            # stream-down while the machine slept or the network was out).
+            # Run the transition the miner missed, so the new broadcast gets
+            # its own watch-streak state instead of inheriting the previous
+            # one's watched minutes and claim.
+            logger.info(
+                f"{streamer.username} started a new broadcast while the miner "
+                "still saw the previous one live",
+                extra={"emoji": ":arrows_counterclockwise:"},
+            )
+            streamer.set_offline(
+                broadcast_id=previous_broadcast_id,
+                seen_live_at=previous_seen_live_at,
+            )
+            streamer.set_online(self.__streamer_drops_description(streamer))
+            # Queue the new broadcast's milestone check for the minute
+            # watcher's budgeted rechecks: after an outage many channels can
+            # change broadcast at once, and checking each here would hold up
+            # minute-watched events.
+            streamer.stream.watch_streak_check_due = True
 
     def reconcile_watch_streak(self, streamer):
         """Clear a pending streak Twitch already awarded for this broadcast.
@@ -2058,7 +2166,7 @@ class Twitch(object):
         ) >= self._streak_only_watch_window(streamer)
         # Other threads refresh the stream while the lookups run; everything
         # below is about this broadcast, so never read the live attribute.
-        broadcast_id = stream.broadcast_id
+        broadcast_id = state_broadcast_id
         logger.debug(
             "[watch-streak] checking Twitch milestone for "
             f"streamer={streamer.username}; broadcast={broadcast_id}"
@@ -2098,7 +2206,7 @@ class Twitch(object):
         if milestone is None:
             logger.info(
                 "[watch-streak] no Twitch milestone for "
-                f"streamer={streamer.username}; broadcast={stream.broadcast_id} "
+                f"streamer={streamer.username}; broadcast={broadcast_id} "
                 "still pending"
             )
             return False
@@ -2108,7 +2216,7 @@ class Twitch(object):
                 "[watch-streak] last milestone for "
                 f"streamer={streamer.username} "
                 f"({milestone.achievement_timestamp.isoformat()}Z) predates "
-                f"broadcast={stream.broadcast_id} "
+                f"broadcast={broadcast_id} "
                 f"({live_stream.created_at.isoformat()}Z); still pending"
             )
             return False

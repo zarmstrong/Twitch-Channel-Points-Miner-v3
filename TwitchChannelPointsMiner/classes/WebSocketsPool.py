@@ -2,6 +2,7 @@ import json
 import logging
 import random
 import time
+from datetime import timezone
 
 # import os
 from threading import Lock, RLock, Thread, Timer
@@ -14,6 +15,7 @@ from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPredi
 from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    bump_streamer_state,
     is_drop_discovered,
     streamer_state_lock,
 )
@@ -31,8 +33,16 @@ logger = logging.getLogger(__name__)
 def _sent_at(message):
     """Twitch's send time of a PubSub message in epoch seconds, or None."""
     try:
-        return parser.parse(message.timestamp).timestamp()
+        sent = parser.parse(message.timestamp)
     except (TypeError, ValueError, OverflowError):
+        return None
+    if sent.tzinfo is None:
+        # Twitch's timestamps are UTC; without an offset, timestamp() would
+        # read it as the host's local time.
+        sent = sent.replace(tzinfo=timezone.utc)
+    try:
+        return sent.timestamp()
+    except (ValueError, OverflowError, OSError):
         return None
 
 
@@ -427,10 +437,14 @@ class WebSocketsPool:
                         if message.type == "stream-up":
                             streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            # Waits for a refresh in progress on another
-                            # thread, which would otherwise put the ended
-                            # broadcast back online after this.
+                            # Only the state lock: a refresh holds it just to
+                            # apply its reply, never across its requests. The
+                            # bump makes a refresh whose requests are out drop
+                            # its reply, which may predate this stream-down,
+                            # instead of putting the ended broadcast back
+                            # online.
                             with streamer_state_lock(streamer.username):
+                                bump_streamer_state(streamer.username)
                                 if streamer.is_online is not True:
                                     pass
                                 elif _stream_down_predates_online(message, streamer):
@@ -451,7 +465,12 @@ class WebSocketsPool:
                                     streamer.set_offline()
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():
-                                ws.twitch.check_streamer_online(streamer)
+                                # Skipped while another thread refreshes this
+                                # streamer, rather than holding up the
+                                # socket's other messages behind it.
+                                ws.twitch.check_streamer_online(
+                                    streamer, blocking=False
+                                )
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":

@@ -271,6 +271,25 @@ class WatchStreakCache:
                 self._save_locked()
             return session
 
+    def reopen(self, streamer_login, broadcast_id):
+        """Undo mark_ended(): the broadcast is live again (the miner marked it
+        offline and then back online on the same broadcast ID).
+
+        A later broadcast's gap is then measured from this broadcast's real
+        end, and the session is not pruned while it is still live.
+        """
+        if broadcast_id in [None, ""]:
+            return None
+        with self._lock:
+            session = self._sessions.get(self._key(streamer_login, broadcast_id))
+            if session is None:
+                return None
+            if session.ended_at is not None:
+                session.ended_at = None
+                session.ended_seen_live = False
+                self._save_locked()
+            return session
+
     def prune(self, now=None, ttl_seconds=STALE_SESSION_TTL_SECONDS):
         current_time = time.time() if now is None else float(now)
         with self._lock:

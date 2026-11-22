@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -111,9 +113,9 @@ def test_on_message_keeps_its_streamer_when_the_list_changes_mid_message(
     logger.error.assert_not_called()
 
 
-def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
-    # A refresh in progress on another thread would otherwise put the ended
-    # broadcast back online after the stream-down marked it offline.
+def test_stream_down_is_applied_under_the_channel_state_lock(logger):
+    # A refresh applies its reply under the same lock, so the two never
+    # interleave.
     import threading
 
     from TwitchChannelPointsMiner.classes.entities.Streamer import (
@@ -150,7 +152,9 @@ def test_stream_down_waits_for_a_refresh_of_the_same_channel(logger):
     ("online_at", "expected_calls", "expected_refreshes"),
     [
         pytest.param(1700000000.0 + 30, [], 1, id="sent-before-online"),
-        pytest.param(1700000000.0 - 30, ["set_offline"], 0, id="sent-after-online"),
+        # Within two minutes either way, the two clocks can't tell: rechecked.
+        pytest.param(1700000000.0 - 90, [], 1, id="within-the-clock-margin"),
+        pytest.param(1700000000.0 - 3 * 60, ["set_offline"], 0, id="sent-after-online"),
         pytest.param(0, ["set_offline"], 0, id="online-time-unknown"),
     ],
 )
@@ -180,7 +184,38 @@ def test_stream_down_sent_before_the_streamer_went_online_is_rechecked(
     logger.error.assert_not_called()
 
 
-def test_points_earned_passes_twitch_send_time_with_the_award(logger, monkeypatch):
+@pytest.fixture
+def host_not_on_utc():
+    """Run with the host's local time away from UTC, where time.tzset()
+    exists (not on Windows)."""
+    if not hasattr(time, "tzset"):
+        yield
+        return
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        pytest.param("2023-11-14T22:13:20.000000Z", id="utc"),
+        pytest.param("2023-11-14T23:13:20+01:00", id="offset"),
+        # Read as UTC, not as the host's local time.
+        pytest.param("2023-11-14T22:13:20", id="no-offset"),
+    ],
+)
+def test_points_earned_passes_twitch_send_time_with_the_award(
+    logger, monkeypatch, host_not_on_utc, timestamp
+):
     # The award's send time tells a late award for an earlier broadcast
     # from one for the broadcast now online.
     monkeypatch.setattr(f"{POOL_MODULE}.Settings.enable_analytics", False)
@@ -197,7 +232,7 @@ def test_points_earned_passes_twitch_send_time_with_the_award(logger, monkeypatc
             {
                 "type": "points-earned",
                 "data": {
-                    "timestamp": "2023-11-14T22:13:20.000000Z",
+                    "timestamp": timestamp,
                     "balance": {"balance": 1450, "channel_id": "2"},
                     "point_gain": {"total_points": 450, "reason_code": "WATCH_STREAK"},
                 },

@@ -90,9 +90,9 @@ class Stream(object):
     ):
         """Apply a stream-info response.
 
-        Callers hold the streamer's state lock (streamer_state_lock()), so
-        refreshes of one stream never overlap and replies apply in the order
-        Twitch answered them.
+        Callers hold the streamer's refresh lock (streamer_refresh_lock()),
+        so refreshes of one stream never overlap and replies apply in the
+        order Twitch answered them, and its state lock while applying.
         """
         now = time.time()
         # When Twitch last showed this stream live: the caller's request time
@@ -170,24 +170,44 @@ class Stream(object):
 
     def init_watch_streak(self):
         with _WATCH_STREAK_LOCK:
-            # The broadcast this state belongs to. broadcast_id itself can
-            # move to the next broadcast on a refresh before the transition
-            # resets this state for it.
-            self.watch_streak_broadcast_id = self.broadcast_id
-            self.watch_streak_missing = True
-            self.watch_streak_checked_at = 0
-            # Answered milestone checks after a streak_only window closed.
-            self.watch_streak_final_checks = 0
-            # A milestone check queued for the minute watcher's budgeted
-            # rechecks, ahead of the usual watched-minutes wait.
-            self.watch_streak_check_due = False
-            self.minute_watched = 0
-            self.__minute_watched_timestamp = 0
-            # Time holding a watch slot, whether or not Twitch accepted the
-            # minute-watched posts: what watch_streak_max_minutes measures,
-            # so a channel whose posts keep failing still lets its slot go.
-            self.watch_slot_minutes = 0
-            self.__watch_slot_timestamp = 0
+            self.__init_watch_streak_locked()
+
+    def resume_watch_streak(self):
+        """Keep the streak state if it belongs to the current broadcast,
+        otherwise reset it for this one. Returns whether it was kept.
+
+        Going offline and back online on the same broadcast ID is the same
+        broadcast: its watched minutes and watch_streak_max_minutes budget
+        carry on instead of starting over.
+        """
+        with _WATCH_STREAK_LOCK:
+            if (
+                self.broadcast_id not in (None, "")
+                and self.watch_streak_broadcast_id == self.broadcast_id
+            ):
+                return True
+            self.__init_watch_streak_locked()
+            return False
+
+    def __init_watch_streak_locked(self):
+        # The broadcast this state belongs to. broadcast_id itself can
+        # move to the next broadcast on a refresh before the transition
+        # resets this state for it.
+        self.watch_streak_broadcast_id = self.broadcast_id
+        self.watch_streak_missing = True
+        self.watch_streak_checked_at = 0
+        # Answered milestone checks after a streak_only window closed.
+        self.watch_streak_final_checks = 0
+        # A milestone check queued for the minute watcher's budgeted
+        # rechecks, ahead of the usual watched-minutes wait.
+        self.watch_streak_check_due = False
+        self.minute_watched = 0
+        self.__minute_watched_timestamp = 0
+        # Time holding a watch slot, whether or not Twitch accepted the
+        # minute-watched posts: what watch_streak_max_minutes measures,
+        # so a channel whose posts keep failing still lets its slot go.
+        self.watch_slot_minutes = 0
+        self.__watch_slot_timestamp = 0
 
     def claim_broadcast_transition(self, previous_broadcast_id, broadcast_id):
         """Claim the missed-offline move from one broadcast to the next.
@@ -247,7 +267,7 @@ class Stream(object):
         per-broadcast reset also takes.
         """
         with _WATCH_STREAK_LOCK:
-            if self.broadcast_id != broadcast_id:
+            if (self.watch_streak_broadcast_id or self.broadcast_id) != broadcast_id:
                 return False
             self.watch_streak_missing = False
             return True

@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -18,6 +19,9 @@ from TwitchChannelPointsMiner.classes.Twitch import (
     Twitch,
 )
 from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
+
+# The real check, kept before tests replace it.
+RECONCILE = Twitch.reconcile_watch_streak
 
 
 def make_streamer(username):
@@ -1022,15 +1026,31 @@ def test_milestone_for_the_previous_broadcast_still_records_its_claim(tmp_path):
     assert streamer.stream.watch_streak_missing is True
 
 
+def _patch_refresh(monkeypatch, fetch):
+    """Replace a refresh's requests with fetch(twitch, streamer), which
+    returns the broadcast ID Twitch reports (or raises
+    StreamerIsOfflineException); the reply is applied as usual."""
+
+    def fetch_stream_update(self, streamer):
+        return ("fetched", fetch(self, streamer))
+
+    def apply_stream_update(self, streamer, fetched):
+        _refresh_live_stream(streamer, fetched[1])
+
+    monkeypatch.setattr(Twitch, "_fetch_stream_update", fetch_stream_update)
+    monkeypatch.setattr(Twitch, "_apply_stream_update", apply_stream_update)
+    monkeypatch.setattr(Twitch, "_update_stream_campaigns", lambda self, s: None)
+    monkeypatch.setattr(Twitch, "get_spade_url", lambda self, s: None)
+
+
 def _twitch_moving_to_broadcast(monkeypatch, clock, broadcast_id, gap_seconds):
     """A Twitch whose next stream refresh shows a new broadcast."""
     reconciled = []
-
-    def update_stream(self, streamer):
-        clock[0] += gap_seconds
-        _refresh_live_stream(streamer, broadcast_id)
-
-    monkeypatch.setattr(Twitch, "update_stream", update_stream)
+    _patch_refresh(
+        monkeypatch,
+        lambda self, streamer: clock.__setitem__(0, clock[0] + gap_seconds)
+        or broadcast_id,
+    )
     monkeypatch.setattr(
         Twitch, "reconcile_watch_streak", lambda self, s: reconciled.append(s)
     )
@@ -1483,7 +1503,7 @@ def test_a_slower_overlapping_check_does_not_reset_the_new_broadcast(
     )
     depth = []
 
-    def overlapping_update_stream(self, streamer):
+    def overlapping_fetch(self, streamer):
         depth.append(1)
         if len(depth) == 1:
             # The faster check runs start to finish inside this fetch.
@@ -1491,9 +1511,9 @@ def test_a_slower_overlapping_check_does_not_reset_the_new_broadcast(
             streamer.stream.minute_watched = 2
         else:
             clock[0] += 60 * 60
-        _refresh_live_stream(streamer, "broadcast-2")
+        return "broadcast-2"
 
-    monkeypatch.setattr(Twitch, "update_stream", overlapping_update_stream)
+    _patch_refresh(monkeypatch, overlapping_fetch)
 
     twitch.check_streamer_online(streamer)
 
@@ -1577,13 +1597,17 @@ def test_stream_refresh_still_applies_after_the_clock_steps_back():
     assert stream.live_snapshot() == ("broadcast-1", 2_000_000_000)
 
 
-def _held_by_another_thread(username):
-    """Whether another thread holds the channel's state lock right now."""
+def _held_by_another_thread(username, which="state"):
+    """Whether another thread holds the channel's state (or refresh) lock
+    right now."""
     from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        streamer_refresh_lock,
         streamer_state_lock,
     )
 
-    lock = streamer_state_lock(username)
+    lock = (streamer_state_lock if which == "state" else streamer_refresh_lock)(
+        username
+    )
     result = []
 
     def probe():
@@ -1599,10 +1623,13 @@ def _held_by_another_thread(username):
     return result[0] is False
 
 
-def test_refresh_holds_the_channel_state_lock_during_the_request(monkeypatch):
+def test_refresh_requests_hold_the_refresh_lock_but_not_the_state_lock(
+    monkeypatch,
+):
     # Refreshes from the main loop, the minute watcher and the websockets
     # must not overlap: overlapping replies could apply in another order
-    # than Twitch answered them.
+    # than Twitch answered them. The websocket handlers take only the state
+    # lock, so it must be free while Twitch answers.
     streamer = make_streamer("channel")
     streamer.settings.claim_drops = False
     twitch = Twitch.__new__(Twitch)
@@ -1610,7 +1637,12 @@ def test_refresh_holds_the_channel_state_lock_during_the_request(monkeypatch):
     held = []
 
     def get_stream_info(self, target):
-        held.append(_held_by_another_thread("channel"))
+        held.append(
+            (
+                _held_by_another_thread("channel", "refresh"),
+                _held_by_another_thread("channel"),
+            )
+        )
         return {
             "stream": {"id": "broadcast-1", "tags": [], "viewersCount": 1},
             "broadcastSettings": {"title": "title", "game": {}},
@@ -1620,8 +1652,9 @@ def test_refresh_holds_the_channel_state_lock_during_the_request(monkeypatch):
 
     twitch.update_stream(streamer)
 
-    assert held == [True]
-    assert not _held_by_another_thread("channel")
+    assert held == [(True, False)]
+    assert streamer.stream.broadcast_id == "broadcast-1"
+    assert not _held_by_another_thread("channel", "refresh")
 
 
 def test_missed_offline_transition_holds_the_channel_state_lock(tmp_path, monkeypatch):
@@ -1660,7 +1693,7 @@ def test_offline_reply_is_applied_under_the_channel_state_lock(monkeypatch):
     twitch = Twitch.__new__(Twitch)
     held = []
 
-    def offline_update_stream(self, target):
+    def offline_fetch(self, target):
         raise StreamerIsOfflineException
 
     set_offline = Streamer.set_offline
@@ -1669,7 +1702,7 @@ def test_offline_reply_is_applied_under_the_channel_state_lock(monkeypatch):
         held.append(_held_by_another_thread("channel"))
         return set_offline(self, *args, **kwargs)
 
-    monkeypatch.setattr(Twitch, "update_stream", offline_update_stream)
+    monkeypatch.setattr(Twitch, "_fetch_stream_update", offline_fetch)
     monkeypatch.setattr(Streamer, "set_offline", recording_set_offline)
 
     twitch.check_streamer_online(streamer)
@@ -1712,7 +1745,7 @@ def test_a_refresh_waits_for_another_threads_refresh_of_the_same_channel(
     assert first_inside.wait(timeout=5)
     second.start()
     # The second thread is blocked on the lock, not inside the request.
-    assert _held_by_another_thread("channel")
+    assert _held_by_another_thread("channel", "refresh")
     assert requests_sent == ["first"]
     release_first.set()
     first.join(timeout=5)
@@ -1803,3 +1836,397 @@ def test_check_pairs_minutes_with_the_broadcast_they_belong_to(tmp_path):
     twitch.reconcile_watch_streak(streamer)
 
     assert real_stream.watch_streak_final_checks == 0
+
+
+def _stream_info(broadcast_id):
+    return {
+        "stream": {"id": broadcast_id, "tags": [], "viewersCount": 1},
+        "broadcastSettings": {"title": "title", "game": {}},
+    }
+
+
+def _stream_down(channel_id, server_time):
+    return json.dumps(
+        {
+            "type": "MESSAGE",
+            "data": {
+                "topic": f"video-playback-by-id.{channel_id}",
+                "message": json.dumps(
+                    {"type": "stream-down", "server_time": server_time}
+                ),
+            },
+        }
+    )
+
+
+def _run_with_timeout(target, *args):
+    """Run target in a thread; return whether it finished within 5 s."""
+    thread = threading.Thread(target=target, args=args)
+    thread.start()
+    thread.join(timeout=5)
+    return not thread.is_alive()
+
+
+def _twitch_with_a_slow_stream_info(monkeypatch, broadcast_id):
+    """A Twitch whose stream-info request waits until released."""
+    inside = threading.Event()
+    release = threading.Event()
+
+    def get_stream_info(self, target):
+        inside.set()
+        assert release.wait(timeout=5)
+        return _stream_info(broadcast_id)
+
+    monkeypatch.setattr(Twitch, "get_stream_info", get_stream_info)
+    monkeypatch.setattr(Twitch, "get_spade_url", lambda self, s: None)
+    reconciled = []
+    monkeypatch.setattr(
+        Twitch, "reconcile_watch_streak", lambda self, s: reconciled.append(s)
+    )
+    twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+    twitch.category_campaign_eligibility = {}
+    return twitch, inside, release, reconciled
+
+
+def _websocket_for(streamer):
+    return SimpleNamespace(
+        index=0,
+        streamers=[streamer],
+        twitch=SimpleNamespace(),
+        events_predictions={},
+        last_message_timestamp=None,
+        last_message_type_channel=None,
+    )
+
+
+def test_stream_down_during_a_refresh_request_is_not_held_up_and_wins(
+    monkeypatch,
+):
+    # The refresh's request went out while B was live and its reply comes
+    # back after B's stream-down. The stream-down must not wait for Twitch,
+    # and the stale reply must not put B back online.
+    from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+
+    streamer = make_streamer("slow-refresh")
+    streamer.channel_id = "41"
+    streamer.settings.claim_drops = False
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.online_at -= 60 * 60
+    streamer.stream.request_refresh()
+    twitch, inside, release, _ = _twitch_with_a_slow_stream_info(
+        monkeypatch, "broadcast-1"
+    )
+    refresh = threading.Thread(target=twitch.check_streamer_online, args=(streamer,))
+    refresh.start()
+    assert inside.wait(timeout=5)
+
+    handled = _run_with_timeout(
+        WebSocketsPool.on_message,
+        _websocket_for(streamer),
+        _stream_down("41", time.time()),
+    )
+    awarded = _run_with_timeout(streamer.update_history, "WATCH", 10)
+    release.set()
+    refresh.join(timeout=5)
+
+    assert handled and awarded
+    assert not refresh.is_alive()
+    assert streamer.is_online is False
+    # The dropped reply leaves the next online check to ask Twitch again.
+    assert streamer.stream.update_required() is True
+
+
+def test_stream_down_while_going_online_keeps_the_streamer_offline(monkeypatch):
+    # The streamer is offline and a refresh is finding it live when the
+    # broadcast ends. The handler ignores a stream-down for an offline
+    # streamer, so the refresh itself must notice it and stay offline.
+    from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+
+    streamer = make_streamer("going-online")
+    streamer.channel_id = "42"
+    streamer.settings.claim_drops = False
+    twitch, inside, release, reconciled = _twitch_with_a_slow_stream_info(
+        monkeypatch, "broadcast-1"
+    )
+    refresh = threading.Thread(target=twitch.check_streamer_online, args=(streamer,))
+    refresh.start()
+    assert inside.wait(timeout=5)
+
+    assert _run_with_timeout(
+        WebSocketsPool.on_message,
+        _websocket_for(streamer),
+        _stream_down("42", time.time()),
+    )
+    release.set()
+    refresh.join(timeout=5)
+
+    assert not refresh.is_alive()
+    assert streamer.is_online is False
+    assert reconciled == []
+    assert streamer.stream.update_required() is True
+
+
+def test_non_blocking_online_check_skips_a_channel_being_refreshed(monkeypatch):
+    # A websocket viewcount must not wait behind another thread's refresh.
+    streamer = make_streamer("busy-channel")
+    twitch, inside, release, _ = _twitch_with_a_slow_stream_info(
+        monkeypatch, "broadcast-1"
+    )
+    streamer.settings.claim_drops = False
+    refresh = threading.Thread(target=twitch.check_streamer_online, args=(streamer,))
+    refresh.start()
+    assert inside.wait(timeout=5)
+    fetches = []
+    monkeypatch.setattr(
+        Twitch, "_fetch_stream_update", lambda self, s: fetches.append(s)
+    )
+
+    skipped = _run_with_timeout(twitch.check_streamer_online, streamer, False)
+    release.set()
+    refresh.join(timeout=5)
+
+    assert skipped and not refresh.is_alive()
+    assert fetches == []
+
+
+def test_viewcount_checks_online_without_waiting():
+    from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+
+    streamer = make_streamer("viewcount-channel")
+    streamer.channel_id = "43"
+    calls = []
+    ws = _websocket_for(streamer)
+    ws.twitch = SimpleNamespace(
+        check_streamer_online=lambda target, **kwargs: calls.append(kwargs)
+    )
+    message = json.dumps(
+        {
+            "type": "MESSAGE",
+            "data": {
+                "topic": "video-playback-by-id.43",
+                "message": json.dumps({"type": "viewcount", "server_time": 1.0}),
+            },
+        }
+    )
+
+    WebSocketsPool.on_message(ws, message)
+
+    assert calls == [{"blocking": False}]
+
+
+def test_milestone_check_stays_on_its_broadcast_across_a_refresh(tmp_path, monkeypatch):
+    # The check snapshots A's state; before its requests go out, another
+    # thread's refresh moves the stream to B and runs the transition. Twitch
+    # then shows B, so the check must not confirm B with A's bookkeeping.
+    streamer, _ = make_streak_streamer(tmp_path)
+    streamer.stream.init_watch_streak()
+    live_stream = SimpleNamespace(
+        id="broadcast-2", created_at=datetime(2026, 10, 26, 17, 45, 7)
+    )
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime(2026, 10, 26, 17, 50, 0), expires_at=None
+    )
+    twitch = twitch_with_streak_responses(live_stream, milestone)
+    stream_class = type(streamer.stream)
+    snapshot = stream_class.watch_streak_check_snapshot
+
+    def snapshot_then_refresh(stream):
+        result = snapshot(stream)
+        stream.broadcast_id = "broadcast-2"
+        stream.init_watch_streak()
+        return result
+
+    monkeypatch.setattr(
+        stream_class, "watch_streak_check_snapshot", snapshot_then_refresh
+    )
+
+    assert twitch.reconcile_watch_streak(streamer) is False
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_award_just_after_a_new_broadcast_came_online_stays_with_the_old_one(
+    tmp_path, monkeypatch
+):
+    # The host clock is a minute behind Twitch's: A's late award, sent
+    # before the miner found B, carries a time a minute after B's online
+    # time. Crediting B would stop pursuing B's streak; crediting A only
+    # costs a milestone check if it was B's after all.
+    clock = [2_000_000_000.0]
+    streamer, cache = _streamer_moved_to_a_new_broadcast(tmp_path, monkeypatch, clock)
+
+    streamer.update_history("WATCH_STREAK", earned=450, awarded_at=clock[0] + 60)
+
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert cache.get("channel", "broadcast-2").claimed is False
+    assert streamer.stream.watch_streak_missing is True
+
+
+def test_award_just_after_the_first_broadcast_came_online_claims_it(
+    tmp_path, monkeypatch
+):
+    # No earlier broadcast is known, so there is nothing else it can be for.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+
+    streamer.update_history("WATCH_STREAK", earned=450, awarded_at=clock[0] + 30)
+
+    assert cache.get("channel", "broadcast-1").claimed is True
+    assert streamer.stream.watch_streak_missing is False
+
+
+def test_award_processed_before_a_missed_transition_is_rechecked(tmp_path, monkeypatch):
+    # B started on Twitch before the miner's refresh found it, and B's award
+    # was processed first, so it went to A. The transition then resets B as
+    # pending, and the milestone check it queues confirms B from Twitch.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.channel_id = "channel-1"
+    streamer.settings.watch_streak = True
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    clock[0] += 3 * 60 * 60
+    streamer.update_history("WATCH_STREAK", earned=450, awarded_at=clock[0])
+    twitch, _ = _twitch_moving_to_broadcast(
+        monkeypatch, clock, "broadcast-2", gap_seconds=60
+    )
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.stream.broadcast_id == "broadcast-2"
+    assert streamer.stream.watch_streak_missing is True
+    assert streamer.stream.watch_streak_check_due is True
+    # Twitch: B started before the award, and the milestone is B's.
+    started = datetime.fromtimestamp(clock[0] - 10 * 60, timezone.utc)
+    milestone = SimpleNamespace(
+        achievement_timestamp=datetime.fromtimestamp(
+            clock[0] - 60, timezone.utc
+        ).replace(tzinfo=None),
+        expires_at=None,
+    )
+    checker = twitch_with_streak_responses(
+        SimpleNamespace(id="broadcast-2", created_at=started.replace(tzinfo=None)),
+        milestone,
+    )
+    monkeypatch.setattr(Twitch, "reconcile_watch_streak", RECONCILE)
+
+    assert checker.reconcile_watch_streak(streamer) is True
+    assert streamer.stream.watch_streak_missing is False
+
+
+def test_same_broadcast_back_online_keeps_its_cap_and_claim_state(
+    tmp_path, monkeypatch
+):
+    # A brief stream-down (or a refresh blip) on the same broadcast ID must
+    # not restart watch_streak_max_minutes for that broadcast.
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    cache = WatchStreakCache.load(tmp_path / "watch-streak.json", "viewer")
+    streamer = make_streamer("channel")
+    streamer.watch_streak_cache = cache
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.minute_watched = 12
+    streamer.stream.watch_slot_minutes = 14
+    streamer.stream.watch_streak_final_checks = 2
+
+    clock[0] += 60
+    streamer.set_offline()
+    assert cache.get("channel", "broadcast-1").ended_at is not None
+    clock[0] += 90
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+
+    assert streamer.stream.minute_watched == 12
+    assert streamer.stream.watch_slot_minutes == 14
+    assert streamer.stream.watch_streak_final_checks == 2
+    assert streamer.stream.watch_streak_missing is True
+    assert cache.get("channel", "broadcast-1").ended_at is None
+
+
+def test_new_broadcast_after_an_offline_still_gets_fresh_state(tmp_path, monkeypatch):
+    clock = [2_000_000_000.0]
+    _pin_clock(monkeypatch, clock)
+    streamer = make_streamer("channel")
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.minute_watched = 12
+    streamer.set_offline()
+    clock[0] += 60 * 60
+    _refresh_live_stream(streamer, "broadcast-2")
+    streamer.set_online()
+
+    assert streamer.stream.minute_watched == 0
+    assert streamer.stream.watch_streak_broadcast_id == "broadcast-2"
+
+
+def test_reopened_session_is_saved(tmp_path):
+    path = tmp_path / "watch-streak.json"
+    cache = WatchStreakCache.load(path, "viewer")
+    now = time.time()
+    cache.ensure("channel", "broadcast-1", started_at=now - 600)
+    cache.mark_ended("channel", "broadcast-1", ended_at=now - 60)
+
+    cache.reopen("channel", "broadcast-1")
+
+    reloaded = WatchStreakCache.load(path, "viewer")
+    assert reloaded.get("channel", "broadcast-1").ended_at is None
+
+
+def test_stream_down_while_the_campaigns_load_keeps_the_streamer_offline(
+    monkeypatch,
+):
+    # The stream info said live; the broadcast ends while the campaigns for
+    # it load, after that reply was applied but before going online.
+    from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+
+    streamer = make_streamer("campaigns-channel")
+    streamer.channel_id = "44"
+    monkeypatch.setattr(
+        Twitch, "get_stream_info", lambda self, s: _stream_info("broadcast-1")
+    )
+    monkeypatch.setattr(Twitch, "get_spade_url", lambda self, s: None)
+
+    def campaigns_while_it_ends(self, target):
+        WebSocketsPool.on_message(
+            _websocket_for(target), _stream_down("44", time.time())
+        )
+
+    monkeypatch.setattr(Twitch, "_update_stream_campaigns", campaigns_while_it_ends)
+    reconciled = []
+    monkeypatch.setattr(
+        Twitch, "reconcile_watch_streak", lambda self, s: reconciled.append(s)
+    )
+    twitch = Twitch.__new__(Twitch)
+    twitch.twitch_login = SimpleNamespace(get_user_id=lambda: "viewer-id")
+    twitch.category_campaign_eligibility = {}
+
+    twitch.check_streamer_online(streamer)
+
+    assert streamer.is_online is False
+    assert reconciled == []
+    assert streamer.stream.update_required() is True
+
+
+def test_milestone_confirmation_goes_to_the_broadcast_the_state_belongs_to():
+    # A refresh has applied B, and B's transition has not reset the state
+    # yet: it is still A's, so a check of B must not clear it.
+    from TwitchChannelPointsMiner.classes.entities.Stream import Stream
+
+    stream = Stream()
+    stream.broadcast_id = "broadcast-1"
+    stream.init_watch_streak()
+    stream.broadcast_id = "broadcast-2"
+
+    assert stream.confirm_watch_streak_for("broadcast-2") is False
+    assert stream.watch_streak_missing is True
+    assert stream.confirm_watch_streak_for("broadcast-1") is True
