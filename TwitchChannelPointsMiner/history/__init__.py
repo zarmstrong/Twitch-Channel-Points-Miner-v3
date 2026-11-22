@@ -172,8 +172,11 @@ def start_history(
             return None
 
 
-def stop_history():
+def stop_history(timeout=10):
     """Stop recording, keeping the stored History readable and deletable.
+
+    Returns False when the recorder is still finishing after ``timeout``
+    seconds (a long import or a slow disk).
 
     The analytics server can outlive the miner (the desktop app keeps its
     window open), so the store stays available and ``recording`` reports
@@ -184,10 +187,12 @@ def stop_history():
     with _lock:
         recorder = _recorder
     if recorder is None:
-        return
+        return True
     recorder.stop()
     if recorder.ident is not None and recorder is not threading.current_thread():
-        recorder.join(timeout=10)
+        recorder.join(timeout=timeout)
+        return not recorder.is_alive()
+    return True
 
 
 class HistoryUnavailableError(RuntimeError):

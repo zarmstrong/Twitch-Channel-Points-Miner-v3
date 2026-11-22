@@ -1086,15 +1086,24 @@ class HistoryStore(object):
             ).fetchall()
         return [(row["streamer"], row["broadcast_id"]) for row in rows]
 
-    def has_rollups(self, streamer):
-        """True once anything of this streamer was counted in the rollups."""
+    def has_rollups(self, streamer, kind=None):
+        """True once something of this streamer was counted in the rollups.
+
+        ``kind="cache"`` asks only about what the streak cache adds:
+        broadcasts and streak claims.  Points counted from the analytics JSON
+        say nothing about whether the cache was imported.
+        """
 
         streamer = _clean_streamer(streamer)
         if not streamer:
             return False
+        condition = (
+            "AND (stream_sessions > 0 OR streak_count > 0)" if kind == "cache" else ""
+        )
         with self._read_connection() as connection:
             row = connection.execute(
-                "SELECT 1 FROM daily_stats WHERE streamer = ? LIMIT 1", (streamer,)
+                f"SELECT 1 FROM daily_stats WHERE streamer = ? {condition} LIMIT 1",
+                (streamer,),
             ).fetchone()
         return row is not None
 

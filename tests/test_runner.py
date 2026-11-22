@@ -749,11 +749,16 @@ def test_requested_restart_stops_history_before_replacing_the_process(
     monkeypatch.setattr(
         history, "history_watching_stopped", lambda: calls.append("watching")
     )
-    monkeypatch.setattr(history, "stop_history", lambda: calls.append("stop"))
+    monkeypatch.setattr(
+        history,
+        "stop_history",
+        lambda timeout=10: calls.append(("stop", timeout)) or True,
+    )
     config = SimpleNamespace(
         MINER_CONFIG={}, MINE_CONFIG={}, STREAMERS=[], ANALYTICS_CONFIG=None
     )
 
     runner.run_config(config, tmp_path / "config.py")
 
-    assert calls == ["watching", "stop", "restart"]
+    # A long final import must finish before the process is replaced.
+    assert calls == ["watching", ("stop", 120), "restart"]

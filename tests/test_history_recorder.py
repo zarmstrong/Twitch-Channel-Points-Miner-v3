@@ -3610,3 +3610,98 @@ def test_a_category_cleared_while_stopped_is_cleared_on_restart(tmp_path):
         assert live["game"] is None
     finally:
         recorder._shutdown()
+
+
+def test_shutdown_after_the_clock_was_set_back_adds_no_watch_time(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    clock = FakeClock(NOW)
+    elapsed = FakeClock(1000.0)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        monotonic=elapsed,
+    )
+    recorder._prepare()
+    path = analytics / "now_watching.json"
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 1
+    elapsed.value = 1001.0
+    recorder._poll_now_watching()
+    # The clock is set back 120 seconds; 20 seconds later the miner stops
+    # before writing another snapshot.
+    clock.value = NOW - 99
+    elapsed.value = 1021.0
+    recorder._shutdown()
+
+    session = store.sessions(kind="watch", days=1, now=NOW + 1)["sessions"][0]
+    assert session["watch_seconds"] <= 20
+
+
+def test_cache_backfill_after_a_failed_first_read_survives_retention(
+    tmp_path, monkeypatch
+):
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    old = NOW - 2 * 24 * 60 * 60
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": old,
+                "ended_at": old + 3600,
+                "claimed": True,
+                "claimed_at": old + 60,
+            }
+        ),
+        NOW - 10,
+    )
+    _write_json(
+        analytics / "bob.json",
+        {
+            "series": [
+                {"x": int(NOW * 1000) - 60000, "y": 1000},
+                {"x": int(NOW * 1000) - 30000, "y": 1050},
+            ]
+        },
+        NOW - 5,
+    )
+    store = HistoryStore(analytics / "history.sqlite3")
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        retention_days=1,
+    )
+    original = recorder_module._read_json
+
+    def cache_unreadable(target):
+        if str(target) == str(cache):
+            raise PermissionError("in use")
+        return original(target)
+
+    monkeypatch.setattr(recorder_module, "_read_json", cache_unreadable)
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        monkeypatch.setattr(recorder_module, "_read_json", original)
+        clock.value = NOW + 20
+        recorder.poll_once()
+
+        daily = store.daily(days=3650, now=clock.value, streamer="bob")
+        assert sum(row["stream_sessions"] for row in daily) == 1
+        assert sum(row["points_gained"] for row in daily) == 50
+    finally:
+        recorder._shutdown()

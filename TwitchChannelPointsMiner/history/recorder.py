@@ -942,13 +942,17 @@ class HistoryRecorder(threading.Thread):
 
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
-        delta = float(now) - float(active["last_tick"])
+        wall_delta = float(now) - float(active["last_tick"])
+        delta = wall_delta
         elapsed_now = self._elapsed_at(now)
         last_elapsed = active.get("last_tick_elapsed")
-        if last_elapsed is not None:
-            # Elapsed time, not the wall clock, so a system clock moved in
-            # either direction between ticks adds or loses no watch time.
-            delta = elapsed_now - last_elapsed
+        if last_elapsed is not None and wall_delta != 0:
+            # A later observation: elapsed time, not the wall clock, so a
+            # system clock moved either way between ticks adds or loses no
+            # watch time (forward, the elapsed time also caps it).  The same
+            # time as the last tick confirms nothing more.
+            elapsed = elapsed_now - last_elapsed
+            delta = elapsed if wall_delta < 0 else min(wall_delta, elapsed)
         delta = min(max(0.0, delta), MAX_WATCH_TICK_SECONDS)
         if delta > 0:
             if not self.store.tick_watch_session(
@@ -1291,7 +1295,7 @@ class HistoryRecorder(threading.Thread):
         """
 
         cutoff = self._retention_cutoff(now)
-        if cutoff is None or not self.store.has_rollups(streamer):
+        if cutoff is None or not self.store.has_rollups(streamer, "cache"):
             return None
         return cutoff
 

@@ -322,7 +322,10 @@ def _stop_history_before_restart():
         )
 
         history_watching_stopped()
-        stop_history()
+        # Replacing the process kills a recorder still writing its last
+        # watch, so give a long import or a slow disk time to finish.
+        if stop_history(timeout=120) is False:
+            logger.warning("History did not finish before the restart")
     except Exception:
         logger.warning("Unable to stop History before restarting", exc_info=True)
 
