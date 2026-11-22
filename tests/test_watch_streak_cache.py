@@ -2386,3 +2386,50 @@ def test_stream_down_while_a_reply_is_applied_does_not_hold_up_the_socket(
     assert handled and awarded
     assert streamer.is_online is False
     assert streamer.stream.watch_streak_missing is False
+
+
+def test_deferred_stream_down_yields_to_a_later_refresh_that_found_it_live():
+    # The stream-down waits for the state lock; meanwhile a refresh sent
+    # after it arrived finds the same broadcast live again. That answer is
+    # newer, so the stream stays online.
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        streamer_state_lock,
+    )
+    from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
+
+    streamer = make_streamer("overtaken")
+    streamer.channel_id = "46"
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.online_at -= 60 * 60
+    holding = threading.Event()
+    delivered = threading.Event()
+
+    def refresh_after_the_stream_down():
+        with streamer_state_lock("overtaken"):
+            holding.set()
+            assert delivered.wait(timeout=5)
+            streamer.stream.update(
+                broadcast_id="broadcast-1",
+                title="title",
+                game={},
+                tags=[],
+                viewers_count=1,
+                seen_live_at=time.time() + 1,
+            )
+
+    holder = threading.Thread(target=refresh_after_the_stream_down)
+    holder.start()
+    assert holding.wait(timeout=5)
+    try:
+        assert _run_with_timeout(
+            WebSocketsPool.on_message,
+            _websocket_for(streamer),
+            _stream_down("46", time.time()),
+        )
+    finally:
+        delivered.set()
+        holder.join(timeout=5)
+    _join_threads_named("stream-down-overtaken")
+
+    assert streamer.is_online is True

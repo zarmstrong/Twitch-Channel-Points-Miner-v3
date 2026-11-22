@@ -4125,7 +4125,18 @@ def test_watch_streak_max_minutes_in_range_is_kept(caplog, value):
     assert caplog.text == ""
 
 
-@pytest.mark.parametrize("value, expected", [(0, 11), (10.9, 11), (61, 60), (600, 60)])
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (0, 11),
+        (10.9, 11),
+        (61, 60),
+        (600, 60),
+        # Integers too large for a float.
+        (10**1000, 60),
+        (-(10**1000), 11),
+    ],
+)
 def test_watch_streak_max_minutes_out_of_range_is_clamped(caplog, value, expected):
     assert _normalize_watch_streak_max_minutes(value) == expected
     assert "watch_streak_max_minutes must be between 11 and 60" in caplog.text

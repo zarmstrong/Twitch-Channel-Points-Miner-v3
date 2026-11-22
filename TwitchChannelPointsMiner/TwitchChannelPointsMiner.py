@@ -189,6 +189,13 @@ def _normalize_watch_status_interval_minutes(minutes):
 
 
 def _normalize_watch_streak_max_minutes(minutes):
+    if isinstance(minutes, int) and not isinstance(minutes, bool):
+        # An int too large for a float would overflow below; any int past
+        # either bound clamps to it the same way.
+        minutes = min(
+            max(minutes, WATCH_STREAK_MAX_MINUTES_MIN - 1),
+            WATCH_STREAK_MAX_MINUTES_MAX + 1,
+        )
     if (
         not isinstance(minutes, (int, float))
         or isinstance(minutes, bool)

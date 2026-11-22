@@ -47,9 +47,19 @@ def _sent_at(message):
         return None
 
 
-def _apply_stream_down(message, streamer):
-    """Handle a stream-down; called under the streamer's state lock."""
+def _apply_stream_down(message, streamer, received_at):
+    """Handle a stream-down; called under the streamer's state lock, maybe
+    later than it arrived (received_at, local time)."""
     if streamer.is_online is not True:
+        return
+    seen_live_at = getattr(getattr(streamer, "stream", None), "live_seen_at", 0) or 0
+    if seen_live_at > received_at:
+        # A refresh sent after this stream-down arrived found the stream
+        # live: newer than the stream-down, so the stream stays online.
+        logger.debug(
+            f"Ignoring a stream-down for {streamer.username}: a later "
+            "refresh found it live"
+        )
         return
     if _stream_down_predates_online(message, streamer):
         # Ask Twitch on the next online check instead of ending a broadcast
@@ -487,7 +497,10 @@ class WebSocketsPool:
                             run_under_state_lock(
                                 streamer.username,
                                 functools.partial(
-                                    _apply_stream_down, message, streamer
+                                    _apply_stream_down,
+                                    message,
+                                    streamer,
+                                    time.time(),
                                 ),
                                 "stream-down",
                             )
