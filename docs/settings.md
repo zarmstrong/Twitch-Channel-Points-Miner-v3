@@ -197,6 +197,8 @@ Allowed values for `chat` are:
 - `ONLINE` Participate in IRC chat while the streamer is online (leave when offline)
 - `OFFLINE` Participate in IRC chat while the streamer is offline (leave when online)
 
-The miner connects to Twitch IRC over TLS on port 6697. If the TLS handshake fails, it doesn't join that chat yet: it retries TLS after 30 seconds, doubling the wait up to 15 minutes, and joins as soon as a handshake succeeds. It never falls back to plaintext port 6667 on its own, because that sends your chat OAuth token unencrypted. On a network that blocks port 6697, set the environment variable `TCPM_ALLOW_PLAINTEXT_IRC=1` to allow plaintext IRC.
+The miner connects to Twitch IRC over TLS on port 6697. If the TLS handshake fails, it doesn't join that chat yet: it retries TLS after 30 seconds, doubling the wait up to 15 minutes, and joins as soon as a handshake succeeds. It never falls back to plaintext port 6667 on its own, because that sends your chat OAuth token unencrypted. On a network that blocks port 6697, set the environment variable `TCPM_ALLOW_PLAINTEXT_IRC=1` to allow plaintext IRC. Connecting to a chat, including the TLS handshake, times out after 15 seconds and is retried later. Leaving a chat or stopping the miner interrupts a connection that is still being set up.
 
 Gifted subs are only seen in chats the miner has joined, so `chat` must not be `NEVER` and the gift must arrive while the miner is in that chat. Check the channel's chat rules before turning on `gift_sub_thanks`: emote-only, followers-only or subscriber-only modes and bot rules can block or ban automated messages.
+
+The log shows "Join IRC Chat" once Twitch has accepted the chat login and the join. If Twitch refuses the chat login, the miner logs a warning for that chat and keeps retrying in the background; mentions and gifted subs from that chat aren't seen until a login is accepted.
