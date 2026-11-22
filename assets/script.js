@@ -1724,7 +1724,7 @@ function restartMiner() {
                             location.reload();
                         }, function () {
                             button.prop('disabled', false);
-                            showConfigMessage('The miner did not restart, so the restart may not have been requested. Check the connection, then try again.', true);
+                            showConfigMessage('Could not confirm that the miner restarted: the restart may not have been requested. Check its logs or reload this page before trying again.', true);
                         });
                         return;
                     }

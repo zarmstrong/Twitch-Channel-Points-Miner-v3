@@ -95,13 +95,18 @@ def test_no_answer_reloads_when_a_new_instance_answers():
 
 
 @needs_node
-def test_no_answer_and_no_restart_is_reported_as_a_failure():
+def test_no_answer_and_no_new_instance_seen_is_reported_as_unconfirmed():
+    # Giving up doesn't prove the miner didn't restart (a proxy can strip
+    # X-Miner-Instance and the downtime can fall between probes), so the
+    # message must not claim it didn't.
     record = _click_restart({"status": 0}, probe="gave_up")
 
     assert record["disabled"] == [True, False]
     assert record["reloads"] == 0
     assert record["messages"][-1]["isError"] is True
-    assert "may not have been requested" in record["messages"][-1]["message"]
+    message = record["messages"][-1]["message"]
+    assert "Could not confirm that the miner restarted" in message
+    assert "did not restart" not in message
 
 
 @needs_node
