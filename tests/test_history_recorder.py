@@ -2970,3 +2970,142 @@ def test_first_seen_broadcast_does_not_take_the_previous_ones_start(tmp_path):
         assert live["started_at"] == NOW
     finally:
         recorder._shutdown()
+
+
+def test_return_after_a_failed_close_starts_a_new_session(recorder, monkeypatch):
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 1
+    recorder._poll_now_watching()
+    original = recorder.store.end_watch_session
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(recorder.store, "end_watch_session", locked)
+    _write_json(path, [], NOW + 61)
+    clock.value = NOW + 61
+    with pytest.raises(sqlite3.OperationalError):
+        recorder._poll_now_watching()
+
+    monkeypatch.setattr(recorder.store, "end_watch_session", original)
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 121)
+    clock.value = NOW + 121
+    recorder._poll_now_watching()
+
+    sessions = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+        "sessions"
+    ]
+    ended = [item for item in sessions if item["ended_at"] is not None]
+    assert len(sessions) == 2
+    assert ended[0]["watch_seconds"] == 60
+    assert ended[0]["ended_at"] == NOW + 61
+
+
+def test_corruption_found_while_preparing_at_startup_is_rebuilt(recorder, monkeypatch):
+    recorder._shutdown()
+    original = recorder._prepare
+    calls = []
+
+    def prepare():
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        original()
+
+    monkeypatch.setattr(recorder, "_prepare", prepare)
+    monkeypatch.setattr(recorder._stop_event, "wait", lambda timeout: True)
+
+    assert recorder._start() is True
+    folder = Path(recorder.store.path).parent
+    assert list(folder.glob("history.sqlite3.bak-*"))
+    assert recorder._run_id is not None
+
+
+def test_successive_older_copies_add_no_spend(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    series = [
+        {"x": int(NOW * 1000), "y": 1000, "z": "Watch"},
+        {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+        {"x": int((NOW + 120) * 1000), "y": 1100, "z": "Watch"},
+    ]
+    _write_json(path, {"series": series, "annotations": []}, NOW + 121)
+    recorder.clock.value = NOW + 130
+    recorder.poll_once()
+    for count, mtime in ((1, NOW + 140), (2, NOW + 160)):
+        _write_json(path, {"series": series[:count], "annotations": []}, mtime)
+        recorder.clock.value = mtime + 10
+        recorder.poll_once()
+
+    window = recorder.store.overview(days=1, now=recorder.clock.value)["window"]
+    assert window["points_gained"] == 100
+    assert window["points_spent"] == 0
+
+
+def test_live_fields_changing_during_the_read_are_read_again(tmp_path):
+    from types import SimpleNamespace
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW)
+
+    class Streamer:
+        # Online on broadcast a; while History reads it, another thread marks
+        # it offline, installs broadcast b, then runs set_online.
+        username = "bob"
+
+        def __init__(self):
+            self.stream = SimpleNamespace(broadcast_id="a", game=None, title=None)
+            self.is_online = True
+            self._online_at = NOW - 3600
+            self._raced = False
+
+        @property
+        def online_at(self):
+            value = self._online_at
+            if not self._raced:
+                self._raced = True
+                self._online_at = NOW
+            return value
+
+        def __getattribute__(self, name):
+            if name == "stream" and not object.__getattribute__(self, "_raced"):
+                stream = object.__getattribute__(self, "__dict__")["stream"]
+                stream.broadcast_id = "b"
+                return stream
+            return object.__getattribute__(self, name)
+
+    streamer = Streamer()
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: [streamer],
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        live = store.streamers(days=1, now=clock.value)[0]["live_stream"]
+        assert live["broadcast_id"] == "b"
+        assert live["started_at"] == NOW
+    finally:
+        recorder._shutdown()
+
+
+def test_shutdown_credits_a_watch_confirmed_by_an_unchanged_snapshot(recorder):
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW)
+    recorder.clock.value = NOW + 1
+    recorder._poll_now_watching()
+    recorder.clock.value = NOW + 19
+    recorder._shutdown()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=NOW + 19)["sessions"][0]
+    assert session["watch_seconds"] == 19
+    assert session["ended_at"] == NOW + 19

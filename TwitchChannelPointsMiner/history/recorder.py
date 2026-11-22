@@ -189,7 +189,9 @@ def _pending_entries(entries, state):
             rewound = bool(valid) and last_x is not None and valid[0][1] <= last_x
         pending = [item for item in valid if item[0] >= consumed]
     if valid:
-        last_x = valid[-1][1]
+        # An older copy keeps the newest position seen, so a later, less old
+        # copy is not taken for entries appended after the cursor.
+        last_x = max(last_x, valid[-1][1]) if rewound else valid[-1][1]
     return [item[1:] for item in pending], len(raw), last_x, rewound
 
 
@@ -317,7 +319,10 @@ class HistoryRecorder(threading.Thread):
                 with self._lock:
                     self._prepare()
                 return True
-            except Exception:
+            except Exception as error:
+                # A table can be corrupt even though the schema reads fine.
+                if self._recover_from_corruption(error):
+                    return True
                 if warned:
                     logger.debug(
                         "History startup is still failing; retrying", exc_info=True
@@ -485,9 +490,15 @@ class HistoryRecorder(threading.Thread):
                         step(now)
                 except Exception:
                     logger.debug("Unable to read the last %s", name, exc_info=True)
+        # An unchanged, recent snapshot still confirms the watches until now.
+        mtime = self._now_watching_mtime
+        confirmed_until = min(now, mtime + STALE_WATCH_SECONDS) if mtime > 0 else 0.0
         for streamer in list(self._active_watch):
             try:
-                self._close_watch(streamer, self._active_watch[streamer]["last_tick"])
+                last_tick = float(self._active_watch[streamer]["last_tick"])
+                self._close_watch(
+                    streamer, max(last_tick, confirmed_until), credit=True
+                )
             except Exception:
                 logger.warning(
                     "Unable to close History watch session for %s",
@@ -801,6 +812,11 @@ class HistoryRecorder(threading.Thread):
                 # configured streamers, so they must not enter the history.
                 continue
             seen.add(streamer)
+            pending_close = self._active_watch.get(streamer)
+            if pending_close is not None and pending_close.get("closing_at"):
+                # The watch ended before and only its close failed; finish it
+                # so the time away is not credited, and start a new session.
+                self._close_watch(streamer, pending_close["closing_at"])
             if streamer not in self._tracked_streamers:
                 # First watch: import its cached broadcasts before resuming
                 # one, so the watch below is linked to the live broadcast.
@@ -877,8 +893,6 @@ class HistoryRecorder(threading.Thread):
 
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
-        # Watched again, so an earlier close that failed no longer applies.
-        active.pop("closing_at", None)
         delta = max(0.0, float(now) - float(active["last_tick"]))
         delta = min(delta, MAX_WATCH_TICK_SECONDS)
         if delta > 0:
@@ -930,8 +944,14 @@ class HistoryRecorder(threading.Thread):
         previous = {}
         for streamer, broadcast_id in self._online_live_keys:
             previous[streamer] = broadcast_id
+        unstable = set()
         for entry in entries:
             streamer = entry["streamer"]
+            if entry.get("unstable"):
+                # Changing right now; leave its broadcasts as they are until
+                # the next poll reads it consistently.
+                unstable.add(streamer)
+                continue
             if streamer in self._drop_farmed:
                 continue
             if streamer not in self._tracked_streamers:
@@ -988,7 +1008,11 @@ class HistoryRecorder(threading.Thread):
         # The snapshot lists every streamer the miner follows, so any other
         # broadcast still open is over too, including one imported from the
         # streak cache of a streamer removed before this process saw it live.
-        stale = (self._online_live_keys | set(self.store.open_streams())) - current
+        stale = {
+            key
+            for key in self._online_live_keys | set(self.store.open_streams())
+            if key not in current and key[0] not in unstable
+        }
         for streamer, broadcast_id in stale:
             self.store.end_stream_session(streamer, broadcast_id, ended_at=now)
             self._online_ended[(streamer, broadcast_id)] = float(now)
@@ -1035,6 +1059,37 @@ class HistoryRecorder(threading.Thread):
         return entries
 
     @staticmethod
+    def _read_streamer_fields(streamer):
+        # The miner sets the broadcast id, then online_at, then is_online.
+        is_online = getattr(streamer, "is_online", True)
+        stream = getattr(streamer, "stream", None)
+        return (
+            is_online,
+            getattr(streamer, "username", None),
+            getattr(stream, "broadcast_id", None),
+            getattr(streamer, "online_at", None),
+            getattr(stream, "game", None),
+            getattr(stream, "title", None),
+        )
+
+    @staticmethod
+    def _stable_streamer_fields(streamer, attempts=5):
+        """Read a streamer's live fields until two reads agree.
+
+        Other threads change them one at a time without a lock, so one read
+        can mix two broadcasts (one's id with the other's start).  Returns
+        None if they keep changing.
+        """
+
+        fields = HistoryRecorder._read_streamer_fields(streamer)
+        for _ in range(attempts):
+            again = HistoryRecorder._read_streamer_fields(streamer)
+            if again[:4] == fields[:4]:
+                return again
+            fields = again
+        return None
+
+    @staticmethod
     def _online_stream_entry(streamer, now):
         if isinstance(streamer, dict):
             username = streamer.get("username") or streamer.get("streamer")
@@ -1044,16 +1099,13 @@ class HistoryRecorder(threading.Thread):
             title = streamer.get("title")
             is_online = streamer.get("is_online", True)
         else:
-            # The miner sets the broadcast id, then online_at, then
-            # is_online.  Reading is_online first means a True value comes
-            # with the id and start time of the same broadcast.
-            is_online = getattr(streamer, "is_online", True)
-            stream = getattr(streamer, "stream", None)
-            username = getattr(streamer, "username", None)
-            broadcast_id = getattr(stream, "broadcast_id", None)
-            started_at = getattr(streamer, "online_at", None)
-            game = getattr(stream, "game", None)
-            title = getattr(stream, "title", None)
+            fields = HistoryRecorder._stable_streamer_fields(streamer)
+            if fields is None:
+                return {
+                    "streamer": _clean_streamer(getattr(streamer, "username", None)),
+                    "unstable": True,
+                }
+            is_online, username, broadcast_id, started_at, game, title = fields
         if is_online is not True:
             return None
         username = _clean_streamer(username)
