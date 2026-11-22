@@ -25,7 +25,7 @@ from TwitchChannelPointsMiner.constants import WATCH_STREAK_STREAM_GAP_SECONDS
 
 logger = logging.getLogger(__name__)
 
-HISTORY_SCHEMA_VERSION = 2
+HISTORY_SCHEMA_VERSION = 3
 DEFAULT_RETENTION_DAYS = 730
 SECONDS_PER_DAY = 24 * 60 * 60
 
@@ -307,6 +307,13 @@ _SCHEMA_V2 = (
     """,
 )
 
+# A stream end History estimated (the next broadcast's start, the live
+# snapshot dropping it, shutdown) rather than one the miner observed; an
+# observed end replaces it, even after a restart.
+_SCHEMA_V3 = (
+    "ALTER TABLE streams ADD COLUMN end_estimated INTEGER NOT NULL DEFAULT 0",
+)
+
 # import_state rows that are not per-file import cursors.
 _RETENTION_WATERMARK_SOURCE = "maintenance:retention_cutoff"
 _LEGACY_CLEANUP_SOURCE = "maintenance:legacy_cleanup"
@@ -314,6 +321,7 @@ _LEGACY_CLEANUP_SOURCE = "maintenance:legacy_cleanup"
 _SCHEMA_MIGRATIONS = {
     1: _SCHEMA_V1,
     2: _SCHEMA_V2,
+    3: _SCHEMA_V3,
 }
 
 
@@ -732,6 +740,34 @@ class HistoryStore(object):
             started_at = float(metadata.get("started_at"))
         except (TypeError, ValueError):
             started_at = None
+        claim_ids = _event_broadcast_ids(payload) or set()
+        if claim_ids:
+            # A claim already naming one of these broadcasts is this claim.
+            for row in connection.execute(
+                """
+                SELECT id, metadata FROM events
+                WHERE streamer = ? AND type = 'watch_streak'
+                  AND metadata IS NOT NULL
+                """,
+                (streamer,),
+            ).fetchall():
+                if (_event_broadcast_ids(row["metadata"]) or set()) & claim_ids:
+                    return row
+            # A rebuilt cache starts the broadcast when the miner reconnected;
+            # the recorded broadcast keeps its real start.
+            placeholders = ",".join("?" for _ in claim_ids)
+            row = connection.execute(
+                f"""
+                SELECT MIN(started_at) AS started_at FROM streams
+                WHERE streamer = ? AND broadcast_id IN ({placeholders})
+                """,
+                (streamer, *sorted(claim_ids)),
+            ).fetchone()
+            if row is not None and row["started_at"] is not None:
+                recorded = float(row["started_at"])
+                started_at = (
+                    recorded if started_at is None else min(started_at, recorded)
+                )
         if started_at is not None:
             return connection.execute(
                 """
@@ -863,7 +899,7 @@ class HistoryStore(object):
                 # can replace it later (see ``observed_end``).
                 connection.execute(
                     """
-                    UPDATE streams SET ended_at = ?
+                    UPDATE streams SET ended_at = ?, end_estimated = 1
                     WHERE streamer = ? AND broadcast_id <> ?
                       AND ended_at IS NULL AND started_at <= ?
                     """,
@@ -873,8 +909,8 @@ class HistoryStore(object):
                     """
                     INSERT INTO streams (
                         streamer, broadcast_id, started_at, ended_at,
-                        last_seen_at, title, game, source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        last_seen_at, title, game, source, end_estimated
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         streamer,
@@ -885,6 +921,8 @@ class HistoryStore(object):
                         title,
                         game,
                         source,
+                        # Only an end the miner observed is not an estimate.
+                        1 if ended_at is not None and not observed_end else 0,
                     ),
                 )
                 self._touch_daily(
@@ -904,7 +942,7 @@ class HistoryStore(object):
                         WHEN ? IS NULL THEN streams.ended_at
                         WHEN ? AND streams.ended_at IS NOT NULL
                             AND ? >= streams.started_at
-                            AND (? OR EXISTS (
+                            AND (? OR streams.end_estimated = 1 OR EXISTS (
                                 SELECT 1 FROM streams AS next
                                 WHERE next.streamer = streams.streamer
                                   AND next.id <> streams.id
@@ -912,6 +950,12 @@ class HistoryStore(object):
                             ))
                         THEN ?
                         ELSE MAX(COALESCE(streams.ended_at, ?), ?)
+                    END,
+                    end_estimated = CASE
+                        WHEN ? IS NULL THEN streams.end_estimated
+                        WHEN ? THEN 0
+                        WHEN streams.ended_at IS NULL THEN ?
+                        ELSE streams.end_estimated
                     END,
                     last_seen_at = MAX(streams.last_seen_at, ?),
                     title = COALESCE(?, streams.title),
@@ -927,6 +971,10 @@ class HistoryStore(object):
                     None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
+                    None if ended_at is None else float(ended_at),
+                    1 if observed_end else 0,
+                    # Closing an open row without an observed end estimates it.
+                    1,
                     last_seen_at,
                     title,
                     game,
@@ -993,6 +1041,7 @@ class HistoryStore(object):
                 """
                 UPDATE streams SET
                     ended_at = NULL,
+                    end_estimated = 0,
                     last_seen_at = MAX(last_seen_at, ?)
                 WHERE streamer = ? AND broadcast_id = ?
                   AND ended_at IS NOT NULL
@@ -1141,7 +1190,7 @@ class HistoryStore(object):
         with self._write_connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE streams SET ended_at = ?,
+                UPDATE streams SET ended_at = ?, end_estimated = 1,
                     last_seen_at = MAX(last_seen_at, ?)
                 WHERE streamer = ? AND broadcast_id = ? AND ended_at IS NULL
                 """,
@@ -1170,7 +1219,8 @@ class HistoryStore(object):
                 """
                 UPDATE streams
                 SET ended_at = COALESCE(ended_at, last_seen_at,
-                                        started_at, ?)
+                                        started_at, ?),
+                    end_estimated = 1
                 WHERE ended_at IS NULL
                 """,
                 (float(ended_at or time.time()),),

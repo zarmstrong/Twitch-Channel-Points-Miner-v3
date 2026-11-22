@@ -553,9 +553,15 @@ class HistoryRecorder(threading.Thread):
         else:
             self._refresh_streamer_state()
             self._ingest_streak_cache(now)
+        # Live broadcasts first, so a watch is credited to the broadcast the
+        # miner is on now rather than the one before a broadcast change.
+        self._poll_online_streamers(now)
+        tracked = set(self._tracked_streamers)
         self._poll_now_watching(now)
         self._ingest_analytics(now)
-        self._poll_online_streamers(now)
+        if self._tracked_streamers - tracked:
+            # A streamer first watched (or imported) in this poll is live too.
+            self._poll_online_streamers(now)
         if now >= self._next_retention_at:
             self._apply_retention(now)
 

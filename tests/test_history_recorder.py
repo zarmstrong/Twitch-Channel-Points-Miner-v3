@@ -3172,3 +3172,96 @@ def test_a_snapshot_read_after_watching_stopped_credits_until_the_stop(recorder)
     session = recorder.store.sessions(kind="watch", days=1, now=NOW + 90)["sessions"][0]
     assert session["watch_seconds"] == 10
     assert session["ended_at"] == NOW + 10
+
+
+def test_observed_end_replaces_an_estimate_made_before_a_restart(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+
+    def make_recorder(clock):
+        return HistoryRecorder(
+            store,
+            analytics_path=analytics,
+            streak_cache_path=cache,
+            username="alice",
+            clock=clock,
+            online_streamers=lambda: list(snapshot),
+        )
+
+    first = make_recorder(FakeClock(NOW + 30))
+    first._prepare()
+    first.poll_once()
+    snapshot[0] = dict(snapshot[0], is_online=False)
+    first.clock.value = NOW + 300
+    first.poll_once()
+    first._shutdown()
+
+    # The cache with the observed end is written, then History restarts.
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": NOW,
+                "ended_at": NOW + 250,
+            }
+        ),
+        NOW + 310,
+    )
+    second = make_recorder(FakeClock(NOW + 320))
+    second._prepare()
+    try:
+        second.poll_once()
+        stream = store.sessions(kind="stream", days=1, now=NOW + 320)["sessions"][0]
+        assert stream["ended_at"] == NOW + 250
+    finally:
+        second._shutdown()
+
+
+def test_watch_moves_to_the_new_broadcast_in_the_poll_that_sees_it(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    watching = analytics / "now_watching.json"
+    clock = FakeClock(NOW + 30)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 45)
+        clock.value = NOW + 45
+        recorder.poll_once()
+        # The miner moved to a new broadcast while bob stayed online.
+        snapshot[0] = dict(snapshot[0], broadcast_id="b2")
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 75)
+        clock.value = NOW + 75
+        recorder.poll_once()
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 90)
+        clock.value = NOW + 90
+        recorder.poll_once()
+
+        watches = store.sessions(kind="watch", days=1, now=clock.value)["sessions"]
+        first = [item for item in watches if item.get("broadcast_id") == "b1"]
+        assert first and first[0]["ended_at"] == NOW + 75
+    finally:
+        recorder._shutdown()

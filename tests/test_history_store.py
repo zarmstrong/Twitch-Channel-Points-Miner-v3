@@ -559,7 +559,9 @@ def test_interrupted_migration_can_be_retried(tmp_path, monkeypatch):
     store = HistoryStore(path)
     store.initialize()
     with store._read_connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            HISTORY_SCHEMA_VERSION
+        )
 
 
 def test_legacy_cleanup_runs_once_so_pruned_watches_keep_their_rollups(store):
@@ -720,3 +722,22 @@ def test_an_annotation_inside_a_cached_claims_broadcast_is_the_same_claim(store)
 
     daily = store.daily(days=1, now=NOW + 1100)
     assert sum(row["streak_count"] for row in daily) == 1
+
+
+def test_a_rebuilt_cache_claim_matches_the_recorded_broadcast_start(store):
+    store.upsert_stream_session("alice", "b1", NOW - 600)
+    store.record_event(
+        "alice", NOW, "watch_streak", "+10 - WATCH_STREAK", dedupe_window=120.0
+    )
+    # The rebuilt cache starts b1 when the miner reconnected, after the claim.
+    store.record_event(
+        "alice",
+        NOW + 1000,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": NOW + 900},
+        dedupe_key="streak:alice:b1",
+        dedupe_window=120.0,
+    )
+
+    assert store.streamers(days=1, now=NOW + 1100)[0]["lifetime"]["streak_count"] == 1
