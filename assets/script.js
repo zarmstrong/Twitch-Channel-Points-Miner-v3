@@ -1712,15 +1712,23 @@ function restartMiner() {
                     restartRequested(xhr.getResponseHeader('X-Miner-Instance'));
                 },
                 error: function (xhr) {
-                    button.prop('disabled', false);
                     if (xhr.status === 0) {
-                        // No answer at all. The server answers before it
-                        // restarts (RESTART_REQUEST_DELAY_SECONDS), so this
-                        // means the request may never have reached it, not
-                        // that the restart happened.
-                        showConfigMessage('No answer from the miner, so the restart may not have been requested. Check the connection, then try again.', true);
+                        // No answer at all: the request may never have
+                        // reached the miner, or the response was lost after
+                        // it accepted the restart. Re-enabling the button
+                        // now could restart the new process a second time,
+                        // so first watch for a new instance, and only report
+                        // a failure if none shows up.
+                        showConfigMessage('No answer from the miner. Checking whether it is restarting...', false);
+                        waitForMinerRestart(typeof minerInstance === 'undefined' ? null : minerInstance, function () {
+                            location.reload();
+                        }, function () {
+                            button.prop('disabled', false);
+                            showConfigMessage('The miner did not restart, so the restart may not have been requested. Check the connection, then try again.', true);
+                        });
                         return;
                     }
+                    button.prop('disabled', false);
                     showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
                         ? xhr.responseJSON.error : 'Unable to request a restart.', true);
                 }
