@@ -188,10 +188,17 @@ def stop_history(timeout=10):
         recorder = _recorder
     if recorder is None:
         return True
+    already_stopped = recorder.ident is not None and not recorder.is_alive()
     recorder.stop()
     if recorder.ident is not None and recorder is not threading.current_thread():
         recorder.join(timeout=timeout)
-        return not recorder.is_alive()
+        if recorder.is_alive():
+            return False
+        if already_stopped:
+            # Stopped earlier (the Windows shell stops it when the runner
+            # returns, before the workers finish); take in what they wrote
+            # since.
+            recorder.drain()
     return True
 
 

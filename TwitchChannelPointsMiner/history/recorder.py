@@ -282,6 +282,30 @@ class HistoryRecorder(threading.Thread):
     def stop(self):
         self._stop_event.set()
 
+    def drain(self):
+        """Import what the miner wrote after this recorder stopped.
+
+        Points, events and streaks only; watches ended with the run.
+        """
+
+        if not self._startup_import_done:
+            return
+        now = self.clock()
+        for name, step in (
+            ("watch streak cache", self._ingest_streak_cache),
+            ("analytics files", self._ingest_analytics),
+        ):
+            try:
+                with self._lock:
+                    step(now)
+            except Exception:
+                logger.debug("Unable to read the last %s", name, exc_info=True)
+        try:
+            # Nothing is live while the miner is stopped.
+            self.store.close_open_streams(now)
+        except Exception:
+            logger.debug("Unable to close History live sessions", exc_info=True)
+
     def watching_stopped(self, timestamp=None):
         """Record that the miner stopped watching, ahead of ``stop()``."""
 
@@ -1422,22 +1446,17 @@ class HistoryRecorder(threading.Thread):
     def _ingest_analytics(self, now=None):
         if not self._streamer_state_ready:
             self._refresh_streamer_state()
-        self._seed_point_baselines()
+        self._seed_point_baselines(self._snapshot_balances())
         for filename, path in self._analytics_files():
             self._ingest_analytics_file(filename, path)
 
-    def _seed_point_baselines(self):
-        """Remember a streamer's balance before its analytics JSON exists.
-
-        The miner writes a series entry only after a change, with the new
-        balance, so the first entry of a new file has no previous balance to
-        compare with and its change would be lost.  The live balance read
-        before that file appears is that previous balance.
-        """
+    def _snapshot_balances(self):
+        """Current channel points of the configured streamers in the snapshot."""
 
         configured = self._configured_streamers()
+        balances = {}
         if not configured:
-            return
+            return balances
         for streamer in list(self._streamer_snapshot or []):
             if isinstance(streamer, dict):
                 username = streamer.get("username") or streamer.get("streamer")
@@ -1452,8 +1471,20 @@ class HistoryRecorder(threading.Thread):
                 balance = int(balance)
             except (TypeError, ValueError):
                 continue
-            if balance < 0:
-                continue
+            if balance >= 0:
+                balances[username] = balance
+        return balances
+
+    def _seed_point_baselines(self, balances):
+        """Remember a streamer's balance before its analytics JSON exists.
+
+        The miner writes a series entry only after a change, with the new
+        balance, so the first entry of a new file has no previous balance to
+        compare with and its change would be lost.  The live balance read
+        before that file appears is that previous balance.
+        """
+
+        for username, balance in balances.items():
             path = os.path.join(self.analytics_path, f"{username}.json")
             if os.path.exists(path):
                 continue
@@ -1555,6 +1586,7 @@ class HistoryRecorder(threading.Thread):
         last_balance = state.get("last_balance") if state else None
         if last_balance is None and pending:
             last_balance = self._baseline_balance(streamer, pending[0][0] / 1000.0)
+
         pruned_before = self._pruned_before(state)
 
         rows = []

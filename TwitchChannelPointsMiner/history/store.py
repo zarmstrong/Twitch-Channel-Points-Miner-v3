@@ -695,8 +695,10 @@ class HistoryStore(object):
             if existing is not None:
                 # The same claim seen again, possibly carried to another
                 # broadcast: count it once, but remember every broadcast it
-                # covers.
+                # covers, and that this key is counted.
                 cls._merge_claim_broadcasts(connection, existing, payload)
+                if dedupe_key:
+                    cls._mark_counted(connection, streamer, dedupe_key)
                 return False
             if dedupe_key and cls._is_counted(connection, dedupe_key):
                 # Counted before; retention pruned the event since.
@@ -706,6 +708,8 @@ class HistoryStore(object):
             )
             if existing is not None:
                 cls._merge_claim_broadcasts(connection, existing, payload)
+                if dedupe_key:
+                    cls._mark_counted(connection, streamer, dedupe_key)
                 return False
         cursor = connection.execute(
             """

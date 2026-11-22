@@ -178,3 +178,32 @@ def test_streamer_analytics_do_not_share_default_series_data(tmp_path):
     assert series[0]["z"] == "Watch"
     assert series[1]["y"] == 200
     assert "z" not in series[1]
+
+
+def test_a_new_series_file_starts_with_the_balance_before_the_change(tmp_path):
+    Settings.analytics_path = str(tmp_path)
+    streamer = Streamer("channel")
+    streamer.channel_points = 150
+
+    streamer.persistent_series(event_type="WATCH", previous_balance=100)
+    streamer.channel_points = 160
+    streamer.persistent_series(event_type="WATCH", previous_balance=150)
+
+    series = json.loads((tmp_path / "channel.json").read_text(encoding="utf-8"))[
+        "series"
+    ]
+    assert [entry["y"] for entry in series] == [100, 150, 160]
+    assert series[0]["x"] == series[1]["x"]
+
+
+def test_an_unloaded_zero_balance_is_not_written_as_the_start(tmp_path):
+    Settings.analytics_path = str(tmp_path)
+    streamer = Streamer("channel")
+    streamer.channel_points = 150
+
+    streamer.persistent_series(event_type="WATCH", previous_balance=0)
+
+    series = json.loads((tmp_path / "channel.json").read_text(encoding="utf-8"))[
+        "series"
+    ]
+    assert [entry["y"] for entry in series] == [150]

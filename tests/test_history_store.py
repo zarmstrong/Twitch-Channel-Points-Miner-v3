@@ -814,3 +814,32 @@ def test_a_pruned_broadcast_and_claim_are_not_counted_again(store):
     daily = store.daily(days=3650, now=NOW)
     assert sum(row["stream_sessions"] for row in daily) == 2
     assert sum(row["streak_count"] for row in daily) == 1
+
+
+def test_a_pruned_claim_merged_from_the_cache_is_not_counted_again(store):
+    old = NOW - 3 * 24 * 60 * 60
+    store.upsert_stream_session("alice", "b1", old, ended_at=old + 3600)
+    # The analytics annotation is recorded first, the cache claim merges in.
+    store.record_event(
+        "alice",
+        old + 60,
+        "watch_streak",
+        "Watch streak claimed",
+        dedupe_key="annotation:alice:1",
+    )
+    cache_claim = dict(
+        metadata={"broadcast_id": "b1", "started_at": old},
+        dedupe_key="streak:alice:b1",
+        dedupe_window=120.0,
+    )
+    store.record_event(
+        "alice", old + 600, "watch_streak", "Watch streak claimed", **cache_claim
+    )
+    store.apply_retention(now=NOW, retention_days=1)
+
+    store.record_event(
+        "alice", old + 600, "watch_streak", "Watch streak claimed", **cache_claim
+    )
+
+    daily = store.daily(days=3650, now=NOW)
+    assert sum(row["streak_count"] for row in daily) == 1

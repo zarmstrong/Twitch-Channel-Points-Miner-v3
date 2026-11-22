@@ -3845,3 +3845,71 @@ def test_watch_time_does_not_depend_on_when_history_polls(tmp_path):
     on_time = run([1, 20, 35, 50, 400])
     delayed = run([1, 600, 700])
     assert on_time == delayed == 19
+
+
+def test_a_new_file_that_starts_with_the_previous_balance_counts_its_change(
+    tmp_path,
+):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    # Written before History ever saw bob's balance.
+    _write_json(
+        analytics / "bob.json",
+        {
+            "series": [
+                {"x": int((NOW + 60) * 1000), "y": 1000, "z": "Start"},
+                {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+            ]
+        },
+        NOW + 61,
+    )
+    clock = FakeClock(NOW + 70)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        window = store.overview(days=1, now=clock.value)["window"]
+        assert window["points_gained"] == 50
+    finally:
+        recorder._shutdown()
+
+
+def test_stopping_history_again_takes_in_what_the_workers_wrote_since(
+    tmp_path, monkeypatch
+):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    path = analytics / "bob.json"
+    series = [{"x": int((NOW + 10) * 1000), "y": 1000}]
+    _write_json(path, {"series": series}, NOW + 11)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=FakeClock(NOW + 20),
+    )
+    monkeypatch.setattr(history_module, "_recorder", recorder)
+    monkeypatch.setattr(history_module, "_store", store)
+    recorder.start()
+    # The Windows shell stops History when the runner returns ...
+    assert history_module.stop_history(timeout=10) is True
+    assert not recorder.is_alive()
+    # ... and a worker still writes a change before the miner stops it.
+    series.append({"x": int((NOW + 30) * 1000), "y": 1040})
+    _write_json(path, {"series": series}, NOW + 31)
+
+    assert history_module.stop_history(timeout=10) is True
+
+    window = store.overview(days=1, now=NOW + 40)["window"]
+    assert window["points_gained"] == 40

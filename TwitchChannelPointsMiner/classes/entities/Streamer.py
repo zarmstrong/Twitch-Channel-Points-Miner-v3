@@ -459,10 +459,12 @@ class Streamer(object):
             }
             self.__save_json("annotations", data)
 
-    def persistent_series(self, event_type="Watch"):
-        self.__save_json("series", event_type=event_type)
+    def persistent_series(self, event_type="Watch", previous_balance=None):
+        self.__save_json(
+            "series", event_type=event_type, previous_balance=previous_balance
+        )
 
-    def __save_json(self, key, data=None, event_type="Watch"):
+    def __save_json(self, key, data=None, event_type="Watch", previous_balance=None):
         # https://stackoverflow.com/questions/4676195/why-do-i-need-to-multiply-unix-timestamps-by-1000-in-javascript
         data = {} if data is None else data.copy()
         now = datetime.now().replace(microsecond=0)
@@ -487,6 +489,18 @@ class Streamer(object):
                 json_data["version"] = ANALYTICS_DATA_VERSION
                 if key not in json_data:
                     json_data[key] = []
+                if (
+                    key == "series"
+                    and not json_data[key]
+                    and previous_balance
+                    and previous_balance != data.get("y")
+                ):
+                    # A new file starts with the balance before this change,
+                    # or the change itself could not be told from it.  A zero
+                    # balance may never have been loaded, so it is skipped.
+                    json_data[key].append(
+                        {"x": data["x"], "y": previous_balance, "z": "Start"}
+                    )
                 json_data[key].append(data)
                 json.dump(json_data, temp_file, indent=4)
 

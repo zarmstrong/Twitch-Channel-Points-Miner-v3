@@ -360,6 +360,7 @@ class WebSocketsPool:
                                 return
 
                             balance = message.data["balance"]["balance"]
+                            previous_balance = streamer.channel_points
                             streamer.channel_points = balance
                             # Analytics switch
                             if Settings.enable_analytics is True:
@@ -368,7 +369,8 @@ class WebSocketsPool:
                                         message.data["point_gain"]["reason_code"]
                                         if message.type == "points-earned"
                                         else "Spent"
-                                    )
+                                    ),
+                                    previous_balance=previous_balance,
                                 )
 
                         if message.type == "points-earned":
