@@ -3,6 +3,7 @@
 """Source-preserving edits for dashboard-managed Python configuration."""
 
 import ast
+import codecs
 import errno
 import io
 import json
@@ -1754,10 +1755,13 @@ def _with_config_import(encoded, statement, used_in=()):
             )
     if _has_config_import(tree, statement, used_in):
         return encoded
+    # A BOM must stay the file's first bytes, and ast columns don't count it,
+    # so the import is placed in the file without it and the BOM put back.
+    bom = codecs.BOM_UTF8 if encoded.startswith(codecs.BOM_UTF8) else b""
+    encoded = encoded[len(bom) :]
     # Below the shebang, encoding declaration, docstring and __future__
     # imports, which must stay first, and above every other statement.
-    # utf-8-sig: a BOM would otherwise hide a shebang or coding line.
-    line, col_offset = module_header_end(encoded.decode("utf-8-sig"), tree)
+    line, col_offset = module_header_end(encoded.decode("utf-8"), tree)
     newline = _newline(encoded).encode("utf-8")
     inserted = statement.encode("utf-8") + newline
     # bytes.splitlines() breaks lines exactly where the tokenizer does, and
@@ -1766,11 +1770,11 @@ def _with_config_import(encoded, statement, used_in=()):
     if col_offset:
         # The first statement shares the header's last line, after a `;`.
         lines[line] = lines[line][:col_offset] + inserted + lines[line][col_offset:]
-        return b"".join(lines)
+        return bom + b"".join(lines)
     if line and not lines[line - 1].endswith((b"\n", b"\r")):
         lines[line - 1] += newline
     lines.insert(line, inserted)
-    return b"".join(lines)
+    return bom + b"".join(lines)
 
 
 def _ensure_config_import(config_path, statement, used_in=()):

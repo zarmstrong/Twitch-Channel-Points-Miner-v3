@@ -1985,6 +1985,111 @@ def test_a_rebound_priority_warns_that_the_default_list_was_not_added(caplog):
     assert "without FAVORITE" in caplog.text
 
 
+def test_omitted_logger_defaults_are_logged(caplog):
+    source = (
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "def make(logging):\n"
+        "    return LoggerSettings(save=False)\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": make(None)}\n'
+    )
+
+    with caplog.at_level(logging.WARNING):
+        migrated, _, _ = migrate_config_source(source)
+
+    assert "console_level=" not in migrated
+    assert "did not add console_level, file_level." in caplog.text
+    assert "color_palette" not in caplog.text
+
+
+def test_omitted_streamer_source_defaults_are_logged(caplog):
+    source = (
+        "StreamerSource = None\n"
+        'MINER_CONFIG = {"username": "alice", "streamer_source_priority": []}\n'
+    )
+
+    with caplog.at_level(logging.WARNING):
+        migrate_config_source(source)
+
+    assert "may bind StreamerSource itself" in caplog.text
+    assert (
+        "StreamerSource.BADGES, StreamerSource.WILDCARD_CATEGORIES "
+        "to MINER_CONFIG['streamer_source_priority']"
+    ) in caplog.text
+
+
+def test_a_rebound_streamer_source_warns_that_the_default_list_was_not_added(
+    caplog,
+):
+    source = 'StreamerSource = None\nMINER_CONFIG = {"username": "alice"}\n'
+
+    with caplog.at_level(logging.WARNING):
+        migrated, _, _ = migrate_config_source(source)
+
+    assert "'streamer_source_priority'" not in migrated
+    assert "may bind StreamerSource itself" in caplog.text
+
+
+def test_defaults_left_out_for_a_rebound_name_match_the_class_defaults():
+    # A default that reads a name the config may rebind is left out, so the
+    # class's own default applies; that must be the same value.
+    from TwitchChannelPointsMiner import config_migration
+    from TwitchChannelPointsMiner.classes.Settings import StreamerSource
+    from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings
+    from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
+        TwitchChannelPointsMiner,
+    )
+
+    names = {"logging": logging, "ColorPalette": ColorPalette}
+    class_defaults = inspect.signature(LoggerSettings).parameters
+    checked = 0
+    for name, value in config_migration.LOGGER_SETTINGS_DEFAULTS:
+        if config_migration._uses_any(value, set(names)):
+            expected = class_defaults[name].default
+            actual = eval(value, dict(names))
+            if isinstance(expected, ColorPalette):
+                assert vars(actual) == vars(expected)
+            else:
+                assert actual == expected
+            checked += 1
+    assert checked == 3
+    miner_defaults = inspect.signature(TwitchChannelPointsMiner).parameters
+    assert list(miner_defaults["streamer_source_priority"].default) == [
+        StreamerSource.STREAMERS,
+        StreamerSource.FOLLOWERS,
+        StreamerSource.CATEGORIES,
+        StreamerSource.BADGES,
+        StreamerSource.WILDCARD_CATEGORIES,
+    ]
+
+
+def test_output_compiles_with_a_shebang_future_import_and_continued_docstring():
+    source = (
+        "#!/usr/bin/env python3\n"
+        '"""Alice\'s \\\n'
+        'miner."""\n'
+        "from __future__ import annotations\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "alice", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+
+    migrated, _, _ = migrate_config_source(source)
+
+    namespace = {}
+    exec(compile(migrated, "config.py", "exec", dont_inherit=True), namespace)
+    lines = migrated.splitlines()
+    assert lines[:4] == [
+        "#!/usr/bin/env python3",
+        '"""Alice\'s \\',
+        'miner."""',
+        "from __future__ import annotations",
+    ]
+    assert ast.get_docstring(ast.parse(migrated)) == "Alice's miner."
+    assert namespace["MINER_CONFIG"]["logger_settings"].console_level == logging.INFO
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

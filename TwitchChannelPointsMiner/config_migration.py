@@ -473,6 +473,27 @@ def _statement_on_same_line(source, line_offsets, tree, node):
     return None
 
 
+def _warn_omitted_defaults(source_name, call_name, names):
+    logger.warning(
+        f"{source_name} may bind a name these {call_name} defaults use (an "
+        "assignment, another import, a parameter or a wildcard import), so the "
+        "migration did not "
+        f"add {', '.join(names)}. The built-in defaults apply; add them to "
+        f"{call_name}(...) to change them.",
+        extra={"emoji": ":warning:"},
+    )
+
+
+def _warn_omitted_additions(source_name, option, enum_name, additions):
+    logger.warning(
+        f"{source_name} may bind {enum_name} itself (an assignment, another "
+        "import, a parameter or a wildcard import), so the migration did not add "
+        f"{', '.join(additions)} to MINER_CONFIG[{option!r}]. Add them there "
+        "to use them.",
+        extra={"emoji": ":warning:"},
+    )
+
+
 def _enum_list_additions(
     source,
     tree,
@@ -482,7 +503,9 @@ def _enum_list_additions(
     import_statement,
     required_imports,
     rebound,
+    where,
 ):
+    """The members of additions node lacks; where is (source_name, option)."""
     existing_members = {
         item.attr
         for item in node.elts
@@ -498,6 +521,13 @@ def _enum_list_additions(
     )
     if prefix is None:
         if enum_name in rebound:
+            additions_left = [
+                addition
+                for addition in additions
+                if addition.rsplit(".", 1)[-1] not in existing_members
+            ]
+            if additions_left:
+                _warn_omitted_additions(*where, enum_name, additions_left)
             return []
         prefix = enum_name
         if import_statement not in required_imports:
@@ -799,6 +829,19 @@ def migrate_config_source(source, source_name="config.py"):
     if (
         safe_config
         and "streamer_source_priority" not in config_names
+        and "StreamerSource" in rebound
+    ):
+        # The built-in order is the same list, so nothing changes.
+        logger.warning(
+            f"{source_name} may bind StreamerSource itself (an assignment, "
+            "another import or a wildcard import), so the migration did not add "
+            "MINER_CONFIG['streamer_source_priority']. The built-in order "
+            "applies; add 'streamer_source_priority' to MINER_CONFIG to change it.",
+            extra={"emoji": ":warning:"},
+        )
+    if (
+        safe_config
+        and "streamer_source_priority" not in config_names
         and "StreamerSource" not in rebound
     ):
         missing_miner_options.append(
@@ -841,13 +884,19 @@ def migrate_config_source(source, source_name="config.py"):
         email_import = "from TwitchChannelPointsMiner.classes.Email import Email"
         if "email" not in logger_names and email_import not in required_imports:
             required_imports.append(email_import)
-        missing = [
-            default
-            for default in _missing_call_defaults(
-                logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
-            )
-            if not _uses_any(default.split("=", 1)[1], rebound)
-        ]
+        missing = []
+        omitted = []
+        for default in _missing_call_defaults(
+            logger_settings, "LoggerSettings", LOGGER_SETTINGS_DEFAULTS
+        ):
+            if _uses_any(default.split("=", 1)[1], rebound):
+                omitted.append(default.split("=", 1)[0])
+            else:
+                missing.append(default)
+        if omitted:
+            # The class defaults are the same values, so nothing changes, but
+            # the options don't appear in config.py.
+            _warn_omitted_defaults(source_name, "LoggerSettings", omitted)
         if missing:
             values = [default.split("=", 1)[1] for default in missing]
             if _uses_any_of(values, {"logging"}) and (
@@ -884,6 +933,7 @@ def migrate_config_source(source, source_name="config.py"):
             "from TwitchChannelPointsMiner.classes.Settings import Priority",
             required_imports,
             rebound,
+            (source_name, "priority"),
         )
         if missing:
             edits.extend(
@@ -903,6 +953,7 @@ def migrate_config_source(source, source_name="config.py"):
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
             required_imports,
             rebound,
+            (source_name, "streamer_source_priority"),
         )
         if missing:
             edits.extend(

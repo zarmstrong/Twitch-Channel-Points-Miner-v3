@@ -3867,6 +3867,24 @@ def test_an_import_is_added_below_a_coding_line_after_a_bom():
 
 
 @pytest.mark.parametrize(
+    "source, expected",
+    [
+        # No header: the import goes first, after the BOM.
+        ("X = 1\n", "import logging\nX = 1\n"),
+        # ast columns don't count the BOM, so the `;` splice must not either.
+        ('"""d"""; X = 1\n', '"""d"""; import logging\nX = 1\n'),
+    ],
+)
+def test_an_import_is_added_after_a_bom_without_a_header(source, expected):
+    encoded = ("\ufeff" + source).encode("utf-8")
+
+    updated = config_editor._with_config_import(encoded, "import logging")
+
+    assert updated == ("\ufeff" + expected).encode("utf-8")
+    config_editor._require_parses(updated)
+
+
+@pytest.mark.parametrize(
     "imports",
     [
         # R327-17: this binds the Streamer module, not the class.
