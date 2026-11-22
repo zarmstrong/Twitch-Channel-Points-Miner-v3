@@ -721,3 +721,39 @@ def test_cli_reports_an_invalid_interval_and_exits_with_1(monkeypatch, capsys):
 
     assert runner.cli([]) == 1
     assert "TCPM_CONFIG_RELOAD_SECONDS" in capsys.readouterr().err
+
+
+def test_requested_restart_stops_history_before_replacing_the_process(
+    monkeypatch, tmp_path
+):
+    import TwitchChannelPointsMiner as package
+    import TwitchChannelPointsMiner.history as history
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(
+        Settings, "config_path", getattr(Settings, "config_path", None), raising=False
+    )
+    calls = []
+
+    class FakeMiner:
+        def __init__(self, **_kwargs):
+            self.queue_listener = SimpleNamespace(stop=lambda: None)
+            self.twitch = SimpleNamespace(restart_requested=threading.Event())
+
+        def mine(self, *_args, **_kwargs):
+            self.twitch.restart_requested.set()
+
+    monkeypatch.setattr(package, "TwitchChannelPointsMiner", FakeMiner)
+    monkeypatch.setattr(runner, "_watch_config", lambda *_args: None)
+    monkeypatch.setattr(runner, "restart_process", lambda: calls.append("restart"))
+    monkeypatch.setattr(
+        history, "history_watching_stopped", lambda: calls.append("watching")
+    )
+    monkeypatch.setattr(history, "stop_history", lambda: calls.append("stop"))
+    config = SimpleNamespace(
+        MINER_CONFIG={}, MINE_CONFIG={}, STREAMERS=[], ANALYTICS_CONFIG=None
+    )
+
+    runner.run_config(config, tmp_path / "config.py")
+
+    assert calls == ["watching", "stop", "restart"]

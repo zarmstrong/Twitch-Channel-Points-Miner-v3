@@ -797,6 +797,11 @@ class HistoryRecorder(threading.Thread):
             entries = None
             if self._now_watching_initialized and mtime != self._now_watching_mtime:
                 entries = _load_list(path)
+        # The poll may have waited (database, the miner's lock) since ``now``
+        # was taken; a snapshot written meanwhile is no older than it.
+        now = max(now, float(self.clock()))
+        if self._watching_stopped_at is not None:
+            now = min(now, self._watching_stopped_at)
 
         if not self._now_watching_initialized:
             self._now_watching_mtime = mtime
@@ -937,13 +942,14 @@ class HistoryRecorder(threading.Thread):
 
     def _tick_watch(self, streamer, now):
         active = self._active_watch[streamer]
-        delta = max(0.0, float(now) - float(active["last_tick"]))
-        delta = min(delta, MAX_WATCH_TICK_SECONDS)
+        delta = float(now) - float(active["last_tick"])
         elapsed_now = self._elapsed_at(now)
         last_elapsed = active.get("last_tick_elapsed")
         if last_elapsed is not None:
-            # A system clock moved forward between ticks is not watch time.
-            delta = min(delta, max(0.0, elapsed_now - last_elapsed))
+            # Elapsed time, not the wall clock, so a system clock moved in
+            # either direction between ticks adds or loses no watch time.
+            delta = elapsed_now - last_elapsed
+        delta = min(max(0.0, delta), MAX_WATCH_TICK_SECONDS)
         if delta > 0:
             if not self.store.tick_watch_session(
                 active["id"], streamer, timestamp=now, delta_seconds=delta

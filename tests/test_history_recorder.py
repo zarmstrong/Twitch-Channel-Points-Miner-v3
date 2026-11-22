@@ -3476,3 +3476,65 @@ def test_a_forward_clock_correction_is_not_watch_time(tmp_path):
         assert session["watch_seconds"] == 20
     finally:
         recorder._shutdown()
+
+
+def test_a_snapshot_written_while_the_poll_waited_starts_when_written(recorder):
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    clock = recorder.clock
+
+    class SlowLock:
+        # The poll started at NOW + 30 and waited for the miner's lock until
+        # NOW + 70; the miner wrote the snapshot at NOW + 60 meanwhile.
+        def __enter__(self):
+            _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 60)
+            clock.value = NOW + 70
+
+        def __exit__(self, *exc):
+            return False
+
+    clock.value = NOW + 30
+    recorder.source_locks["now_watching"] = SlowLock()
+    recorder._poll_now_watching()
+    recorder.source_locks.pop("now_watching")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 90)
+    clock.value = NOW + 90
+    recorder._poll_now_watching()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+        "sessions"
+    ][0]
+    assert session["started_at"] == NOW + 60
+    assert session["watch_seconds"] == 30
+
+
+def test_a_backward_clock_correction_keeps_the_watch_time(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    clock = FakeClock(NOW)
+    elapsed = FakeClock(1000.0)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        monotonic=elapsed,
+    )
+    recorder._prepare()
+    path = analytics / "now_watching.json"
+    try:
+        _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+        clock.value = NOW + 1
+        elapsed.value = 1001.0
+        recorder._poll_now_watching()
+        # 20 seconds pass while the host clock is set back 120 seconds.
+        clock.value = NOW - 99
+        elapsed.value = 1021.0
+        _write_json(path, [{"username": "bob", "reason": "points"}], NOW - 99)
+        recorder._poll_now_watching()
+
+        session = store.sessions(kind="watch", days=1, now=NOW + 1)["sessions"][0]
+        assert session["watch_seconds"] == 20
+    finally:
+        recorder._shutdown()

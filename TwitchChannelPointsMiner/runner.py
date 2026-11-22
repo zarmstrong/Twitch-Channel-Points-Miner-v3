@@ -304,7 +304,27 @@ def run_config(config, path, on_miner_ready=None):
     # miner stopped or is restarting, before the process exits or is replaced.
     miner.queue_listener.stop()
     if miner.twitch.restart_requested.is_set():
+        _stop_history_before_restart()
         restart_process()
+
+
+def _stop_history_before_restart():
+    """Let History record the last watch before the process is replaced.
+
+    A requested restart skips the miner's worker shutdown, and ``os.execv``
+    runs neither ``atexit`` callbacks nor ``finally`` blocks.
+    """
+
+    try:
+        from TwitchChannelPointsMiner.history import (
+            history_watching_stopped,
+            stop_history,
+        )
+
+        history_watching_stopped()
+        stop_history()
+    except Exception:
+        logger.warning("Unable to stop History before restarting", exc_info=True)
 
 
 def restart_process():
