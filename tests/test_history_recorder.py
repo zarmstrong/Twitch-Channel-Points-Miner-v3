@@ -2867,7 +2867,7 @@ def test_startup_keeps_the_claim_of_a_broadcast_live_past_retention(tmp_path):
         recorder._shutdown()
 
 
-def test_snapshot_read_late_credits_only_until_shortly_after_it(recorder):
+def test_snapshot_read_late_credits_only_until_it_was_written(recorder):
     clock = recorder.clock
     path = os.path.join(recorder.analytics_path, "now_watching.json")
     _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
@@ -2884,8 +2884,9 @@ def test_snapshot_read_late_credits_only_until_shortly_after_it(recorder):
     session = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
         "sessions"
     ][0]
-    assert session["watch_seconds"] == 199
-    assert session["ended_at"] == NOW + 200
+    # Polling on time would credit the same: up to the last snapshot.
+    assert session["watch_seconds"] == 19
+    assert session["ended_at"] == NOW + 20
 
 
 def test_observed_end_replaces_the_end_estimated_from_the_snapshot(tmp_path):
@@ -3705,3 +3706,142 @@ def test_cache_backfill_after_a_failed_first_read_survives_retention(
         assert sum(row["points_gained"] for row in daily) == 50
     finally:
         recorder._shutdown()
+
+
+def test_the_first_change_of_a_new_analytics_file_is_counted(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [{"username": "bob", "channel_points": 1000, "is_online": False}]
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        # The miner writes entries only after changes: 1000 -> 1050 -> 1100.
+        _write_json(
+            analytics / "bob.json",
+            {
+                "series": [
+                    {"x": int((NOW + 60) * 1000), "y": 1050, "z": "Watch"},
+                    {"x": int((NOW + 120) * 1000), "y": 1100, "z": "Watch"},
+                ]
+            },
+            NOW + 121,
+        )
+        clock.value = NOW + 130
+        recorder.poll_once()
+
+        window = store.overview(days=1, now=clock.value)["window"]
+        assert window["points_gained"] == 100
+    finally:
+        recorder._shutdown()
+
+
+def test_old_cache_history_is_counted_after_a_live_row_and_retention(
+    tmp_path, monkeypatch
+):
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    old = NOW - 2 * 24 * 60 * 60
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": old,
+                "ended_at": old + 3600,
+                "claimed": True,
+                "claimed_at": old + 60,
+            },
+            {"streamer_login": "bob", "broadcast_id": "b2", "started_at": NOW - 60},
+        ),
+        NOW - 10,
+    )
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    snapshot = [
+        {
+            "username": "bob",
+            "broadcast_id": "b2",
+            "online_at": NOW - 60,
+            "is_online": True,
+        }
+    ]
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        retention_days=1,
+        online_streamers=lambda: list(snapshot),
+    )
+    original = recorder_module._read_json
+
+    def cache_unreadable(target):
+        if str(target) == str(cache):
+            raise PermissionError("in use")
+        return original(target)
+
+    monkeypatch.setattr(recorder_module, "_read_json", cache_unreadable)
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        monkeypatch.setattr(recorder_module, "_read_json", original)
+        clock.value = NOW + 20
+        recorder.poll_once()
+
+        daily = store.daily(days=3650, now=clock.value, streamer="bob")
+        assert sum(row["stream_sessions"] for row in daily) == 2
+        assert sum(row["streak_count"] for row in daily) == 1
+    finally:
+        recorder._shutdown()
+
+
+def test_watch_time_does_not_depend_on_when_history_polls(tmp_path):
+    def run(poll_times):
+        folder = tmp_path / f"run{len(poll_times)}"
+        folder.mkdir()
+        store = HistoryStore(folder / "history.sqlite3")
+        clock = FakeClock(NOW)
+        recorder = HistoryRecorder(
+            store,
+            analytics_path=folder,
+            streak_cache_path=folder / "missing.json",
+            username="alice",
+            clock=clock,
+        )
+        recorder._prepare()
+        path = folder / "now_watching.json"
+        writes = {1: NOW + 1, 20: NOW + 20}
+        for offset in poll_times:
+            for written, mtime in writes.items():
+                if written <= offset and written == max(
+                    w for w in writes if w <= offset
+                ):
+                    _write_json(path, [{"username": "bob", "reason": "points"}], mtime)
+            clock.value = NOW + offset
+            recorder._poll_now_watching()
+        session = store.sessions(kind="watch", days=1, now=clock.value)["sessions"][0]
+        recorder._shutdown()
+        return session["watch_seconds"]
+
+    on_time = run([1, 20, 35, 50, 400])
+    delayed = run([1, 600, 700])
+    assert on_time == delayed == 19

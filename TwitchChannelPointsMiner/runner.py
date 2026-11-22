@@ -316,13 +316,10 @@ def _stop_history_before_restart():
     """
 
     try:
-        from TwitchChannelPointsMiner.history import (
-            history_watching_stopped,
-            stop_history,
-        )
+        from TwitchChannelPointsMiner.history import stop_history
 
-        history_watching_stopped()
-        # Replacing the process kills a recorder still writing its last
+        # The workers keep watching until the process is replaced, so this
+        # does not mark watching stopped.  Replacing the process kills a recorder still writing its last
         # watch, so give a long import or a slow disk time to finish.
         if stop_history(timeout=120) is False:
             logger.warning("History did not finish before the restart")

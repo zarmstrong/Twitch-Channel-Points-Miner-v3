@@ -769,3 +769,48 @@ def test_streamer_detail_summary_reads_the_same_snapshot(store, monkeypatch):
     assert detail["summary"]["points_gained"] == sum(
         row["points_gained"] for row in detail["daily"]
     )
+
+
+def test_the_cache_start_corrects_a_start_known_only_from_the_live_snapshot(store):
+    store.upsert_stream_session("alice", "b1", NOW, source="online")
+    earlier = NOW - 24 * 60 * 60
+    store.upsert_stream_session("alice", "b1", earlier, source="streak_cache")
+
+    stream = store.sessions(kind="stream", days=3, now=NOW)["sessions"][0]
+    assert stream["started_at"] == earlier
+    daily = {row["day"]: row for row in store.daily(days=3, now=NOW)}
+    assert daily[utc_day(earlier)]["stream_sessions"] == 1
+    assert daily[utc_day(NOW)]["stream_sessions"] == 0
+
+
+def test_a_pruned_broadcast_and_claim_are_not_counted_again(store):
+    old = NOW - 3 * 24 * 60 * 60
+    store.upsert_stream_session("alice", "b1", old, ended_at=old + 3600)
+    store.record_event(
+        "alice",
+        old + 60,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": old},
+        dedupe_key="streak:alice:b1",
+        dedupe_window=120.0,
+    )
+    store.apply_retention(now=NOW, retention_days=1)
+
+    # The streak cache still lists both.
+    store.upsert_stream_session("alice", "b1", old, ended_at=old + 3600)
+    store.record_event(
+        "alice",
+        old + 60,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": old},
+        dedupe_key="streak:alice:b1",
+        dedupe_window=120.0,
+    )
+    # A broadcast never seen before is counted, however old.
+    store.upsert_stream_session("alice", "b0", old - 7200, ended_at=old - 3600)
+
+    daily = store.daily(days=3650, now=NOW)
+    assert sum(row["stream_sessions"] for row in daily) == 2
+    assert sum(row["streak_count"] for row in daily) == 1

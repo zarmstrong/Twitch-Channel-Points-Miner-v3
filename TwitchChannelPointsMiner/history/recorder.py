@@ -867,7 +867,9 @@ class HistoryRecorder(threading.Thread):
                 self.store.link_watch_broadcast(active["id"], broadcast_id)
                 active["broadcast_id"] = broadcast_id
             if active is not None and self._same_watch(active, reason, broadcast_id):
-                self._tick_watch(streamer, confirmed_until)
+                # Credit up to when this snapshot was written, not when it was
+                # read, so the totals do not depend on when History polls.
+                self._tick_watch(streamer, changed_at)
             if self._active_watch.get(streamer) is None or not self._same_watch(
                 self._active_watch[streamer], reason, broadcast_id
             ):
@@ -1272,34 +1274,20 @@ class HistoryRecorder(threading.Thread):
                     self._cache_startup_closed.add(
                         (item["streamer"], item["broadcast_id"])
                     )
-        cutoffs = {}
         for item in parsed:
             if item["streamer"] in self._drop_farmed:
                 continue
             if item["streamer"] not in self._tracked_streamers:
                 continue
-            if item["streamer"] not in cutoffs:
-                cutoffs[item["streamer"]] = self._streamer_cutoff(item["streamer"], now)
-            cutoff = cutoffs[item["streamer"]]
-            self._store_cached_session(item, now, close_open=close_open, cutoff=cutoff)
-            self._record_cached_streak(item, now, cutoff=cutoff)
+            # The store counts each broadcast and claim once, even after
+            # retention pruned its row (see counted_keys).
+            self._store_cached_session(item, now, close_open=close_open)
+            self._record_cached_streak(item, now)
         # Remember the file only once it is imported, so a failed write is
         # retried on the next poll even if the cache does not change again.
         self._streak_cache_key = cache_key
 
-    def _streamer_cutoff(self, streamer, now):
-        """Retention cutoff for one streamer's cached data, read before a batch.
-
-        Nothing of a streamer without rollups was counted yet, so none of its
-        data can be a pruned duplicate and all of it is imported.
-        """
-
-        cutoff = self._retention_cutoff(now)
-        if cutoff is None or not self.store.has_rollups(streamer, "cache"):
-            return None
-        return cutoff
-
-    def _store_cached_session(self, item, now, close_open=False, cutoff=None):
+    def _store_cached_session(self, item, now, close_open=False):
         started_at = item["started_at"]
         ended_at = item["ended_at"]
         key = (item["streamer"], item["broadcast_id"])
@@ -1314,11 +1302,6 @@ class HistoryRecorder(threading.Thread):
             # This process already ended the broadcast; an open cache entry
             # must not reopen it, or recreate it once retention pruned it.
             ended_at = max(started_at, self._online_ended[key])
-        if cutoff is not None and ended_at is not None and ended_at < cutoff:
-            # Retention already pruned this row (or will); importing it again
-            # would count it a second time in the permanent daily rollups.
-            return
-
         self.store.upsert_stream_session(
             item["streamer"],
             item["broadcast_id"],
@@ -1338,7 +1321,7 @@ class HistoryRecorder(threading.Thread):
             # reports the broadcast as online.
             self._online_live_keys.discard(key)
 
-    def _record_cached_streak(self, item, now, cutoff=None):
+    def _record_cached_streak(self, item, now):
         if not item.get("claimed") or item.get("claimed_at") is None:
             return
         try:
@@ -1346,10 +1329,6 @@ class HistoryRecorder(threading.Thread):
         except (TypeError, ValueError):
             return
         if self._deleted_since(item["streamer"], claimed_at):
-            return
-        if cutoff is not None and claimed_at < cutoff:
-            # See _store_cached_session: the pruned event must not be counted
-            # again in the rollups.
             return
         self.store.record_event(
             item["streamer"],
@@ -1367,11 +1346,10 @@ class HistoryRecorder(threading.Thread):
     def _import_cached_sessions(self, streamer, now):
         """Backfill live sessions once a streamer is first watched."""
 
-        cutoff = self._streamer_cutoff(streamer, now)
         for item in self._cached_stream_sessions:
             if item["streamer"] == streamer:
-                self._store_cached_session(item, now, close_open=False, cutoff=cutoff)
-                self._record_cached_streak(item, now, cutoff=cutoff)
+                self._store_cached_session(item, now, close_open=False)
+                self._record_cached_streak(item, now)
 
     def _resume_cached_live_stream(self, streamer, now):
         """Reopen the broadcast a restarted miner is watching again.
@@ -1444,8 +1422,45 @@ class HistoryRecorder(threading.Thread):
     def _ingest_analytics(self, now=None):
         if not self._streamer_state_ready:
             self._refresh_streamer_state()
+        self._seed_point_baselines()
         for filename, path in self._analytics_files():
             self._ingest_analytics_file(filename, path)
+
+    def _seed_point_baselines(self):
+        """Remember a streamer's balance before its analytics JSON exists.
+
+        The miner writes a series entry only after a change, with the new
+        balance, so the first entry of a new file has no previous balance to
+        compare with and its change would be lost.  The live balance read
+        before that file appears is that previous balance.
+        """
+
+        configured = self._configured_streamers()
+        if not configured:
+            return
+        for streamer in list(self._streamer_snapshot or []):
+            if isinstance(streamer, dict):
+                username = streamer.get("username") or streamer.get("streamer")
+                balance = streamer.get("channel_points")
+            else:
+                username = getattr(streamer, "username", None)
+                balance = getattr(streamer, "channel_points", None)
+            username = _clean_streamer(username)
+            if username not in configured or isinstance(balance, bool):
+                continue
+            try:
+                balance = int(balance)
+            except (TypeError, ValueError):
+                continue
+            if balance < 0:
+                continue
+            path = os.path.join(self.analytics_path, f"{username}.json")
+            if os.path.exists(path):
+                continue
+            source = f"analytics:{username}.json:series"
+            if self.store.get_import_state(source) is not None:
+                continue
+            self.store.set_import_state(source, last_balance=balance, consumed=0)
 
     def _ingest_analytics_file(self, filename, path, file_locked=False, force=False):
         """Import one analytics JSON; False when it could not be read.

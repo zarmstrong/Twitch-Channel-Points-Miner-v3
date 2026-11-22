@@ -760,5 +760,6 @@ def test_requested_restart_stops_history_before_replacing_the_process(
 
     runner.run_config(config, tmp_path / "config.py")
 
-    # A long final import must finish before the process is replaced.
-    assert calls == ["watching", ("stop", 120), "restart"]
+    # A long final import must finish before the process is replaced.  The
+    # workers keep watching until then, so watching is not marked stopped.
+    assert calls == [("stop", 120), "restart"]

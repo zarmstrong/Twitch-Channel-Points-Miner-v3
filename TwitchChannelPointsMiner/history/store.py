@@ -312,6 +312,15 @@ _SCHEMA_V2 = (
 # observed end replaces it, even after a restart.
 _SCHEMA_V3 = (
     "ALTER TABLE streams ADD COLUMN end_estimated INTEGER NOT NULL DEFAULT 0",
+    # Broadcasts and streak claims already counted in the rollups.  Retention
+    # prunes their rows but keeps these, so the streak cache (which keeps
+    # entries for a week, open ones longer) cannot count one again.
+    """
+    CREATE TABLE IF NOT EXISTS counted_keys (
+        key TEXT PRIMARY KEY,
+        streamer TEXT NOT NULL
+    )
+    """,
 )
 
 # import_state rows that are not per-file import cursors.
@@ -689,6 +698,9 @@ class HistoryStore(object):
                 # covers.
                 cls._merge_claim_broadcasts(connection, existing, payload)
                 return False
+            if dedupe_key and cls._is_counted(connection, dedupe_key):
+                # Counted before; retention pruned the event since.
+                return False
             existing = cls._claim_of_same_broadcast(
                 connection, streamer, timestamp, payload
             )
@@ -713,6 +725,8 @@ class HistoryStore(object):
         )
         if cursor.rowcount <= 0:
             return False
+        if event_type == "watch_streak" and dedupe_key:
+            cls._mark_counted(connection, streamer, dedupe_key)
         cls._touch_daily(
             connection,
             streamer,
@@ -720,6 +734,26 @@ class HistoryStore(object):
             streak_delta=1 if event_type == "watch_streak" else 0,
         )
         return True
+
+    @staticmethod
+    def _is_counted(connection, key):
+        return (
+            connection.execute(
+                "SELECT 1 FROM counted_keys WHERE key = ?", (key,)
+            ).fetchone()
+            is not None
+        )
+
+    @classmethod
+    def _mark_counted(cls, connection, streamer, key):
+        """Remember ``key`` as counted; True when it was counted before."""
+
+        if cls._is_counted(connection, key):
+            return True
+        connection.execute(
+            "INSERT INTO counted_keys (key, streamer) VALUES (?, ?)", (key, streamer)
+        )
+        return False
 
     @staticmethod
     def _claim_of_same_broadcast(connection, streamer, timestamp, payload):
@@ -894,9 +928,21 @@ class HistoryStore(object):
         last_seen_at = float(last_seen_at or ended_at or started_at)
         with self._write_connection() as connection:
             existing = connection.execute(
-                "SELECT id FROM streams WHERE streamer = ? AND broadcast_id = ?",
+                """
+                SELECT id, started_at, source FROM streams
+                WHERE streamer = ? AND broadcast_id = ?
+                """,
                 (streamer, broadcast_id),
             ).fetchone()
+            if (
+                existing is not None
+                and source == "streak_cache"
+                and existing["source"] == "online"
+                and started_at < float(existing["started_at"])
+            ):
+                # The live snapshot only knew when this process saw the
+                # broadcast; the cache knows when the miner first did.
+                self._move_stream_start(connection, streamer, existing, started_at)
             if existing is None:
                 # A new broadcast supersedes anything still marked live.  The
                 # inferred end is the new broadcast's start; an observed end
@@ -909,6 +955,12 @@ class HistoryStore(object):
                     """,
                     (started_at, streamer, broadcast_id, started_at),
                 )
+                counted = self._mark_counted(
+                    connection, streamer, f"stream:{streamer}:{broadcast_id}"
+                )
+                if counted and ended_at is not None:
+                    # Counted before and pruned since: nothing to restore.
+                    return None
                 connection.execute(
                     """
                     INSERT INTO streams (
@@ -929,11 +981,13 @@ class HistoryStore(object):
                         1 if ended_at is not None and not observed_end else 0,
                     ),
                 )
+                # A broadcast counted before (its row since pruned) is not
+                # counted again.
                 self._touch_daily(
                     connection,
                     streamer,
                     started_at,
-                    stream_session_delta=1,
+                    stream_session_delta=0 if counted else 1,
                 )
                 return int(
                     connection.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -988,6 +1042,18 @@ class HistoryStore(object):
                 ),
             )
             return int(existing["id"])
+
+    @classmethod
+    def _move_stream_start(cls, connection, streamer, existing, started_at):
+        old_start = float(existing["started_at"])
+        connection.execute(
+            "UPDATE streams SET started_at = ? WHERE id = ?",
+            (started_at, int(existing["id"])),
+        )
+        if utc_day(old_start) != utc_day(started_at):
+            # The broadcast is counted on the day it started.
+            cls._touch_daily(connection, streamer, old_start, stream_session_delta=-1)
+            cls._touch_daily(connection, streamer, started_at, stream_session_delta=1)
 
     def update_open_stream_details(
         self, streamer, timestamp, game=None, title=None, clear_game=False
@@ -1085,27 +1151,6 @@ class HistoryStore(object):
                 "SELECT streamer, broadcast_id FROM streams WHERE ended_at IS NULL"
             ).fetchall()
         return [(row["streamer"], row["broadcast_id"]) for row in rows]
-
-    def has_rollups(self, streamer, kind=None):
-        """True once something of this streamer was counted in the rollups.
-
-        ``kind="cache"`` asks only about what the streak cache adds:
-        broadcasts and streak claims.  Points counted from the analytics JSON
-        say nothing about whether the cache was imported.
-        """
-
-        streamer = _clean_streamer(streamer)
-        if not streamer:
-            return False
-        condition = (
-            "AND (stream_sessions > 0 OR streak_count > 0)" if kind == "cache" else ""
-        )
-        with self._read_connection() as connection:
-            row = connection.execute(
-                f"SELECT 1 FROM daily_stats WHERE streamer = ? {condition} LIMIT 1",
-                (streamer,),
-            ).fetchone()
-        return row is not None
 
     def stream_start(self, streamer, broadcast_id):
         """Return when a recorded broadcast started, or None."""
@@ -2260,6 +2305,10 @@ class HistoryStore(object):
                     f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
                 )
                 counts[table] = max(0, cursor.rowcount)
+            # What is left after the delete counts afresh.
+            connection.execute(
+                "DELETE FROM counted_keys WHERE streamer = ?", (streamer,)
+            )
             connection.execute(
                 """
                 INSERT INTO deleted_streamers (streamer, deleted_at)
