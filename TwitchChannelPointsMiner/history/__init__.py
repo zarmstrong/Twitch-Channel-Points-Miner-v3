@@ -245,6 +245,18 @@ def delete_streamer_history(
     return standalone.delete_streamer(streamer, remove_source=remove_source)
 
 
+def history_watching_stopped():
+    """Tell History the miner stopped watching streams.
+
+    The miner stops its watch worker first and History only after its other
+    workers, so this keeps shutdown from crediting watch time in between.
+    """
+
+    recorder = _recorder
+    if recorder is not None:
+        recorder.watching_stopped()
+
+
 def is_recording():
     """True while the recorder thread is running and has started its run."""
 
@@ -270,6 +282,7 @@ __all__ = [
     "HistoryUnavailableError",
     "delete_streamer_history",
     "get_store",
+    "history_watching_stopped",
     "is_recording",
     "start_history",
     "stop_history",

@@ -3109,3 +3109,47 @@ def test_shutdown_credits_a_watch_confirmed_by_an_unchanged_snapshot(recorder):
     session = recorder.store.sessions(kind="watch", days=1, now=NOW + 19)["sessions"][0]
     assert session["watch_seconds"] == 19
     assert session["ended_at"] == NOW + 19
+
+
+def test_watches_expire_while_the_snapshot_stays_unreadable(recorder, monkeypatch):
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    clock = recorder.clock
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 1)
+    clock.value = NOW + 1
+    recorder._poll_now_watching()
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 30)
+
+    def denied(target):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(recorder_module, "_read_json", denied)
+    clock.value = NOW + 1000
+    recorder._poll_now_watching()
+
+    overview = recorder.store.overview(days=1, now=clock.value)
+    assert overview["active_watch_sessions"] == 0
+
+
+def test_shutdown_credits_no_watch_time_after_watching_stopped(recorder):
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW)
+    recorder.clock.value = NOW + 1
+    recorder._poll_now_watching()
+    recorder.watching_stopped(NOW + 10)
+    # The other workers take a while to stop before History does.
+    recorder.clock.value = NOW + 90
+    recorder._shutdown()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=NOW + 90)["sessions"][0]
+    assert session["watch_seconds"] == 10
+    assert session["ended_at"] == NOW + 10
+
+
+def test_history_watching_stopped_reaches_the_recorder(monkeypatch):
+    calls = []
+    fake = type("Fake", (), {"watching_stopped": lambda self: calls.append(1)})()
+    monkeypatch.setattr(history_module, "_recorder", fake)
+    history_module.history_watching_stopped()
+    assert calls == [1]

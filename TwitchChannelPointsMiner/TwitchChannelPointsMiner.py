@@ -3241,6 +3241,13 @@ class TwitchChannelPointsMiner:
                 streamer.retire_chat(timeout=10)
 
         self.running = self.twitch.running = False
+        try:
+            from TwitchChannelPointsMiner.history import history_watching_stopped
+
+            # Watching ends here; History itself stops after the workers.
+            history_watching_stopped()
+        except Exception:
+            logger.debug("Unable to tell History watching stopped", exc_info=True)
         self.drop_badge_catalog_stop_event.set()
         if self.ws_pool is not None:
             self.ws_pool.end()

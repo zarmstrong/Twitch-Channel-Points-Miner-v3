@@ -247,6 +247,8 @@ class HistoryRecorder(threading.Thread):
         self._active_watch = {}
         self._now_watching_initialized = False
         self._now_watching_mtime = 0.0
+        # When the miner stopped watching; shutdown credits no time after it.
+        self._watching_stopped_at = None
         self._run_id = None
         self._next_retention_at = 0.0
         self._streak_cache_key = None
@@ -268,6 +270,14 @@ class HistoryRecorder(threading.Thread):
     # -- lifecycle ---------------------------------------------------------
     def stop(self):
         self._stop_event.set()
+
+    def watching_stopped(self, timestamp=None):
+        """Record that the miner stopped watching, ahead of ``stop()``."""
+
+        if self._watching_stopped_at is None:
+            self._watching_stopped_at = (
+                self.clock() if timestamp is None else float(timestamp)
+            )
 
     def run(self):
         try:
@@ -493,6 +503,9 @@ class HistoryRecorder(threading.Thread):
         # An unchanged, recent snapshot still confirms the watches until now.
         mtime = self._now_watching_mtime
         confirmed_until = min(now, mtime + STALE_WATCH_SECONDS) if mtime > 0 else 0.0
+        if self._watching_stopped_at is not None:
+            # The miner stopped watching before it got to stopping History.
+            confirmed_until = min(confirmed_until, self._watching_stopped_at)
         for streamer in list(self._active_watch):
             try:
                 last_tick = float(self._active_watch[streamer]["last_tick"])
@@ -778,15 +791,13 @@ class HistoryRecorder(threading.Thread):
             return
 
         if mtime == self._now_watching_mtime:
-            if self._active_watch and mtime > 0 and now - mtime > STALE_WATCH_SECONDS:
-                for streamer in list(self._active_watch):
-                    self._close_watch(
-                        streamer, self._active_watch[streamer]["last_tick"]
-                    )
+            self._expire_stale_watches(now)
             return
 
         if entries is _READ_FAILED:
-            # Keep the old mtime, so the same snapshot is read again.
+            # Keep the old mtime, so the same snapshot is read again.  The
+            # watches it might confirm still expire like unconfirmed ones.
+            self._expire_stale_watches(now)
             return
         if entries is None:
             entries = []
@@ -876,6 +887,14 @@ class HistoryRecorder(threading.Thread):
         # Only now is the snapshot fully recorded; a failed write above leaves
         # the old mtime so the same snapshot is processed again next poll.
         self._now_watching_mtime = mtime
+
+    def _expire_stale_watches(self, now):
+        """Close watches no readable snapshot confirmed for a while."""
+
+        mtime = self._now_watching_mtime
+        if self._active_watch and mtime > 0 and now - mtime > STALE_WATCH_SECONDS:
+            for streamer in list(self._active_watch):
+                self._close_watch(streamer, self._active_watch[streamer]["last_tick"])
 
     @staticmethod
     def _same_watch(active, reason, broadcast_id):

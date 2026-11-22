@@ -678,6 +678,12 @@ class HistoryStore(object):
                 # covers.
                 cls._merge_claim_broadcasts(connection, existing, payload)
                 return False
+            existing = cls._claim_of_same_broadcast(
+                connection, streamer, timestamp, payload
+            )
+            if existing is not None:
+                cls._merge_claim_broadcasts(connection, existing, payload)
+                return False
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO events (
@@ -703,6 +709,53 @@ class HistoryStore(object):
             streak_delta=1 if event_type == "watch_streak" else 0,
         )
         return True
+
+    @staticmethod
+    def _claim_of_same_broadcast(connection, streamer, timestamp, payload):
+        """Find a claim already recorded for the broadcast of a new one.
+
+        A broadcast has one watch streak.  The streak cache can be rebuilt
+        (for example after losing ``logs/.state``) and record the claim again
+        at a later time, while the analytics annotation keeps the original
+        time, so the two can be far apart.  A claim between the broadcast's
+        start and the new claim, or a cached claim whose broadcast covers an
+        annotation, is the same claim.
+        """
+
+        try:
+            metadata = json.loads(payload) if payload else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        try:
+            started_at = float(metadata.get("started_at"))
+        except (TypeError, ValueError):
+            started_at = None
+        if started_at is not None:
+            return connection.execute(
+                """
+                SELECT id, metadata FROM events
+                WHERE streamer = ? AND type = 'watch_streak'
+                  AND ts >= ? AND ts <= ?
+                ORDER BY ts LIMIT 1
+                """,
+                (streamer, started_at, timestamp),
+            ).fetchone()
+        if _event_broadcast_ids(payload):
+            return None
+        # An annotation: covered by a cached claim of the broadcast it falls in.
+        return connection.execute(
+            """
+            SELECT id, metadata FROM events
+            WHERE streamer = ? AND type = 'watch_streak'
+              AND json_valid(metadata)
+              AND CAST(json_extract(metadata, '$.started_at') AS REAL) <= ?
+              AND ts >= ?
+            ORDER BY ts LIMIT 1
+            """,
+            (streamer, timestamp, timestamp),
+        ).fetchone()
 
     @staticmethod
     def _merge_claim_broadcasts(connection, existing, payload):

@@ -680,3 +680,43 @@ def test_a_claim_carried_to_the_next_broadcast_covers_it(store):
     item = store.streamers(days=1, now=NOW + 60)[0]
     assert item["live_streak_at"] == NOW + 30
     assert item["lifetime"]["streak_count"] == 1
+
+
+def test_a_rebuilt_cache_claim_does_not_count_the_annotation_again(store):
+    store.upsert_stream_session("alice", "b1", NOW - 600)
+    # The analytics annotation of the original claim.
+    store.record_event(
+        "alice", NOW, "watch_streak", "+10 - WATCH_STREAK", dedupe_window=120.0
+    )
+    # The streak cache was lost and the claim recorded again on reconnect.
+    store.record_event(
+        "alice",
+        NOW + 1000,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": NOW - 600},
+        dedupe_key="streak:alice:b1",
+        dedupe_window=120.0,
+    )
+
+    item = store.streamers(days=1, now=NOW + 1100)[0]
+    assert item["lifetime"]["streak_count"] == 1
+    assert item["live_streak_at"] == NOW
+
+
+def test_an_annotation_inside_a_cached_claims_broadcast_is_the_same_claim(store):
+    store.record_event(
+        "alice",
+        NOW + 1000,
+        "watch_streak",
+        "Watch streak claimed",
+        metadata={"broadcast_id": "b1", "started_at": NOW - 600},
+        dedupe_key="streak:alice:b1",
+        dedupe_window=120.0,
+    )
+    store.record_event(
+        "alice", NOW, "watch_streak", "+10 - WATCH_STREAK", dedupe_window=120.0
+    )
+
+    daily = store.daily(days=1, now=NOW + 1100)
+    assert sum(row["streak_count"] for row in daily) == 1
