@@ -12,7 +12,9 @@ The **Config** tab manages explicit streamers, categories and their order,
 per-streamer behavior, category discovery, stream sources, logging, daily
 reports, and notification providers. Streamer additions/removals and category
 list changes are detected by the running miner; controls marked in the page as
-restart-required take effect on the next start.
+restart-required take effect on the next start, or immediately through the
+**Restart now** button at the bottom of the Config tab (the in-process
+restart the dashboard already uses for reauthentication).
 
 Dashboard changes are written directly to their canonical `STREAMERS`,
 `MINER_CONFIG`, and `MINE_CONFIG` values in `config.py`; unrelated source and
@@ -25,7 +27,7 @@ and HTTPS guidance described below.
 
 | Light theme | Dark theme |
 | ----------- | ---------- |
-| ![Light theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-light.png) | ![Dark theme](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/chart-analytics-dark.png) |
+| ![Light theme](../assets/chart-analytics-light.png) | ![Dark theme](../assets/chart-analytics-dark.png) |
 
 Enable storage with `MINER_CONFIG["enable_analytics"] = True` and configure the
 server through `ANALYTICS_CONFIG`. The chart refreshes every `refresh` minutes.
@@ -36,10 +38,14 @@ The log viewer polls every `log_poll_interval` seconds (default `5`; accepted
 range `1` to `180`), and `days_ago` controls the chart's initial time range.
 
 For access from another machine, bind to `0.0.0.0` and provide a strong
-`password`; remote binds without a password are rejected. Sign in with the
-configured Twitch username and analytics password. The built-in server uses
-plain HTTP, so expose it only on a trusted network or behind an HTTPS reverse
-proxy. Background and design context are available in [issue #96](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/96).
+`password`; remote binds without a password are rejected unless
+`trust_proxy_auth=True` is set. Sign in with the configured Twitch username and
+analytics password. The built-in server uses plain HTTP, so expose it only on a
+trusted network or behind an HTTPS reverse proxy. Background and design context
+are available in [issue #96](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/issues/96).
+
+If Traefik and Authelia are the only way to reach the dashboard, see
+[Traefik + Authelia](traefik-authelia.md).
 ```python
 MINER_CONFIG = {
     "username": "your-twitch-username",
@@ -84,10 +90,12 @@ server {
 ```
 
 Set `ANALYTICS_CONFIG={"host": "127.0.0.1", "password": "a-strong-password"}`
-behind that proxy. Restrict the proxy further with a firewall, VPN, or IP
-allowlist where possible. nginx and certificate provisioning must be configured
-for your operating system and domain; the example only shows the relevant proxy
-boundary.
+behind that proxy. If you disable the built-in password with
+`trust_proxy_auth=True`, also set `allowed_hosts` to the proxy's public
+hostname so the loopback DNS-rebinding Host guard keeps working. Restrict the
+proxy further with a firewall, VPN, or IP allowlist where possible. nginx and
+certificate provisioning must be configured for your operating system and
+domain; the example only shows the relevant proxy boundary.
 
 ## Enabling analytics storage
 

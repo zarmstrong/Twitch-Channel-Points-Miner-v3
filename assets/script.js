@@ -384,6 +384,7 @@ $(document).ready(function () {
     $('#update-settings-form').submit(saveUpdateSettings);
     $('#login-settings-form').submit(saveLoginSettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
+    $('#restart-miner').on('click', restartMiner);
     $('#dismiss-update-banner').click(dismissUpdateBanner);
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
@@ -842,6 +843,10 @@ function renderNowWatching(entries) {
         } else if (entry.reason === 'drops' || entry.reason === 'badge') {
             var label2 = entry.reason === 'badge' ? 'Badge campaign' : 'Drops';
             line.text(`Currently watching ${entry.username} for ${label2}`);
+        } else if (entry.reason === 'streak') {
+            line.text(
+                `Currently watching ${entry.username} for watch streak (${entry.channel_points})`
+            );
         } else {
             line.text(
                 `Currently watching ${entry.username} for points (${entry.channel_points})`
@@ -1389,10 +1394,22 @@ function renderConfiguredStreamers(streamers) {
             ['make_predictions', 'Predictions'],
             ['follow_raid', 'Follow raids'],
             ['claim_drops', 'Claim Drops'],
-            ['claim_moments', 'Claim moments']
+            ['claim_moments', 'Claim moments'],
+            ['streak_only', 'Streak only']
         ].forEach(function (setting) {
-            var label = $('<label>').addClass('checkbox config-checkbox').text(` ${setting[1]}`);
-            label.prepend($('<input>').attr('type', 'checkbox').attr('data-setting', setting[0]).prop('checked', settings[setting[0]] === true));
+            var value = settings[setting[0]];
+            var labelText = setting[1];
+            // streak_only may be an integer custom window in config.py. Show
+            // it as checked and keep the configured value for saveStreamerSettings.
+            if (setting[0] === 'streak_only' && Number.isInteger(value) && value > 0) {
+                labelText += ` (${value} min)`;
+            }
+            var label = $('<label>').addClass('checkbox config-checkbox').text(` ${labelText}`);
+            label.prepend($('<input>')
+                .attr('type', 'checkbox')
+                .attr('data-setting', setting[0])
+                .data('configured-value', value)
+                .prop('checked', setting[0] === 'streak_only' ? Boolean(value) : value === true));
             controls.append(label);
         });
         var chat = $('<select>').attr('data-setting', 'chat');
@@ -1589,7 +1606,20 @@ function saveStreamerSettings() {
     var pointsValue = item.find('[data-setting="points_limit"]').val();
     var settings = { points_limit: pointsValue === '' ? null : Number(pointsValue) };
     item.find('input[type="checkbox"][data-setting]').each(function () {
-        settings[$(this).data('setting')] = $(this).prop('checked');
+        var input = $(this);
+        var name = input.data('setting');
+        var configuredValue = input.data('configured-value');
+        var checked = input.prop('checked');
+        // An untouched integer streak_only keeps its custom window instead of
+        // being rewritten to true/false just because another setting changed.
+        if (name === 'streak_only'
+            && Number.isInteger(configuredValue)
+            && configuredValue > 0
+            && checked === Boolean(configuredValue)) {
+            settings[name] = configuredValue;
+        } else {
+            settings[name] = checked;
+        }
     });
     settings.chat = item.find('[data-setting="chat"]').val();
     var username = item.attr('data-username');
@@ -1608,6 +1638,37 @@ function saveCategorySettings(event) {
             drops_enabled: $('#category-drops-enabled').prop('checked')
         }
     }, 'Category settings were saved. Restart the miner to apply them.', button);
+}
+
+function restartMiner() {
+    function restartRequested() {
+        showConfigMessage('Restart requested. This page reloads when the miner is back.', false);
+        setTimeout(function () { location.reload(); }, 15000);
+    }
+    showConfirmDialog({
+        title: 'Restart the miner?',
+        message: 'Settings that require a restart (per-streamer, constructor, analytics and most mining changes) take effect immediately after it. The dashboard will be briefly unavailable.',
+        confirmLabel: 'Restart',
+        onConfirm: function () {
+            var button = $('#restart-miner').prop('disabled', true);
+            $.ajax({
+                url: '/config/restart',
+                method: 'POST',
+                success: restartRequested,
+                error: function (xhr) {
+                    if (xhr.status === 0) {
+                        // The process was exec'd before the response flushed:
+                        // the restart did happen, this is not a failure.
+                        restartRequested();
+                        return;
+                    }
+                    button.prop('disabled', false);
+                    showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+                        ? xhr.responseJSON.error : 'Unable to request a restart.', true);
+                }
+            });
+        }
+    });
 }
 
 function saveSourceSettings(event) {

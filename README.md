@@ -215,6 +215,14 @@ python -m TwitchChannelPointsMiner.runner --config-dir ./config
 For unattended source checkouts, see the
 [optional supervisor](docs/configuration.md#supervisor-optional).
 
+#### Nightly builds
+
+To try a fix before it is released, use the nightly build of the `master`
+branch: the Docker tag [`nightly`](docs/docker.md#nightly-image) or the
+[portable Windows ZIP](docs/windows.md#nightly-build). Nightly builds are
+untested against Twitch and can break, so back up your data first and use the
+releases above for everyday mining.
+
 For every method, keep the populated configuration private: never commit or
 share account names, passwords, webhook URLs, or notification credentials.
 Portainer is a Docker deployment. The [Termux](docs/other-platforms.md#termux) instructions are
@@ -268,8 +276,8 @@ categories, and analytics.
 | [Analytics](docs/analytics.md) | The analytics server, HTTPS reverse proxy, analytics storage |
 | [History](docs/history.md) | Durable streamer sessions, watch time, points and streak history |
 | [Logs](docs/logs.md) | Full and compact log formats, the graceful-shutdown report |
-| [Docker](docs/docker.md) | Docker Hub images, graceful shutdowns, Portainer |
-| [Windows](docs/windows.md) | Standard and portable builds, setup, updates, troubleshooting |
+| [Docker](docs/docker.md) | Docker Hub images, the nightly image, graceful shutdowns, Portainer |
+| [Windows](docs/windows.md) | Standard and portable builds, setup, updates, the nightly build, troubleshooting |
 | [Other platforms](docs/other-platforms.md) | Termux on Android, Replit |
 | [Migration](docs/migration.md) | Migrating from `run.py`, persisted data versions, legacy cookies |
 

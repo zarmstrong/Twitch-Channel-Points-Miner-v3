@@ -13,6 +13,11 @@ on:
         description: Bare SemVer release tag to publish (for example, 3.9.0)
         required: true
         type: string
+      rebuild:
+        description: Build and push the image again even if this version is already on Docker Hub
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -24,15 +29,27 @@ jobs:
   deploy-docker:
     name: Deploy Docker Hub
     runs-on: ubuntu-latest
+    # One publish of a version at a time, whether dispatched by hand or called
+    # by a release run: two at once could both find the version missing and
+    # both push it, so the later build would replace the earlier one.
+    concurrency:
+      group: deploy-docker-${{ inputs.ref }}
+      cancel-in-progress: false
     steps:
       - name: Validate release tag
         env:
           RELEASE_TAG: ${{ inputs.ref }}
         shell: bash
         run: |
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          # SemVer, matching RELEASE_TAG in release-resolve.js: a numeric
+          # prerelease identifier has no leading zero. No build metadata
+          # (`+...`): Docker tags drop it, so two such versions would share
+          # one image tag. The C locale keeps [A-Za-z] to ASCII letters.
+          export LC_ALL=C
+          id='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${id}(\.${id})*)?\$"
           if [[ ! "${RELEASE_TAG}" =~ ${semver} ]]; then
-            echo "::error::ref must be a bare SemVer release tag such as 3.9.0"
+            echo "::error::ref must be a bare SemVer release tag such as 3.9.0, without build metadata"
             exit 1
           fi
 
@@ -68,7 +85,75 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.ref }}
 
+      # A version tag that's already pushed isn't built again: a retry after
+      # a later step failed (latest, description, notes) would otherwise
+      # replace the published image with a different build. When only one
+      # repository has it, it's copied to the other instead, and when the two
+      # hold different builds, the primary one is copied over the legacy
+      # one. Only a "not
+      # found" answer counts as missing; any other registry error fails the
+      # job, and a later run retries. It checks the tags the build would push,
+      # exactly as metadata-action wrote them.
+      - name: Check whether this version is already pushed
+        id: existing
+        env:
+          RELEASE_TAG: ${{ inputs.ref }}
+          REBUILD: ${{ inputs.rebuild }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t refs < <(grep -v '^[[:space:]]*$' <<< "${IMAGE_TAGS}")
+          if (( ${#refs[@]} != 2 )); then
+            echo "::error::Expected one version tag for each of the two images, got: ${refs[*]}"
+            exit 1
+          fi
+          primary="${refs[0]}"
+          legacy="${refs[1]}"
+          if [[ "${REBUILD}" == "true" ]]; then
+            echo "Rebuilding ${RELEASE_TAG} as requested"
+            echo "pushed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          error_file="$(mktemp)"
+          trap 'rm -f "${error_file}"' EXIT
+          # Prints the image's digest, or "missing".
+          image_state() {
+            local output digest
+            if output="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2>"${error_file}")"; then
+              if ! digest="$(jq -er '.digest' <<< "${output}")"; then
+                echo "::error::Could not read the digest of $1 from: ${output%%$'\n'*}" >&2
+                return 1
+              fi
+              echo "${digest}"
+            elif grep -q ': not found' "${error_file}"; then
+              echo missing
+            else
+              echo "::error::Could not check whether $1 is on Docker Hub: $(head -n 1 "${error_file}")" >&2
+              return 1
+            fi
+          }
+          primary_state="$(image_state "${primary}")" || exit 1
+          legacy_state="$(image_state "${legacy}")" || exit 1
+          pushed=true
+          if [[ "${primary_state}" == missing && "${legacy_state}" == missing ]]; then
+            pushed=false
+          elif [[ "${primary_state}" == missing ]]; then
+            docker buildx imagetools create --tag "${primary}" "${legacy}" || exit 1
+          elif [[ "${legacy_state}" != "${primary_state}" ]]; then
+            # Missing, or a different build: a rebuild can push the primary
+            # repository and then fail on the legacy one. The primary
+            # repository is the one the release notes link.
+            if [[ "${legacy_state}" != missing ]]; then
+              echo "::warning::${legacy} (${legacy_state}) differs from ${primary} (${primary_state}); copying ${primary} over it."
+            fi
+            docker buildx imagetools create --tag "${legacy}" "${primary}" || exit 1
+          fi
+          echo "Version ${RELEASE_TAG} already pushed: ${pushed}"
+          echo "pushed=${pushed}" >> "${GITHUB_OUTPUT}"
+
       - name: Build and push AMD64 and ARM64
+        if: steps.existing.outputs.pushed != 'true'
         id: docker_build
         uses: docker/build-push-action@v7
         with:
@@ -79,40 +164,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Add Docker image to GitHub release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.ref }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${RELEASE_TAG#v}"
-          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
-
-          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
-            exit 0
-          fi
-
-          release_notes=$(gh release view "${RELEASE_TAG}" --json body --jq '.body // ""')
-          release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
-          docker_notes=$(cat <<EOF
-          <!-- docker-image:start -->
-          ### Docker image
-
-          * [\`${image}:${version}\`](https://hub.docker.com/r/${image}/tags?name=${version})
-
-          \`\`\`bash
-          docker pull ${image}:${version}
-          \`\`\`
-          <!-- docker-image:end -->
-          EOF
-          )
-          notes_file=$(mktemp)
-          trap 'rm -f "${notes_file}"' EXIT
-          printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
-          gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
 
       # Checked out after the build, so it isn't part of the build context.
       # A manually published older release doesn't have these scripts.
@@ -165,5 +216,59 @@ jobs:
           short-description: Automatically earn Twitch channel points, claim Drops, and manage predictions.
           readme-filepath: ./DOCKERHUB.md
 
+      # Last, so a GitHub API error here can't stop latest or the Docker Hub
+      # description from moving; the image is already pushed by now.
+      # Runs only when every step above succeeded: release-resolve.js reads
+      # the Docker block as "Docker publishing finished", so a release whose
+      # latest or description update failed stays unfinished and a later
+      # failed or re-run release run publishes it again.
+      - name: Add Docker image to GitHub release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          image="${DOCKERHUB_NAMESPACE}/twitch-channel-points-miner"
+
+          notes_file=$(mktemp)
+          error_file=$(mktemp)
+          trap 'rm -f "${notes_file}" "${error_file}"' EXIT
+
+          # Only a missing release (HTTP 404) skips the notes. Auth,
+          # rate-limit, server and network errors fail the step instead of
+          # passing as "no release". One REST call, so no other lookup's
+          # "not found" can stand in for its error, as with gh release view.
+          if ! release_notes=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.body // ""' 2>"${error_file}"); then
+            if grep -q '(HTTP 404)' "${error_file}"; then
+              echo "No GitHub release found for ${RELEASE_TAG}; skipping release notes update."
+              exit 0
+            fi
+            echo "::error::Could not read GitHub release ${RELEASE_TAG}: $(cat "${error_file}")"
+            exit 1
+          fi
+
+          release_notes=$(printf '%s\n' "${release_notes}" | sed '/<!-- docker-image:start -->/,/<!-- docker-image:end -->/d')
+          docker_notes=$(cat <<EOF
+          <!-- docker-image:start -->
+          ### Docker image
+
+          * [\`${image}:${version}\`](https://hub.docker.com/r/${image}/tags?name=${version})
+
+          \`\`\`bash
+          docker pull ${image}:${version}
+          \`\`\`
+          <!-- docker-image:end -->
+          EOF
+          )
+          printf '%s\n\n%s\n' "${release_notes}" "${docker_notes}" > "${notes_file}"
+          gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
+
       - name: Image digest AMD64 and ARM64
-        run: echo ${{ steps.docker_build.outputs.digest }}
+        env:
+          DIGEST: ${{ steps.docker_build.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          echo "${DIGEST:-Not built: ${RELEASE_TAG} was already on Docker Hub.}"

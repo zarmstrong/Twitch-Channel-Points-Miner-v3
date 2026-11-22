@@ -1,11 +1,14 @@
+import functools
 import logging
 import socket
+import sys
 import threading
 import ssl
 import time
 import types
 from unittest.mock import MagicMock, call
 
+import irc.client
 import pytest
 
 from TwitchChannelPointsMiner.classes import Chat
@@ -93,7 +96,10 @@ def test_client_irc_uses_tls_port_and_wrapped_factory_when_available(monkeypatch
 
     server = client.servers.peek()
     assert server.port == IRC_TLS_PORT
-    assert "connect_factory" in client._SingleServerIRCBot__connect_params
+    factory = client._SingleServerIRCBot__connect_params["connect_factory"]
+    assert isinstance(factory, Chat._StoppableConnectFactory)
+    assert factory.wrapper is not None
+    assert factory.timeout == Chat.IRC_CONNECT_TIMEOUT_SECONDS
 
 
 def test_client_irc_uses_plaintext_port_when_explicitly_allowed(monkeypatch):
@@ -104,7 +110,10 @@ def test_client_irc_uses_plaintext_port_when_explicitly_allowed(monkeypatch):
 
     server = client.servers.peek()
     assert server.port == IRC_PORT
-    assert "connect_factory" not in client._SingleServerIRCBot__connect_params
+    # Plaintext gets the same timeout and stop handling, without TLS.
+    factory = client._SingleServerIRCBot__connect_params["connect_factory"]
+    assert isinstance(factory, Chat._StoppableConnectFactory)
+    assert factory.wrapper is None
 
 
 def test_client_irc_refuses_plaintext_when_tls_unavailable(monkeypatch):
@@ -344,6 +353,129 @@ def test_on_welcome_requests_tags_before_join(monkeypatch):
         call.send_raw("CAP REQ :twitch.tv/tags twitch.tv/commands"),
         call.join("#somechannel"),
     ]
+
+
+LOGIN_REFUSED = ":tmi.twitch.tv NOTICE * :Login authentication failed"
+BAD_AUTH = ":tmi.twitch.tv NOTICE * :Improperly formatted auth"
+WELCOME = ":tmi.twitch.tv 001 someuser :Welcome, GLHF!"
+OWN_JOIN = ":someuser!someuser@someuser.tmi.twitch.tv JOIN #somechannel"
+
+
+def _wired_client(monkeypatch):
+    """A ClientIRC whose connection parses raw Twitch lines through the irc
+    library's own dispatch, without a socket. The username keeps a capital
+    letter, as a config might, while Twitch answers in lowercase."""
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
+    monkeypatch.setenv("TCPM_ALLOW_PLAINTEXT_IRC", "1")
+    client = ClientIRC("SomeUser", "sometoken", "somechannel")
+    connection = client.connection
+    # What ServerConnection.connect() would have set up.
+    connection.handlers = {}
+    connection.real_server_name = ""
+    connection.real_nickname = "SomeUser"
+    connection.send_raw = MagicMock()
+    return client
+
+
+def _feed(client, *lines):
+    for line in lines:
+        client.connection._process_line(line)
+
+
+def _chat_records(caplog, text):
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if text in record.getMessage()
+    ]
+
+
+def test_refused_chat_login_warns_once_per_streak(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    _feed(client, LOGIN_REFUSED, LOGIN_REFUSED, BAD_AUTH)
+
+    records = _chat_records(caplog, "Twitch refused the chat login")
+    assert [level for level, _ in records] == [
+        logging.WARNING,
+        logging.DEBUG,
+        logging.DEBUG,
+    ]
+    assert "#somechannel: Login authentication failed" in records[0][1]
+    assert "Improperly formatted auth" in records[2][1]
+    assert all("sometoken" not in message for _, message in records)
+    assert _chat_records(caplog, "Join IRC Chat") == []
+
+
+def test_join_after_a_refusal_is_announced_and_resets_the_warning(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    _feed(client, LOGIN_REFUSED, WELCOME, OWN_JOIN)
+    # The connection drops and the next login is refused again.
+    _feed(client, LOGIN_REFUSED, WELCOME, OWN_JOIN)
+
+    assert _chat_records(caplog, "Join IRC Chat") == [
+        (logging.INFO, "Join IRC Chat: #somechannel"),
+        (logging.INFO, "Join IRC Chat: #somechannel"),
+    ]
+    assert [
+        level for level, _ in _chat_records(caplog, "Twitch refused the chat login")
+    ] == [logging.WARNING, logging.WARNING]
+
+
+def test_join_is_announced_once_and_rejoins_log_at_debug(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    _feed(client, WELCOME, OWN_JOIN, WELCOME, OWN_JOIN)
+
+    assert _chat_records(caplog, "Join IRC Chat") == [
+        (logging.INFO, "Join IRC Chat: #somechannel"),
+        (logging.DEBUG, "Join IRC Chat: #somechannel"),
+    ]
+
+
+def test_other_joins_and_notices_are_not_logged(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    # Twitch only reports other users' joins after our own join.
+    _feed(
+        client,
+        WELCOME,
+        OWN_JOIN,
+        ":someoneelse!someoneelse@someoneelse.tmi.twitch.tv JOIN #somechannel",
+        ":someuser!someuser@someuser.tmi.twitch.tv JOIN #otherchannel",
+        ":tmi.twitch.tv NOTICE * :Some other notice",
+        ":tmi.twitch.tv NOTICE #somechannel :Login authentication failed",
+    )
+
+    assert _chat_records(caplog, "Join IRC Chat") == [
+        (logging.INFO, "Join IRC Chat: #somechannel")
+    ]
+    assert _chat_records(caplog, "Twitch refused the chat login") == []
+
+
+def test_thread_chat_run_does_not_announce_the_join_before_connecting(
+    monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG)
+
+    class FakeClientIRC:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(Chat, "ClientIRC", FakeClientIRC)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+
+    ThreadChat("u", "t", "c").run()
+
+    assert _chat_records(caplog, "Join IRC Chat") == []
 
 
 def test_thread_chat_run_passes_settings_to_client(monkeypatch):
@@ -798,3 +930,191 @@ def test_streamer_added_back_with_a_new_chat_can_join(monkeypatch):
 
 def test_thread_chat_is_a_daemon_thread():
     assert ThreadChat("u", "t", "c").daemon is True
+
+
+def _silent_listener():
+    """A loopback listener that accepts TCP but never answers, so a TLS
+    handshake against it stalls."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    server.settimeout(5)
+    return server
+
+
+def _tls_wrapper():
+    return functools.partial(
+        Chat._irc_tls_context().wrap_socket, server_hostname="localhost"
+    )
+
+
+def test_stopping_a_chat_interrupts_a_stalled_tls_handshake(monkeypatch):
+    server = _silent_listener()
+    accepted = []
+    try:
+        monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+        monkeypatch.setattr(Chat, "IRC", "localhost")
+        monkeypatch.setattr(Chat, "IRC_TLS_PORT", server.getsockname()[1])
+        chat = ThreadChat("someuser", "sometoken", "somechannel")
+        chat.start()
+        # The TCP connect has gone through; the handshake now waits for a
+        # server that never answers.
+        accepted.append(server.accept()[0])
+
+        started = time.monotonic()
+        chat.stop()
+        chat.join(timeout=3)
+        stopped_promptly = not chat.is_alive()
+        elapsed = time.monotonic() - started
+    finally:
+        for connection in accepted:
+            connection.close()
+        server.close()
+
+    assert stopped_promptly
+    assert elapsed < Chat.IRC_CONNECT_TIMEOUT_SECONDS
+
+
+def _run_in_thread(target):
+    result = {}
+
+    def runner():
+        try:
+            result["value"] = target()
+        except Exception as error:
+            result["error"] = error
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _wait_for_pending(factory):
+    deadline = time.monotonic() + 5
+    while factory._pending is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert factory._pending is not None
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="relies on Linux dropping SYNs when the accept queue is full",
+)
+def test_cancel_interrupts_a_stalled_tcp_connect():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(0)
+    address = server.getsockname()
+    # Fill the accept queue, so the next connect's SYNs are dropped.
+    fillers = []
+    for _ in range(4):
+        filler = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        filler.setblocking(False)
+        try:
+            filler.connect(address)
+        except BlockingIOError:
+            pass
+        fillers.append(filler)
+    factory = Chat._StoppableConnectFactory(timeout=30)
+    try:
+        thread, result = _run_in_thread(lambda: factory(address))
+        _wait_for_pending(factory)
+        started = time.monotonic()
+        factory.cancel()
+        thread.join(timeout=3)
+        elapsed = time.monotonic() - started
+    finally:
+        for filler in fillers:
+            filler.close()
+        server.close()
+
+    assert not thread.is_alive()
+    assert isinstance(result.get("error"), OSError)
+    assert elapsed < 3
+
+
+def test_a_stalled_tls_handshake_times_out():
+    server = _silent_listener()
+    factory = Chat._StoppableConnectFactory(wrapper=_tls_wrapper(), timeout=0.5)
+    try:
+        thread, result = _run_in_thread(lambda: factory(server.getsockname()))
+        thread.join(timeout=5)
+    finally:
+        server.close()
+
+    assert not thread.is_alive()
+    assert isinstance(result.get("error"), OSError)
+    assert factory._pending is None
+
+
+def test_a_connected_socket_gets_the_default_timeout_back():
+    server = _silent_listener()
+    factory = Chat._StoppableConnectFactory(timeout=3)
+    try:
+        sock = factory(server.getsockname())
+        try:
+            assert sock.gettimeout() == socket.getdefaulttimeout()
+            assert factory._pending is None
+        finally:
+            sock.close()
+    finally:
+        server.close()
+
+
+def test_a_cancelled_factory_does_not_connect():
+    server = _silent_listener()
+    server.settimeout(0.2)
+    factory = Chat._StoppableConnectFactory(timeout=3)
+    factory.cancel()
+    try:
+        with pytest.raises(OSError, match="stopped before connecting"):
+            factory(server.getsockname())
+        with pytest.raises(socket.timeout):
+            server.accept()
+    finally:
+        server.close()
+
+
+def test_die_cancels_the_connect_factory(monkeypatch):
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    client = ClientIRC("someuser", "sometoken", "somechannel")
+    factory = client._SingleServerIRCBot__connect_params["connect_factory"]
+
+    client.die()
+
+    assert factory._cancelled is True
+
+
+def test_a_chat_that_leaves_does_not_stop_other_chats_reconnecting(monkeypatch):
+    # The leaving chat's disconnect schedules a reconnect check on its own
+    # reactor, which stops and never runs it. Another chat that loses its
+    # connection afterwards must still get a reconnect scheduled.
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+    leaving = ClientIRC("someuser", "sometoken", "leaving")
+    staying = ClientIRC("someuser", "sometoken", "staying")
+    disconnect = irc.client.Event("disconnect", "", "", [""])
+
+    leaving._on_disconnect(leaving.connection, disconnect)
+    staying._on_disconnect(staying.connection, disconnect)
+
+    assert len(staying.reactor.scheduler.queue) == 1
+    assert leaving.recon is not staying.recon
+
+
+def test_refused_login_is_retried_after_another_chat_left(monkeypatch, caplog):
+    # The warning promises a retry in the background. That needs this chat's
+    # own reconnect strategy: with one shared by every chat, a chat that left
+    # earlier would have left its check scheduled on its own stopped reactor.
+    caplog.set_level(logging.DEBUG)
+    leaving = _wired_client(monkeypatch)
+    refused = _wired_client(monkeypatch)
+    disconnect = irc.client.Event("disconnect", "", "", [""])
+
+    leaving._on_disconnect(leaving.connection, disconnect)
+    _feed(refused, LOGIN_REFUSED)
+    refused._on_disconnect(refused.connection, disconnect)
+
+    assert [
+        level for level, _ in _chat_records(caplog, "Twitch refused the chat login")
+    ] == [logging.WARNING]
+    assert len(refused.reactor.scheduler.queue) == 1

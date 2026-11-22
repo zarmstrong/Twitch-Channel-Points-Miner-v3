@@ -23,6 +23,7 @@ class Stream(object):
         "spade_url",
         "payload",
         "watch_streak_missing",
+        "watch_streak_checked_at",
         "minute_watched",
         "__last_update",
         "__minute_watched_timestamp",
@@ -103,6 +104,7 @@ class Stream(object):
 
     def init_watch_streak(self):
         self.watch_streak_missing = True
+        self.watch_streak_checked_at = 0
         self.minute_watched = 0
         self.__minute_watched_timestamp = 0
 
