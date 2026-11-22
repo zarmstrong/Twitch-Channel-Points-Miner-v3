@@ -46,6 +46,27 @@ def _sent_at(message):
         return None
 
 
+def _check_online_in_background(twitch, streamer):
+    """Run a websocket-triggered online check on its own thread.
+
+    The check makes Twitch requests; on the socket's thread it would hold up
+    every later message on that socket (stream-downs, awards, predictions,
+    pongs). It doesn't wait for a refresh already running on another thread.
+    """
+
+    def check():
+        try:
+            twitch.check_streamer_online(streamer, blocking=False)
+        except Exception:
+            logger.error(
+                f"Exception raised while checking whether {streamer.username} "
+                "is online",
+                exc_info=True,
+            )
+
+    Thread(target=check, name=f"online-check-{streamer.username}", daemon=True).start()
+
+
 def _stream_down_predates_online(message, streamer):
     """Whether Twitch sent this stream-down before the miner last marked the
     streamer online (see Streamer.sent_before_online()).
@@ -465,12 +486,7 @@ class WebSocketsPool:
                                     streamer.set_offline()
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():
-                                # Skipped while another thread refreshes this
-                                # streamer, rather than holding up the
-                                # socket's other messages behind it.
-                                ws.twitch.check_streamer_online(
-                                    streamer, blocking=False
-                                )
+                                _check_online_in_background(ws.twitch, streamer)
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":

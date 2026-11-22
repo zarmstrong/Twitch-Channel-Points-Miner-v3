@@ -1992,16 +1992,24 @@ def test_non_blocking_online_check_skips_a_channel_being_refreshed(monkeypatch):
     assert fetches == []
 
 
-def test_viewcount_checks_online_without_waiting():
+def test_viewcount_online_check_does_not_hold_up_the_socket():
+    # The check makes Twitch requests; the socket's next messages must not
+    # wait for them, and it must not wait for another thread's refresh.
     from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
 
     streamer = make_streamer("viewcount-channel")
     streamer.channel_id = "43"
+    started = threading.Event()
+    release = threading.Event()
     calls = []
+
+    def slow_check(target, **kwargs):
+        calls.append(kwargs)
+        started.set()
+        assert release.wait(timeout=5)
+
     ws = _websocket_for(streamer)
-    ws.twitch = SimpleNamespace(
-        check_streamer_online=lambda target, **kwargs: calls.append(kwargs)
-    )
+    ws.twitch = SimpleNamespace(check_streamer_online=slow_check)
     message = json.dumps(
         {
             "type": "MESSAGE",
@@ -2012,7 +2020,11 @@ def test_viewcount_checks_online_without_waiting():
         }
     )
 
-    WebSocketsPool.on_message(ws, message)
+    try:
+        assert _run_with_timeout(WebSocketsPool.on_message, ws, message)
+        assert started.wait(timeout=5)
+    finally:
+        release.set()
 
     assert calls == [{"blocking": False}]
 
@@ -2285,6 +2297,36 @@ def test_a_reply_in_flight_at_offline_does_not_count_offline_time(monkeypatch):
     streamer.set_online()
     streamer.stream.hold_watch_slot()
     streamer.stream.update_minute_watched()
+
+    assert streamer.stream.minute_watched == pytest.approx(0.5, abs=1e-3)
+    assert streamer.stream.watch_streak_minutes() == pytest.approx(0.5, abs=1e-3)
+
+
+def test_a_reply_in_flight_at_offline_and_a_cycle_while_offline_count_nothing(
+    monkeypatch,
+):
+    # The in-flight 204 restarts the counter after the offline, and the next
+    # watch cycle, with the channel still offline, pauses it: that pause must
+    # not add the offline time either.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
+    _pin_clock(monkeypatch, clock)
+    streamer = make_streamer("channel")
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.hold_watch_slot()
+    streamer.stream.update_minute_watched()
+    clock[0] += 30
+
+    streamer.set_offline()
+    streamer.stream.update_minute_watched()
+    clock[0] += 20
+    streamer.stream.pause_minute_watched()
+    clock[0] += 10 * 60
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
 
     assert streamer.stream.minute_watched == pytest.approx(0.5, abs=1e-3)
     assert streamer.stream.watch_streak_minutes() == pytest.approx(0.5, abs=1e-3)

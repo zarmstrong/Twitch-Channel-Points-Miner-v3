@@ -47,6 +47,7 @@ class Stream(object):
         "__refresh_requested",
         "__minute_watched_timestamp",
         "__watch_slot_timestamp",
+        "__timers_stopped",
     ]
 
     def __init__(self):
@@ -179,9 +180,7 @@ class Stream(object):
         Going offline and back online on the same broadcast ID is the same
         broadcast: its watched minutes and watch_streak_max_minutes budget
         carry on instead of starting over. The timers start again from the
-        next post and cycle: a minute-watched reply or a watch cycle that was
-        in flight when the stream went offline can have restarted them, and
-        the offline time must not count.
+        next post and cycle (see stop_watch_timers()).
         """
         with _WATCH_STREAK_LOCK:
             if (
@@ -190,6 +189,7 @@ class Stream(object):
             ):
                 self.__minute_watched_timestamp = 0
                 self.__watch_slot_timestamp = 0
+                self.__timers_stopped = False
                 return True
             self.__init_watch_streak_locked()
             return False
@@ -213,6 +213,7 @@ class Stream(object):
         # so a channel whose posts keep failing still lets its slot go.
         self.watch_slot_minutes = 0
         self.__watch_slot_timestamp = 0
+        self.__timers_stopped = False
 
     def claim_broadcast_transition(self, previous_broadcast_id, broadcast_id):
         """Claim the missed-offline move from one broadcast to the next.
@@ -314,6 +315,8 @@ class Stream(object):
         clock correction can't add or remove slot time.
         """
         with _WATCH_STREAK_LOCK:
+            if self.__timers_stopped:
+                return
             now = time.monotonic()
             self.__count_watch_slot_step(now)
             self.__watch_slot_timestamp = now
@@ -322,6 +325,15 @@ class Stream(object):
         if self.__watch_slot_timestamp != 0:
             elapsed = max(now - self.__watch_slot_timestamp, 0)
             self.watch_slot_minutes += round(elapsed / 60, 5)
+
+    def stop_watch_timers(self):
+        """Pause the watch timers until the stream is back online: called
+        when it goes offline. A minute-watched reply or a watch cycle still
+        in flight then can't restart them, and the offline time is never
+        counted."""
+        with _WATCH_STREAK_LOCK:
+            self.__pause_locked()
+            self.__timers_stopped = True
 
     def pause_minute_watched(self):
         """Stop counting: the stream is out of a watch slot.
@@ -332,10 +344,13 @@ class Stream(object):
         never count any time at all.
         """
         with _WATCH_STREAK_LOCK:
-            self.__count_minute_watched_step(time.monotonic())
-            self.__minute_watched_timestamp = 0
-            self.__count_watch_slot_step(time.monotonic())
-            self.__watch_slot_timestamp = 0
+            self.__pause_locked()
+
+    def __pause_locked(self):
+        self.__count_minute_watched_step(time.monotonic())
+        self.__minute_watched_timestamp = 0
+        self.__count_watch_slot_step(time.monotonic())
+        self.__watch_slot_timestamp = 0
 
     def update_minute_watched(self):
         # Under the lock the per-broadcast reset takes, so a step measured on
@@ -343,6 +358,8 @@ class Stream(object):
         # On the monotonic clock, like the slot time: a wall clock correction
         # can't add or remove watched time.
         with _WATCH_STREAK_LOCK:
+            if self.__timers_stopped:
+                return
             now = time.monotonic()
             self.__count_minute_watched_step(now)
             self.__minute_watched_timestamp = now
