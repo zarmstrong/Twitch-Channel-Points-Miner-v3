@@ -2259,3 +2259,32 @@ def test_offline_time_does_not_count_when_the_same_broadcast_resumes(monkeypatch
 
     assert streamer.stream.watch_streak_minutes() == pytest.approx(1.5, abs=1e-3)
     assert streamer.stream.minute_watched == pytest.approx(1.5, abs=1e-3)
+
+
+def test_a_reply_in_flight_at_offline_does_not_count_offline_time(monkeypatch):
+    # A minute-watched post is in flight when the stream goes offline; its
+    # 204 arrives afterwards and restarts the counter. When the same
+    # broadcast comes back, the offline minutes must still not count.
+    from TwitchChannelPointsMiner.classes.entities import Stream as stream_module
+
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(stream_module.time, "monotonic", lambda: clock[0])
+    _pin_clock(monkeypatch, clock)
+    streamer = make_streamer("channel")
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.hold_watch_slot()
+    streamer.stream.update_minute_watched()
+    clock[0] += 30
+
+    streamer.set_offline()
+    streamer.stream.update_minute_watched()
+    streamer.stream.hold_watch_slot()
+    clock[0] += 10 * 60
+    _refresh_live_stream(streamer, "broadcast-1")
+    streamer.set_online()
+    streamer.stream.hold_watch_slot()
+    streamer.stream.update_minute_watched()
+
+    assert streamer.stream.minute_watched == pytest.approx(0.5, abs=1e-3)
+    assert streamer.stream.watch_streak_minutes() == pytest.approx(0.5, abs=1e-3)

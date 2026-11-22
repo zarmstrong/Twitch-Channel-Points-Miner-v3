@@ -178,13 +178,18 @@ class Stream(object):
 
         Going offline and back online on the same broadcast ID is the same
         broadcast: its watched minutes and watch_streak_max_minutes budget
-        carry on instead of starting over.
+        carry on instead of starting over. The timers start again from the
+        next post and cycle: a minute-watched reply or a watch cycle that was
+        in flight when the stream went offline can have restarted them, and
+        the offline time must not count.
         """
         with _WATCH_STREAK_LOCK:
             if (
                 self.broadcast_id not in (None, "")
                 and self.watch_streak_broadcast_id == self.broadcast_id
             ):
+                self.__minute_watched_timestamp = 0
+                self.__watch_slot_timestamp = 0
                 return True
             self.__init_watch_streak_locked()
             return False
