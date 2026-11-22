@@ -52,7 +52,10 @@ _ANALYTICS_EXCLUDED_FILES = {
     "drops_by_category.json",
 }
 
-_POINTS_PATTERN = re.compile(r"([+-]\d+)")
+# The miner writes point annotations as "+50 - WATCH_STREAK".  Prediction
+# annotations carry the prediction's title, which can contain any number.
+_POINTS_PATTERN = re.compile(r"^\s*([+-]\d+) - ")
+_PREDICTION_TYPES = frozenset({"win", "lose", "prediction_made"})
 
 
 def _clean_streamer(value):
@@ -137,7 +140,9 @@ def _annotation_type(text, border_color=None):
     return "points"
 
 
-def _annotation_points(text):
+def _annotation_points(text, event_type=None):
+    if event_type in _PREDICTION_TYPES:
+        return None
     match = _POINTS_PATTERN.search(str(text or ""))
     return int(match.group(1)) if match else None
 
@@ -1612,7 +1617,7 @@ class HistoryRecorder(threading.Thread):
                     x / 1000.0,
                     event_type,
                     label,
-                    _annotation_points(label),
+                    _annotation_points(label, event_type),
                     f"annotation:{streamer}:{x:.3f}:{occurrence}:{label}",
                 )
             )

@@ -3265,3 +3265,25 @@ def test_watch_moves_to_the_new_broadcast_in_the_poll_that_sees_it(tmp_path):
         assert first and first[0]["ended_at"] == NOW + 75
     finally:
         recorder._shutdown()
+
+
+def test_prediction_titles_are_not_read_as_point_amounts(recorder):
+    path = os.path.join(recorder.analytics_path, "bob.json")
+    x = int((NOW + 60) * 1000)
+    annotations = [
+        {"x": x, "borderColor": "#36b535", "label": {"text": "Will I hit +20 LP?"}},
+        {
+            "x": x + 1000,
+            "borderColor": "#ffe045",
+            "label": {"text": "Decision: Yes - Over -5 deaths?"},
+        },
+        {"x": x + 2000, "label": {"text": "+10 - WATCH_STREAK"}},
+    ]
+    _write_json(path, {"series": [], "annotations": annotations}, NOW + 63)
+    recorder._ingest_analytics(NOW + 63)
+
+    events = recorder.store.events(days=1, now=NOW + 63)["events"]
+    deltas = {item["label"]: item["points_delta"] for item in events}
+    assert deltas["Will I hit +20 LP?"] is None
+    assert deltas["Decision: Yes - Over -5 deaths?"] is None
+    assert deltas["+10 - WATCH_STREAK"] == 10

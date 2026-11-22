@@ -878,6 +878,7 @@ class TwitchChannelPointsMiner:
             # Mark the miner stopped first so a signal arriving mid-shutdown
             # makes end() a no-op instead of exiting 0 over this failure.
             self.running = self.twitch.running = False
+            self.__history_watching_stopped()
             logger.error(
                 f"The miner stopped because of an unexpected error: {error!r}. "
                 "Shutting down so it can be restarted.",
@@ -3226,6 +3227,21 @@ class TwitchChannelPointsMiner:
 
         sys.exit(0)
 
+    @staticmethod
+    def __history_watching_stopped():
+        """Tell History watching ended; it stops only after the workers.
+
+        Call it where the running flags are cleared: History credits no
+        watch time after the first call.
+        """
+
+        try:
+            from TwitchChannelPointsMiner.history import history_watching_stopped
+
+            history_watching_stopped()
+        except Exception:
+            logger.debug("Unable to tell History watching stopped", exc_info=True)
+
     def __stop_workers(self):
         self.__save_daily_report_state_safely(retire_all=True)
         # Snapshot: the badge Drop thread may still be retiring streamers.
@@ -3241,13 +3257,7 @@ class TwitchChannelPointsMiner:
                 streamer.retire_chat(timeout=10)
 
         self.running = self.twitch.running = False
-        try:
-            from TwitchChannelPointsMiner.history import history_watching_stopped
-
-            # Watching ends here; History itself stops after the workers.
-            history_watching_stopped()
-        except Exception:
-            logger.debug("Unable to tell History watching stopped", exc_info=True)
+        self.__history_watching_stopped()
         self.drop_badge_catalog_stop_event.set()
         if self.ws_pool is not None:
             self.ws_pool.end()

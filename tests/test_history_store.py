@@ -741,3 +741,12 @@ def test_a_rebuilt_cache_claim_matches_the_recorded_broadcast_start(store):
     )
 
     assert store.streamers(days=1, now=NOW + 1100)[0]["lifetime"]["streak_count"] == 1
+
+
+def test_one_read_sees_one_snapshot_while_the_recorder_writes(store):
+    store.record_points("alice", NOW, 150, 50, "WATCH")
+    with store._read_connection() as connection:
+        first = connection.execute("SELECT COUNT(*) FROM points").fetchone()[0]
+        store.record_points("alice", NOW + 60, 160, 10, "WATCH")
+        second = connection.execute("SELECT COUNT(*) FROM points").fetchone()[0]
+    assert first == second == 1

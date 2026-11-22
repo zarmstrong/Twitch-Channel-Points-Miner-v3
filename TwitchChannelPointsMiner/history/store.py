@@ -391,6 +391,9 @@ class HistoryStore(object):
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA busy_timeout=5000")
+            # One read transaction, so every query of a request sees the same
+            # snapshot even while the recorder commits.
+            connection.execute("BEGIN")
             yield connection
         finally:
             connection.close()

@@ -798,3 +798,29 @@ def test_start_does_not_run_a_socket_force_closed_before_its_thread_ran(monkeypa
     threads[0].join(timeout=5)
 
     assert ran == []
+
+
+def test_crash_tells_history_watching_stopped_before_stopping_workers():
+    miner = _miner()
+    order = []
+
+    def save_state(self, retire_all=False):
+        order.append("save")
+
+    with (
+        patch.object(TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")),
+        patch.object(
+            TwitchChannelPointsMiner,
+            "_TwitchChannelPointsMiner__save_daily_report_state_safely",
+            save_state,
+        ),
+        patch(
+            "TwitchChannelPointsMiner.history.history_watching_stopped",
+            lambda: order.append("watching_stopped"),
+        ),
+        patch(f"{MODULE}.logger"),
+    ):
+        with pytest.raises(SystemExit):
+            miner.mine([])
+
+    assert order[0] == "watching_stopped"
