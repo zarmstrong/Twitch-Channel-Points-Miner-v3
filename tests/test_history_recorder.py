@@ -4077,3 +4077,82 @@ def test_stopping_history_again_gives_up_on_a_stuck_drain(monkeypatch):
         assert history_module.stop_history(timeout=0.05) is False
     finally:
         release.set()
+
+
+def test_an_old_open_broadcast_stays_closed_after_a_failed_first_cache_stat(
+    tmp_path, monkeypatch
+):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    old = NOW - 24 * 60 * 60
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": old,
+                "claimed": True,
+                "claimed_at": old + 60,
+            }
+        ),
+        old + 120,
+    )
+    store = HistoryStore(analytics / "history.sqlite3")
+    snapshot = [{"username": "bob", "is_online": False}]
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    original = os.stat
+
+    def stat(target, *args, **kwargs):
+        if os.fspath(target) == str(cache):
+            raise PermissionError("in use")
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        monkeypatch.setattr(os, "stat", original)
+        clock.value = NOW + 15
+        recorder.poll_once()
+
+        streams = store.sessions(kind="stream", days=3, now=clock.value)["sessions"]
+        assert len(streams) == 1
+        assert streams[0]["ended_at"] < NOW - 3600
+    finally:
+        recorder._shutdown()
+
+
+def test_a_signal_during_stop_history_can_stop_history_again(monkeypatch):
+    class StoppedRecorder:
+        ident = None
+
+        def is_alive(self):
+            return False
+
+        def stop(self):
+            pass
+
+    import threading
+
+    monkeypatch.setattr(history_module, "_recorder", StoppedRecorder())
+    results = []
+
+    def interrupted_stop():
+        # This thread is inside stop_history when the signal handler runs.
+        with history_module._lock:
+            results.append(history_module.stop_history(timeout=0.05))
+
+    worker = threading.Thread(target=interrupted_stop, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert results == [True]

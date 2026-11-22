@@ -286,6 +286,15 @@ WATCH_STREAK_RECONCILE_AFTER_MINUTES = 5
 WATCH_STREAK_RECONCILE_INTERVAL_SECONDS = 3 * 60
 
 
+def _history_watching_stopped():
+    try:
+        from TwitchChannelPointsMiner.history import history_watching_stopped
+
+        history_watching_stopped()
+    except Exception:
+        logger.debug("Unable to tell History watching stopped", exc_info=True)
+
+
 class Twitch(object):
     __slots__ = [
         "cookies_file",
@@ -647,10 +656,13 @@ class Twitch(object):
                 },
             )
             self.running = False
+            _history_watching_stopped()
             return
 
         self.restart_requested.set()
         self.running = False
+        # The workers stop watching now, not when the process is replaced.
+        _history_watching_stopped()
 
     def __log_drop_check(self, message, level=logging.INFO):
         if getattr(self, "log_drop_checks", False) is True:

@@ -321,6 +321,15 @@ _SCHEMA_V3 = (
         streamer TEXT NOT NULL
     )
     """,
+    # What an older database already counted.
+    """
+    INSERT OR IGNORE INTO counted_keys (key, streamer)
+    SELECT 'stream:' || streamer || ':' || broadcast_id, streamer FROM streams
+    """,
+    """
+    INSERT OR IGNORE INTO counted_keys (key, streamer)
+    SELECT dedupe_key, streamer FROM events WHERE type = 'watch_streak'
+    """,
 )
 
 # import_state rows that are not per-file import cursors.
@@ -953,6 +962,10 @@ class HistoryStore(object):
                 # The live snapshot only knew when this process saw the
                 # broadcast; the cache knows when the miner first did.
                 self._move_stream_start(connection, streamer, existing, started_at)
+            if existing is not None:
+                self._mark_counted(
+                    connection, streamer, f"stream:{streamer}:{broadcast_id}"
+                )
             if existing is None:
                 # A new broadcast supersedes anything still marked live.  The
                 # inferred end is the new broadcast's start; an observed end
@@ -1779,9 +1792,9 @@ class HistoryStore(object):
                        COALESCE(SUM(watch_seconds), 0) AS watch_seconds,
                        COALESCE(SUM(streak_count), 0) AS streak_count,
                        COUNT(DISTINCT streamer) AS streamers
-                FROM daily_stats WHERE day >= ?
+                FROM daily_stats WHERE day >= ? AND day <= ?
                 """,
-                (cutoff_day,),
+                (cutoff_day, today),
             ).fetchone()
             today_row = connection.execute(
                 """
@@ -1854,10 +1867,12 @@ class HistoryStore(object):
                        COALESCE(SUM(streak_count), 0) AS streak_count,
                        MIN(first_seen) AS first_seen,
                        MAX(last_seen) AS last_seen
-                FROM daily_stats WHERE day >= ?
+                FROM daily_stats WHERE day >= ? AND day <= ?
                 GROUP BY streamer ORDER BY last_seen DESC
                 """,
-                (cutoff_day,),
+                # Days after today (the clock went back) are not in the
+                # daily chart either.
+                (cutoff_day, utc_day(now)),
             ).fetchall()
             lifetime = {row["streamer"]: row for row in connection.execute("""
                     SELECT streamer,
@@ -1964,9 +1979,9 @@ class HistoryStore(object):
             daily_rows = connection.execute(
                 """
                 SELECT * FROM daily_stats
-                WHERE streamer = ? AND day >= ? ORDER BY day
+                WHERE streamer = ? AND day >= ? AND day <= ? ORDER BY day
                 """,
-                (streamer, cutoff_day),
+                (streamer, cutoff_day, utc_day(now)),
             ).fetchall()
             # The newest 100 of each within the same window as the totals.
             watch_rows = connection.execute(
@@ -2223,9 +2238,9 @@ class HistoryStore(object):
                 daily_rows = connection.execute(
                     """
                     SELECT * FROM daily_stats
-                    WHERE day >= ? AND streamer = ?
+                    WHERE day >= ? AND day <= ? AND streamer = ?
                     """,
-                    (day_list[0], streamer),
+                    (day_list[0], day_list[-1], streamer),
                 ).fetchall()
             else:
                 daily_rows = connection.execute(
@@ -2234,9 +2249,10 @@ class HistoryStore(object):
                            COALESCE(SUM(watch_seconds), 0) AS watch_seconds,
                            COALESCE(SUM(points_gained), 0) AS points_gained,
                            COALESCE(SUM(streak_count), 0) AS streak_count
-                    FROM daily_stats WHERE day >= ? GROUP BY day, streamer
+                    FROM daily_stats WHERE day >= ? AND day <= ?
+                    GROUP BY day, streamer
                     """,
-                    (day_list[0],),
+                    (day_list[0], day_list[-1]),
                 ).fetchall()
             for row in daily_rows:
                 item = cell(row["streamer"], row["day"])

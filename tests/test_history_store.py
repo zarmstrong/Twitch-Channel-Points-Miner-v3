@@ -858,3 +858,43 @@ def test_a_pruned_claim_merged_from_the_cache_is_not_counted_again(store):
 
     daily = store.daily(days=3650, now=NOW)
     assert sum(row["streak_count"] for row in daily) == 1
+
+
+def test_window_totals_leave_out_days_after_a_clock_rollback(store):
+    tomorrow = NOW + 24 * 60 * 60
+    store.record_points("alice", tomorrow, 1050, 50, "WATCH")
+
+    assert store.overview(days=1, now=NOW)["window"]["points_gained"] == 0
+    assert all(row["points_gained"] == 0 for row in store.streamers(days=1, now=NOW))
+    detail = store.streamer_detail("alice", days=1, now=NOW)
+    assert all(row["points_gained"] == 0 for row in detail["daily"])
+
+
+def test_a_migrated_broadcast_is_not_counted_again_after_retention(tmp_path):
+    from TwitchChannelPointsMiner.history import store as store_module
+
+    path = tmp_path / "history.sqlite3"
+    old = NOW - 3 * 24 * 60 * 60
+    connection = sqlite3.connect(path)
+    for statement in store_module._SCHEMA_V1 + store_module._SCHEMA_V2:
+        connection.execute(statement)
+    connection.execute(
+        "INSERT INTO streams (streamer, broadcast_id, started_at, ended_at, "
+        "last_seen_at) VALUES ('alice', 'b1', ?, ?, ?)",
+        (old, old + 3600, old + 3600),
+    )
+    connection.execute(
+        "INSERT INTO daily_stats (day, streamer, stream_sessions) VALUES (?, ?, 1)",
+        (utc_day(old), "alice"),
+    )
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+    store = HistoryStore(path)
+    store.initialize()
+
+    store.apply_retention(now=NOW, retention_days=1)
+    store.upsert_stream_session("alice", "b1", old, ended_at=old + 3600)
+
+    daily = store.daily(days=3650, now=NOW)
+    assert sum(row["stream_sessions"] for row in daily) == 1

@@ -569,6 +569,24 @@ def test_authentication_recovery_clears_cookie_and_requests_restart(tmp_path):
     assert twitch.running is False
 
 
+def test_authentication_restart_tells_history_watching_stopped(tmp_path, monkeypatch):
+    import TwitchChannelPointsMiner.history as history_module
+
+    calls = []
+    monkeypatch.setattr(
+        history_module, "history_watching_stopped", lambda: calls.append("stopped")
+    )
+    twitch = Twitch.__new__(Twitch)
+    twitch.cookies_file = str(tmp_path / "cookies.json")
+    twitch.twitch_login = SimpleNamespace(username="example")
+    twitch.restart_requested = Event()
+    twitch.running = True
+
+    twitch._Twitch__request_authentication_restart()
+
+    assert calls == ["stopped"]
+
+
 def test_raw_batch_transport_preserves_variable_response_shapes():
     payload = [
         {"data": {"user": {"dropCampaign": {"id": "campaign-1"}}}},

@@ -1238,9 +1238,13 @@ class HistoryRecorder(threading.Thread):
         now = self.clock() if now is None else float(now)
         try:
             stat = os.stat(self.streak_cache_path)
-        except OSError:
+        except FileNotFoundError:
             self._streak_cache_key = None
             return
+        except OSError:
+            # Unreadable for now; the startup read is retried.
+            self._streak_cache_key = None
+            return False
         cache_key = (stat.st_mtime_ns, stat.st_size)
         if not force and cache_key == self._streak_cache_key:
             return

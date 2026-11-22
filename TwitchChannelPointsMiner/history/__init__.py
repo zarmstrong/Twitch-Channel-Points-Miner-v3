@@ -16,7 +16,9 @@ from TwitchChannelPointsMiner.history.store import DEFAULT_RETENTION_DAYS
 
 logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()
+# Reentrant: a signal handler that ends the miner can call stop_history while
+# the same thread is already inside it.
+_lock = threading.RLock()
 _recorder = None
 _store = None
 _atexit_registered = False
