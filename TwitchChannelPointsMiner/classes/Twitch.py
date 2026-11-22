@@ -179,7 +179,7 @@ def _watch_reward_lock(twitch):
     return getattr(twitch, "watch_reward_lock", None) or _WATCH_REWARD_FALLBACK_LOCK
 
 
-_DROP_REPORT_ORDER_FALLBACK_LOCK = Lock()
+_DROP_REPORT_ORDER_FALLBACK_LOCK = RLock()
 
 
 def _drop_report_order_lock(twitch):
@@ -594,7 +594,10 @@ class Twitch(object):
         # which can stall, so nothing that only reads the stored records
         # takes it. Taken after the claim locks and before the watch-reward
         # lock, never while holding that one or the analytics mutex.
-        self.drop_report_order_lock = Lock()
+        # Reentrant: the write is a callback, and one that came to store a
+        # record or mark a claim accepted would take it again on the same
+        # thread.
+        self.drop_report_order_lock = RLock()
         # The drop each accepted claim ID was last accepted for. A repeating
         # reward group is claimed under one ID once per repeat.
         self.accepted_claim_drop_ids = {}
@@ -9582,7 +9585,9 @@ class Twitch(object):
         # Under the report-order lock too: this forgets what was saved for a
         # drop that started over and notes the rewards seen earned, and a
         # row decided on the record before must be written before either
-        # (see __save_drop_snapshot_if_new).
+        # (see __save_drop_snapshot_if_new). So a listing waits for a row
+        # being written, the main loop's category refresh included; the
+        # claim thread and the main loop's checks of what is due do not.
         with _drop_report_order_lock(self), _watch_reward_lock(self):
             previous = known.get(campaign_id)
             if (
@@ -11962,8 +11967,10 @@ class Twitch(object):
             # Under the report-order lock as well: this can note rewards as
             # earned, like a listing (see __remember_watch_reward_campaign).
             # The claim lock is held here, as it is for the rows the caller
-            # writes next: a write stalled on disk holds up the claim after
-            # this one, though no longer one that is only due.
+            # writes next: a write stalled on disk holds up whatever takes
+            # the claim lock meanwhile (the claim after this one, and the
+            # inventory sync in __reconcile_unlinked_claims), though no
+            # longer a claim that is only due (#377).
             with _drop_report_order_lock(self), _watch_reward_lock(self):
                 for campaign in list(
                     (getattr(self, "watch_reward_campaigns", None) or {}).values()
