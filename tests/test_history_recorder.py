@@ -3153,3 +3153,22 @@ def test_history_watching_stopped_reaches_the_recorder(monkeypatch):
     monkeypatch.setattr(history_module, "_recorder", fake)
     history_module.history_watching_stopped()
     assert calls == [1]
+
+
+def test_a_snapshot_read_after_watching_stopped_credits_until_the_stop(recorder):
+    path = os.path.join(recorder.analytics_path, "now_watching.json")
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW)
+    recorder.clock.value = NOW + 1
+    recorder._poll_now_watching()
+    # The miner refreshed the snapshot, then stopped watching; History polls
+    # and stops only after the other workers.
+    _write_json(path, [{"username": "bob", "reason": "points"}], NOW + 8)
+    recorder.watching_stopped(NOW + 10)
+    recorder.clock.value = NOW + 60
+    recorder.poll_once()
+    recorder.clock.value = NOW + 90
+    recorder._shutdown()
+
+    session = recorder.store.sessions(kind="watch", days=1, now=NOW + 90)["sessions"][0]
+    assert session["watch_seconds"] == 10
+    assert session["ended_at"] == NOW + 10

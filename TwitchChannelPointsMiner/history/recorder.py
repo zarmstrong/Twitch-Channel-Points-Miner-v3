@@ -771,6 +771,9 @@ class HistoryRecorder(threading.Thread):
 
     def _poll_now_watching(self, now=None):
         now = self.clock() if now is None else float(now)
+        if self._watching_stopped_at is not None:
+            # The miner stopped watching; nothing after that is watch time.
+            now = min(now, self._watching_stopped_at)
         if not self._streamer_state_ready:
             self._refresh_streamer_state()
         path = self._now_watching_path()
