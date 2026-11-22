@@ -3913,3 +3913,101 @@ def test_stopping_history_again_takes_in_what_the_workers_wrote_since(
 
     window = store.overview(days=1, now=NOW + 40)["window"]
     assert window["points_gained"] == 40
+
+
+def test_an_old_open_broadcast_stays_closed_after_a_failed_first_cache_read(
+    tmp_path, monkeypatch
+):
+    from TwitchChannelPointsMiner.history import recorder as recorder_module
+
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    old = NOW - 24 * 60 * 60
+    # Left open by a crash a day ago.
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": old,
+                "claimed": True,
+                "claimed_at": old + 60,
+            }
+        ),
+        old + 120,
+    )
+    store = HistoryStore(analytics / "history.sqlite3")
+    snapshot = [{"username": "bob", "is_online": False}]
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    original = recorder_module._read_json
+
+    def cache_unreadable(target):
+        if str(target) == str(cache):
+            raise PermissionError("in use")
+        return original(target)
+
+    monkeypatch.setattr(recorder_module, "_read_json", cache_unreadable)
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        monkeypatch.setattr(recorder_module, "_read_json", original)
+        clock.value = NOW + 15
+        recorder.poll_once()
+
+        overview = store.overview(days=3, now=clock.value)
+        assert overview["live_streams"] == 0
+        stream = store.sessions(kind="stream", days=3, now=clock.value)["sessions"]
+        assert len(stream) == 1
+        assert stream[0]["ended_at"] < NOW - 3600
+    finally:
+        recorder._shutdown()
+
+
+def test_a_balance_read_mid_write_is_replaced_by_the_files_start(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    # PubSub already set the new balance; the file is not written yet.
+    snapshot = [{"username": "bob", "channel_points": 1050, "is_online": False}]
+    clock = FakeClock(NOW)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=tmp_path / "missing.json",
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        _write_json(
+            analytics / "bob.json",
+            {
+                "series": [
+                    {"x": int(NOW * 1000), "y": 1000, "z": "Start"},
+                    {"x": int(NOW * 1000), "y": 1050, "z": "Watch"},
+                ]
+            },
+            NOW + 1,
+        )
+        clock.value = NOW + 15
+        recorder.poll_once()
+
+        window = store.overview(days=1, now=clock.value)["window"]
+        assert window["points_gained"] == 50
+        assert window["points_spent"] == 0
+    finally:
+        recorder._shutdown()

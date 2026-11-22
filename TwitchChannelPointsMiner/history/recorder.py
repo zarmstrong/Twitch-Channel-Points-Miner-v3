@@ -33,6 +33,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 
+from TwitchChannelPointsMiner.constants import SERIES_START_LABEL
 from TwitchChannelPointsMiner.history.store import (
     DEFAULT_RETENTION_DAYS,
     DROP_FARM_REASONS,
@@ -250,6 +251,8 @@ class HistoryRecorder(threading.Thread):
         # with an import that already read the deleted data.
         self._lock = threading.RLock()
         self._startup_import_done = False
+        # The startup cache read has not succeeded yet.
+        self._startup_cache_pending = True
         self._deleted_before = {}
         self._persisted_drop_farmed = set()
         self._retention_watermark = None
@@ -469,6 +472,7 @@ class HistoryRecorder(threading.Thread):
         self._next_retention_at = now
         self._baseline_now_watching()
         self._startup_import_done = False
+        self._startup_cache_pending = True
         if self._streamers_loaded():
             self._startup_import(now)
         # Start the run last: a failed step above is retried from the start,
@@ -505,8 +509,18 @@ class HistoryRecorder(threading.Thread):
         # as already closed so they cannot become permanent phantom live rows.
         # Watching that streamer again proves the broadcast is live and
         # reopens it.
-        self._ingest_streak_cache(now, close_open=True, force=True)
+        self._ingest_startup_streak_cache(now)
         self._startup_import_done = True
+
+    def _ingest_startup_streak_cache(self, now):
+        """Read the cache as the startup import does until one read works.
+
+        A failed first read is retried the same way, so an open session left
+        by an old crash is still imported as closed instead of as live.
+        """
+
+        if self._ingest_streak_cache(now, close_open=True, force=True) is not False:
+            self._startup_cache_pending = False
 
     def _guarded_shutdown(self):
         try:
@@ -587,7 +601,10 @@ class HistoryRecorder(threading.Thread):
             self._startup_import(now)
         else:
             self._refresh_streamer_state()
-            self._ingest_streak_cache(now)
+            if self._startup_cache_pending:
+                self._ingest_startup_streak_cache(now)
+            else:
+                self._ingest_streak_cache(now)
         # Live broadcasts first, so a watch is credited to the broadcast the
         # miner is on now rather than the one before a broadcast change.
         self._poll_online_streamers(now)
@@ -1237,7 +1254,7 @@ class HistoryRecorder(threading.Thread):
                 self.streak_cache_path,
                 error,
             )
-            return
+            return False
 
         if not isinstance(payload, dict):
             self._streak_cache_key = cache_key
@@ -1598,8 +1615,11 @@ class HistoryRecorder(threading.Thread):
                 balance = int(balance)
             except (TypeError, ValueError):
                 continue
-            if last_balance is None:
+            if last_balance is None or entry.get("z") == SERIES_START_LABEL:
                 # First observation is the baseline; there is no delta yet.
+                # The miner starts a new file with the balance before its
+                # first change, which replaces a balance History read live
+                # (possibly already the changed one).
                 last_balance = balance
                 continue
             delta = balance - int(last_balance)

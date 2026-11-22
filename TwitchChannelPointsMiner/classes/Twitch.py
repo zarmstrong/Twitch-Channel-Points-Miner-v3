@@ -8071,6 +8071,7 @@ class Twitch(object):
             )
             return
         streamer.channel_points = community_points.balance
+        streamer.channel_points_loaded = True
         streamer.activeMultipliers = [
             {"factor": multiplier.factor}
             for multiplier in community_points.active_multipliers

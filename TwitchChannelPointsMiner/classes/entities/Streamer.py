@@ -18,7 +18,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
     Settings,
     StreamerSource,
 )
-from TwitchChannelPointsMiner.constants import URL
+from TwitchChannelPointsMiner.constants import SERIES_START_LABEL, URL
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
 from TwitchChannelPointsMiner.utils import _millify
 
@@ -202,6 +202,7 @@ class Streamer(object):
         "online_at",
         "offline_at",
         "channel_points",
+        "channel_points_loaded",
         "community_goals",
         "minute_watched_requests",
         "viewer_is_mod",
@@ -248,6 +249,9 @@ class Streamer(object):
         self.online_at = 0
         self.offline_at = 0
         self.channel_points = 0
+        # True once a balance was read from Twitch; until then the 0 above is
+        # not a real balance.
+        self.channel_points_loaded = False
         self.community_goals = {}
         self.minute_watched_requests = None
         self.viewer_is_mod = False
@@ -492,14 +496,17 @@ class Streamer(object):
                 if (
                     key == "series"
                     and not json_data[key]
-                    and previous_balance
+                    and previous_balance is not None
                     and previous_balance != data.get("y")
                 ):
                     # A new file starts with the balance before this change,
-                    # or the change itself could not be told from it.  A zero
-                    # balance may never have been loaded, so it is skipped.
+                    # or the change itself could not be told from it.
                     json_data[key].append(
-                        {"x": data["x"], "y": previous_balance, "z": "Start"}
+                        {
+                            "x": data["x"],
+                            "y": previous_balance,
+                            "z": SERIES_START_LABEL,
+                        }
                     )
                 json_data[key].append(data)
                 json.dump(json_data, temp_file, indent=4)

@@ -360,8 +360,15 @@ class WebSocketsPool:
                                 return
 
                             balance = message.data["balance"]["balance"]
-                            previous_balance = streamer.channel_points
+                            # A balance never read from Twitch is no previous
+                            # balance for the analytics file.
+                            previous_balance = (
+                                streamer.channel_points
+                                if getattr(streamer, "channel_points_loaded", False)
+                                else None
+                            )
                             streamer.channel_points = balance
+                            streamer.channel_points_loaded = True
                             # Analytics switch
                             if Settings.enable_analytics is True:
                                 streamer.persistent_series(

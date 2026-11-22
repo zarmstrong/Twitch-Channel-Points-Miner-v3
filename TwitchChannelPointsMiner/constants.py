@@ -29,6 +29,9 @@ CLIENT_VERSION = "ef928475-9403-42f2-8a34-55784bd08e16"  # Browser
 
 # Twitch counts a broadcast that starts less than 30 minutes after the previous
 # one ended as the same stream for watch-streak purposes.
+# Label of the entry that starts a new analytics series file with the balance
+# before its first change (History reads it as a baseline, not a change).
+SERIES_START_LABEL = "Start"
 WATCH_STREAK_STREAM_GAP_SECONDS = 30 * 60
 
 USER_AGENTS = {
