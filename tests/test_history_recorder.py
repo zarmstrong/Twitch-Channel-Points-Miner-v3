@@ -3287,3 +3287,115 @@ def test_prediction_titles_are_not_read_as_point_amounts(recorder):
     assert deltas["Will I hit +20 LP?"] is None
     assert deltas["Decision: Yes - Over -5 deaths?"] is None
     assert deltas["+10 - WATCH_STREAK"] == 10
+
+
+def _live_recorder(tmp_path, snapshot, clock, **kwargs):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir(exist_ok=True)
+    store = HistoryStore(analytics / "history.sqlite3")
+    store.initialize()
+    store.start_watch_session("bob", "points", NOW - 600)
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=kwargs.pop("cache", tmp_path / "missing.json"),
+        username="alice",
+        clock=clock,
+        online_streamers=lambda: list(snapshot),
+        **kwargs,
+    )
+    recorder._prepare()
+    return recorder
+
+
+def test_an_older_watch_snapshot_does_not_overwrite_the_live_category(tmp_path):
+    snapshot = [
+        {
+            "username": "bob",
+            "broadcast_id": "b1",
+            "online_at": NOW,
+            "is_online": True,
+            "game": "Go",
+        }
+    ]
+    clock = FakeClock(NOW + 30)
+    recorder = _live_recorder(tmp_path, snapshot, clock)
+    try:
+        _write_json(
+            os.path.join(recorder.analytics_path, "now_watching.json"),
+            [{"username": "bob", "reason": "points", "game": "Chess"}],
+            NOW + 20,
+        )
+        recorder.poll_once()
+        clock.value = NOW + 45
+        recorder.poll_once()
+
+        live = recorder.store.streamers(days=1, now=clock.value)[0]["live_stream"]
+        assert live["game"] == "Go"
+    finally:
+        recorder._shutdown()
+
+
+def test_a_watch_of_a_new_broadcast_starts_no_earlier_than_it(tmp_path):
+    snapshot = [
+        {"username": "bob", "broadcast_id": "b1", "online_at": NOW, "is_online": True}
+    ]
+    clock = FakeClock(NOW + 30)
+    recorder = _live_recorder(tmp_path, snapshot, clock)
+    watching = os.path.join(recorder.analytics_path, "now_watching.json")
+    try:
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 20)
+        recorder.poll_once()
+        # The recorder was delayed: the miner moved to b2 at NOW + 60, and the
+        # unread watch snapshot was written before that.
+        _write_json(watching, [{"username": "bob", "reason": "points"}], NOW + 40)
+        snapshot[0] = dict(snapshot[0], broadcast_id="b2")
+        clock.value = NOW + 60
+        recorder.poll_once()
+
+        watches = recorder.store.sessions(kind="watch", days=1, now=clock.value)[
+            "sessions"
+        ]
+        by_broadcast = {item.get("broadcast_id"): item for item in watches}
+        assert by_broadcast["b1"]["ended_at"] == NOW + 60
+        assert by_broadcast["b2"]["started_at"] == NOW + 60
+    finally:
+        recorder._shutdown()
+
+
+def test_first_backfill_counts_cached_history_older_than_retention(tmp_path):
+    analytics = tmp_path / "analytics"
+    analytics.mkdir()
+    cache = tmp_path / "watch_streak_cache.alice.json"
+    old = NOW - 2 * 24 * 60 * 60
+    _write_json(
+        cache,
+        _cache_payload(
+            {
+                "streamer_login": "bob",
+                "broadcast_id": "b1",
+                "started_at": old,
+                "ended_at": old + 3600,
+                "claimed": True,
+                "claimed_at": old + 60,
+            }
+        ),
+        NOW - 10,
+    )
+    store = HistoryStore(analytics / "history.sqlite3")
+    recorder = HistoryRecorder(
+        store,
+        analytics_path=analytics,
+        streak_cache_path=cache,
+        username="alice",
+        clock=FakeClock(NOW),
+        retention_days=1,
+    )
+    recorder._prepare()
+    try:
+        recorder.poll_once()
+        daily = store.daily(days=3650, now=NOW)
+        assert sum(row["stream_sessions"] for row in daily) == 1
+        assert sum(row["streak_count"] for row in daily) == 1
+    finally:
+        recorder._shutdown()

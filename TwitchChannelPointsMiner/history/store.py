@@ -1084,6 +1084,19 @@ class HistoryStore(object):
             ).fetchall()
         return [(row["streamer"], row["broadcast_id"]) for row in rows]
 
+    def stream_start(self, streamer, broadcast_id):
+        """Return when a recorded broadcast started, or None."""
+
+        streamer = _clean_streamer(streamer)
+        if not streamer or not broadcast_id:
+            return None
+        with self._read_connection() as connection:
+            row = connection.execute(
+                "SELECT started_at FROM streams WHERE streamer = ? AND broadcast_id = ?",
+                (streamer, str(broadcast_id)),
+            ).fetchone()
+        return None if row is None else float(row["started_at"])
+
     def open_broadcast(self, streamer):
         streamer = _clean_streamer(streamer)
         if not streamer:

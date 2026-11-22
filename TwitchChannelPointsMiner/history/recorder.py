@@ -653,24 +653,17 @@ class HistoryRecorder(threading.Thread):
             return float(timestamp) < math.floor(cutoff) + 1
         return float(timestamp) < cutoff
 
-    def _retention_cutoff(self, now, window=True):
-        """Return the time before which cached data must not be imported.
+    def _retention_cutoff(self, now):
+        """Return the time before which imported data may be counted already.
 
-        That is the current retention window, or the oldest data an earlier,
-        shorter window already pruned: its rollups were kept, so importing it
-        again would count it twice.
+        That is the newest cutoff retention ever applied: rows older than it
+        may have been pruned with their rollups kept, so importing them again
+        would count them twice.  Older data never seen before (a first
+        backfill) is still imported, counted, and pruned by the next pass.
         """
 
-        cutoffs = []
-        try:
-            days = float(self.retention_days or 0)
-        except (TypeError, ValueError):
-            days = 0
-        if window and days > 0:
-            cutoffs.append(float(now) - (days * 24 * 60 * 60))
-        if self._retention_watermark is not None:
-            cutoffs.append(self._retention_watermark)
-        return max(cutoffs) if cutoffs else None
+        del now
+        return self._retention_watermark
 
     def _apply_retention(self, now):
         self._next_retention_at = now + RETENTION_CHECK_SECONDS
@@ -867,16 +860,20 @@ class HistoryRecorder(threading.Thread):
             if self._active_watch.get(streamer) is None or not self._same_watch(
                 self._active_watch[streamer], reason, broadcast_id
             ):
+                broadcast_id = self.store.open_broadcast(streamer)
+                # A watch of a broadcast cannot begin before that broadcast
+                # did, even when the snapshot read now is older than it.
+                boundary = changed_at
+                broadcast_start = self.store.stream_start(streamer, broadcast_id)
+                if broadcast_start is not None and broadcast_start > boundary:
+                    boundary = min(broadcast_start, confirmed_until)
                 if self._active_watch.get(streamer) is not None:
-                    self._close_watch(streamer, changed_at, credit=True)
+                    self._close_watch(streamer, boundary, credit=True)
                 self._tracked_streamers.add(streamer)
                 self._import_cached_sessions(streamer, now)
                 # The watch began when the snapshot naming it was written,
                 # but not before a delete of this streamer's history.
-                started_at = max(
-                    changed_at, self._deleted_before.get(streamer, changed_at)
-                )
-                broadcast_id = self.store.open_broadcast(streamer)
+                started_at = max(boundary, self._deleted_before.get(streamer, boundary))
                 session_id = self.store.start_watch_session(
                     streamer,
                     reason,
@@ -890,7 +887,9 @@ class HistoryRecorder(threading.Thread):
                         "broadcast_id": broadcast_id,
                         "last_tick": started_at,
                     }
-            if game:
+            if game and not any(key[0] == streamer for key in self._online_live_keys):
+                # The live snapshot (read first) is the newer source of the
+                # category; this snapshot fills in only without one.
                 self.store.update_open_stream_details(
                     streamer, timestamp=now, game=game
                 )
@@ -1269,7 +1268,7 @@ class HistoryRecorder(threading.Thread):
             # This process already ended the broadcast; an open cache entry
             # must not reopen it, or recreate it once retention pruned it.
             ended_at = max(started_at, self._online_ended[key])
-        cutoff = self._retention_cutoff(now, window=not self._maybe_live(item))
+        cutoff = self._retention_cutoff(now)
         if cutoff is not None and ended_at is not None and ended_at < cutoff:
             # Retention already pruned this row (or will); importing it again
             # would count it a second time in the permanent daily rollups.
@@ -1294,18 +1293,6 @@ class HistoryRecorder(threading.Thread):
             # reports the broadcast as online.
             self._online_live_keys.discard(key)
 
-    def _maybe_live(self, item):
-        """True for a cache entry whose broadcast may still be live.
-
-        Such an entry is imported even when it is older than the retention
-        window: the live snapshot may reopen it, and retention keeps a live
-        stream's rows.  Only data older than the watermark, which an earlier
-        pass may already have pruned and counted, is skipped.
-        """
-
-        key = (item["streamer"], item["broadcast_id"])
-        return item["ended_at"] is None and key not in self._online_ended
-
     def _record_cached_streak(self, item, now):
         if not item.get("claimed") or item.get("claimed_at") is None:
             return
@@ -1315,7 +1302,7 @@ class HistoryRecorder(threading.Thread):
             return
         if self._deleted_since(item["streamer"], claimed_at):
             return
-        cutoff = self._retention_cutoff(now, window=not self._maybe_live(item))
+        cutoff = self._retention_cutoff(now)
         if cutoff is not None and claimed_at < cutoff:
             # See _store_cached_session: the pruned event must not be counted
             # again in the rollups.
@@ -1569,7 +1556,7 @@ class HistoryRecorder(threading.Thread):
 
         if state is None:
             return None
-        return self._retention_cutoff(self.clock(), window=False)
+        return self._retention_cutoff(self.clock())
 
     @staticmethod
     def _unimported(pending, state, rewound):
