@@ -79,8 +79,13 @@ def _import_source_pattern(streamer):
     return f"analytics:{escaped}.json:%"
 
 
-def _event_broadcast_id(raw_metadata):
-    """Return the broadcast id stored on an event, or ``None`` when absent."""
+def _event_broadcast_ids(raw_metadata):
+    """Return the broadcast ids a streak claim covers, or ``None`` when absent.
+
+    The miner can record a claim on the broadcast it still holds and then
+    carry it to the next one, so one claim can name several broadcasts:
+    ``broadcast_id`` plus any merged into ``broadcast_ids``.
+    """
 
     if not raw_metadata:
         return None
@@ -90,8 +95,14 @@ def _event_broadcast_id(raw_metadata):
         return None
     if not isinstance(metadata, dict):
         return None
+    ids = set()
     broadcast_id = str(metadata.get("broadcast_id") or "").strip()
-    return broadcast_id or None
+    if broadcast_id:
+        ids.add(broadcast_id)
+    extra = metadata.get("broadcast_ids")
+    if isinstance(extra, list):
+        ids.update(str(item).strip() for item in extra if str(item or "").strip())
+    return ids or None
 
 
 def _logical_stream_window(live_stream, streams):
@@ -161,9 +172,9 @@ def _live_streak_at(claims, live_stream, broadcast_ids=None, logical_started_at=
         except (TypeError, ValueError):
             logical_started_at = None
     matched = None
-    for timestamp, claim_broadcast_id in claims:
-        if claim_broadcast_id is not None:
-            is_current = claim_broadcast_id in broadcast_ids
+    for timestamp, claim_broadcast_ids in claims:
+        if claim_broadcast_ids is not None:
+            is_current = bool(claim_broadcast_ids & broadcast_ids)
         else:
             is_current = (
                 logical_started_at is not None and timestamp >= logical_started_at
@@ -654,14 +665,18 @@ class HistoryStore(object):
         if event_type == "watch_streak" and dedupe_window:
             existing = connection.execute(
                 """
-                SELECT 1 FROM events
+                SELECT id, metadata FROM events
                 WHERE streamer = ? AND type = 'watch_streak'
                   AND ABS(ts - ?) <= ?
-                LIMIT 1
+                ORDER BY ABS(ts - ?) LIMIT 1
                 """,
-                (streamer, timestamp, float(dedupe_window)),
+                (streamer, timestamp, float(dedupe_window), timestamp),
             ).fetchone()
             if existing is not None:
+                # The same claim seen again, possibly carried to another
+                # broadcast: count it once, but remember every broadcast it
+                # covers.
+                cls._merge_claim_broadcasts(connection, existing, payload)
                 return False
         cursor = connection.execute(
             """
@@ -688,6 +703,28 @@ class HistoryStore(object):
             streak_delta=1 if event_type == "watch_streak" else 0,
         )
         return True
+
+    @staticmethod
+    def _merge_claim_broadcasts(connection, existing, payload):
+        added = _event_broadcast_ids(payload) or set()
+        known = _event_broadcast_ids(existing["metadata"]) or set()
+        if not added - known:
+            return
+        try:
+            metadata = json.loads(existing["metadata"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        primary = str(metadata.get("broadcast_id") or "").strip()
+        metadata["broadcast_ids"] = sorted((known | added) - {primary})
+        connection.execute(
+            "UPDATE events SET metadata = ? WHERE id = ?",
+            (
+                json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                existing["id"],
+            ),
+        )
 
     def import_batch(self, source, state, points=(), events=()):
         """Write one file's imported rows and its cursor in one transaction.
@@ -741,6 +778,7 @@ class HistoryStore(object):
         game=None,
         source="observed",
         observed_end=False,
+        estimated_end=False,
     ):
         """Create or update one observed live session.
 
@@ -750,7 +788,9 @@ class HistoryStore(object):
 
         An end only moves forward, except that ``observed_end`` (the miner saw
         the stream go offline then) replaces an end inferred from the next
-        broadcast's start, which may be later than the real one.
+        broadcast's start, which may be later than the real one.  With
+        ``estimated_end`` the caller knows the stored end is an estimate, so
+        an observed end replaces it either way.
         """
 
         streamer = _clean_streamer(streamer)
@@ -811,12 +851,12 @@ class HistoryStore(object):
                         WHEN ? IS NULL THEN streams.ended_at
                         WHEN ? AND streams.ended_at IS NOT NULL
                             AND ? >= streams.started_at
-                            AND EXISTS (
+                            AND (? OR EXISTS (
                                 SELECT 1 FROM streams AS next
                                 WHERE next.streamer = streams.streamer
                                   AND next.id <> streams.id
                                   AND next.started_at = streams.ended_at
-                            )
+                            ))
                         THEN ?
                         ELSE MAX(COALESCE(streams.ended_at, ?), ?)
                     END,
@@ -830,6 +870,7 @@ class HistoryStore(object):
                     None if ended_at is None else float(ended_at),
                     1 if observed_end else 0,
                     None if ended_at is None else float(ended_at),
+                    1 if estimated_end else 0,
                     None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
                     None if ended_at is None else float(ended_at),
@@ -912,6 +953,22 @@ class HistoryStore(object):
                 (timestamp, streamer, broadcast_id),
             )
             return cursor.rowcount > 0
+
+    def latest_stream_start(self, streamer, exclude=None):
+        """Start of the streamer's newest recorded broadcast, or None."""
+
+        streamer = _clean_streamer(streamer)
+        with self._read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(started_at) AS started_at FROM streams
+                WHERE streamer = ? AND broadcast_id <> ?
+                """,
+                (streamer, str(exclude or "")),
+            ).fetchone()
+        if row is None or row["started_at"] is None:
+            return None
+        return float(row["started_at"])
 
     def open_streams(self):
         """Return ``(streamer, broadcast_id)`` of every broadcast still open."""
@@ -1444,9 +1501,9 @@ class HistoryStore(object):
             ).fetchall()
             kept = []
             for claim in claims:
-                claim_broadcast_id = _event_broadcast_id(claim["metadata"])
-                if claim_broadcast_id is not None:
-                    keep = claim_broadcast_id in broadcast_ids
+                claim_broadcast_ids = _event_broadcast_ids(claim["metadata"])
+                if claim_broadcast_ids is not None:
+                    keep = bool(claim_broadcast_ids & broadcast_ids)
                 else:
                     keep = float(claim["ts"]) >= float(logical_started_at)
                 if keep:
@@ -1642,7 +1699,7 @@ class HistoryStore(object):
                     tuple(live_streams),
                 ).fetchall():
                     streak_claims.setdefault(row["streamer"], []).append(
-                        (float(row["ts"]), _event_broadcast_id(row["metadata"]))
+                        (float(row["ts"]), _event_broadcast_ids(row["metadata"]))
                     )
         rows = [dict(row) for row in rows]
         # A streamer live or watched now belongs in the list even without

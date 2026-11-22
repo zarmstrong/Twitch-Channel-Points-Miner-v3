@@ -782,6 +782,11 @@ class HistoryRecorder(threading.Thread):
         # A snapshot written later than the last observation marks when the
         # watch selection changed; credit watch time up to it.
         changed_at = min(max(float(mtime), 0.0), now) if mtime > 0 else now
+        # A snapshot read late (the recorder was stalled) confirms watching
+        # only up to shortly after it was written, as an unchanged one does.
+        confirmed_until = (
+            min(now, changed_at + STALE_WATCH_SECONDS) if mtime > 0 else now
+        )
 
         seen = set()
         for entry in entries:
@@ -817,7 +822,7 @@ class HistoryRecorder(threading.Thread):
                 self.store.link_watch_broadcast(active["id"], broadcast_id)
                 active["broadcast_id"] = broadcast_id
             if active is not None and self._same_watch(active, reason, broadcast_id):
-                self._tick_watch(streamer, now)
+                self._tick_watch(streamer, confirmed_until)
             if self._active_watch.get(streamer) is None or not self._same_watch(
                 self._active_watch[streamer], reason, broadcast_id
             ):
@@ -953,6 +958,10 @@ class HistoryRecorder(threading.Thread):
                 # offline, so online_at still belongs to the previous one.
                 # The new broadcast is known to exist only from now.
                 started_at = float(now)
+            elif previous.get(streamer) is None:
+                started_at = self._first_seen_start(
+                    streamer, broadcast_id, started_at, now
+                )
             cutoff = self._deleted_before.get(streamer)
             if cutoff is not None and started_at < cutoff:
                 # History of this broadcast before the delete stays deleted.
@@ -989,6 +998,28 @@ class HistoryRecorder(threading.Thread):
             for key, value in self._online_details.items()
             if key in self._online_live_keys
         }
+
+    def _first_seen_start(self, streamer, broadcast_id, started_at, now):
+        """Start time of a broadcast this process has not seen live before.
+
+        The miner can change the broadcast id while the streamer stays
+        online, leaving online_at at the previous broadcast's start.  The
+        streak cache knows when the miner first saw this broadcast; without
+        it, an online_at no later than another recorded broadcast's start
+        belongs to that one, and the new broadcast is known only from now.
+        """
+
+        cached = [
+            item["started_at"]
+            for item in self._cached_stream_sessions
+            if item["streamer"] == streamer and item["broadcast_id"] == broadcast_id
+        ]
+        if cached:
+            return max(float(started_at), float(max(cached)))
+        latest = self.store.latest_stream_start(streamer, exclude=broadcast_id)
+        if latest is not None and float(started_at) <= latest:
+            return float(now)
+        return float(started_at)
 
     def _online_stream_entries(self, now):
         if not self._streamer_state_ready:
@@ -1169,6 +1200,9 @@ class HistoryRecorder(threading.Thread):
             # Only an end the cache recorded was observed; the others above
             # are estimates.
             observed_end=item["ended_at"] is not None and ended_at == item["ended_at"],
+            # This process ended the row when the broadcast left the live
+            # snapshot, which is only an estimate of when it went offline.
+            estimated_end=item["ended_at"] is not None and key in self._online_ended,
         )
         if ended_at is not None:
             # Let the next live snapshot reopen the row when the miner still

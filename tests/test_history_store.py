@@ -659,3 +659,24 @@ def test_retention_keeps_claims_of_earlier_parts_of_a_live_stream(store):
     store.apply_retention(now=later, retention_days=1)
 
     assert store.streamers(days=7, now=later)[0]["live_streak_at"] == NOW + 60
+
+
+def test_a_claim_carried_to_the_next_broadcast_covers_it(store):
+    # The miner confirmed the streak while it still held b1, then carried the
+    # claim to b2; the cache lists the same claim on both.
+    store.upsert_stream_session("alice", "b1", NOW - 7200, ended_at=NOW - 3600)
+    for broadcast_id in ("b1", "b2"):
+        store.record_event(
+            "alice",
+            NOW + 30,
+            "watch_streak",
+            "Watch streak claimed",
+            metadata={"broadcast_id": broadcast_id},
+            dedupe_key=f"streak:alice:{broadcast_id}",
+            dedupe_window=120.0,
+        )
+    store.upsert_stream_session("alice", "b2", NOW)
+
+    item = store.streamers(days=1, now=NOW + 60)[0]
+    assert item["live_streak_at"] == NOW + 30
+    assert item["lifetime"]["streak_count"] == 1
