@@ -1,3 +1,4 @@
+import errno
 import os
 import subprocess
 import sys
@@ -959,3 +960,99 @@ def test_missing_runner_with_a_leftover_backup_stops_instead_of_a_default(
     assert result == 1
     assert "Rename run.py.bak back to run.py" in error
     assert not (config_dir / "config.py").exists()
+
+
+GOOD_LEGACY_RUNNER = BAD_LEGACY_RUNNER.replace(
+    'date_format="bad"', 'date_format="dd/mm/yy"'
+)
+
+
+def test_reset_config_after_a_conversion_gets_a_default_despite_the_backup(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text(GOOD_LEGACY_RUNNER, encoding="utf-8")
+    args = ("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+    assert _run_cli(*args, "--convert-only") == 0
+    assert (tmp_path / "run.py.bak").is_file()
+
+    # The user deletes config.py to start over from a default one.
+    (config_dir / "config.py").unlink()
+    template = tmp_path / "config.example.py"
+    template.write_text("# default\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "DEFAULT_CONFIG_TEMPLATE", template)
+
+    assert _run_cli(*args) == 0
+    assert (config_dir / "config.py").read_text(encoding="utf-8") == "# default\n"
+
+
+def test_existing_backup_beside_run_py_stops_with_how_to_fix_it(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text(GOOD_LEGACY_RUNNER, encoding="utf-8")
+    (tmp_path / "run.py.bak").write_text("older", encoding="utf-8")
+    monkeypatch.setattr(
+        runner, "convert_runner", lambda *args: pytest.fail("tried to convert")
+    )
+
+    result = _run_cli("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert "Move or delete run.py.bak" in error
+    assert "correct it" not in error
+    assert (tmp_path / "run.py.bak").read_text(encoding="utf-8") == "older"
+
+
+def test_bind_mounted_run_py_is_converted_once_and_then_warned_about(
+    tmp_path, monkeypatch, no_legacy_exec, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text(GOOD_LEGACY_RUNNER, encoding="utf-8")
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self == legacy_runner:
+            raise OSError(errno.EBUSY, "Device or resource busy")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    args = ("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    assert _run_cli(*args, "--convert-only") == 0
+    first = capsys.readouterr()
+    assert f"Converted {legacy_runner}" in first.out
+    assert f"WARNING: {legacy_runner} is ignored" in first.err
+    assert legacy_runner.is_file()
+    assert runner._load_config(config_dir / "config.py").MINER_CONFIG
+
+    monkeypatch.setattr(
+        runner, "convert_runner", lambda *args: pytest.fail("converted again")
+    )
+    assert _run_cli(*args, "--convert-only") == 0
+    assert f"WARNING: {legacy_runner} is ignored" in capsys.readouterr().err
+
+
+def test_failed_load_puts_the_dashboard_settings_back(tmp_path, no_legacy_exec, capsys):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text(BAD_LEGACY_RUNNER, encoding="utf-8")
+    web_config = config_dir / "web-config.json"
+    web_config.write_text('{"sources": {"followers": true}}\n', encoding="utf-8")
+
+    result = _run_cli("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    assert result == 1
+    assert "CONFIGURATION UPDATE REQUIRED" in capsys.readouterr().err
+    assert web_config.read_text(encoding="utf-8") == (
+        '{"sources": {"followers": true}}\n'
+    )
+    assert not (config_dir / ".web-config.json.migrated.bak").exists()

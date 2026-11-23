@@ -32,9 +32,11 @@ the old calls into the four current configuration values.
 After a successful conversion, the converter renames the legacy runner to
 `run.py.bak` so it cannot be mistaken for the active configuration. When the
 file is bind-mounted into the container, Linux does not allow the rename; the
-conversion then still succeeds and `run.py` stays where it is, which is
-harmless because `config.py` takes precedence. It refuses
-to overwrite either an existing `config/config.py` or `run.py.bak`. The new
+conversion then still succeeds and `run.py` stays where it is. It is never
+read again: `config.py` takes precedence, and every start prints a warning
+until you remove the `run.py` mount. Edit `config/config.py` instead. The
+converter refuses to overwrite either an existing `config/config.py` or
+`run.py.bak`. The new
 configuration has owner-only permissions, and `config/.converted-from-run-py`
 records the source path and SHA-256 hash.
 
@@ -81,8 +83,11 @@ message that says what to do, in these cases:
 - **Conversion fails.** Any incomplete output is removed and the message names
   the error. If the original had already been renamed to `run.py.bak`, it is
   put back as `run.py` (if that fails, the container keeps stopping until you
-  rename it back). Correct the legacy file and start again, or create
-  `config/config.py` manually from [config.example.py](../config.example.py).
+  rename it back). Settings already moved from `web-config.json` are put back
+  too. Correct the legacy file and start again, or create `config/config.py`
+  manually from [config.example.py](../config.example.py).
+- **`run.py.bak` already exists beside `run.py`.** Move or delete the old
+  backup and start again.
 - **`TCPM_DISABLE_AUTO_CONVERSION=1` is set** and `config/config.py` doesn't
   exist. Remove the variable to let the container convert `run.py`, or create
   `config/config.py` yourself.

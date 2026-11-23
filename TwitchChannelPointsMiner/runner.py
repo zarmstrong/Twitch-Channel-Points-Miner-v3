@@ -14,7 +14,11 @@ import time
 import types
 from pathlib import Path
 
-from TwitchChannelPointsMiner.config_editor import ConfigEditError, migrate_web_config
+from TwitchChannelPointsMiner.config_editor import (
+    WEB_CONFIG_FILENAME,
+    ConfigEditError,
+    migrate_web_config,
+)
 from TwitchChannelPointsMiner.config_migration import (
     ConfigMigrationError,
     convert_runner,
@@ -394,9 +398,12 @@ def main(argv=None, on_miner_ready=None):
     if not config_path.is_file():
         if not args.legacy_runner.is_file():
             backup = args.legacy_runner.with_name(args.legacy_runner.name + ".bak")
-            if backup.is_file():
+            converted_before = (args.config_dir / ".converted-from-run-py").is_file()
+            if backup.is_file() and not converted_before:
                 # A failed conversion that couldn't put the original back.
-                # Don't hide it behind a fresh default configuration.
+                # Don't hide it behind a fresh default configuration. After
+                # a successful conversion the marker stays, so deleting
+                # config.py to reset it still creates a default one.
                 _legacy_runner_stop(
                     f"{config_path} does not exist and {args.legacy_runner} is "
                     f"missing, but {backup} exists. Rename {backup.name} back "
@@ -424,12 +431,30 @@ def main(argv=None, on_miner_ready=None):
                 "directly: unset TCPM_DISABLE_AUTO_CONVERSION to convert it, or "
                 f"write {config_path} yourself from config.example.py."
             )
+        runner_backup = args.legacy_runner.with_name(args.legacy_runner.name + ".bak")
+        if runner_backup.exists():
+            _legacy_runner_stop(
+                f"{config_path} does not exist and {args.legacy_runner} can't be "
+                f"converted because {runner_backup} already exists. Move or "
+                f"delete {runner_backup.name} and start again."
+            )
         existing_backups = set(config_path.parent.glob(f"{config_path.name}.v*.bak"))
+        web_config = args.config_dir / WEB_CONFIG_FILENAME
+        had_web_config = web_config.is_file()
         try:
             convert_runner(args.legacy_runner, config_path)
             config = _load_config(config_path)
             print(f"Converted {args.legacy_runner} to {config_path}.", flush=True)
         except Exception as error:
+            # Loading moves web-config.json aside once it has been applied to
+            # config.py. config.py is deleted below, so put the dashboard
+            # settings back for the next attempt.
+            applied = web_config.with_name(f".{WEB_CONFIG_FILENAME}.migrated.bak")
+            if had_web_config and not web_config.exists() and applied.is_file():
+                try:
+                    applied.rename(web_config)
+                except OSError:
+                    pass
             # _load_config keeps a schema backup of what it migrated. A
             # leftover one would make the retry refuse to migrate.
             created_backups = (
@@ -447,6 +472,16 @@ def main(argv=None, on_miner_ready=None):
                     pass
             _conversion_failed(args.legacy_runner, config_path, error)
 
+    if args.legacy_runner.is_file():
+        # Only possible when run.py couldn't be renamed (a single-file bind
+        # mount or a read-only mount). It is never read again.
+        print(
+            f"WARNING: {args.legacy_runner} is ignored: settings are read from "
+            f"{config_path}. Edit {config_path.name} instead, and remove the "
+            f"{args.legacy_runner.name} mount.",
+            file=sys.stderr,
+            flush=True,
+        )
     if args.convert_only:
         return 0
     run_config(config or _load_config(config_path), config_path, on_miner_ready)
