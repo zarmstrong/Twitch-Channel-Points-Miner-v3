@@ -1338,3 +1338,28 @@ def test_convert_runner_still_fails_on_other_rename_errors(tmp_path, monkeypatch
         convert_runner(runner, config)
     assert not config.exists()
     assert not (config.parent / ".converted-from-run-py").exists()
+
+
+def test_convert_runner_source_moves_a_streamers_keyword_to_streamers():
+    converted = convert_runner_source("""\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+
+miner = TwitchChannelPointsMiner("alice")
+miner.mine(streamers=["channel_one"], followers=True)
+""")
+    namespace = {}
+
+    exec(converted, namespace)
+
+    assert namespace["STREAMERS"] == ["channel_one"]
+    assert namespace["MINE_CONFIG"] == {"followers": True}
+
+
+def test_convert_runner_source_rejects_streamers_given_twice():
+    with pytest.raises(ConfigMigrationError, match="streamers twice"):
+        convert_runner_source("""\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+
+miner = TwitchChannelPointsMiner("alice")
+miner.mine(["a"], streamers=["b"])
+""")

@@ -1056,3 +1056,30 @@ def test_failed_load_puts_the_dashboard_settings_back(tmp_path, no_legacy_exec, 
         '{"sources": {"followers": true}}\n'
     )
     assert not (config_dir / ".web-config.json.migrated.bak").exists()
+
+
+def test_failed_load_warns_when_the_dashboard_settings_cannot_be_restored(
+    tmp_path, no_legacy_exec, capsys, monkeypatch
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy_runner = tmp_path / "run.py"
+    legacy_runner.write_text(BAD_LEGACY_RUNNER, encoding="utf-8")
+    (config_dir / "web-config.json").write_text(
+        '{"sources": {"followers": true}}\n', encoding="utf-8"
+    )
+    original_rename = Path.rename
+
+    def fail_restore(self, target):
+        if self.name == ".web-config.json.migrated.bak":
+            raise PermissionError("held by a scanner")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_restore)
+
+    result = _run_cli("--config-dir", config_dir, "--legacy-runner", legacy_runner)
+
+    assert result == 1
+    error = capsys.readouterr().err
+    assert "Unable to restore the dashboard settings" in error
+    assert ".web-config.json.migrated.bak" in error

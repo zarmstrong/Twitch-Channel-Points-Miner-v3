@@ -453,8 +453,17 @@ def main(argv=None, on_miner_ready=None):
             if had_web_config and not web_config.exists() and applied.is_file():
                 try:
                     applied.rename(web_config)
-                except OSError:
-                    pass
+                except OSError as restore_error:
+                    # config.py is deleted below, and the next conversion
+                    # ignores this hidden backup, so say where the settings are.
+                    print(
+                        f"WARNING: Unable to restore the dashboard settings from "
+                        f"{applied}: {restore_error}. Rename it back to "
+                        f"{web_config.name} before starting again, or those "
+                        "settings are lost.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             # _load_config keeps a schema backup of what it migrated. A
             # leftover one would make the retry refuse to migrate.
             created_backups = (
