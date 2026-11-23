@@ -355,6 +355,129 @@ def test_on_welcome_requests_tags_before_join(monkeypatch):
     ]
 
 
+LOGIN_REFUSED = ":tmi.twitch.tv NOTICE * :Login authentication failed"
+BAD_AUTH = ":tmi.twitch.tv NOTICE * :Improperly formatted auth"
+WELCOME = ":tmi.twitch.tv 001 someuser :Welcome, GLHF!"
+OWN_JOIN = ":someuser!someuser@someuser.tmi.twitch.tv JOIN #somechannel"
+
+
+def _wired_client(monkeypatch):
+    """A ClientIRC whose connection parses raw Twitch lines through the irc
+    library's own dispatch, without a socket. The username keeps a capital
+    letter, as a config might, while Twitch answers in lowercase."""
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: False)
+    monkeypatch.setenv("TCPM_ALLOW_PLAINTEXT_IRC", "1")
+    client = ClientIRC("SomeUser", "sometoken", "somechannel")
+    connection = client.connection
+    # What ServerConnection.connect() would have set up.
+    connection.handlers = {}
+    connection.real_server_name = ""
+    connection.real_nickname = "SomeUser"
+    connection.send_raw = MagicMock()
+    return client
+
+
+def _feed(client, *lines):
+    for line in lines:
+        client.connection._process_line(line)
+
+
+def _chat_records(caplog, text):
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if text in record.getMessage()
+    ]
+
+
+def test_refused_chat_login_warns_once_per_streak(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    _feed(client, LOGIN_REFUSED, LOGIN_REFUSED, BAD_AUTH)
+
+    records = _chat_records(caplog, "Twitch refused the chat login")
+    assert [level for level, _ in records] == [
+        logging.WARNING,
+        logging.DEBUG,
+        logging.DEBUG,
+    ]
+    assert "#somechannel: Login authentication failed" in records[0][1]
+    assert "Improperly formatted auth" in records[2][1]
+    assert all("sometoken" not in message for _, message in records)
+    assert _chat_records(caplog, "Join IRC Chat") == []
+
+
+def test_join_after_a_refusal_is_announced_and_resets_the_warning(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    _feed(client, LOGIN_REFUSED, WELCOME, OWN_JOIN)
+    # The connection drops and the next login is refused again.
+    _feed(client, LOGIN_REFUSED, WELCOME, OWN_JOIN)
+
+    assert _chat_records(caplog, "Join IRC Chat") == [
+        (logging.INFO, "Join IRC Chat: #somechannel"),
+        (logging.INFO, "Join IRC Chat: #somechannel"),
+    ]
+    assert [
+        level for level, _ in _chat_records(caplog, "Twitch refused the chat login")
+    ] == [logging.WARNING, logging.WARNING]
+
+
+def test_join_is_announced_once_and_rejoins_log_at_debug(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    _feed(client, WELCOME, OWN_JOIN, WELCOME, OWN_JOIN)
+
+    assert _chat_records(caplog, "Join IRC Chat") == [
+        (logging.INFO, "Join IRC Chat: #somechannel"),
+        (logging.DEBUG, "Join IRC Chat: #somechannel"),
+    ]
+
+
+def test_other_joins_and_notices_are_not_logged(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    client = _wired_client(monkeypatch)
+
+    # Twitch only reports other users' joins after our own join.
+    _feed(
+        client,
+        WELCOME,
+        OWN_JOIN,
+        ":someoneelse!someoneelse@someoneelse.tmi.twitch.tv JOIN #somechannel",
+        ":someuser!someuser@someuser.tmi.twitch.tv JOIN #otherchannel",
+        ":tmi.twitch.tv NOTICE * :Some other notice",
+        ":tmi.twitch.tv NOTICE #somechannel :Login authentication failed",
+    )
+
+    assert _chat_records(caplog, "Join IRC Chat") == [
+        (logging.INFO, "Join IRC Chat: #somechannel")
+    ]
+    assert _chat_records(caplog, "Twitch refused the chat login") == []
+
+
+def test_thread_chat_run_does_not_announce_the_join_before_connecting(
+    monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG)
+
+    class FakeClientIRC:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(Chat, "ClientIRC", FakeClientIRC)
+    monkeypatch.setattr(Chat, "_irc_tls_available", lambda **_: True)
+
+    ThreadChat("u", "t", "c").run()
+
+    assert _chat_records(caplog, "Join IRC Chat") == []
+
+
 def test_thread_chat_run_passes_settings_to_client(monkeypatch):
     created = {}
 
@@ -976,3 +1099,22 @@ def test_a_chat_that_leaves_does_not_stop_other_chats_reconnecting(monkeypatch):
 
     assert len(staying.reactor.scheduler.queue) == 1
     assert leaving.recon is not staying.recon
+
+
+def test_refused_login_is_retried_after_another_chat_left(monkeypatch, caplog):
+    # The warning promises a retry in the background. That needs this chat's
+    # own reconnect strategy: with one shared by every chat, a chat that left
+    # earlier would have left its check scheduled on its own stopped reactor.
+    caplog.set_level(logging.DEBUG)
+    leaving = _wired_client(monkeypatch)
+    refused = _wired_client(monkeypatch)
+    disconnect = irc.client.Event("disconnect", "", "", [""])
+
+    leaving._on_disconnect(leaving.connection, disconnect)
+    _feed(refused, LOGIN_REFUSED)
+    refused._on_disconnect(refused.connection, disconnect)
+
+    assert [
+        level for level, _ in _chat_records(caplog, "Twitch refused the chat login")
+    ] == [logging.WARNING]
+    assert len(refused.reactor.scheduler.queue) == 1

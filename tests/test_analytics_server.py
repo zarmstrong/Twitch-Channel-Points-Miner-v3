@@ -3,6 +3,7 @@ import errno
 import logging
 import os
 import re
+import sys
 import time
 from io import BytesIO
 from pathlib import Path
@@ -390,6 +391,153 @@ def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_aut
     )
 
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ("miner.example.com", "miner.example.com"),
+        (" Miner.Example.com:8443 ", "miner.example.com"),
+        ("https://miner.example.com", "miner.example.com"),
+        ("HTTPS://Miner.Example.com:443/dashboard/", "miner.example.com"),
+        ("::1", "::1"),
+        ("[::1]:54455", "::1"),
+        ("2001:DB8::1", "2001:db8::1"),
+        ("192.0.2.10", "192.0.2.10"),
+        ("2001:db8:0:0:0:0:0:1", "2001:db8::1"),
+        ("https://münchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://faß.example/", "xn--fa-hia.example"),
+        ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://%6Diner.example.com/", "miner.example.com"),
+        ("https://miner\u3002example.com/", "miner.example.com"),
+        ("https://\uff4diner.example.com/", "miner.example.com"),
+        ("https://mi\u00adner.example/", "miner.example"),
+        ("https://mi\u200bner.example/", "miner.example"),
+        ("https://192.168.257/", "192.168.1.1"),
+        ("https://0300.0250.1.1/", "192.168.1.1"),
+        ("https://miner.example/path\\file", "miner.example"),
+        ("localhost.", "localhost."),
+        ("https://192.0.2.10./", "192.0.2.10"),
+        ("https://mi\u2061ner.example/", "miner.example"),
+        ("https://0x/", "0.0.0.0"),
+        ("https://0x.0x.0x.0x/", "0.0.0.0"),
+        ("https://0xc0.0xa8.0x101/", "192.168.1.1"),
+        ("https://\u03f2.example/", "xn--4xa.example"),
+        ("https://\u1fb2.example/", "xn--uxa303l.example"),
+    ],
+)
+def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
+    server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset({expected})
+
+
+@pytest.mark.parametrize(
+    "entry, host_header",
+    [
+        ("2001:db8:0:0:0:0:0:1", "[2001:db8::1]:54455"),
+        ("2001:db8::1", "[2001:db8:0:0:0:0:0:1]"),
+        ("::ffff:192.0.2.10", "[::ffff:c000:20a]"),
+        ("https://münchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://%6Diner.example.com/", "miner.example.com"),
+    ],
+)
+def test_allowed_hosts_entry_admits_the_host_a_client_sends(entry, host_header):
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=[entry],
+    )
+    client = server.app.test_client()
+
+    response = client.get("/__host_guard_probe__", headers={"Host": host_header})
+
+    assert response.status_code == 404
+
+
+def test_allowed_hosts_entry_does_not_admit_the_idna_2003_spelling():
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=["faß.example"],
+    )
+    client = server.app.test_client()
+
+    response = client.get("/__host_guard_probe__", headers={"Host": "fass.example"})
+
+    assert response.status_code == 403
+
+
+def test_allowed_hosts_warning_does_not_log_the_entry(caplog):
+    entry = "https://demo:dummy-password@[bad]/?api_key=dummy-api-key"
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset()
+    assert "allowed_hosts" in caplog.text
+    assert "dummy-password" not in caplog.text
+    assert "dummy-api-key" not in caplog.text
+
+
+@pytest.mark.parametrize("entry", ["https://faß.example/", "münchen.example.com"])
+def test_allowed_hosts_skips_non_ascii_names_without_the_idna_package(
+    entry, monkeypatch, caplog
+):
+    monkeypatch.setitem(sys.modules, "idna", None)
+
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset()
+    assert "allowed_hosts" in caplog.text
+
+
+def test_allowed_hosts_url_entry_admits_its_host_not_the_scheme():
+    # "https://miner.example.com" used to parse to the host name "https", so
+    # the real host got a 403.
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=["https://miner.example.com"],
+    )
+    client = server.app.test_client()
+
+    allowed = client.get("/__host_guard_probe__", headers={"Host": "miner.example.com"})
+    rejected = client.get("/__host_guard_probe__", headers={"Host": "https"})
+
+    assert allowed.status_code == 404
+    assert rejected.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "",
+        "   ",
+        "https://",
+        "[not-an-ip]",
+        "https://miner.example.com\\@attacker.example/",
+        "https://miner example.com/",
+        "https://%FF.example/",
+        "miner example.com",
+        "https://miner%3A443.example/",
+    ],
+)
+def test_allowed_hosts_warns_about_and_skips_unusable_entries(entry, caplog):
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(
+            host="127.0.0.1",
+            password=None,
+            allowed_hosts=[entry, "miner.example.com"],
+        )
+
+    assert server.allowed_hosts == frozenset({"miner.example.com"})
+    assert "allowed_hosts" in caplog.text
+    assert "entry 1 of" in caplog.text
 
 
 def test_trust_proxy_auth_rejects_cross_site_post():
