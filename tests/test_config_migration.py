@@ -1363,3 +1363,27 @@ from TwitchChannelPointsMiner import TwitchChannelPointsMiner
 miner = TwitchChannelPointsMiner("alice")
 miner.mine(["a"], streamers=["b"])
 """)
+
+
+def test_package_has_no_f_string_reusing_its_own_quote_inside_an_expression():
+    # Python 3.12 accepts f"{f("x")}", but python_requires still allows 3.11.
+    import io
+    import tokenize
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[1] / "TwitchChannelPointsMiner"
+    if not hasattr(tokenize, "FSTRING_START"):
+        pytest.skip("needs the Python 3.12 tokenizer")
+    offenders = []
+    for path in package.rglob("*.py"):
+        stack = []
+        source = path.read_text(encoding="utf-8")
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.FSTRING_START:
+                stack.append(token.string[-1])
+            elif token.type == tokenize.FSTRING_END:
+                stack.pop()
+            elif token.type == tokenize.STRING and stack:
+                if token.string.endswith(stack[-1]):
+                    offenders.append(f"{path.name}:{token.start[0]}")
+    assert not offenders

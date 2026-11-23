@@ -963,6 +963,9 @@ def convert_runner_source(source, source_name="run.py"):
         imports.append(
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
         )
+    mine_config = _render_dict(
+        source, mine, ignore_args=True, skip_names=("streamers",)
+    )
     output = [
         "# -*- coding: utf-8 -*-",
         f"# Automatically converted from {source_name}; review before editing.",
@@ -986,7 +989,7 @@ def convert_runner_source(source, source_name="run.py"):
         "",
         f"STREAMERS = {streamers}",
         "",
-        f"MINE_CONFIG = {_render_dict(source, mine, ignore_args=True, skip_names=("streamers",))}",
+        f"MINE_CONFIG = {mine_config}",
         "",
         "ANALYTICS_CONFIG = "
         + (_render_dict(source, analytics[0]) if analytics else "None"),
