@@ -902,6 +902,12 @@ class TwitchChannelPointsMiner:
             self.start_datetime = datetime.now()
 
             self.twitch.login()
+            restart_requested = getattr(self.twitch, "restart_requested", None)
+            if restart_requested is not None and restart_requested.is_set():
+                # Requested while the login waited for the user (for example
+                # from the dashboard's Restart now): nothing has started yet,
+                # so return and let the runner replace the process.
+                return
             self.twitch.track_drop_item_art = drop_item_art
             self.twitch.scrape_drop_progress_on_load = scrape_drop_progress_on_load
             self.twitch.log_drop_checks = log_drop_checks
