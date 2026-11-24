@@ -47,7 +47,12 @@ from TwitchChannelPointsMiner.classes.Settings import (
 )
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
-from TwitchChannelPointsMiner.constants import GITHUB_REPOSITORY_URL
+from TwitchChannelPointsMiner.constants import (
+    GITHUB_REPOSITORY_URL,
+    WATCH_STREAK_MAX_MINUTES_DEFAULT,
+    WATCH_STREAK_MAX_MINUTES_MAX,
+    WATCH_STREAK_MAX_MINUTES_MIN,
+)
 from TwitchChannelPointsMiner.data_migration import (
     DataMigrationError,
     migrate_analytics_directory,
@@ -181,6 +186,37 @@ def _normalize_watch_status_interval_minutes(minutes):
         "using the default value 15"
     )
     return 15.0
+
+
+def _normalize_watch_streak_max_minutes(minutes):
+    if isinstance(minutes, int) and not isinstance(minutes, bool):
+        # An int too large for a float would overflow below; any int past
+        # either bound clamps to it the same way.
+        minutes = min(
+            max(minutes, WATCH_STREAK_MAX_MINUTES_MIN - 1),
+            WATCH_STREAK_MAX_MINUTES_MAX + 1,
+        )
+    if (
+        not isinstance(minutes, (int, float))
+        or isinstance(minutes, bool)
+        or not math.isfinite(minutes)
+    ):
+        logger.error(
+            "watch_streak_max_minutes must be a number of minutes; "
+            f"using the default value {WATCH_STREAK_MAX_MINUTES_DEFAULT}"
+        )
+        return float(WATCH_STREAK_MAX_MINUTES_DEFAULT)
+    clamped = min(
+        max(float(minutes), WATCH_STREAK_MAX_MINUTES_MIN),
+        WATCH_STREAK_MAX_MINUTES_MAX,
+    )
+    if clamped != minutes:
+        logger.warning(
+            f"watch_streak_max_minutes must be between "
+            f"{WATCH_STREAK_MAX_MINUTES_MIN} and {WATCH_STREAK_MAX_MINUTES_MAX}; "
+            f"using {clamped:g}"
+        )
+    return clamped
 
 
 def _normalize_wildcard_category_positive_int(value, name, default):
@@ -786,6 +822,8 @@ class TwitchChannelPointsMiner:
         wildcard_category_limit: int = 10,
         wildcard_category_streamer_limit: int = 1,
         wildcard_category_pin_active: bool = True,
+        # Last, so existing positional calls keep their meaning.
+        watch_streak_max_minutes: float = WATCH_STREAK_MAX_MINUTES_DEFAULT,
     ):
         # run() refuses to start a second session on a running instance;
         # that refusal must not stop the session that is already running.
@@ -812,6 +850,7 @@ class TwitchChannelPointsMiner:
                 drop_progress_stall_minutes=drop_progress_stall_minutes,
                 drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
                 watch_status_interval_minutes=watch_status_interval_minutes,
+                watch_streak_max_minutes=watch_streak_max_minutes,
                 category_drops_override_streamers=category_drops_override_streamers,
                 drop_badge_catalog=drop_badge_catalog,
                 drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
@@ -892,6 +931,8 @@ class TwitchChannelPointsMiner:
         wildcard_category_limit: int = 10,
         wildcard_category_streamer_limit: int = 1,
         wildcard_category_pin_active: bool = True,
+        # Last, so existing positional calls keep their meaning.
+        watch_streak_max_minutes: float = WATCH_STREAK_MAX_MINUTES_DEFAULT,
     ):
         if self.running:
             logger.error("You can't start multiple sessions of this instance!")
@@ -921,6 +962,9 @@ class TwitchChannelPointsMiner:
             )
             watch_status_interval_minutes = _normalize_watch_status_interval_minutes(
                 watch_status_interval_minutes
+            )
+            watch_streak_max_minutes = _normalize_watch_streak_max_minutes(
+                watch_streak_max_minutes
             )
             Settings.track_category_streamer_points = track_category_streamer_points
             self.twitch.category_drops_override_streamers = (
@@ -1344,6 +1388,7 @@ class TwitchChannelPointsMiner:
                     "drop_progress_stall_minutes": drop_progress_stall_minutes,
                     "drop_pick_stickiness_minutes": drop_pick_stickiness_minutes,
                     "watch_status_interval_minutes": watch_status_interval_minutes,
+                    "watch_streak_max_minutes": watch_streak_max_minutes,
                 },
             )
             self.minute_watcher_thread.name = "Minute watcher"
@@ -3075,6 +3120,8 @@ class TwitchChannelPointsMiner:
                     else Streamer(username)
                 )
                 streamer.explicitly_configured = True
+                # Same durable streak state as streamers built at startup.
+                streamer.watch_streak_cache = getattr(self, "watch_streak_cache", None)
                 streamer.channel_id = self.twitch.get_channel_id(username)
                 streamer.settings = set_default_settings(
                     streamer.settings, Settings.streamer_settings
