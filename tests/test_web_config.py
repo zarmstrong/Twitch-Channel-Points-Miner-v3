@@ -1171,6 +1171,40 @@ def test_add_streamers_marks_already_tracked_streamer_configured():
     assert category.explicitly_configured is True
 
 
+def test_add_streamers_attaches_the_watch_streak_cache(monkeypatch):
+    from TwitchChannelPointsMiner.classes.entities.Streamer import StreamerSettings
+
+    defaults = StreamerSettings(chat=ChatPresence.NEVER)
+    defaults.default()
+    defaults.chat = ChatPresence.NEVER
+    monkeypatch.setattr(Settings, "streamer_settings", defaults, raising=False)
+    cache = object()
+    cache_when_checked = []
+    twitch = SimpleNamespace(
+        get_channel_id=lambda username: "channel-1",
+        load_channel_points_context=lambda streamer: None,
+        check_streamer_online=lambda streamer: cache_when_checked.append(
+            streamer.watch_streak_cache
+        ),
+    )
+    miner = SimpleNamespace(
+        streamers=[],
+        original_streamers=[],
+        twitch=twitch,
+        watch_streak_cache=cache,
+        ws_pool=SimpleNamespace(submit=lambda topic: None),
+        _record_daily_report_streamers=lambda streamers: None,
+        _TwitchChannelPointsMiner__subscribe_user_drop_events=lambda: None,
+    )
+
+    TwitchChannelPointsMiner._add_streamers(miner, ["newcomer"])
+
+    assert [streamer.username for streamer in miner.streamers] == ["newcomer"]
+    # Attached before the first online check, which can call set_online().
+    assert cache_when_checked == [cache]
+    assert miner.streamers[0].watch_streak_cache is cache
+
+
 def test_websocket_pool_removes_and_unlistens_streamer_topics():
     target = Streamer("target")
     retained = Streamer("retained")

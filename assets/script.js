@@ -1713,9 +1713,19 @@ function restartMiner() {
                 },
                 error: function (xhr) {
                     if (xhr.status === 0) {
-                        // The process was exec'd before the response flushed:
-                        // the restart did happen, this is not a failure.
-                        restartRequested();
+                        // No answer at all: the request may never have
+                        // reached the miner, or the response was lost after
+                        // it accepted the restart. Re-enabling the button
+                        // now could restart the new process a second time,
+                        // so first watch for a new instance, and only report
+                        // a failure if none shows up.
+                        showConfigMessage('No answer from the miner. Checking whether it is restarting...', false);
+                        waitForMinerRestart(typeof minerInstance === 'undefined' ? null : minerInstance, function () {
+                            location.reload();
+                        }, function () {
+                            button.prop('disabled', false);
+                            showConfigMessage('Could not confirm that the miner restarted: the restart may not have been requested. Check its logs or reload this page before trying again.', true);
+                        });
                         return;
                     }
                     button.prop('disabled', false);
