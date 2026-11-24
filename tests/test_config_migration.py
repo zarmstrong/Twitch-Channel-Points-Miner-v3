@@ -1358,3 +1358,91 @@ ANALYTICS_CONFIG = None
 
     assert "emoji" not in migrated
     assert namespace["LOGGER"].emoji is RUNTIME_EMOJI_DEFAULT
+
+
+@pytest.mark.parametrize("code", [errno.EBUSY, errno.EROFS])
+def test_convert_runner_keeps_config_when_the_runner_cannot_be_renamed(
+    tmp_path, monkeypatch, code
+):
+    runner = tmp_path / "run.py"
+    runner.write_text(RUNNER, encoding="utf-8")
+    config = tmp_path / "config" / "config.py"
+    real_rename = Path.rename
+
+    def reject_rename(self, target):
+        if self == runner:
+            raise OSError(code, "mount point")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", reject_rename)
+
+    assert convert_runner(runner, config) == config
+    assert config.is_file()
+    assert (config.parent / ".converted-from-run-py").is_file()
+    assert runner.is_file()
+    assert not (tmp_path / "run.py.bak").exists()
+
+
+def test_convert_runner_still_fails_on_other_rename_errors(tmp_path, monkeypatch):
+    runner = tmp_path / "run.py"
+    runner.write_text(RUNNER, encoding="utf-8")
+    config = tmp_path / "config" / "config.py"
+
+    def reject_rename(self, target):
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(Path, "rename", reject_rename)
+
+    with pytest.raises(OSError):
+        convert_runner(runner, config)
+    assert not config.exists()
+    assert not (config.parent / ".converted-from-run-py").exists()
+
+
+def test_convert_runner_source_moves_a_streamers_keyword_to_streamers():
+    converted = convert_runner_source("""\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+
+miner = TwitchChannelPointsMiner("alice")
+miner.mine(streamers=["channel_one"], followers=True)
+""")
+    namespace = {}
+
+    exec(converted, namespace)
+
+    assert namespace["STREAMERS"] == ["channel_one"]
+    assert namespace["MINE_CONFIG"] == {"followers": True}
+
+
+def test_convert_runner_source_rejects_streamers_given_twice():
+    with pytest.raises(ConfigMigrationError, match="streamers twice"):
+        convert_runner_source("""\
+from TwitchChannelPointsMiner import TwitchChannelPointsMiner
+
+miner = TwitchChannelPointsMiner("alice")
+miner.mine(["a"], streamers=["b"])
+""")
+
+
+def test_package_has_no_f_string_reusing_its_own_quote_inside_an_expression():
+    # Python 3.12 accepts f"{f("x")}", but python_requires still allows 3.11.
+    import io
+    import tokenize
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[1] / "TwitchChannelPointsMiner"
+    if not hasattr(tokenize, "FSTRING_START"):
+        pytest.skip("needs the Python 3.12 tokenizer")
+    offenders = []
+    for path in package.rglob("*.py"):
+        stack = []
+        source = path.read_text(encoding="utf-8")
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.FSTRING_START:
+                stack.append(token.string[-1])
+            elif token.type == tokenize.FSTRING_END:
+                stack.pop()
+            elif token.type == tokenize.STRING and stack:
+                if token.string.endswith(stack[-1]):
+                    offenders.append(f"{path.name}:{token.start[0]}")
+    assert not offenders
