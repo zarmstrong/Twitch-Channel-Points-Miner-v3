@@ -57,6 +57,7 @@ from TwitchChannelPointsMiner.data_migration import (
     DataMigrationError,
     migrate_analytics_directory,
 )
+from TwitchChannelPointsMiner.history import journal as history_journal
 from TwitchChannelPointsMiner.logger import (
     ANDROID_LOGIN_COLOR,
     LoggerSettings,
@@ -440,6 +441,8 @@ def _recent_drop_progress(snapshot, now=None):
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
+        "workers_stopping",
+        "workers_stopped",
         "category_lookup_failure_streaks",
         "twitch",
         "claim_drops_startup",
@@ -638,6 +641,9 @@ class TwitchChannelPointsMiner:
 
         self.session_id = str(uuid.uuid4())
         self.running = False
+        # Set when a thread starts stopping the workers, and when it is done.
+        self.workers_stopping = threading.Event()
+        self.workers_stopped = threading.Event()
         self.start_datetime = None
         self.original_streamers = CopyOnWriteList()
         self.original_drop_progress = None
@@ -766,9 +772,19 @@ class TwitchChannelPointsMiner:
         log_poll_interval: int = 5,
         trust_proxy_auth: bool = False,
         allowed_hosts: list = None,
+        history_retention_days: int = 730,
     ):
         # Analytics switch
         if Settings.enable_analytics is True:
+            try:
+                from TwitchChannelPointsMiner.history import start_history
+
+                start_history(retention_days=history_retention_days)
+            except Exception:
+                logger.warning(
+                    "Unable to start the optional History tab", exc_info=True
+                )
+
             from TwitchChannelPointsMiner.classes.AnalyticsServer import AnalyticsServer
 
             days_ago = days_ago if days_ago <= 365 * 15 else 365 * 15
@@ -893,12 +909,18 @@ class TwitchChannelPointsMiner:
             # to act on. A requested restart replaces the process, and end()
             # has already stopped them.
             restart_requested = getattr(self.twitch, "restart_requested", None)
-            if (
-                not already_running
-                and self.running
-                and not (restart_requested is not None and restart_requested.is_set())
-            ):
+            restarting = restart_requested is not None and restart_requested.is_set()
+            if not already_running and self.running and not restarting:
                 self.__stop_workers()
+            elif not already_running and not restarting:
+                # Another thread (the desktop app's window) is stopping the
+                # workers: return once it is done, so cleanup after mine()
+                # (ending History's journal run) never comes before it.
+                stopping = getattr(self, "workers_stopping", None)
+                stopped = getattr(self, "workers_stopped", None)
+                if stopping is not None and stopping.is_set() and stopped is not None:
+                    if not stopped.wait(timeout=600):
+                        logger.warning("Stopping the miner is taking over 10 minutes")
 
     def run(
         self,
@@ -950,6 +972,9 @@ class TwitchChannelPointsMiner:
                 # from the dashboard's Restart now): nothing has started yet,
                 # so return and let the runner replace the process.
                 return
+            # Before the streamers load: checking them online already writes
+            # History records.
+            self.__start_history_journal()
             self.twitch.track_drop_item_art = drop_item_art
             self.twitch.scrape_drop_progress_on_load = scrape_drop_progress_on_load
             self.twitch.log_drop_checks = log_drop_checks
@@ -1328,6 +1353,10 @@ class TwitchChannelPointsMiner:
             # 3. DEACTIVATED: Check if the user is a moderator. (was used before the 5th of April 2021 to deactivate predictions)
             invalid_streamers = self.twitch.initialize_streamers_context(self.streamers)
             if invalid_streamers:
+                for streamer in self.streamers:
+                    if streamer.username in invalid_streamers:
+                        # It may already have been recorded live.
+                        history_journal.JOURNAL.retire(streamer)
                 self.streamers[:] = [
                     streamer
                     for streamer in self.streamers
@@ -2365,15 +2394,19 @@ class TwitchChannelPointsMiner:
                 continue
 
             if streamer.explicitly_configured or streamer.from_followers:
-                streamer.from_badge_campaign = False
-                # from_category was only ever True because this was a badge
-                # campaign (see the badge-streamer construction site above) -
-                # not because it was discovered via category browsing. Reset
-                # it too, or a retained ex-badge streamer permanently
-                # misclassifies as a real category-discovery streamer in every
-                # from_category check from here on (streamer_source(),
-                # eligibility, the shared discovered-slot arbitration).
-                streamer.from_category = False
+                # A followed channel no longer discovered for Drops joins
+                # History.
+                with history_journal.JOURNAL.eligibility_change(streamer):
+                    streamer.from_badge_campaign = False
+                    # from_category was only ever True because this was a
+                    # badge campaign (see the badge-streamer construction site
+                    # above) - not because it was discovered via category
+                    # browsing. Reset it too, or a retained ex-badge streamer
+                    # permanently misclassifies as a real category-discovery
+                    # streamer in every from_category check from here on
+                    # (streamer_source(), eligibility, the shared
+                    # discovered-slot arbitration).
+                    streamer.from_category = False
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
@@ -2465,8 +2498,9 @@ class TwitchChannelPointsMiner:
                 continue
 
             if streamer.explicitly_configured or streamer.from_followers:
-                streamer.from_category = False
-                streamer.from_wildcard_category = False
+                with history_journal.JOURNAL.eligibility_change(streamer):
+                    streamer.from_category = False
+                    streamer.from_wildcard_category = False
                 retained.append(streamer)
                 retained_baselines.append(baseline)
                 continue
@@ -3067,15 +3101,22 @@ class TwitchChannelPointsMiner:
                     retained.append(streamer)
                     retained_baselines.append(baseline)
                     continue
-                streamer.explicitly_configured = False
-                if (
+                kept = (
                     streamer.from_followers
                     or streamer.from_category
                     or streamer.from_badge_campaign
-                ):
+                )
+                if kept:
+                    # A channel kept for Drops leaves History here.
+                    with history_journal.JOURNAL.eligibility_change(streamer):
+                        streamer.explicitly_configured = False
                     retained.append(streamer)
                     retained_baselines.append(baseline)
                     continue
+                streamer.explicitly_configured = False
+                # Removed: this object records nothing more, even from a
+                # stream refresh or request still in flight.
+                history_journal.JOURNAL.retire(streamer)
                 self.ws_pool.remove_streamer_topics(streamer)
                 streamer.retire_chat()
                 logger.info(
@@ -3111,7 +3152,9 @@ class TwitchChannelPointsMiner:
                 # source does not retire a channel the user now lists.
                 for tracked in self.streamers:
                     if tracked.username == username:
-                        tracked.explicitly_configured = True
+                        # A Drops channel now listed joins History.
+                        with history_journal.JOURNAL.eligibility_change(tracked):
+                            tracked.explicitly_configured = True
                 continue
             try:
                 streamer = (
@@ -3120,6 +3163,9 @@ class TwitchChannelPointsMiner:
                     else Streamer(username)
                 )
                 streamer.explicitly_configured = True
+                # Tracked again: History records this object again, also
+                # one removed earlier and passed back in.
+                history_journal.JOURNAL.reinstate(streamer)
                 # Same durable streak state as streamers built at startup.
                 streamer.watch_streak_cache = getattr(self, "watch_streak_cache", None)
                 streamer.channel_id = self.twitch.get_channel_id(username)
@@ -3137,6 +3183,9 @@ class TwitchChannelPointsMiner:
                     )
                 self.twitch.load_channel_points_context(streamer)
                 self.twitch.check_streamer_online(streamer)
+                # An object added back can still be online from before it was
+                # removed, with no transition for the check to record.
+                history_journal.JOURNAL.record_live(streamer)
                 self.streamers.append(streamer)
                 self.original_streamers.append(streamer.channel_points)
                 self._record_daily_report_streamers([streamer])
@@ -3232,6 +3281,17 @@ class TwitchChannelPointsMiner:
         sys.exit(0)
 
     def __stop_workers(self):
+        stopping = getattr(self, "workers_stopping", None)
+        if stopping is not None:
+            stopping.set()
+        try:
+            self.__stop_workers_now()
+        finally:
+            stopped = getattr(self, "workers_stopped", None)
+            if stopped is not None:
+                stopped.set()
+
+    def __stop_workers_now(self):
         self.__save_daily_report_state_safely(retire_all=True)
         # Snapshot: the badge Drop thread may still be retiring streamers.
         streamers = list(self.streamers)
@@ -3306,7 +3366,31 @@ class TwitchChannelPointsMiner:
                         "continuing shutdown anyway"
                     )
 
+        # The workers above no longer write History records: end the journal
+        # run (after a bet or goal contribution still being made, which
+        # end() above did not cancel), then let History import the rest.
+        self.__stop_history_journal()
+
         self.__save_daily_report_state_safely(retire_all=True)
+
+    @staticmethod
+    def __start_history_journal():
+        try:
+            from TwitchChannelPointsMiner.history import start_journal
+
+            start_journal()
+        except Exception:
+            logger.warning("Unable to start the History journal", exc_info=True)
+
+    @staticmethod
+    def __stop_history_journal():
+        try:
+            from TwitchChannelPointsMiner.history import stop_history, stop_journal
+
+            stop_journal()
+            stop_history()
+        except Exception:
+            logger.warning("Unable to stop History", exc_info=True)
 
     def __save_daily_report_state_safely(self, retire_all=False):
         # Neither shutdown (including a crash before the state was loaded) nor

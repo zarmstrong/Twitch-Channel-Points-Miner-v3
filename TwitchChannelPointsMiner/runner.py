@@ -308,7 +308,28 @@ def run_config(config, path, on_miner_ready=None):
     # miner stopped or is restarting, before the process exits or is replaced.
     miner.queue_listener.stop()
     if miner.twitch.restart_requested.is_set():
+        _stop_history_before_restart()
         restart_process()
+
+
+def _stop_history_before_restart():
+    """Stop History, then end the journal run, before the process is replaced.
+
+    A requested restart skips the miner's worker shutdown, and ``os.execv``
+    runs neither ``atexit`` callbacks nor ``finally`` blocks.  The workers
+    keep writing records while History finishes its import, so the run ends
+    only after it, right before the process is replaced; the next process
+    imports what was written meanwhile, ``run_end`` included.
+    """
+
+    try:
+        from TwitchChannelPointsMiner.history import stop_history, stop_journal
+
+        if stop_history(timeout=120) is False:
+            logger.warning("History did not finish importing before the restart")
+        stop_journal()
+    except Exception:
+        logger.warning("Unable to stop History before restarting", exc_info=True)
 
 
 def restart_process():

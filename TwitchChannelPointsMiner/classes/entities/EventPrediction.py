@@ -17,6 +17,7 @@ class EventPrediction(object):
         "bet_confirmed",
         "bet_placed",
         "bet",
+        "confirmed_points",
     ]
 
     def __init__(
@@ -42,6 +43,9 @@ class EventPrediction(object):
         self.bet_confirmed = False
         self.bet_placed = False
         self.bet = Bet(outcomes, streamer.settings.bet)
+        # The wager Twitch confirmed (prediction-made), whoever placed it;
+        # None until then.
+        self.confirmed_points = None
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
