@@ -924,6 +924,7 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(
     opened = []
     paused = []
     joins = []
+    shown = []
 
     class MinerThread:
         def __init__(self, **kwargs):
@@ -950,6 +951,9 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(
         ),
     )
     monkeypatch.setattr(
+        windows_launcher, "_show_fatal_error_message", lambda text: shown.append(text)
+    )
+    monkeypatch.setattr(
         windows_launcher.webbrowser, "open", lambda url: opened.append(url)
     )
     monkeypatch.setattr(
@@ -970,6 +974,7 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(
     # The unbounded join keeps the daemon miner alive without a GUI or stdin.
     assert joins[0] is None
     assert paused == [True]
+    assert len(shown) == 1 and "no WebView2 runtime" in shown[0]
 
 
 def test_first_run_pauses_on_windows(monkeypatch):
