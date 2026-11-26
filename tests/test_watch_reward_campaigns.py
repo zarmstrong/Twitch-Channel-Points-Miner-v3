@@ -2795,9 +2795,25 @@ def window_ending_in(minutes):
     }
 
 
-def record_whose_window_just_closed(twitch):
+def record_whose_window_just_closed(twitch, monkeypatch):
     """Store a repeat one minute short with two minutes of its window left,
-    then let the window close: the record is three minutes old."""
+    then let the window close: the record is three minutes old.
+
+    Both clocks the code reads (utc_now and time.time) stay at NOW. NOW is
+    when this file was imported, and on a slow run more than two minutes can
+    pass before this test starts, which would close the window in real time
+    before the record is stored."""
+    for module in (
+        twitch_module,
+        campaign_module,
+        drop_module,
+        importlib.import_module(
+            "TwitchChannelPointsMiner.classes.entities.RewardCampaign"
+        ),
+    ):
+        monkeypatch.setattr(module, "utc_now", lambda: NOW)
+    now_epoch = NOW.replace(tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(time, "time", lambda: now_epoch)
     twitch._Twitch__remember_watch_reward_campaign(
         convert(watch_group(progress(minutes=59, window=window_ending_in(2))))
     )
@@ -2813,7 +2829,7 @@ def test_repeat_whose_window_closed_unfinished_is_read_again(monkeypatch):
     # The record is recent, but all it knows is a window that is over. The
     # repeat starts over in the next one.
     twitch, _, listing_calls = evaluation_twitch(watch_group(progress(minutes=0)))
-    record_whose_window_just_closed(twitch)
+    record_whose_window_just_closed(twitch, monkeypatch)
 
     assert set(evaluate(monkeypatch, twitch, [listing()])[0]) == {"example-game"}
     assert listing_calls == ["4242"]
@@ -2823,12 +2839,12 @@ def test_repeat_whose_window_closed_is_looked_for_again_when_nobody_is_live(
     monkeypatch,
 ):
     twitch, _, _ = evaluation_twitch(watch_group(progress(minutes=0)))
-    record_whose_window_just_closed(twitch)
+    record_whose_window_just_closed(twitch, monkeypatch)
 
     assert evaluate(monkeypatch, twitch, [listing()], channels=())[0] == {}
 
     [retry_at] = twitch.watch_reward_pending_starts
-    assert (retry_at - utc_now()).total_seconds() == pytest.approx(
+    assert (retry_at - NOW).total_seconds() == pytest.approx(
         WATCH_REWARD_PROGRESS_REFRESH_SECONDS, abs=5
     )
 
