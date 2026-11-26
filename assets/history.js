@@ -219,9 +219,12 @@
         });
     }
 
+    // state.notice (what a delete did) leads every status until a refresh
+    // has shown it with fresh data.
     function setStatus(message) {
         var status = byId('history-status');
-        if (status) status.textContent = message || '';
+        var text = [state.notice, message].filter(Boolean).join(' ');
+        if (status) status.textContent = text;
     }
 
     function showError(message) {
@@ -498,8 +501,6 @@
             fetchJson('activity', filtered, request)
         ]).then(function (results) {
             if (state.request !== request) return;
-            var notice = state.notice;
-            state.notice = '';
             renderCards(results[0]);
             renderStreamerOptions(results[1], selection.streamer);
             renderStreamers(results[1], selection.streamer);
@@ -510,8 +511,8 @@
             renderActivity(results[5]);
             state.loadedAt = Date.now();
             state.loadedKey = selection.key;
-            setStatus((notice ? notice + ' ' : '') +
-                'Updated ' + new Date().toLocaleTimeString());
+            setStatus('Updated ' + new Date().toLocaleTimeString());
+            state.notice = '';
         }).catch(function (error) {
             if (state.request !== request) return;
             var message = error && error.message ? error.message : String(error);
@@ -886,6 +887,20 @@
         if (top) top.outerHTML = detailHead(state.detailStreamer);
     }
 
+    // What the panels show includes History that is gone: clear them until a
+    // refresh replaces them, so a reload that fails never leaves the deleted
+    // numbers on screen.
+    function clearPanels() {
+        destroyChart('points');
+        destroyChart('watch');
+        state.lastDaily = null;
+        ['history-cards', 'history-points-chart', 'history-watch-chart', 'history-activity',
+            'history-streamers', 'history-sessions', 'history-events'].forEach(function (id) {
+            var element = byId(id);
+            if (element) element.innerHTML = '<p class="history-empty">Reloading…</p>';
+        });
+    }
+
     // -- deleting a streamer's History -----------------------------------------
     function confirmDeleteHistory(streamer) {
         if (!streamer || state.deleting) return;
@@ -924,6 +939,7 @@
             state.notice = rows
                 ? 'Deleted the History for ' + streamer + '.'
                 : 'There was no History for ' + streamer + ' to delete.';
+            setStatus('');
             forgetStreamers([streamer]);
         }).catch(function (error) {
             state.deleting = '';
@@ -960,12 +976,20 @@
         if (state.detailStreamer && gone.indexOf(state.detailStreamer.toLowerCase()) !== -1) {
             closeStreamerDetail();
         }
+        var select = byId('history-streamer');
         if (state.streamer && gone.indexOf(state.streamer.toLowerCase()) !== -1) {
             // The filter would only show an empty History now.
             state.streamer = '';
-            var select = byId('history-streamer');
             if (select) select.value = '';
         }
+        if (select) {
+            Array.prototype.slice.call(select.options).forEach(function (option) {
+                if (option.value && gone.indexOf(option.value.toLowerCase()) !== -1) {
+                    select.removeChild(option);
+                }
+            });
+        }
+        clearPanels();
         if (state.visible) {
             refreshHistory(true);
         } else if (state.request) {

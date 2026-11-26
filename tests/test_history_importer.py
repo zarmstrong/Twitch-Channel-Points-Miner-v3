@@ -922,3 +922,71 @@ def test_a_failed_delete_keeps_the_watch_going(tmp_path):
     recorder.poll_once()
     assert totals(store)["watch_seconds"] == 30
     journal.stop()
+
+
+def test_a_delete_blocked_by_a_database_lock_changes_nothing(tmp_path, monkeypatch):
+    """Another process holds the database's write lock: the delete fails
+    before its cutoff is saved or the watch is ended, so a retry is the
+    only thing that deletes anything."""
+
+    from types import SimpleNamespace
+
+    from TwitchChannelPointsMiner.history import store as store_module
+    from TwitchChannelPointsMiner.history.journal import Journal, read_delete_cutoffs
+
+    clock = {"mono": 0.0}
+    folder = str(tmp_path / "history")
+    journal = Journal(monotonic=lambda: clock["mono"])
+    journal.start(folder)
+    alice = SimpleNamespace(
+        username="alice",
+        is_online=True,
+        explicitly_configured=True,
+        from_followers=False,
+        from_category=False,
+        from_badge_campaign=False,
+        from_wildcard_category=False,
+        stream=SimpleNamespace(broadcast_id="b1", game={}, title="Title"),
+    )
+    journal.record_live(alice)
+    journal.watch_selection({"alice": (alice, "points")})
+    token = journal.watch_token(alice)
+    clock["mono"] = 30.0
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    store.initialize()
+    recorder = HistoryRecorder(store, folder, journal=journal)
+    recorder.poll_once()
+
+    class QuickConnection(sqlite3.Connection):
+        # Give up on the lock at once instead of after five seconds.
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA busy_timeout"):
+                sql = "PRAGMA busy_timeout=50"
+            return super().execute(sql, *args)
+
+    real_connect = sqlite3.connect
+
+    def quick_connect(*args, **kwargs):
+        kwargs["timeout"] = 0.05
+        kwargs["factory"] = QuickConnection
+        return real_connect(*args, **kwargs)
+
+    holder = sqlite3.connect(store.path)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(store_module.sqlite3, "connect", quick_connect)
+            with pytest.raises(sqlite3.OperationalError):
+                recorder.delete_streamer("alice")
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert read_delete_cutoffs(folder) == {}
+    # The watch went on: the request answered after the failed delete
+    # credits its 30 seconds, and the live session is still there.
+    journal.watch_attempt(alice, True, broadcast_id="b1", token=token)
+    recorder.poll_once()
+    assert totals(store)["watch_seconds"] == 30
+    assert totals(store)["stream_sessions"] == 1
+    journal.stop()

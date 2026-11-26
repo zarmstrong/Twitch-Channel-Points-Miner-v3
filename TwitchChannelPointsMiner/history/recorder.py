@@ -179,15 +179,24 @@ class HistoryRecorder(threading.Thread):
                     streamer, position[0], position[1], deleted_at
                 )
 
-            position = (
-                self.journal.delete_cutoff(streamer, save) if writing_here else None
-            )
-            if position is None:
-                position = self.importer.end_position()
-                save(position)
-            counts = self.store.delete_streamer(
-                streamer, position[0], position[1], deleted_at=deleted_at
-            )
+            # The database's write lock is taken before anything changes: a
+            # delete that cannot get it (another process holds it) fails
+            # before its cutoff is saved or the streamer's watch is ended,
+            # so a failed delete changes nothing and can be retried.
+            with self.store.transaction() as connection:
+                position = (
+                    self.journal.delete_cutoff(streamer, save) if writing_here else None
+                )
+                if position is None:
+                    position = self.importer.end_position()
+                    save(position)
+                counts = self.store.delete_streamer(
+                    streamer,
+                    position[0],
+                    position[1],
+                    deleted_at=deleted_at,
+                    connection=connection,
+                )
             if writing_here:
                 self.journal.forget(streamer)
             if remove_source is not None:
