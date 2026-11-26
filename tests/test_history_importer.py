@@ -1096,4 +1096,40 @@ def test_a_delete_whose_commit_fails_is_finished_by_the_next_import(
     assert setup.recorder.poll_once() is True
     assert totals(setup.store)["watch_seconds"] == 0
     assert totals(setup.store)["stream_sessions"] == 0
+    # The same broadcast, title and game: alice is recorded live again.
+    setup.journal.record_live(setup.alice)
+    setup.recorder.poll_once()
+    assert totals(setup.store)["stream_sessions"] == 1
     setup.journal.stop()
+
+
+def test_cutoffs_saved_before_finishing_existed_never_delete_later_activity(
+    writer, importer, store
+):
+    """A database rebuilt by an earlier build holds activity after a delete
+    without the delete's row; its cutoff line (no version) only skips."""
+
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    cutoff = os.path.getsize(writer.path(1))
+    with open(os.path.join(writer.folder, journal_module.DELETES_FILE), "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "streamer": "alice",
+                    "segment": segment_name(1, 1),
+                    "offset": cutoff,
+                    "at": T0 + 30,
+                }
+            )
+            + "\n"
+        )
+    watch(writer, T0 + 40)
+    # The earlier build imported without recording the cutoff in the database.
+    importer.apply_saved_deletes = lambda: None
+    importer.poll()
+    assert totals(store)["watch_seconds"] == 20
+    del importer.apply_saved_deletes
+
+    importer.poll()
+    assert totals(store)["watch_seconds"] == 20

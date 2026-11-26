@@ -149,9 +149,10 @@ only after that (for example because the disk is full), the delete still
 returns an error, and History finishes clearing the database before it imports
 anything else.
 
-A delete waits for History to finish what it is importing. The History tab
-keeps waiting for the answer and updates once the delete is done, even if that
-takes longer than usual.
+A delete waits for History to finish what it is importing. If History has
+not answered after 30 seconds, the History tab says the delete may still
+finish, shows what is there now and lets you delete again; it still updates
+when the delete finishes.
 
 ## Watch streaks
 

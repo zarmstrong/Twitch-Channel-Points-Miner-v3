@@ -32,9 +32,11 @@
         chartThemeStale: false,
         detailStreamer: '',
         detailRequest: null,
-        // The streamer whose History is being deleted, if any; one delete
-        // runs at a time.
-        deleting: '',
+        // The delete waiting for its answer, if any ({ streamer }); one
+        // runs at a time.  lastDelete is the newest delete started: only
+        // its answer may change what the tab says.
+        deleting: null,
+        lastDelete: null,
         // { streamer, text }: why the last delete failed, shown in that
         // streamer's drill-down until it is closed or retried.
         detailMessage: null,
@@ -859,7 +861,7 @@
     function detailHead(streamer) {
         var message = state.detailMessage &&
             sameStreamer(state.detailMessage.streamer, streamer) ? state.detailMessage.text : '';
-        var deleting = state.deleting && sameStreamer(state.deleting, streamer);
+        var deleting = state.deleting && sameStreamer(state.deleting.streamer, streamer);
         return '<div class="history-detail-top">' +
             '<div class="history-detail-head">' +
             '<h3 class="title is-4">' + escapeHtml(streamer) + '</h3>' +
@@ -934,37 +936,56 @@
 
     function deleteHistory(streamer) {
         if (!streamer || state.deleting) return;
-        state.deleting = streamer;
+        var operation = { streamer: streamer };
+        state.deleting = operation;
+        state.lastDelete = operation;
         state.detailMessage = null;
         renderDetailHead();
-        // The DELETE is not given up after REQUEST_TIMEOUT_MS like a read:
-        // the miner may still be finishing it, and the tab must follow its
-        // answer whenever it comes.  Until then, say it is still running.
+        // The DELETE itself is not given up: the miner may still be
+        // finishing it, and whenever it answers the tab follows.  After
+        // REQUEST_TIMEOUT_MS the tab stops waiting for it, though: it says
+        // the outcome is not known yet, reloads, and lets the user delete
+        // again (deleting twice is harmless).
         var slow = setTimeout(function () {
-            if (state.deleting !== streamer) return;
+            if (state.deleting !== operation) return;
+            state.deleting = null;
             reportDeleteProblem(streamer, 'History has not answered yet. The delete of ' +
-                streamer + "'s History may still finish; this tab updates when it does.");
+                streamer + "'s History may still finish; the tab shows what is there now " +
+                'and updates if it does. You can delete again.');
+            state.loadedAt = 0;
+            state.loadedKey = '';
+            refreshHistory(true);
+            renderDetailHead();
         }, REQUEST_TIMEOUT_MS);
         fetchJson('streamer/' + encodeURIComponent(streamer), null, null, 'DELETE').then(function (body) {
+            if (state.deleting === operation) state.deleting = null;
             var deleted = (body && body.deleted) || {};
             var rows = Object.keys(deleted).reduce(function (sum, table) {
                 return sum + (Number(deleted[table]) || 0);
             }, 0);
-            state.deleting = '';
-            state.detailMessage = null;
-            state.notice = rows
-                ? 'Deleted the History for ' + streamer + '.'
-                : 'There was no History for ' + streamer + ' to delete.';
+            var done = 'Deleted the History for ' + streamer + '.';
+            // A success is reported even when a newer delete was started
+            // (the History is gone either way), but a repeated delete that
+            // found nothing left does not hide that an earlier one did.
+            if (rows || state.notice !== done) {
+                state.notice = rows ? done
+                    : 'There was no History for ' + streamer + ' to delete.';
+            }
+            if (state.detailMessage && sameStreamer(state.detailMessage.streamer, streamer)) {
+                state.detailMessage = null;
+            }
             setStatus('');
             forgetStreamers([streamer]);
             // Another drill-down open now may offer its delete again.
             renderDetailHead();
         }).catch(function (error) {
-            state.deleting = '';
-            var text = error && error.message ? error.message : String(error);
-            state.detailMessage = null;
-            reportDeleteProblem(streamer,
-                'Could not delete the History for ' + streamer + '. ' + text);
+            if (state.deleting === operation) state.deleting = null;
+            if (state.lastDelete === operation) {
+                var text = error && error.message ? error.message : String(error);
+                state.detailMessage = null;
+                reportDeleteProblem(streamer,
+                    'Could not delete the History for ' + streamer + '. ' + text);
+            }
             renderDetailHead();
         }).finally(function () {
             clearTimeout(slow);

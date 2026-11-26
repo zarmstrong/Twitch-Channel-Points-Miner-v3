@@ -112,8 +112,10 @@ class JournalImporter(object):
         self._stall = None
         self._last_ack = None
         self._bad_line_logged = False
-        # Delete cutoffs from DELETES_FILE (loaded when first needed).
+        # Delete cutoffs from DELETES_FILE (loaded when first needed): all
+        # of them, and those apply_saved_deletes may finish.
         self._file_deletes = None
+        self._finishable_deletes = None
 
     # -- delete cutoffs --------------------------------------------------------
     def _load_deletes(self):
@@ -129,10 +131,17 @@ class JournalImporter(object):
         applies it; raises ``OSError`` when it cannot be saved."""
 
         cutoffs = self._load_deletes()
+        finishable = self._load_finishable_deletes()
         save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
         position = (str(segment), int(offset))
-        if position > cutoffs.get(streamer, ("", 0)):
-            cutoffs[streamer] = position
+        for known in (cutoffs, finishable):
+            if position > known.get(streamer, ("", 0)):
+                known[streamer] = position
+
+    def _load_finishable_deletes(self):
+        if self._finishable_deletes is None:
+            self._finishable_deletes = read_delete_cutoffs(self.folder, finishable=True)
+        return self._finishable_deletes
 
     # -- reading -------------------------------------------------------------
     def _cursor(self, connection):
@@ -153,9 +162,11 @@ class JournalImporter(object):
 
         Runs before anything is imported, so the rows it deletes are all from
         before the cutoff: records after it are only imported once the
-        database has the cutoff."""
+        database has the cutoff.  Cutoffs saved before this was done
+        (without ``CUTOFF_VERSION``) are left alone: a database rebuilt then
+        may hold activity after them without having recorded them."""
 
-        cutoffs = self._load_deletes()
+        cutoffs = self._load_finishable_deletes()
         if not cutoffs:
             return
         with self.store._read_connection() as connection:

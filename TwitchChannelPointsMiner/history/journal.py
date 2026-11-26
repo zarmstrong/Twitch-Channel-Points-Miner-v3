@@ -124,9 +124,17 @@ def journal_end(folder):
     return names[-1], os.path.getsize(os.path.join(folder, names[-1]))
 
 
-def read_delete_cutoffs(folder):
+# Cutoff lines with this version are written before the database deletes
+# the streamer's rows; the importer finishes such a delete if the database
+# never committed it.  Older lines (no version) are only used to skip
+# records.
+CUTOFF_VERSION = 2
+
+
+def read_delete_cutoffs(folder, finishable=False):
     """``streamer -> (segment, offset)``: the latest delete cutoff of each
-    streamer, from ``DELETES_FILE``.
+    streamer, from ``DELETES_FILE``.  With ``finishable``, only cutoffs
+    written with ``CUTOFF_VERSION`` or later count.
 
     The file outlives the database, so a rebuilt one still skips what was
     deleted.  Raises ``OSError`` when it exists but cannot be read:
@@ -144,7 +152,17 @@ def read_delete_cutoffs(folder):
             entry = json.loads(raw.decode("utf-8"))
             streamer = _clean(entry["streamer"])
             position = (str(entry["segment"]), int(entry["offset"]))
-        except (UnicodeDecodeError, ValueError, KeyError, TypeError, OverflowError):
+            version = int(entry.get("v", 1))
+        except (
+            UnicodeDecodeError,
+            ValueError,
+            KeyError,
+            TypeError,
+            OverflowError,
+            AttributeError,
+        ):
+            continue
+        if finishable and version < CUTOFF_VERSION:
             continue
         if streamer and position > cutoffs.get(streamer, ("", 0)):
             cutoffs[streamer] = position
@@ -158,6 +176,7 @@ def save_delete_cutoff(folder, streamer, segment, offset, deleted_at):
     os.makedirs(folder, exist_ok=True)
     line = json.dumps(
         {
+            "v": CUTOFF_VERSION,
             "streamer": _clean(streamer),
             "segment": str(segment),
             "offset": int(offset),
