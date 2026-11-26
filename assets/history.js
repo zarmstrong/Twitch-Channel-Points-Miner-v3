@@ -181,8 +181,7 @@
     function newRequest() {
         var request = {
             controller: typeof AbortController === 'function' ? new AbortController() : null,
-            timer: null,
-            timedOut: false
+            timer: null
         };
         request.cancel = function () {
             clearTimeout(request.timer);
@@ -192,7 +191,6 @@
         };
         request.expired = new Promise(function (resolve, reject) {
             request.timer = setTimeout(function () {
-                request.timedOut = true;
                 reject(new Error('History did not respond in time. Try Refresh.'));
                 request.cancel();
             }, REQUEST_TIMEOUT_MS);
@@ -922,46 +920,54 @@
         }
     }
 
+    // Says why a delete failed: in the drill-down when it shows that
+    // streamer, otherwise in the status line.
+    function reportDeleteProblem(streamer, text) {
+        if (state.detailStreamer && sameStreamer(state.detailStreamer, streamer)) {
+            state.detailMessage = { streamer: streamer, text: text };
+            renderDetailHead();
+        } else {
+            state.notice = text;
+            setStatus('');
+        }
+    }
+
     function deleteHistory(streamer) {
         if (!streamer || state.deleting) return;
         state.deleting = streamer;
         state.detailMessage = null;
         renderDetailHead();
-        var request = newRequest();
-        request.run([
-            fetchJson('streamer/' + encodeURIComponent(streamer), null, request, 'DELETE')
-        ]).then(function (results) {
-            var deleted = (results[0] && results[0].deleted) || {};
+        // The DELETE is not given up after REQUEST_TIMEOUT_MS like a read:
+        // the miner may still be finishing it, and the tab must follow its
+        // answer whenever it comes.  Until then, say it is still running.
+        var slow = setTimeout(function () {
+            if (state.deleting !== streamer) return;
+            reportDeleteProblem(streamer, 'History has not answered yet. The delete of ' +
+                streamer + "'s History may still finish; this tab updates when it does.");
+        }, REQUEST_TIMEOUT_MS);
+        fetchJson('streamer/' + encodeURIComponent(streamer), null, null, 'DELETE').then(function (body) {
+            var deleted = (body && body.deleted) || {};
             var rows = Object.keys(deleted).reduce(function (sum, table) {
                 return sum + (Number(deleted[table]) || 0);
             }, 0);
             state.deleting = '';
+            state.detailMessage = null;
             state.notice = rows
                 ? 'Deleted the History for ' + streamer + '.'
                 : 'There was no History for ' + streamer + ' to delete.';
             setStatus('');
             forgetStreamers([streamer]);
+            // Another drill-down open now may offer its delete again.
+            renderDetailHead();
         }).catch(function (error) {
             state.deleting = '';
             var text = error && error.message ? error.message : String(error);
-            if (request.timedOut) {
-                // The miner may still finish the delete; reload to show
-                // whether it did.
-                text = 'History did not answer in time. The delete may still finish; ' +
-                    'the tab has been reloaded to show what is left.';
-            }
-            state.detailMessage = {
-                streamer: streamer,
-                text: 'Could not delete the History for ' + streamer + '. ' + text
-            };
-            if (request.timedOut) {
-                state.loadedAt = 0;
-                state.loadedKey = '';
-                refreshHistory(true);
-            }
+            state.detailMessage = null;
+            reportDeleteProblem(streamer,
+                'Could not delete the History for ' + streamer + '. ' + text);
             renderDetailHead();
         }).finally(function () {
-            request.cancel();
+            clearTimeout(slow);
         });
     }
 

@@ -146,9 +146,33 @@ class JournalImporter(object):
 
         return journal_end(self.folder)
 
+    def apply_saved_deletes(self):
+        """Finish the deletes whose cutoff was saved but whose database
+        change did not commit (see ``HistoryRecorder.delete_streamer``), and
+        record the cutoffs a rebuilt database has not seen yet.
+
+        Runs before anything is imported, so the rows it deletes are all from
+        before the cutoff: records after it are only imported once the
+        database has the cutoff."""
+
+        cutoffs = self._load_deletes()
+        if not cutoffs:
+            return
+        with self.store._read_connection() as connection:
+            applied = {
+                row["streamer"]: (row["segment"], row["offset"])
+                for row in connection.execute(
+                    "SELECT streamer, segment, offset FROM deleted_streamers"
+                )
+            }
+        for streamer, position in cutoffs.items():
+            if position > applied.get(streamer, ("", 0)):
+                self.store.delete_streamer(streamer, position[0], position[1])
+
     def poll(self):
         """Import everything complete; returns the number of lines read."""
 
+        self.apply_saved_deletes()
         names = list_segments(self.folder)
         if not names:
             return 0

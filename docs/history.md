@@ -143,7 +143,15 @@ anything after it is recorded as usual, also after the database is rebuilt
 from the journal. If History cannot be cleared, for
 example while it is still starting or because another process holds a lock on
 the database, the delete returns an error and changes nothing, so you can retry
-it; a delete from the Points tab then keeps the analytics data too.
+it; a delete from the Points tab then keeps the analytics data too. The delete
+takes effect when History saves it beside the journal; if the database fails
+only after that (for example because the disk is full), the delete still
+returns an error, and History finishes clearing the database before it imports
+anything else.
+
+A delete waits for History to finish what it is importing. The History tab
+keeps waiting for the answer and updates once the delete is done, even if that
+takes longer than usual.
 
 ## Watch streaks
 
