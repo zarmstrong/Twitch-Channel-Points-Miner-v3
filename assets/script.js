@@ -730,6 +730,13 @@ function confirmStreamerAnalyticsDeletion() {
     Promise.allSettled(deleteRequests).then(function (results) {
         var deletedStreamers = streamers.filter((_streamer, index) => results[index].status === 'fulfilled');
         var failedStreamers = streamers.filter((_streamer, index) => results[index].status === 'rejected');
+        if (deletedStreamers.length > 0) {
+            // The optional History tab shows these streamers' History, which
+            // the delete removed too.
+            window.dispatchEvent(new CustomEvent('analytics-streamers-deleted', {
+                detail: { streamers: deletedStreamers }
+            }));
+        }
 
         if (deletedStreamers.includes(currentStreamer)) {
             if (streamerRefreshTimeout) {

@@ -888,10 +888,16 @@ class HistoryStore(object):
         for row in stream_rows:
             item = dict(row)
             item["active"] = live is not None and live["id"] == item["id"]
+            # Measured on the server's clock, as in sessions().
+            finished = item["ended_at"]
+            if finished is None:
+                finished = now if item["active"] else item["last_seen_at"]
+            item["duration_seconds"] = max(0.0, finished - item["started_at"])
             streams.append(item)
         return {
             "streamer": streamer,
             "days": int(days),
+            "generated_at": now,
             "summary": summary,
             "daily": [dict(row) for row in daily_rows],
             "watch_sessions": watch_sessions,

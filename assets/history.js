@@ -90,6 +90,13 @@
         return String(Number(hours.toFixed(2))) + 'h';
     }
 
+    // Durations of what is still running are measured against the server's
+    // clock, like the sessions list; the browser's clock may differ.
+    function serverNow(payload) {
+        var now = Number(payload && payload.generated_at);
+        return Number.isFinite(now) && now > 0 ? now : Date.now() / 1000;
+    }
+
     function formatTime(timestamp) {
         var value = Number(timestamp);
         if (!Number.isFinite(value) || value <= 0) return '—';
@@ -543,7 +550,7 @@
                 label: 'Active now',
                 value: formatNumber(overview.active_watch_sessions),
                 meta: overview.live_streams + ' live · ' +
-                    (run ? 'run ' + formatDuration((Date.now() / 1000) - run.started_at) : 'no run')
+                    (run ? 'run ' + formatDuration(serverNow(overview) - run.started_at) : 'no run')
             }
         ];
         container.innerHTML = cards.map(function (card) {
@@ -914,14 +921,8 @@
         }).join('');
 
         var streamRows = (detail.streams || []).slice(0, 15).map(function (session) {
-            // As the sessions list computes it: an open stream counts up to
-            // now while live, and to its last sighting once it went stale.
-            var end = session.ended_at;
-            if (end === null || end === undefined) {
-                end = session.active ? Date.now() / 1000 : session.last_seen_at;
-            }
             return '<tr><td class="history-muted">' + escapeHtml(formatTime(session.started_at)) + '</td>' +
-                '<td class="num">' + escapeHtml(formatDuration((Number(end) || 0) - session.started_at)) + '</td>' +
+                '<td class="num">' + escapeHtml(formatDuration(session.duration_seconds)) + '</td>' +
                 '<td>' + sessionEndCell(session, 'live') + '</td><td>' + escapeHtml([session.game, session.title].filter(Boolean).join(' · ') || '—') +
                 '</td></tr>';
         }).join('');
@@ -971,6 +972,26 @@
     buildPanel();
     buildTabButton();
     wrapTabSwitcher();
+
+    // Deleting a streamer's analytics on the Points tab also deletes their
+    // History (script.js dispatches this after a successful delete).
+    window.addEventListener('analytics-streamers-deleted', function (event) {
+        var names = ((event.detail && event.detail.streamers) || []).map(function (name) {
+            return String(name).replace(/\.json$/i, '').toLowerCase();
+        });
+        state.loadedAt = 0;
+        state.loadedKey = '';
+        if (state.detailStreamer &&
+                names.indexOf(state.detailStreamer.toLowerCase()) !== -1) {
+            closeStreamerDetail();
+        }
+        if (state.visible) {
+            refreshHistory(true);
+        } else if (state.request) {
+            state.request.cancel();
+            state.request = null;
+        }
+    });
 
     document.addEventListener('visibilitychange', function () {
         if (document.visibilityState === 'visible' && state.visible) {
