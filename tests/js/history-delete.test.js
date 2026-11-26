@@ -93,7 +93,8 @@ test('a delete that succeeds says so and forgets the streamer', async () => {
   assert.equal(s.deleting, operation);
   assert.deepEqual(page.calls, [['renderHead'], ['send', 'alice']]);
   assert.equal(page.timers.size, 1);
-  assert.equal([...page.timers.values()][0].ms, REQUEST_TIMEOUT_MS);
+  assert.equal([...page.timers.values()][0].ms, 30000, 'the tab waits 30 seconds');
+  assert.equal(REQUEST_TIMEOUT_MS, 30000);
 
   page.sent[0].answer(REMOVED);
   await settle();
@@ -281,7 +282,33 @@ test('a late failure after a newer delete started is not reported', async () => 
   assert.equal(s.notice, 'Deleted the History for alice.');
 });
 
-test('the newer delete of another streamer is not disturbed by a late answer', async () => {
+test("a late success forgets its streamer without touching another streamer's delete", async () => {
+  const s = tabState('alice');
+  const page = fakePage(s);
+  runDelete(s, 'alice', page.ui);
+  await settle();
+  page.expire();
+  s.detailStreamer = 'bob';
+  s.detailMessage = null;
+  const newer = runDelete(s, 'bob', page.ui);
+  await settle();
+  page.sent[1].fail(new Error('HTTP 500'));
+  await settle();
+  const bobFailure = 'Could not delete the History for bob. HTTP 500';
+  assert.equal(detailMessageFor(s, 'bob'), bobFailure);
+  assert.equal(s.deleting, null);
+
+  page.sent[0].answer(REMOVED);
+  await settle();
+  assert.ok(page.calls.some(([name, value]) => name === 'forget' && value === 'alice'));
+  assert.ok(!page.calls.some(([name, value]) => name === 'forget' && value === 'bob'));
+  assert.equal(s.detailStreamer, 'bob', "bob's drill-down stays open");
+  assert.equal(detailMessageFor(s, 'bob'), bobFailure, "bob's failure stays shown");
+  assert.equal(s.notice, '', 'the older delete reports nothing');
+  assert.equal(s.lastDelete, newer);
+});
+
+test("a late success while another streamer's delete runs leaves it running", async () => {
   const s = tabState('alice');
   const page = fakePage(s);
   runDelete(s, 'alice', page.ui);
@@ -293,7 +320,40 @@ test('the newer delete of another streamer is not disturbed by a late answer', a
 
   page.sent[0].answer(REMOVED);
   await settle();
+  assert.ok(page.calls.some(([name, value]) => name === 'forget' && value === 'alice'));
   assert.equal(s.deleting, newer);
-  assert.equal(s.detailStreamer, 'bob', "bob's drill-down stays open");
+  assert.equal(s.detailStreamer, 'bob');
+  assert.equal(s.notice, '');
   assert.deepEqual(deleteButtonState(s, 'bob'), { disabled: true, loading: true });
+
+  page.sent[1].answer(REMOVED);
+  await settle();
+  assert.equal(s.deleting, null);
+  assert.equal(s.notice, 'Deleted the History for bob.');
+});
+
+test("a late failure while another streamer's delete runs is not reported", async () => {
+  const s = tabState('alice');
+  s.notice = 'Earlier notice.';
+  const page = fakePage(s);
+  runDelete(s, 'alice', page.ui);
+  await settle();
+  page.expire();
+  s.notice = 'Earlier notice.';
+  s.detailStreamer = 'bob';
+  const newer = runDelete(s, 'bob', page.ui);
+  await settle();
+  const before = page.calls.length;
+
+  page.sent[0].fail(new Error('HTTP 500'));
+  await settle();
+  assert.equal(s.deleting, newer);
+  assert.equal(s.detailMessage, null);
+  assert.equal(s.notice, 'Earlier notice.');
+  assert.ok(!page.calls.slice(before).some(([name]) => name === 'status' || name === 'forget'));
+  assert.deepEqual(deleteButtonState(s, 'bob'), { disabled: true, loading: true });
+
+  page.sent[1].answer(REMOVED);
+  await settle();
+  assert.equal(s.notice, 'Deleted the History for bob.');
 });
