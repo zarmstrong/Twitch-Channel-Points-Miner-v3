@@ -147,7 +147,9 @@ it; a delete from the Points tab then keeps the analytics data too. The delete
 takes effect when History saves it beside the journal; if the database fails
 only after that (for example because the disk is full), the delete still
 returns an error, and History finishes clearing the database before it imports
-anything else.
+anything else. If the save itself fails but the disk kept part of it, History
+may finish the delete after a restart; it then removes only what was recorded
+before the delete, never anything imported since.
 
 A delete waits for History to finish what it is importing. If History has
 not answered after 30 seconds, the History tab says the delete may still

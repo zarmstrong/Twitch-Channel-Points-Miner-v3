@@ -116,9 +116,6 @@ class JournalImporter(object):
         # of them, and those apply_saved_deletes may finish.
         self._file_deletes = None
         self._finishable_deletes = None
-        # Streamers whose delete apply_saved_deletes finished; the recorder
-        # takes them to reset the journal's live state.
-        self.finished_deletes = []
 
     # -- delete cutoffs --------------------------------------------------------
     def _load_deletes(self):
@@ -136,30 +133,11 @@ class JournalImporter(object):
         cutoffs = self._load_deletes()
         finishable = self._load_finishable_deletes()
         position = (str(segment), int(offset))
-        try:
-            save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
-        except OSError as error:
-            failure = error
-        else:
-            failure = None
-        if failure is not None:
-            # The line may be in the file even so (only the fsync failed,
-            # say), and would then count after a restart: read the file
-            # again, so this process does what a restart would.
-            self._file_deletes = None
-            self._finishable_deletes = None
-            try:
-                saved = read_delete_cutoffs(self.folder).get(clean_streamer(streamer))
-            except OSError:
-                saved = None
-            if saved is None or saved < position:
-                raise failure
-            logger.warning(
-                "Saving a History delete reported an error, but the delete was saved",
-                exc_info=failure,
-            )
-            cutoffs = self._load_deletes()
-            finishable = self._load_finishable_deletes()
+        # Raises when the line may not be durable (even if it was written):
+        # the delete then fails.  Should the line have reached the file
+        # anyway, a later import honours it only while it has not passed
+        # the cutoff (``apply_saved_deletes``).
+        save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
         for known in (cutoffs, finishable):
             if position > known.get(streamer, ("", 0)):
                 known[streamer] = position
@@ -190,11 +168,10 @@ class JournalImporter(object):
         only while the import has not passed the cutoff, so they are all from
         before it; if the database already holds records from after the
         cutoff (it was rebuilt by an earlier build, which did not record
-        cutoffs, or a cutoff line appeared after its save failed), only the
-        cutoff is recorded and the activity is kept.  Cutoffs saved before
-        this was done (without ``CUTOFF_VERSION``) are left alone.  The
-        streamers whose rows were deleted are added to ``finished_deletes``.
-        """
+        cutoffs, or the line of a delete that failed reached the file
+        anyway), only the cutoff is recorded and the activity is kept.
+        Cutoffs saved before this was done (without ``CUTOFF_VERSION``) are
+        left alone."""
 
         cutoffs = self._load_finishable_deletes()
         if not cutoffs:
@@ -212,7 +189,6 @@ class JournalImporter(object):
                 continue
             if cursor <= position:
                 self.store.delete_streamer(streamer, position[0], position[1])
-                self.finished_deletes.append(streamer)
             else:
                 logger.warning(
                     "History already holds records after %s's saved delete; "
