@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copy this template to config/config.py and review each setting before use.
 
-CONFIG_VERSION = 12
+CONFIG_VERSION = 13
 
 import logging
 from colorama import Fore
@@ -347,6 +347,7 @@ MINE_CONFIG = {
     "drop_progress_stall_minutes": 10,
     "drop_pick_stickiness_minutes": 15,
     "watch_status_interval_minutes": 15,  # Repeat an unchanged "Watching for points" line after this many minutes; 0 logs it only when it changes
+    "watch_streak_max_minutes": 20,  # Stop prioritizing a pending watch streak that Twitch hasn't confirmed after this many minutes in a watch slot per broadcast (11-60)
     "category_drops_override_streamers": False,  # Twitch counts Drops progress on only one channel at a time, so only one Drops stream is watched, chosen by streamer_source_priority. When True, a configured/followed streamer's Drops for a game NOT in 'categories' rank below category, wildcard, and badge Drops streams even if STREAMERS/FOLLOWERS rank higher.
     "drop_badge_catalog": True,
     "drop_badge_refresh_interval_hours": 1,
@@ -367,5 +368,7 @@ ANALYTICS_CONFIG = None
 #     'refresh': 5,                             # Chart refresh interval in minutes
 #     'days_ago': 7,                            # Initial chart history range
 #     'password': None,                         # Required when binding to a non-loopback host
+#     'trust_proxy_auth': False,                # Set True only when an authenticating reverse proxy (Authelia, Traefik, oauth2-proxy, ...) is the only way to reach this port: disables Basic auth and enables the Config tab without a password
+#     'allowed_hosts': None,                    # Extra Host header names accepted by the loopback DNS-rebinding guard, e.g. ['miner.example.com']; required for a 127.0.0.1 bind behind a reverse proxy that preserves Host
 #     'log_poll_interval': 5,                   # Log viewer polling interval in seconds (1-180)
 # }

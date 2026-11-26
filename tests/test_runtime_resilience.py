@@ -51,7 +51,7 @@ def test_online_streamer_without_spade_url_retries_extraction(monkeypatch):
         target.stream.spade_url = "https://spade.test/example"
 
     monkeypatch.setattr(Twitch, "get_spade_url", fake_spade)
-    monkeypatch.setattr(Twitch, "update_stream", lambda self, s: None)
+    monkeypatch.setattr(Twitch, "_fetch_stream_update", lambda self, s: None)
 
     twitch.check_streamer_online(streamer)
     twitch.check_streamer_online(streamer)

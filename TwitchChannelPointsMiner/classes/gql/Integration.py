@@ -180,6 +180,11 @@ DROP_SESSION_ATTEMPT_STRATEGY = AttemptStrategy(attempts=1)
 # A failed ban check leaves the channel's state unknown and is retried a few
 # minutes later, so it doesn't hold up the minute watcher with retries.
 CHANNEL_BAN_ATTEMPT_STRATEGY = AttemptStrategy(attempts=1)
+
+# The watch-streak milestone check runs on the minute watcher and is optional:
+# a failed check leaves the streak pending and is retried a few minutes later,
+# so it doesn't hold up minute-watched events with retries.
+WATCH_STREAK_ATTEMPT_STRATEGY = AttemptStrategy(attempts=1)
 # Twitch rejects a whole batch of more than 35 operations
 # (BATCH_LIMIT_EXCEEDED); stay below that.
 CHANNEL_BAN_BATCH_SIZE = 30
@@ -525,6 +530,7 @@ class GQL:
             GQLOperations.WithIsStreamLiveQuery["operationName"],
             json_data,
             self.parser.parse_stream_live_status_response,
+            attempt_strategy=WATCH_STREAK_ATTEMPT_STRATEGY,
         )
 
     def get_reward_list(self, channel_id: str) -> RewardListResponse:
@@ -543,6 +549,7 @@ class GQL:
             GQLOperations.RewardList["operationName"],
             json_data,
             self.parser.parse_reward_list_response,
+            attempt_strategy=WATCH_STREAK_ATTEMPT_STRATEGY,
         )
 
     def get_id_from_login(self, streamer_username: str) -> GetIdFromLoginResponse:

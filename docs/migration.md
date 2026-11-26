@@ -30,8 +30,13 @@ the old calls into the four current configuration values.
    persistent config directory for future upgrades.
 
 After a successful conversion, the converter renames the legacy runner to
-`run.py.bak` so it cannot be mistaken for the active configuration. It refuses
-to overwrite either an existing `config/config.py` or `run.py.bak`. The new
+`run.py.bak` so it cannot be mistaken for the active configuration. When the
+file is bind-mounted into the container, Linux does not allow the rename; the
+conversion then still succeeds and `run.py` stays where it is. It is never
+read again: `config.py` takes precedence, and every start prints a warning
+until you remove the `run.py` mount. Edit `config/config.py` instead. The
+converter refuses to overwrite either an existing `config/config.py` or
+`run.py.bak`. The new
 configuration has owner-only permissions, and `config/.converted-from-run-py`
 records the source path and SHA-256 hash.
 
@@ -68,12 +73,27 @@ User-owned formats are checked when their corresponding feature starts:
 Migrations are idempotent and refuse to overwrite an existing backup or consume
 a format version newer than the running release.
 
-If conversion fails, any incomplete output is removed, a migration warning is
-printed, and the original runner executes unchanged. Correct the legacy file and
-remove any partial config before retrying, or create `config/config.py` manually
-from [config.example.py](../config.example.py). Set
-`TCPM_DISABLE_AUTO_CONVERSION=1` only when you intentionally need to postpone
-conversion; the container will continue using the mounted legacy runner.
+The runner no longer runs a legacy `run.py` unchanged. Earlier releases fell
+back to it; now the container stops with a `CONFIGURATION UPDATE REQUIRED`
+message that says what to do, in these cases:
+
+- **The config directory isn't mounted.** Mount a persistent directory at
+  `/usr/src/app/config` and recreate the container. The mounted `run.py` is
+  then converted automatically.
+- **Conversion fails.** Any incomplete output is removed and the message names
+  the error. If the original had already been renamed to `run.py.bak`, it is
+  put back as `run.py` (if that fails, the container keeps stopping until you
+  rename it back). Settings already moved from `web-config.json` are put back
+  too. Correct the legacy file and start again, or create `config/config.py`
+  manually from [config.example.py](../config.example.py).
+- **`run.py.bak` already exists beside `run.py`.** Move or delete the old
+  backup and start again.
+- **`TCPM_DISABLE_AUTO_CONVERSION=1` is set** and `config/config.py` doesn't
+  exist. Remove the variable to let the container convert `run.py`, or create
+  `config/config.py` yourself.
+
+With a restart policy, the container keeps stopping with the same message until
+the configuration is fixed.
 
 To convert without starting the miner, run the image's runner with
 `--convert-only` while mounting both paths. This writes the converted config but

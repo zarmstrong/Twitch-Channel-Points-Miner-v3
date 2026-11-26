@@ -3,6 +3,8 @@ import errno
 import logging
 import os
 import re
+import sys
+import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -305,6 +307,267 @@ def test_config_endpoints_require_analytics_authentication():
     assert response.status_code == 403
     assert notification_response.status_code == 403
     assert "analytics username and password" in read_response.get_json()["error"]
+
+
+def test_analytics_beyond_localhost_requires_password_by_default():
+    with pytest.raises(ValueError, match="requires a password"):
+        AnalyticsServer(host="0.0.0.0", password=None)
+
+
+def test_trust_proxy_auth_allows_non_loopback_bind_without_password():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    assert server.password is None
+    assert server.trust_proxy_auth is True
+
+
+def test_trust_proxy_auth_allows_config_endpoint_without_password(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "config_path", str(tmp_path), raising=False)
+    monkeypatch.setitem(
+        __import__(
+            "TwitchChannelPointsMiner.classes.AnalyticsServer", fromlist=["web_config"]
+        ).web_config.__globals__,
+        "read_managed_web_config",
+        lambda _path: {"streamers": []},
+    )
+    server = AnalyticsServer(password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get("/config")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"streamers": []}
+
+
+def test_trust_proxy_auth_does_not_bypass_a_configured_password():
+    server = AnalyticsServer(username="user", password="secret", trust_proxy_auth=True)
+
+    response = server.app.test_client().get("/")
+
+    assert response.status_code == 401
+
+
+def test_trust_proxy_auth_loopback_bind_rejects_unlisted_host():
+    # trust_proxy_auth does not disable the loopback DNS-rebinding guard: a
+    # rebound page can't make its own Host header match an allowed name.
+    server = AnalyticsServer(host="127.0.0.1", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().get(
+        "/__host_guard_probe__",
+        headers={
+            "Host": "evil.example:54455",
+            "Origin": "http://evil.example:54455",
+            "X-Forwarded-Host": "evil.example:54455",
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"].startswith("Unrecognized Host header.")
+
+
+@pytest.mark.parametrize("trust_proxy_auth", [False, True])
+def test_allowed_hosts_accepts_traefik_external_host_on_loopback(trust_proxy_auth):
+    # Traefik keeps the browser's Host header, while Authelia is the only
+    # authentication layer. A loopback bind must accept the explicitly
+    # allowlisted host, with or without trust_proxy_auth.
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=trust_proxy_auth,
+        allowed_hosts=["Miner.Example.com:443"],
+    )
+
+    response = server.app.test_client().get(
+        "/__host_guard_probe__",
+        headers={
+            "Host": "miner.example.com",
+            "X-Forwarded-Host": "miner.example.com",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ("miner.example.com", "miner.example.com"),
+        (" Miner.Example.com:8443 ", "miner.example.com"),
+        ("https://miner.example.com", "miner.example.com"),
+        ("HTTPS://Miner.Example.com:443/dashboard/", "miner.example.com"),
+        ("::1", "::1"),
+        ("[::1]:54455", "::1"),
+        ("2001:DB8::1", "2001:db8::1"),
+        ("192.0.2.10", "192.0.2.10"),
+        ("2001:db8:0:0:0:0:0:1", "2001:db8::1"),
+        ("https://münchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://faß.example/", "xn--fa-hia.example"),
+        ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://%6Diner.example.com/", "miner.example.com"),
+        ("https://miner\u3002example.com/", "miner.example.com"),
+        ("https://\uff4diner.example.com/", "miner.example.com"),
+        ("https://mi\u00adner.example/", "miner.example"),
+        ("https://mi\u200bner.example/", "miner.example"),
+        ("https://192.168.257/", "192.168.1.1"),
+        ("https://0300.0250.1.1/", "192.168.1.1"),
+        ("https://miner.example/path\\file", "miner.example"),
+        ("localhost.", "localhost."),
+        ("https://192.0.2.10./", "192.0.2.10"),
+        ("https://mi\u2061ner.example/", "miner.example"),
+        ("https://0x/", "0.0.0.0"),
+        ("https://0x.0x.0x.0x/", "0.0.0.0"),
+        ("https://0xc0.0xa8.0x101/", "192.168.1.1"),
+        ("https://\u03f2.example/", "xn--4xa.example"),
+        ("https://\u1fb2.example/", "xn--uxa303l.example"),
+    ],
+)
+def test_allowed_hosts_entries_normalize_to_the_host_name(entry, expected):
+    server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset({expected})
+
+
+@pytest.mark.parametrize(
+    "entry, host_header",
+    [
+        ("2001:db8:0:0:0:0:0:1", "[2001:db8::1]:54455"),
+        ("2001:db8::1", "[2001:db8:0:0:0:0:0:1]"),
+        ("::ffff:192.0.2.10", "[::ffff:c000:20a]"),
+        ("https://münchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://m%C3%BCnchen.example.com/", "xn--mnchen-3ya.example.com"),
+        ("https://%6Diner.example.com/", "miner.example.com"),
+    ],
+)
+def test_allowed_hosts_entry_admits_the_host_a_client_sends(entry, host_header):
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=[entry],
+    )
+    client = server.app.test_client()
+
+    response = client.get("/__host_guard_probe__", headers={"Host": host_header})
+
+    assert response.status_code == 404
+
+
+def test_allowed_hosts_entry_does_not_admit_the_idna_2003_spelling():
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=["faß.example"],
+    )
+    client = server.app.test_client()
+
+    response = client.get("/__host_guard_probe__", headers={"Host": "fass.example"})
+
+    assert response.status_code == 403
+
+
+def test_allowed_hosts_warning_does_not_log_the_entry(caplog):
+    entry = "https://demo:dummy-password@[bad]/?api_key=dummy-api-key"
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset()
+    assert "allowed_hosts" in caplog.text
+    assert "dummy-password" not in caplog.text
+    assert "dummy-api-key" not in caplog.text
+
+
+@pytest.mark.parametrize("entry", ["https://faß.example/", "münchen.example.com"])
+def test_allowed_hosts_skips_non_ascii_names_without_the_idna_package(
+    entry, monkeypatch, caplog
+):
+    monkeypatch.setitem(sys.modules, "idna", None)
+
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(host="127.0.0.1", password=None, allowed_hosts=[entry])
+
+    assert server.allowed_hosts == frozenset()
+    assert "allowed_hosts" in caplog.text
+
+
+def test_allowed_hosts_url_entry_admits_its_host_not_the_scheme():
+    # "https://miner.example.com" used to parse to the host name "https", so
+    # the real host got a 403.
+    server = AnalyticsServer(
+        host="127.0.0.1",
+        password=None,
+        trust_proxy_auth=True,
+        allowed_hosts=["https://miner.example.com"],
+    )
+    client = server.app.test_client()
+
+    allowed = client.get("/__host_guard_probe__", headers={"Host": "miner.example.com"})
+    rejected = client.get("/__host_guard_probe__", headers={"Host": "https"})
+
+    assert allowed.status_code == 404
+    assert rejected.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "",
+        "   ",
+        "https://",
+        "[not-an-ip]",
+        "https://miner.example.com\\@attacker.example/",
+        "https://miner example.com/",
+        "https://%FF.example/",
+        "miner example.com",
+        "https://miner%3A443.example/",
+    ],
+)
+def test_allowed_hosts_warns_about_and_skips_unusable_entries(entry, caplog):
+    with caplog.at_level(logging.WARNING):
+        server = AnalyticsServer(
+            host="127.0.0.1",
+            password=None,
+            allowed_hosts=[entry, "miner.example.com"],
+        )
+
+    assert server.allowed_hosts == frozenset({"miner.example.com"})
+    assert "allowed_hosts" in caplog.text
+    assert "entry 1 of" in caplog.text
+
+
+def test_trust_proxy_auth_rejects_cross_site_post():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Host": "miner.example.com", "Origin": "https://evil.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Cross-site request rejected."
+
+
+def test_trust_proxy_auth_accepts_same_origin_traefik_post():
+    server = AnalyticsServer(host="0.0.0.0", password=None, trust_proxy_auth=True)
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={
+            "Host": "miner.example.com",
+            "Origin": "https://miner.example.com",
+            "X-Forwarded-Host": "miner.example.com",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    # No on_restart callback in this test: passing the cross-site and config
+    # gates is what matters, and the endpoint reports restart as unavailable.
+    assert response.status_code == 503
 
 
 def test_static_assets_are_served_without_authentication():
@@ -938,6 +1201,7 @@ def test_config_ui_exposes_requested_management_controls():
         "logging-settings-form",
         "update-settings-form",
         "notification-settings",
+        "restart-miner",
     ):
         assert f'id="{selector}"' in template
     for setting in (
@@ -969,6 +1233,46 @@ def test_config_ui_exposes_requested_management_controls():
     assert "/config/notifications/${encodeURIComponent(provider)}/test" in script
     assert "reorder_streamers" in script
     assert "Sortable.create" in script
+    assert "/config/restart" in script
+
+
+def test_config_restart_route_requests_miner_restart():
+    calls = []
+    server = AnalyticsServer(
+        username="user", password="secret", on_restart=lambda: calls.append(True)
+    )
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 202
+    # The request lands on a timer so the response flushes before the process
+    # is exec'd; wait out the grace period.
+    deadline = time.time() + 3
+    while not calls and time.time() < deadline:
+        time.sleep(0.05)
+    assert calls == [True]
+
+
+def test_config_restart_without_callback_reports_unavailable():
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().post(
+        "/config/restart",
+        headers={"Authorization": "Basic dXNlcjpzZWNyZXQ="},
+    )
+
+    assert response.status_code == 503
+
+
+def test_config_restart_requires_authentication():
+    server = AnalyticsServer(password=None)
+
+    response = server.app.test_client().post("/config/restart")
+
+    assert response.status_code == 403
 
 
 def test_config_ui_preserves_an_integer_streak_only_window():

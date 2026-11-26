@@ -21,7 +21,7 @@ _LINE_PATTERN = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 _ENCODING_DECLARATION = re.compile(r"[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
 _BLANK_OR_COMMENT_LINE = re.compile(r"[ \t\f]*(?:#|$)")
 
-CONFIG_VERSION = 12
+CONFIG_VERSION = 13
 STREAMER_SETTINGS_DEFAULTS = (
     ("make_predictions", "True"),
     ("follow_raid", "True"),
@@ -129,6 +129,7 @@ MINE_CONFIG_DEFAULTS = (
     ("drop_progress_stall_minutes", "10"),
     ("drop_pick_stickiness_minutes", "15"),
     ("watch_status_interval_minutes", "15"),
+    ("watch_streak_max_minutes", "20"),
     ("category_drops_override_streamers", "False"),
     ("drop_badge_catalog", "True"),
     ("drop_badge_refresh_interval_hours", "1"),
@@ -146,6 +147,8 @@ ANALYTICS_CONFIG_DEFAULTS = (
     ("days_ago", "7"),
     ("password", "None"),
     ("log_poll_interval", "5"),
+    ("trust_proxy_auth", "False"),
+    ("allowed_hosts", "None"),
 )
 
 
@@ -230,6 +233,10 @@ def _missing_call_defaults(call, call_name, defaults):
         not isinstance(call, ast.Call)
         or _call_name(call.func) != call_name
         or any(keyword.arg is None for keyword in call.keywords)
+        # Positional arguments set settings this keyword check can't see, and
+        # adding the same setting as a keyword makes the call raise TypeError.
+        # Leave such calls alone: unset settings already use their defaults.
+        or call.args
     ):
         return []
     existing = {keyword.arg for keyword in call.keywords}
@@ -1511,7 +1518,12 @@ def _is_runner_import(node):
 
 
 def _render_dict(
-    source, call, positional_names=(), ignore_args=False, default_entries=()
+    source,
+    call,
+    positional_names=(),
+    ignore_args=False,
+    default_entries=(),
+    skip_names=(),
 ):
     if not ignore_args and len(call.args) > len(positional_names):
         raise ConfigMigrationError(
@@ -1528,6 +1540,8 @@ def _render_dict(
     for keyword in call.keywords:
         if keyword.arg is None:
             raise ConfigMigrationError("Expanded **kwargs cannot be converted safely")
+        if keyword.arg in skip_names:
+            continue
         entries.append((keyword.arg, _source(source, keyword.value)))
     existing_names = {name for name, _ in entries}
     entries.extend(
@@ -1579,7 +1593,19 @@ def convert_runner_source(source, source_name="run.py"):
     mine = mines[0]
     if len(mine.args) > 1:
         raise ConfigMigrationError("mine() has more than one positional argument")
-    streamers = _source(source, mine.args[0]) if mine.args else "[]"
+    streamers_keywords = [
+        keyword for keyword in mine.keywords if keyword.arg == "streamers"
+    ]
+    if mine.args and streamers_keywords:
+        raise ConfigMigrationError("mine() gets streamers twice")
+    if mine.args:
+        streamers = _source(source, mine.args[0])
+    elif streamers_keywords:
+        # run_config() passes STREAMERS positionally, so keeping the keyword in
+        # MINE_CONFIG would raise "multiple values for argument 'streamers'".
+        streamers = _source(source, streamers_keywords[0].value)
+    else:
+        streamers = "[]"
     imports = [
         _source(source, node)
         for node in tree.body
@@ -1599,6 +1625,9 @@ def convert_runner_source(source, source_name="run.py"):
         imports.append(
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
         )
+    mine_config = _render_dict(
+        source, mine, ignore_args=True, skip_names=("streamers",)
+    )
     output = [
         "# -*- coding: utf-8 -*-",
         f"# Automatically converted from {source_name}; review before editing.",
@@ -1622,7 +1651,7 @@ def convert_runner_source(source, source_name="run.py"):
         "",
         f"STREAMERS = {streamers}",
         "",
-        f"MINE_CONFIG = {_render_dict(source, mine, ignore_args=True)}",
+        f"MINE_CONFIG = {mine_config}",
         "",
         "ANALYTICS_CONFIG = "
         + (_render_dict(source, analytics[0]) if analytics else "None"),
@@ -1671,7 +1700,15 @@ def convert_runner(runner_path, config_path):
         marker.write_text(
             f"source={runner.resolve()}\nsha256={digest}\n", encoding="utf-8"
         )
-        runner.rename(backup)
+        try:
+            runner.rename(backup)
+        except OSError as error:
+            # A run.py bind-mounted as a single file (EBUSY) or from a
+            # read-only mount (EROFS) can't be renamed. The converted config
+            # is complete and takes precedence on every later start, so keep
+            # it and leave the original where it is.
+            if error.errno not in (errno.EBUSY, errno.EROFS, errno.EXDEV):
+                raise
     except Exception:
         marker.unlink(missing_ok=True)
         config.unlink(missing_ok=True)

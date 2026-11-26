@@ -1,13 +1,15 @@
 import errno
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
-from urllib.parse import urlsplit
+from threading import Lock, Thread, Timer
+from urllib.parse import unquote, urlsplit
 
 from flask import Flask, Response, cli, g, render_template, request
 
@@ -27,6 +29,13 @@ logger = logging.getLogger(__name__)
 MAX_LOG_TAIL_BYTES = 1024 * 1024
 UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
 RESPONSE_CACHE_TTL_SECONDS = 10.0
+# Grace for the restart response to flush to the client before the restart
+# event wakes the main loop: the restart execs the process once it lands, and
+# a connection reset on the request that triggered it would look like a failure.
+RESTART_REQUEST_DELAY_SECONDS = 0.5
+# Response header naming this server process. It changes when the miner
+# restarts, which is how the dashboard tells the new process from the old one.
+MINER_INSTANCE_HEADER = "X-Miner-Instance"
 
 # Extensions the static-file route serves without authentication (see
 # require_authentication() below) - the assets folder this route reads from
@@ -157,10 +166,117 @@ def _secret_matches(supplied, expected):
     )
 
 
+_IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}\.?")
+_HOSTNAME_RE = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?\.?")
+
+
+def _parse_ipv4_numbers(hostname):
+    """Dotted IPv4 text for "192.168.257", "0300.0250.1.1" or "0x", else None.
+
+    The WHATWG URL rules browsers use: one to four numbers, each decimal,
+    0-prefixed octal or 0x hexadecimal ("0x" alone is 0), with the last number
+    filling the remaining bytes, and one trailing dot dropped.
+    """
+    parts = hostname.split(".")
+    if parts[-1] == "" and len(parts) > 1:
+        parts.pop()
+    if len(parts) > 4:
+        return None
+    numbers = []
+    for part in parts:
+        try:
+            if part[:2] in ("0x", "0X"):
+                numbers.append(int(part[2:] or "0", 16))
+            elif len(part) > 1 and part[0] == "0":
+                numbers.append(int(part, 8))
+            else:
+                numbers.append(int(part, 10))
+        except ValueError:
+            return None
+    if any(number > 255 for number in numbers[:-1]):
+        return None
+    if numbers[-1] >= 256 ** (5 - len(numbers)):
+        return None
+    value = numbers[-1]
+    for position, number in enumerate(numbers[:-1]):
+        value += number << (8 * (3 - position))
+    return str(ipaddress.IPv4Address(value))
+
+
+def _canonical_hostname(hostname):
+    """Lowercase host in one spelling: IP addresses compressed, names as IDNA.
+
+    Applied to both the configured entries and the request's Host header, so
+    "2001:db8:0:0:0:0:0:1" matches "[2001:db8::1]" and "münchen.example.com"
+    matches the "xn--mnchen-3ya.example.com" that HTTP clients send.
+    """
+    hostname = (hostname or "").lower()
+    if not hostname:
+        return ""
+    if not hostname.isascii():
+        try:
+            import idna
+
+            # UTS 46 mapping and Punycode as browsers do it (non-transitional,
+            # so "ß" stays), not the stdlib "idna" codec, which folds it
+            # into "ss" and would allow a different domain.
+            hostname = idna.encode(hostname, uts46=True, transitional=False).decode(
+                "ascii"
+            )
+        except (ImportError, UnicodeError):
+            # idna.IDNAError is a UnicodeError. Without the package (requests
+            # depends on it, so it is normally there) or for a name it
+            # refuses, give up: an approximate mapping could admit a
+            # different domain than the one configured.
+            return ""
+    try:
+        return str(ipaddress.ip_address(hostname))
+    except ValueError:
+        pass
+    if _IPV4_NUMBERS_RE.fullmatch(hostname):
+        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address.
+        return _parse_ipv4_numbers(hostname) or hostname
+    return hostname
+
+
 def _request_hostname(host_header):
     """Hostname from a Host header, lowercased, without port or IPv6 brackets."""
     try:
-        return (urlsplit(f"//{host_header}").hostname or "").lower()
+        return _canonical_hostname(urlsplit(f"//{host_header}").hostname)
+    except ValueError:
+        return ""
+
+
+def _allowed_hostname(entry):
+    """Host name for one ANALYTICS_CONFIG["allowed_hosts"] entry, or "".
+
+    Accepts what users paste besides a bare name: a port, a full URL such as
+    "https://miner.example.com/", and a bare IPv6 address.
+    """
+    entry = str(entry).strip()
+    if "://" in entry:
+        if "\\" in re.split(r"[/?#]", entry.split("://", 1)[1], maxsplit=1)[0]:
+            # Browsers read a backslash as a slash, urlsplit does not, so the
+            # two would disagree about which host the URL names.
+            return ""
+        try:
+            # Clients percent-decode the host of a URL.
+            hostname = _canonical_hostname(
+                unquote(urlsplit(entry).hostname or "", errors="strict")
+            )
+        except ValueError:
+            return ""
+    else:
+        try:
+            # A bare IPv6 address has colons that urlsplit would take for a port.
+            return str(ipaddress.ip_address(entry))
+        except ValueError:
+            hostname = _request_hostname(entry)
+    # Anything else is no host name: spaces, "%", "@" and the like.
+    if _HOSTNAME_RE.fullmatch(hostname):
+        return hostname
+    try:
+        return str(ipaddress.ip_address(hostname))
     except ValueError:
         return ""
 
@@ -543,7 +659,7 @@ def read_dashboard_prefs():
     }
 
 
-def index(refresh=5, days_ago=7, log_poll_interval=5):
+def index(refresh=5, days_ago=7, log_poll_interval=5, miner_instance=None):
     assets_folder = get_assets_folder()
     asset_version = max(
         os.path.getmtime(os.path.join(assets_folder, filename))
@@ -568,6 +684,7 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
         dashboardPrefs=read_dashboard_prefs(),
         buildCommit=os.environ.get(BUILD_COMMIT_ENV_VAR),
+        minerInstance=miner_instance,
     )
 
 
@@ -809,6 +926,9 @@ class AnalyticsServer(Thread):
         password: str = None,
         log_poll_interval: int = 5,
         logs_file: str = None,
+        trust_proxy_auth: bool = False,
+        allowed_hosts: list = None,
+        on_restart=None,
     ):
         super(AnalyticsServer, self).__init__()
 
@@ -828,10 +948,35 @@ class AnalyticsServer(Thread):
         self.username = username
         self.password = password
         self.logs_file = logs_file
+        self.trust_proxy_auth = trust_proxy_auth
+        if isinstance(allowed_hosts, str):
+            allowed_hosts = [allowed_hosts]
+        hostnames = set()
+        for position, entry in enumerate(allowed_hosts or []):
+            hostname = _allowed_hostname(entry)
+            if hostname:
+                hostnames.add(hostname)
+            else:
+                # Without this, a typo only shows up as a 403 on the proxy.
+                logger.warning(
+                    # The entry itself is not logged: a pasted URL can carry
+                    # a user name, password or token.
+                    "Ignoring entry %d of ANALYTICS_CONFIG['allowed_hosts']: "
+                    "it is not a host name.",
+                    position + 1,
+                    extra={"emoji": ":warning:"},
+                )
+        self.allowed_hosts = frozenset(hostnames)
+        self.on_restart = on_restart
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
+        self.instance_id = secrets.token_hex(8)
 
-        if host not in LOOPBACK_HOSTS and not password:
-            raise ValueError("Analytics exposed beyond localhost requires a password")
+        if host not in LOOPBACK_HOSTS and not password and not trust_proxy_auth:
+            raise ValueError(
+                "Analytics exposed beyond localhost requires a password "
+                "(or trust_proxy_auth=True when an authenticating reverse "
+                "proxy is the only way to reach it)"
+            )
 
         def generate_log():
             if self.logs_file is None:
@@ -899,21 +1044,26 @@ class AnalyticsServer(Thread):
         def require_authentication():
             # Without a password, a loopback-only dashboard is only reached as
             # localhost; any other Host name means DNS rebinding from a web
-            # page. With a password the rebound page can't authenticate, so
-            # other names (e.g. a reverse proxy keeping the original Host)
-            # are allowed.
+            # page. trust_proxy_auth does not disable this guard: a reverse
+            # proxy that keeps the browser's Host must list that name in
+            # allowed_hosts. With a password the rebound page can't
+            # authenticate, so other names (e.g. a reverse proxy keeping the
+            # original Host) are allowed.
             if (
                 self.password is None
                 and self.host in LOOPBACK_HOSTS
-                and _request_hostname(request.host) not in LOOPBACK_HOSTS
+                and _request_hostname(request.host)
+                not in LOOPBACK_HOSTS | self.allowed_hosts
             ):
                 return Response(
                     json.dumps(
                         {
                             "error": (
-                                "Unrecognized Host header. Set an analytics "
-                                "username and password to reach the dashboard "
-                                "under another host name."
+                                "Unrecognized Host header. Use a loopback host "
+                                "name, add this host name to "
+                                "ANALYTICS_CONFIG['allowed_hosts'], or set an "
+                                "analytics username and password to reach the "
+                                "dashboard under another host name."
                             )
                         }
                     ),
@@ -947,7 +1097,7 @@ class AnalyticsServer(Thread):
                 # still go through the checks below like any other page.
                 return None
             if self.password is None:
-                if request.path.startswith("/config"):
+                if not self.trust_proxy_auth and request.path.startswith("/config"):
                     return Response(
                         json.dumps(
                             {
@@ -1003,6 +1153,29 @@ class AnalyticsServer(Thread):
                 )
             return response
 
+        @self.app.after_request
+        def add_miner_instance_header(response):
+            response.headers[MINER_INSTANCE_HEADER] = self.instance_id
+            return response
+
+        def request_miner_restart():
+            if self.on_restart is None:
+                return Response(
+                    json.dumps({"error": "Restart is unavailable."}),
+                    status=503,
+                    mimetype="application/json",
+                )
+            # Delayed so this response flushes before the restart lands: the
+            # main loop execs the process the moment the event is set.
+            Timer(RESTART_REQUEST_DELAY_SECONDS, self.on_restart).start()
+            logger.info(
+                "Miner restart requested from the dashboard",
+                extra={"emoji": ":repeat:"},
+            )
+            return Response(
+                json.dumps({"ok": True}), status=202, mimetype="application/json"
+            )
+
         self.app.add_url_rule(
             "/",
             "index",
@@ -1011,6 +1184,7 @@ class AnalyticsServer(Thread):
                 "refresh": refresh,
                 "days_ago": days_ago,
                 "log_poll_interval": log_poll_interval,
+                "miner_instance": self.instance_id,
             },
             methods=["GET"],
         )
@@ -1037,6 +1211,12 @@ class AnalyticsServer(Thread):
         self.app.add_url_rule("/log", "log", generate_log, methods=["GET"])
         self.app.add_url_rule(
             "/config", "web_config", web_config, methods=["GET", "POST"]
+        )
+        self.app.add_url_rule(
+            "/config/restart",
+            "restart_miner",
+            request_miner_restart,
+            methods=["POST"],
         )
         self.app.add_url_rule(
             "/config/notifications/<string:provider>/test",

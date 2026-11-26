@@ -384,6 +384,7 @@ $(document).ready(function () {
     $('#update-settings-form').submit(saveUpdateSettings);
     $('#login-settings-form').submit(saveLoginSettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
+    $('#restart-miner').on('click', restartMiner);
     $('#dismiss-update-banner').click(dismissUpdateBanner);
     $(document).keydown(function (event) {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
@@ -1637,6 +1638,103 @@ function saveCategorySettings(event) {
             drops_enabled: $('#category-drops-enabled').prop('checked')
         }
     }, 'Category settings were saved. Restart the miner to apply them.', button);
+}
+
+var RESTART_POLL_INTERVAL_MS = 2000;
+var RESTART_GIVE_UP_MS = 3 * 60 * 1000;
+
+// Calls onBack once a new miner process answers, or onGiveUp after
+// RESTART_GIVE_UP_MS. Each process sends its own X-Miner-Instance header;
+// polling a static file (served without authentication) until that header
+// differs from the one this page was served with tells the new process from
+// the old one, which keeps answering until the restart lands. If the header
+// is missing (a proxy that drops it), the server going away and answering
+// again is taken as the restart instead. A restart that falls entirely between
+// two probes then goes unnoticed and the page gives up with a message, which is
+// safer than reloading while the old process is still running.
+function waitForMinerRestart(previousInstance, onBack, onGiveUp) {
+    var started = Date.now();
+    var sawServerDown = false;
+    function schedule() {
+        if (Date.now() - started >= RESTART_GIVE_UP_MS) {
+            onGiveUp();
+            return;
+        }
+        setTimeout(poll, RESTART_POLL_INTERVAL_MS);
+    }
+    function poll() {
+        $.ajax({
+            url: typeof minerProbeUrl === 'undefined' ? './assets/style.css' : minerProbeUrl,
+            method: 'HEAD',
+            cache: false,
+            timeout: 5000
+        }).done(function (data, status, xhr) {
+            var instance = xhr.getResponseHeader('X-Miner-Instance');
+            var back = instance && previousInstance
+                ? instance !== previousInstance
+                : sawServerDown;
+            if (back) {
+                onBack();
+                return;
+            }
+            schedule();
+        }).fail(function () {
+            sawServerDown = true;
+            schedule();
+        });
+    }
+    schedule();
+}
+
+function restartMiner() {
+    // acceptedBy is the instance that took the restart request, the one that
+    // is about to go away. Without it (no answer reached us) the page's own.
+    function restartRequested(acceptedBy) {
+        showConfigMessage('Restart requested. This page reloads when the miner is back.', false);
+        var servedBy = acceptedBy || (typeof minerInstance === 'undefined' ? null : minerInstance);
+        waitForMinerRestart(servedBy, function () {
+            location.reload();
+        }, function () {
+            $('#restart-miner').prop('disabled', false);
+            showConfigMessage('The miner has not come back after 3 minutes. Check its logs, then reload this page.', true);
+        });
+    }
+    showConfirmDialog({
+        title: 'Restart the miner?',
+        message: 'Settings that require a restart (per-streamer, constructor, analytics and most mining changes) take effect immediately after it. The dashboard will be briefly unavailable.',
+        confirmLabel: 'Restart',
+        onConfirm: function () {
+            var button = $('#restart-miner').prop('disabled', true);
+            $.ajax({
+                url: '/config/restart',
+                method: 'POST',
+                success: function (data, status, xhr) {
+                    restartRequested(xhr.getResponseHeader('X-Miner-Instance'));
+                },
+                error: function (xhr) {
+                    if (xhr.status === 0) {
+                        // No answer at all: the request may never have
+                        // reached the miner, or the response was lost after
+                        // it accepted the restart. Re-enabling the button
+                        // now could restart the new process a second time,
+                        // so first watch for a new instance, and only report
+                        // a failure if none shows up.
+                        showConfigMessage('No answer from the miner. Checking whether it is restarting...', false);
+                        waitForMinerRestart(typeof minerInstance === 'undefined' ? null : minerInstance, function () {
+                            location.reload();
+                        }, function () {
+                            button.prop('disabled', false);
+                            showConfigMessage('Could not confirm that the miner restarted: the restart may not have been requested. Check its logs or reload this page before trying again.', true);
+                        });
+                        return;
+                    }
+                    button.prop('disabled', false);
+                    showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
+                        ? xhr.responseJSON.error : 'Unable to request a restart.', true);
+                }
+            });
+        }
+    });
 }
 
 function saveSourceSettings(event) {

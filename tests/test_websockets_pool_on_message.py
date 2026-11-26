@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -109,6 +111,138 @@ def test_on_message_keeps_its_streamer_when_the_list_changes_mid_message(
     assert target.calls == ["set_offline"]
     assert first.calls == []
     logger.error.assert_not_called()
+
+
+def test_stream_down_is_applied_under_the_channel_state_lock(logger):
+    # A refresh applies its reply under the same lock, so the two never
+    # interleave.
+    import threading
+
+    from TwitchChannelPointsMiner.classes.entities.Streamer import (
+        streamer_state_lock,
+    )
+
+    target = FakeStreamer("lock-target", "2")
+    held = []
+
+    def probe():
+        acquired = streamer_state_lock("lock-target").acquire(blocking=False)
+        if acquired:
+            streamer_state_lock("lock-target").release()
+        held.append(not acquired)
+
+    def set_offline():
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(timeout=5)
+        target.calls.append("set_offline")
+
+    target.set_offline = set_offline
+
+    WebSocketsPool.on_message(
+        _websocket([target]),
+        _pubsub("video-playback-by-id", "2", {"type": "stream-down"}),
+    )
+
+    assert target.calls == ["set_offline"]
+    assert held == [True]
+
+
+@pytest.mark.parametrize(
+    ("online_at", "expected_calls", "expected_refreshes"),
+    [
+        pytest.param(1700000000.0 + 30, [], 1, id="sent-before-online"),
+        # Within two minutes either way, the two clocks can't tell: rechecked.
+        pytest.param(1700000000.0 - 90, [], 1, id="within-the-clock-margin"),
+        pytest.param(1700000000.0 - 3 * 60, ["set_offline"], 0, id="sent-after-online"),
+        pytest.param(0, ["set_offline"], 0, id="online-time-unknown"),
+    ],
+)
+def test_stream_down_sent_before_the_streamer_went_online_is_rechecked(
+    logger, online_at, expected_calls, expected_refreshes
+):
+    # A's stream-down was delayed (or sent while the refresh that found B
+    # was in flight). It may not be B's, so B isn't ended on it: the next
+    # online check asks Twitch.
+    from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+
+    target = FakeStreamer("predates-target", "2")
+    target.online_at = online_at
+    target.sent_before_online = lambda sent_at: Streamer.sent_before_online(
+        target, sent_at
+    )
+    refreshes = []
+    target.stream = SimpleNamespace(request_refresh=lambda: refreshes.append(1))
+
+    WebSocketsPool.on_message(
+        _websocket([target]),
+        _pubsub("video-playback-by-id", "2", {"type": "stream-down"}),
+    )
+
+    assert target.calls == expected_calls
+    assert len(refreshes) == expected_refreshes
+    logger.error.assert_not_called()
+
+
+@pytest.fixture
+def host_not_on_utc():
+    """Run with the host's local time away from UTC, where time.tzset()
+    exists (not on Windows)."""
+    if not hasattr(time, "tzset"):
+        yield
+        return
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        pytest.param("2023-11-14T22:13:20.000000Z", id="utc"),
+        pytest.param("2023-11-14T23:13:20+01:00", id="offset"),
+        # Read as UTC, not as the host's local time.
+        pytest.param("2023-11-14T22:13:20", id="no-offset"),
+    ],
+)
+def test_points_earned_passes_twitch_send_time_with_the_award(
+    logger, monkeypatch, host_not_on_utc, timestamp
+):
+    # The award's send time tells a late award for an earlier broadcast
+    # from one for the broadcast now online.
+    monkeypatch.setattr(f"{POOL_MODULE}.Settings.enable_analytics", False)
+    monkeypatch.setattr(f"{POOL_MODULE}.is_drop_discovered", lambda streamer: False)
+    target = FakeStreamer("award-target", "2")
+    awards = []
+    target.update_history = lambda *args, **kwargs: awards.append((args, kwargs))
+
+    WebSocketsPool.on_message(
+        _websocket([target]),
+        _pubsub(
+            "community-points-user-v1",
+            "2",
+            {
+                "type": "points-earned",
+                "data": {
+                    "timestamp": timestamp,
+                    "balance": {"balance": 1450, "channel_id": "2"},
+                    "point_gain": {"total_points": 450, "reason_code": "WATCH_STREAK"},
+                },
+            },
+        ),
+    )
+
+    assert awards == [
+        (("WATCH_STREAK", 450), {"awarded_at": 1700000000.0}),
+    ]
 
 
 GOAL = {
