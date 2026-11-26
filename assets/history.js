@@ -434,7 +434,7 @@
             },
             {
                 label: 'Streak hits',
-                value: formatNumber(window.streak_count),
+                value: formatNumber(windowStats.streak_count),
                 meta: 'Today ' + formatNumber(today.streak_count)
             },
             {
