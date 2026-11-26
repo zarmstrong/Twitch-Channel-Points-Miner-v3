@@ -80,6 +80,9 @@ jobs:
           node .github/scripts/nightly-plan.test.js
           node .github/scripts/nightly-release.test.js
 
+      - name: Run dashboard script tests
+        run: node tests/js/history-delete.test.js
+
   black:
     name: Black
     needs: changes
