@@ -25,6 +25,8 @@
         loadedAt: 0,
         loadedKey: '',
         timer: null,
+        // The one pending retry while History is starting.
+        retryTimer: null,
         charts: {},
         lastDaily: null,
         chartThemeStale: false,
@@ -406,8 +408,16 @@
         }, REFRESH_MS);
     }
 
+    function clearRetry() {
+        if (state.retryTimer) {
+            clearTimeout(state.retryTimer);
+            state.retryTimer = null;
+        }
+    }
+
     function hideHistory() {
         state.visible = false;
+        clearRetry();
         if (state.timer) {
             clearInterval(state.timer);
             state.timer = null;
@@ -428,6 +438,7 @@
             if (!replace) return;
             state.request.cancel();
         }
+        clearRetry();
         var request = newRequest();
         state.request = request;
         var selection = {
@@ -481,7 +492,9 @@
             if (/not available/i.test(message)) {
                 setStatus('History recorder is starting…');
                 showError('');
-                setTimeout(function () {
+                clearRetry();
+                state.retryTimer = setTimeout(function () {
+                    state.retryTimer = null;
                     if (state.visible) refreshHistory();
                 }, 5000);
             } else {
