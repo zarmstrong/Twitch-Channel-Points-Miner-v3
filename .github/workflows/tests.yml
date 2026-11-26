@@ -137,6 +137,35 @@ jobs:
         if: needs.changes.outputs.code != 'false'
         run: python -m pytest
 
+  # The suite on Windows, with the Python the Windows executables are built
+  # with. Windows refuses to move or delete an open file, so file handling
+  # that passes on Linux can fail here. Not a required check, so a
+  # documentation-only change can skip the whole job.
+  pytest_windows:
+    name: Python 3.14 (Windows)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest
+
   build_windows_exe:
     name: Build Windows executable (${{ matrix.flavor }})
     needs: changes
