@@ -543,6 +543,21 @@ class HistoryStore(object):
                 f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
             )
             counts[table] = max(0, cursor.rowcount)
+        HistoryStore._record_delete(connection, streamer, segment, offset, deleted_at)
+        return {table: count for table, count in counts.items() if count}
+
+    def record_delete(self, streamer, segment, offset, deleted_at=None):
+        """Record a delete cutoff without deleting rows (see
+        ``JournalImporter.apply_saved_deletes``)."""
+
+        streamer = clean_streamer(streamer)
+        if not streamer:
+            return
+        with self.transaction() as connection:
+            self._record_delete(connection, streamer, segment, offset, deleted_at)
+
+    @staticmethod
+    def _record_delete(connection, streamer, segment, offset, deleted_at):
         existing = connection.execute(
             "SELECT segment, offset FROM deleted_streamers WHERE streamer = ?",
             (streamer,),
@@ -561,7 +576,6 @@ class HistoryStore(object):
             """,
             (streamer, position[0], position[1], float(deleted_at or time.time())),
         )
-        return {table: count for table, count in counts.items() if count}
 
     def journal_status(self):
         with self._read_connection() as connection:

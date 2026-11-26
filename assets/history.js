@@ -959,18 +959,24 @@
         }, REQUEST_TIMEOUT_MS);
         fetchJson('streamer/' + encodeURIComponent(streamer), null, null, 'DELETE').then(function (body) {
             if (state.deleting === operation) state.deleting = null;
+            if (state.lastDelete !== operation) {
+                // A newer delete was started since (after this one stopped
+                // being waited for): what it says and shows stays.  The data
+                // changed, though, so the tab reloads.
+                state.loadedAt = 0;
+                state.loadedKey = '';
+                clearPanels();
+                if (state.visible) refreshHistory(true);
+                renderDetailHead();
+                return;
+            }
             var deleted = (body && body.deleted) || {};
             var rows = Object.keys(deleted).reduce(function (sum, table) {
                 return sum + (Number(deleted[table]) || 0);
             }, 0);
-            var done = 'Deleted the History for ' + streamer + '.';
-            // A success is reported even when a newer delete was started
-            // (the History is gone either way), but a repeated delete that
-            // found nothing left does not hide that an earlier one did.
-            if (rows || state.notice !== done) {
-                state.notice = rows ? done
-                    : 'There was no History for ' + streamer + ' to delete.';
-            }
+            state.notice = rows
+                ? 'Deleted the History for ' + streamer + '.'
+                : 'There was no History for ' + streamer + ' to delete.';
             if (state.detailMessage && sameStreamer(state.detailMessage.streamer, streamer)) {
                 state.detailMessage = null;
             }

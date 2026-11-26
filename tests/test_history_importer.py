@@ -1133,3 +1133,99 @@ def test_cutoffs_saved_before_finishing_existed_never_delete_later_activity(
 
     importer.poll()
     assert totals(store)["watch_seconds"] == 20
+
+
+def test_a_delete_whose_fsync_failed_but_whose_line_was_written_still_holds(
+    writer, importer, store, monkeypatch
+):
+    """The cutoff line reached the file but the fsync raised: the delete
+    counts as saved now, as it would after a restart, so later activity is
+    never deleted by it."""
+
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    importer.poll()
+    recorder = HistoryRecorder(store, importer.folder)
+    real_fsync = journal_module.os.fsync
+    calls = []
+
+    def failing_fsync(fd):
+        if not calls:
+            calls.append(fd)
+            raise OSError("fsync failed")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal_module.os, "fsync", failing_fsync)
+        recorder.delete_streamer("alice")
+    assert calls
+    assert totals(store)["watch_seconds"] == 0
+
+    watch(writer, T0 + 40)
+    recorder.poll_once()
+    assert totals(store)["watch_seconds"] == 20
+    # A restart reads the cutoff again: the later activity stays.
+    HistoryRecorder(store, importer.folder).poll_once()
+    assert totals(store)["watch_seconds"] == 20
+
+
+def test_a_saved_cutoff_the_import_has_passed_keeps_later_activity(
+    writer, importer, store
+):
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    cutoff = os.path.getsize(writer.path(1))
+    with open(os.path.join(writer.folder, journal_module.DELETES_FILE), "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": journal_module.CUTOFF_VERSION,
+                    "streamer": "alice",
+                    "segment": segment_name(1, 1),
+                    "offset": cutoff,
+                    "at": T0 + 30,
+                }
+            )
+            + "\n"
+        )
+    watch(writer, T0 + 40)
+    # Imported past the cutoff without the database recording it.
+    importer.apply_saved_deletes = lambda: None
+    importer.poll()
+    del importer.apply_saved_deletes
+    assert totals(store)["watch_seconds"] == 20
+
+    importer.poll()
+    assert totals(store)["watch_seconds"] == 20
+    assert importer.finished_deletes == []
+
+
+def test_a_delete_finished_from_its_cutoff_records_the_live_stream_again(tmp_path):
+    from TwitchChannelPointsMiner.history.journal import journal_end
+
+    setup = _watching_alice(tmp_path)
+    assert totals(setup.store)["stream_sessions"] == 1
+    # A cutoff the database never applied (its save reported an error).
+    segment, offset = journal_end(setup.folder)
+    with open(os.path.join(setup.folder, journal_module.DELETES_FILE), "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": journal_module.CUTOFF_VERSION,
+                    "streamer": "alice",
+                    "segment": segment,
+                    "offset": offset,
+                    "at": 0,
+                }
+            )
+            + "\n"
+        )
+    setup.recorder.importer._file_deletes = None
+    setup.recorder.importer._finishable_deletes = None
+
+    assert setup.recorder.poll_once() is True
+    assert totals(setup.store)["stream_sessions"] == 0
+    setup.journal.record_live(setup.alice)  # unchanged broadcast, title, game
+    setup.recorder.poll_once()
+    assert totals(setup.store)["stream_sessions"] == 1
+    setup.journal.stop()

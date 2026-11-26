@@ -105,7 +105,7 @@ class HistoryRecorder(threading.Thread):
         with self._lock:
             if not self.store.ready and not self._initialize():
                 return False
-            self._sync_active_run()
+            writing_here = self._sync_active_run()
             try:
                 self.importer.poll()
             except Exception as error:
@@ -124,8 +124,20 @@ class HistoryRecorder(threading.Thread):
                     "Unable to import the History journal; retrying", exc_info=True
                 )
                 return False
+            finally:
+                self._forget_finished_deletes(writing_here)
             self._maybe_apply_retention()
             return True
+
+    def _forget_finished_deletes(self, writing_here):
+        """A delete the importer finished from its saved cutoff deleted the
+        streamer's live session: its next stream update is recorded again."""
+
+        finished = self.importer.finished_deletes
+        self.importer.finished_deletes = []
+        if writing_here:
+            for streamer in finished:
+                self.journal.forget(streamer)
 
     def drain(self):
         """One last import (the miner stopped)."""
@@ -165,11 +177,13 @@ class HistoryRecorder(threading.Thread):
                 return {}
             if not self.store.ready and not self._initialize():
                 raise HistoryUnavailableError("History is still starting")
+            writing_here = self._sync_active_run()
             try:
                 self.importer.poll()
             except Exception:
                 logger.debug("Import before a History delete failed", exc_info=True)
-            writing_here = self._sync_active_run()
+            finally:
+                self._forget_finished_deletes(writing_here)
             deleted_at = self.clock()
 
             counts = {}

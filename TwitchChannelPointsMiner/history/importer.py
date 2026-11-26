@@ -116,6 +116,9 @@ class JournalImporter(object):
         # of them, and those apply_saved_deletes may finish.
         self._file_deletes = None
         self._finishable_deletes = None
+        # Streamers whose delete apply_saved_deletes finished; the recorder
+        # takes them to reset the journal's live state.
+        self.finished_deletes = []
 
     # -- delete cutoffs --------------------------------------------------------
     def _load_deletes(self):
@@ -132,8 +135,31 @@ class JournalImporter(object):
 
         cutoffs = self._load_deletes()
         finishable = self._load_finishable_deletes()
-        save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
         position = (str(segment), int(offset))
+        try:
+            save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
+        except OSError as error:
+            failure = error
+        else:
+            failure = None
+        if failure is not None:
+            # The line may be in the file even so (only the fsync failed,
+            # say), and would then count after a restart: read the file
+            # again, so this process does what a restart would.
+            self._file_deletes = None
+            self._finishable_deletes = None
+            try:
+                saved = read_delete_cutoffs(self.folder).get(clean_streamer(streamer))
+            except OSError:
+                saved = None
+            if saved is None or saved < position:
+                raise failure
+            logger.warning(
+                "Saving a History delete reported an error, but the delete was saved",
+                exc_info=failure,
+            )
+            cutoffs = self._load_deletes()
+            finishable = self._load_finishable_deletes()
         for known in (cutoffs, finishable):
             if position > known.get(streamer, ("", 0)):
                 known[streamer] = position
@@ -160,11 +186,15 @@ class JournalImporter(object):
         change did not commit (see ``HistoryRecorder.delete_streamer``), and
         record the cutoffs a rebuilt database has not seen yet.
 
-        Runs before anything is imported, so the rows it deletes are all from
-        before the cutoff: records after it are only imported once the
-        database has the cutoff.  Cutoffs saved before this was done
-        (without ``CUTOFF_VERSION``) are left alone: a database rebuilt then
-        may hold activity after them without having recorded them."""
+        Runs before anything is imported.  The streamer's rows are deleted
+        only while the import has not passed the cutoff, so they are all from
+        before it; if the database already holds records from after the
+        cutoff (it was rebuilt by an earlier build, which did not record
+        cutoffs, or a cutoff line appeared after its save failed), only the
+        cutoff is recorded and the activity is kept.  Cutoffs saved before
+        this was done (without ``CUTOFF_VERSION``) are left alone.  The
+        streamers whose rows were deleted are added to ``finished_deletes``.
+        """
 
         cutoffs = self._load_finishable_deletes()
         if not cutoffs:
@@ -176,9 +206,20 @@ class JournalImporter(object):
                     "SELECT streamer, segment, offset FROM deleted_streamers"
                 )
             }
+            cursor = self._cursor(connection) or ("", 0)
         for streamer, position in cutoffs.items():
-            if position > applied.get(streamer, ("", 0)):
+            if position <= applied.get(streamer, ("", 0)):
+                continue
+            if cursor <= position:
                 self.store.delete_streamer(streamer, position[0], position[1])
+                self.finished_deletes.append(streamer)
+            else:
+                logger.warning(
+                    "History already holds records after %s's saved delete; "
+                    "recording the delete without removing them",
+                    streamer,
+                )
+                self.store.record_delete(streamer, position[0], position[1])
 
     def poll(self):
         """Import everything complete; returns the number of lines read."""
