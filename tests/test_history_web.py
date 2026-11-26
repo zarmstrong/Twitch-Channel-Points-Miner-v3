@@ -168,3 +168,52 @@ def test_streamer_detail_measures_live_streams_on_the_server_clock(store):
     assert stream["active"] is True
     assert stream["duration_seconds"] == pytest.approx(100)
     assert stream["duration_seconds"] == listed[0]["duration_seconds"]
+
+
+def test_history_delete_streamer_removes_every_total_and_only_history(
+    client, monkeypatch, store, tmp_path
+):
+    # The History tab's "Delete history" deletes the rows behind every
+    # total (daily and all-time included) and leaves the analytics JSON
+    # behind the Points tab alone.
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    chart = tmp_path / "alice.json"
+    chart.write_text('{"series": [], "annotations": []}')
+
+    response = client.delete("/history/streamer/alice")
+    assert response.status_code == 200
+    deleted = response.get_json()["deleted"]
+    for table in ("points", "events", "watch_sessions", "streams", "daily_stats"):
+        assert deleted.get(table, 0) > 0, table
+
+    overview = client.get("/history/overview?days=3650").get_json()
+    assert overview["lifetime"]["points_gained"] == 0
+    assert overview["lifetime"]["watch_seconds"] == 0
+    detail = client.get("/history/streamer/alice?days=3650").get_json()
+    assert detail["summary"]["lifetime"]["points_gained"] == 0
+    assert chart.read_text() == '{"series": [], "annotations": []}'
+
+    # Deleting again finds nothing.
+    response = client.delete("/history/streamer/alice")
+    assert response.status_code == 200
+    assert response.get_json()["deleted"] == {}
+
+
+def test_history_delete_streamer_rejects_cross_site_requests(
+    monkeypatch, store, tmp_path
+):
+    from TwitchChannelPointsMiner.classes.AnalyticsServer import AnalyticsServer
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    monkeypatch.setattr(history_web, "get_store", lambda: store)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.delete(
+        "/history/streamer/alice", headers={"Origin": "https://evil.example"}
+    )
+    assert response.status_code == 403
+    assert store.streamers(days=3650)[0]["streamer"] == "alice"

@@ -31,7 +31,15 @@
         lastDaily: null,
         chartThemeStale: false,
         detailStreamer: '',
-        detailRequest: null
+        detailRequest: null,
+        // The streamer whose History is being deleted, if any; one delete
+        // runs at a time.
+        deleting: '',
+        // { streamer, text }: why the last delete failed, shown in that
+        // streamer's drill-down until it is closed or retried.
+        detailMessage: null,
+        // Shown with the status of the next refresh that completes.
+        notice: ''
     };
 
     // The Windows desktop shell authenticates this page through a token on
@@ -173,7 +181,8 @@
     function newRequest() {
         var request = {
             controller: typeof AbortController === 'function' ? new AbortController() : null,
-            timer: null
+            timer: null,
+            timedOut: false
         };
         request.cancel = function () {
             clearTimeout(request.timer);
@@ -183,6 +192,7 @@
         };
         request.expired = new Promise(function (resolve, reject) {
             request.timer = setTimeout(function () {
+                request.timedOut = true;
                 reject(new Error('History did not respond in time. Try Refresh.'));
                 request.cancel();
             }, REQUEST_TIMEOUT_MS);
@@ -193,8 +203,9 @@
         return request;
     }
 
-    function fetchJson(path, params, request) {
+    function fetchJson(path, params, request, method) {
         return fetch(buildUrl(path, params), {
+            method: method || 'GET',
             credentials: 'same-origin',
             headers: { Accept: 'application/json' },
             signal: request && request.controller ? request.controller.signal : undefined
@@ -387,6 +398,11 @@
             detail.addEventListener('click', function (event) {
                 if (event.target.closest('[data-history-detail-close]')) {
                     closeStreamerDetail();
+                    return;
+                }
+                var remove = event.target.closest('[data-history-delete]');
+                if (remove && !remove.disabled) {
+                    confirmDeleteHistory(remove.getAttribute('data-history-delete'));
                 }
             });
         }
@@ -482,6 +498,8 @@
             fetchJson('activity', filtered, request)
         ]).then(function (results) {
             if (state.request !== request) return;
+            var notice = state.notice;
+            state.notice = '';
             renderCards(results[0]);
             renderStreamerOptions(results[1], selection.streamer);
             renderStreamers(results[1], selection.streamer);
@@ -492,7 +510,8 @@
             renderActivity(results[5]);
             state.loadedAt = Date.now();
             state.loadedKey = selection.key;
-            setStatus('Updated ' + new Date().toLocaleTimeString());
+            setStatus((notice ? notice + ' ' : '') +
+                'Updated ' + new Date().toLocaleTimeString());
         }).catch(function (error) {
             if (state.request !== request) return;
             var message = error && error.message ? error.message : String(error);
@@ -829,15 +848,130 @@
             state.detailRequest = null;
         }
         state.detailStreamer = '';
+        state.detailMessage = null;
         var container = byId('history-detail');
         if (container) container.style.display = 'none';
     }
 
+    function sameStreamer(a, b) {
+        return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+    }
+
     function detailHead(streamer) {
-        return '<div class="history-detail-head">' +
+        var message = state.detailMessage &&
+            sameStreamer(state.detailMessage.streamer, streamer) ? state.detailMessage.text : '';
+        var deleting = state.deleting && sameStreamer(state.deleting, streamer);
+        return '<div class="history-detail-top">' +
+            '<div class="history-detail-head">' +
             '<h3 class="title is-4">' + escapeHtml(streamer) + '</h3>' +
+            '<div class="buttons">' +
+            '<button class="button is-small is-danger is-outlined' + (deleting ? ' is-loading' : '') +
+                '" type="button" data-history-delete="' + escapeHtml(streamer) + '"' +
+                (state.deleting ? ' disabled' : '') + '>Delete history</button>' +
             '<button class="button is-small" type="button" data-history-detail-close>Close</button>' +
+            '</div></div>' +
+            (message
+                ? '<div class="notification is-danger is-light history-detail-message" role="alert">' +
+                    escapeHtml(message) + '</div>'
+                : '') +
             '</div>';
+    }
+
+    // Redraws the drill-down's header (its buttons and message) without
+    // touching the data below it.
+    function renderDetailHead() {
+        var container = byId('history-detail');
+        if (!container || !state.detailStreamer) return;
+        var top = container.querySelector('.history-detail-top');
+        if (top) top.outerHTML = detailHead(state.detailStreamer);
+    }
+
+    // -- deleting a streamer's History -----------------------------------------
+    function confirmDeleteHistory(streamer) {
+        if (!streamer || state.deleting) return;
+        var message = 'This deletes everything History recorded for ' + streamer +
+            ': points, spends, predictions, watch and live sessions, watch streaks, and the ' +
+            'daily and all-time totals. Their analytics data and the Points tab are not changed. ' +
+            'If ' + streamer + ' is still in your miner configuration, activity after the ' +
+            'delete is recorded again.';
+        var onConfirm = function () { deleteHistory(streamer); };
+        if (typeof window.showConfirmDialog === 'function' && byId('confirm-modal')) {
+            window.showConfirmDialog({
+                title: 'Delete History for ' + streamer + '?',
+                message: message,
+                confirmLabel: 'Delete history',
+                onConfirm: onConfirm
+            });
+        } else if (window.confirm(message)) {
+            onConfirm();
+        }
+    }
+
+    function deleteHistory(streamer) {
+        if (!streamer || state.deleting) return;
+        state.deleting = streamer;
+        state.detailMessage = null;
+        renderDetailHead();
+        var request = newRequest();
+        request.run([
+            fetchJson('streamer/' + encodeURIComponent(streamer), null, request, 'DELETE')
+        ]).then(function (results) {
+            var deleted = (results[0] && results[0].deleted) || {};
+            var rows = Object.keys(deleted).reduce(function (sum, table) {
+                return sum + (Number(deleted[table]) || 0);
+            }, 0);
+            state.deleting = '';
+            state.notice = rows
+                ? 'Deleted the History for ' + streamer + '.'
+                : 'There was no History for ' + streamer + ' to delete.';
+            forgetStreamers([streamer]);
+        }).catch(function (error) {
+            state.deleting = '';
+            var text = error && error.message ? error.message : String(error);
+            if (request.timedOut) {
+                // The miner may still finish the delete; reload to show
+                // whether it did.
+                text = 'History did not answer in time. The delete may still finish; ' +
+                    'the tab has been reloaded to show what is left.';
+            }
+            state.detailMessage = {
+                streamer: streamer,
+                text: 'Could not delete the History for ' + streamer + '. ' + text
+            };
+            if (request.timedOut) {
+                state.loadedAt = 0;
+                state.loadedKey = '';
+                refreshHistory(true);
+            }
+            renderDetailHead();
+        }).finally(function () {
+            request.cancel();
+        });
+    }
+
+    // These streamers' History is gone (deleted here, or with their
+    // analytics data on the Points tab): drop what the tab shows of them.
+    function forgetStreamers(names) {
+        var gone = names.map(function (name) {
+            return String(name).replace(/\.json$/i, '').toLowerCase();
+        });
+        state.loadedAt = 0;
+        state.loadedKey = '';
+        if (state.detailStreamer && gone.indexOf(state.detailStreamer.toLowerCase()) !== -1) {
+            closeStreamerDetail();
+        }
+        if (state.streamer && gone.indexOf(state.streamer.toLowerCase()) !== -1) {
+            // The filter would only show an empty History now.
+            state.streamer = '';
+            var select = byId('history-streamer');
+            if (select) select.value = '';
+        }
+        if (state.visible) {
+            refreshHistory(true);
+        } else if (state.request) {
+            state.request.cancel();
+            state.request = null;
+        }
     }
 
     // options.scroll brings the drill-down into view once loaded;
@@ -851,6 +985,7 @@
             if (options.background) return;
             state.detailRequest.cancel();
         }
+        if (!sameStreamer(streamer, state.detailStreamer)) state.detailMessage = null;
         var request = newRequest();
         state.detailRequest = request;
         state.detailStreamer = streamer;
@@ -976,21 +1111,7 @@
     // Deleting a streamer's analytics on the Points tab also deletes their
     // History (script.js dispatches this after a successful delete).
     window.addEventListener('analytics-streamers-deleted', function (event) {
-        var names = ((event.detail && event.detail.streamers) || []).map(function (name) {
-            return String(name).replace(/\.json$/i, '').toLowerCase();
-        });
-        state.loadedAt = 0;
-        state.loadedKey = '';
-        if (state.detailStreamer &&
-                names.indexOf(state.detailStreamer.toLowerCase()) !== -1) {
-            closeStreamerDetail();
-        }
-        if (state.visible) {
-            refreshHistory(true);
-        } else if (state.request) {
-            state.request.cancel();
-            state.request = null;
-        }
+        forgetStreamers((event.detail && event.detail.streamers) || []);
     });
 
     document.addEventListener('visibilitychange', function () {
