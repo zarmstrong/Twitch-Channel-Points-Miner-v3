@@ -34,6 +34,7 @@ Tests never reach Twitch, notification services or the internet.
 
 - `tests/test_windows_launcher.py` covers the desktop app. Mock `ctypes`, `winreg`, `subprocess` and pywebview. Never create real mutexes, registry values, scheduled tasks, processes or message boxes. A real `MessageBoxW` blocks the run until someone clicks it.
 - Tests that need Windows or a non-Windows platform skip themselves with `pytest.mark.skipif`.
+- CI runs the whole suite on Windows too (`Python 3.14 (Windows)`), so those tests run there. Windows won't move or delete a file that is still open: close files and SQLite connections before the code under test renames them or `tmp_path` is cleaned up. A `sqlite3` connection used as a context manager only commits, so wrap it in `contextlib.closing`.
 
 ## Formatting
 
