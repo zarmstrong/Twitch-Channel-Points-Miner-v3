@@ -10,6 +10,7 @@
     'use strict';
 
     var REFRESH_MS = 60000;
+    var REQUEST_TIMEOUT_MS = 30000;
     var DAY_OPTIONS = [7, 30, 90, 365];
     var numberFormat = new Intl.NumberFormat();
 
@@ -18,12 +19,29 @@
         streamer: '',
         sessionKind: 'watch',
         visible: false,
-        loading: false,
+        // The refresh in flight, if any.  Each selection change replaces it,
+        // and only the current one may render.
+        request: null,
         loadedAt: 0,
+        loadedKey: '',
         timer: null,
         charts: {},
-        lastDaily: null
+        lastDaily: null,
+        chartThemeStale: false,
+        detailStreamer: '',
+        detailRequest: null
     };
+
+    // The Windows desktop shell authenticates this page through a token on
+    // its URL; the jQuery prefilter in charts.html adds it to $.ajax calls,
+    // and History's own requests add it the same way.
+    var shellToken = (function () {
+        try {
+            return new URLSearchParams(window.location.search).get('shell_token') || '';
+        } catch (error) {
+            return '';
+        }
+    }());
 
     function byId(id) {
         return document.getElementById(id);
@@ -116,6 +134,8 @@
         // charts when the dashboard theme changes while History is visible.
         if (state.visible && state.lastDaily) {
             renderCharts(state.lastDaily);
+        } else if (state.lastDaily) {
+            state.chartThemeStale = true;
         }
     }
 
@@ -128,13 +148,42 @@
                 query.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
             }
         });
+        if (shellToken) {
+            query.push('shell_token=' + encodeURIComponent(shellToken));
+        }
         return '/history/' + path + (query.length ? '?' + query.join('&') : '');
     }
 
-    function fetchJson(path, params) {
+    // A group of requests that is given up as a whole: when it is replaced,
+    // when one of its requests fails, or after REQUEST_TIMEOUT_MS.
+    function newRequest() {
+        var request = {
+            controller: typeof AbortController === 'function' ? new AbortController() : null,
+            timer: null
+        };
+        request.cancel = function () {
+            clearTimeout(request.timer);
+            if (request.controller) {
+                try { request.controller.abort(); } catch (error) { /* ignore */ }
+            }
+        };
+        request.expired = new Promise(function (resolve, reject) {
+            request.timer = setTimeout(function () {
+                reject(new Error('History did not respond in time. Try Refresh.'));
+                request.cancel();
+            }, REQUEST_TIMEOUT_MS);
+        });
+        request.run = function (promises) {
+            return Promise.race([Promise.all(promises), request.expired]);
+        };
+        return request;
+    }
+
+    function fetchJson(path, params, request) {
         return fetch(buildUrl(path, params), {
             credentials: 'same-origin',
-            headers: { Accept: 'application/json' }
+            headers: { Accept: 'application/json' },
+            signal: request && request.controller ? request.controller.signal : undefined
         }).then(function (response) {
             return response.json().catch(function () { return {}; }).then(function (body) {
                 if (!response.ok) {
@@ -275,7 +324,10 @@
                 if (state.days === days) return;
                 state.days = days;
                 renderWindows();
-                refreshHistory();
+                refreshHistory(true);
+                if (state.detailStreamer) {
+                    loadStreamerDetail(state.detailStreamer, false);
+                }
             });
             container.appendChild(button);
         });
@@ -292,9 +344,8 @@
         if (streamer) {
             streamer.addEventListener('change', function () {
                 state.streamer = streamer.value || '';
-                refreshHistory();
-                var detail = byId('history-detail');
-                if (detail) detail.style.display = 'none';
+                closeStreamerDetail();
+                refreshHistory(true);
             });
         }
         var kind = byId('history-session-kind');
@@ -302,7 +353,7 @@
             kind.value = state.sessionKind;
             kind.addEventListener('change', function () {
                 state.sessionKind = kind.value || 'watch';
-                refreshHistory();
+                refreshHistory(true);
             });
         }
         var darkMode = byId('dark-mode');
@@ -315,26 +366,32 @@
                 var link = event.target.closest('[data-history-streamer]');
                 if (!link) return;
                 event.preventDefault();
-                loadStreamerDetail(link.getAttribute('data-history-streamer'));
+                loadStreamerDetail(link.getAttribute('data-history-streamer'), true);
             });
         }
         var detail = byId('history-detail');
         if (detail) {
             detail.addEventListener('click', function (event) {
                 if (event.target.closest('[data-history-detail-close]')) {
-                    detail.style.display = 'none';
+                    closeStreamerDetail();
                 }
             });
         }
     }
 
     // -- show / hide / polling --------------------------------------------
+    function selectionKey() {
+        return [state.days, state.streamer, state.sessionKind].join('|');
+    }
+
     function showHistory() {
         state.visible = true;
         renderWindows();
-        if (!state.loadedAt) {
-            refreshHistory();
-        } else if (Date.now() - state.loadedAt > REFRESH_MS) {
+        if (state.chartThemeStale && state.lastDaily) {
+            renderCharts(state.lastDaily);
+        }
+        if (!state.loadedAt || state.loadedKey !== selectionKey() ||
+                Date.now() - state.loadedAt > REFRESH_MS) {
             refreshHistory();
         }
         if (state.timer) clearInterval(state.timer);
@@ -351,45 +408,66 @@
             clearInterval(state.timer);
             state.timer = null;
         }
+        // Nothing renders into the hidden panel; showHistory() reloads.
+        if (state.request) {
+            state.request.cancel();
+            state.request = null;
+        }
     }
 
-    function refreshHistory(force) {
-        if (state.loading) return;
-        if (!state.visible && !force) return;
-        state.loading = true;
+    // A selection change passes replace=true: the refresh in flight is for
+    // the old selection, so it is cancelled.  Timed refreshes leave a
+    // refresh in flight alone.
+    function refreshHistory(replace) {
+        if (!state.visible) return;
+        if (state.request) {
+            if (!replace) return;
+            state.request.cancel();
+        }
+        var request = newRequest();
+        state.request = request;
+        var selection = {
+            days: state.days,
+            streamer: state.streamer,
+            kind: state.sessionKind,
+            key: selectionKey()
+        };
         showError('');
         setStatus('Loading history…');
 
-        var params = { days: state.days };
-        var filtered = { days: state.days, streamer: state.streamer };
-        Promise.all([
-            fetchJson('overview', params),
-            fetchJson('streamers', params),
-            fetchJson('daily', filtered),
+        var params = { days: selection.days };
+        var filtered = { days: selection.days, streamer: selection.streamer };
+        request.run([
+            fetchJson('overview', params, request),
+            fetchJson('streamers', params, request),
+            fetchJson('daily', filtered, request),
             fetchJson('sessions', {
-                kind: state.sessionKind,
-                days: state.days,
-                streamer: state.streamer,
+                kind: selection.kind,
+                days: selection.days,
+                streamer: selection.streamer,
                 limit: 100
-            }),
+            }, request),
             fetchJson('events', {
-                days: state.days,
-                streamer: state.streamer,
+                days: selection.days,
+                streamer: selection.streamer,
                 limit: 100
-            }),
-            fetchJson('activity', filtered)
+            }, request),
+            fetchJson('activity', filtered, request)
         ]).then(function (results) {
+            if (state.request !== request) return;
             renderCards(results[0]);
-            renderStreamerOptions(results[1]);
-            renderStreamers(results[1]);
+            renderStreamerOptions(results[1], selection.streamer);
+            renderStreamers(results[1], selection.streamer);
             state.lastDaily = results[2];
             renderCharts(results[2]);
-            renderSessions(results[3]);
+            renderSessions(results[3], selection.kind);
             renderEvents(results[4]);
             renderActivity(results[5]);
             state.loadedAt = Date.now();
+            state.loadedKey = selection.key;
             setStatus('Updated ' + new Date().toLocaleTimeString());
         }).catch(function (error) {
+            if (state.request !== request) return;
             var message = error && error.message ? error.message : String(error);
             if (/not available/i.test(message)) {
                 setStatus('History recorder is starting…');
@@ -402,7 +480,9 @@
                 setStatus('');
             }
         }).finally(function () {
-            state.loading = false;
+            // Stops the other requests of a batch that failed.
+            request.cancel();
+            if (state.request === request) state.request = null;
         });
     }
 
@@ -453,23 +533,25 @@
         }).join('');
     }
 
-    function renderStreamerOptions(streamersPayload) {
+    function renderStreamerOptions(streamersPayload, current) {
         var select = byId('history-streamer');
         if (!select) return;
         var names = (streamersPayload.streamers || []).map(function (item) {
             return item.streamer;
-        }).sort();
-        var current = state.streamer;
+        });
+        // Keep a selected streamer with no activity in this window, so the
+        // filter shown is the one the data was loaded with.
+        if (current && names.indexOf(current) === -1) {
+            names.push(current);
+        }
+        names.sort();
         var options = ['<option value="">All streamers</option>'];
         names.forEach(function (name) {
             options.push('<option value="' + escapeHtml(name) + '">' +
                 escapeHtml(name) + '</option>');
         });
         select.innerHTML = options.join('');
-        if (names.indexOf(current) === -1 && current) {
-            state.streamer = '';
-        }
-        select.value = state.streamer;
+        select.value = current || '';
     }
 
     function destroyChart(name) {
@@ -612,13 +694,13 @@
             '<tbody>' + body.join('') + '</tbody></table></div>';
     }
 
-    function renderStreamers(streamersPayload) {
+    function renderStreamers(streamersPayload, selected) {
         var container = byId('history-streamers');
         if (!container) return;
         var items = (streamersPayload.streamers || []).slice();
-        if (state.streamer) {
+        if (selected) {
             items = items.filter(function (item) {
-                return item.streamer === state.streamer;
+                return item.streamer === selected;
             });
         }
         if (!items.length) {
@@ -658,11 +740,11 @@
             '<tbody>' + rows + '</tbody></table>';
     }
 
-    function renderSessions(sessionsPayload) {
+    function renderSessions(sessionsPayload, selectedKind) {
         var container = byId('history-sessions');
         if (!container) return;
         var items = (sessionsPayload && sessionsPayload.sessions) || [];
-        var kind = (sessionsPayload && sessionsPayload.kind) || state.sessionKind;
+        var kind = (sessionsPayload && sessionsPayload.kind) || selectedKind;
         if (!items.length) {
             container.innerHTML = '<p class="history-empty">No sessions recorded in this window.</p>';
             return;
@@ -712,23 +794,62 @@
         }).join('');
     }
 
-    function loadStreamerDetail(streamer) {
+    function closeStreamerDetail() {
+        if (state.detailRequest) {
+            state.detailRequest.cancel();
+            state.detailRequest = null;
+        }
+        state.detailStreamer = '';
         var container = byId('history-detail');
-        if (!container) return;
-        container.style.display = 'block';
-        container.innerHTML = '<p class="history-empty">Loading ' + escapeHtml(streamer) + '…</p>';
-        fetchJson('streamer/' + encodeURIComponent(streamer), { days: state.days })
-            .then(function (detail) {
-                renderStreamerDetail(detail);
-                container.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            })
-            .catch(function (error) {
-                container.innerHTML = '<div class="notification is-danger">' +
-                    escapeHtml(error.message || String(error)) + '</div>';
-            });
+        if (container) container.style.display = 'none';
     }
 
-    function renderStreamerDetail(detail) {
+    function loadStreamerDetail(streamer, scroll) {
+        var container = byId('history-detail');
+        if (!container) return;
+        if (state.detailRequest) state.detailRequest.cancel();
+        var request = newRequest();
+        state.detailRequest = request;
+        state.detailStreamer = streamer;
+        var days = state.days;
+        container.style.display = 'block';
+        container.innerHTML = '<p class="history-empty">Loading ' + escapeHtml(streamer) + '…</p>';
+        request.run([
+            fetchJson('streamer/' + encodeURIComponent(streamer), { days: days }, request),
+            // The detail's own event list is the newest 100 of every type.
+            fetchJson('events', {
+                streamer: streamer,
+                days: days,
+                type: 'watch_streak',
+                limit: 20
+            }, request)
+        ]).then(function (results) {
+            if (state.detailRequest !== request) return;
+            renderStreamerDetail(results[0], results[1]);
+            if (scroll) container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }).catch(function (error) {
+            if (state.detailRequest !== request) return;
+            container.innerHTML = '<div class="notification is-danger">' +
+                escapeHtml(error.message || String(error)) + '</div>';
+        }).finally(function () {
+            request.cancel();
+            if (state.detailRequest === request) state.detailRequest = null;
+        });
+    }
+
+    function sessionEndCell(session, activeLabel) {
+        if (session.active) {
+            return '<span class="tag is-success is-light">' + activeLabel + '</span>';
+        }
+        if (session.ended_at !== null && session.ended_at !== undefined) {
+            return '<span class="history-muted">' + escapeHtml(formatTime(session.ended_at)) + '</span>';
+        }
+        // Never closed, but no longer active (for example after a crash).
+        return '<span class="history-muted">last seen ' +
+            escapeHtml(formatTime(session.last_seen_at)) + '</span>';
+    }
+
+    function renderStreamerDetail(detail, streaksPayload) {
         var container = byId('history-detail');
         if (!container) return;
         var summary = detail.summary || {};
@@ -748,26 +869,23 @@
             return '<tr><td>' + escapeHtml(reasonLabel(session.reason)) + '</td>' +
                 '<td class="history-muted">' + escapeHtml(formatTime(session.started_at)) + '</td>' +
                 '<td class="num">' + escapeHtml(formatDuration(session.watch_seconds)) + '</td>' +
-                '<td>' + (session.ended_at === null
-                    ? '<span class="tag is-success is-light">active</span>'
-                    : '<span class="history-muted">' + escapeHtml(formatTime(session.ended_at)) + '</span>') +
-                '</td></tr>';
+                '<td>' + sessionEndCell(session, 'active') + '</td></tr>';
         }).join('');
 
         var streamRows = (detail.streams || []).slice(0, 15).map(function (session) {
-            var end = session.ended_at || session.last_seen_at || (Date.now() / 1000);
+            // As the sessions list computes it: an open stream counts up to
+            // now while live, and to its last sighting once it went stale.
+            var end = session.ended_at;
+            if (end === null || end === undefined) {
+                end = session.active ? Date.now() / 1000 : session.last_seen_at;
+            }
             return '<tr><td class="history-muted">' + escapeHtml(formatTime(session.started_at)) + '</td>' +
-                '<td class="num">' + escapeHtml(formatDuration(end - session.started_at)) + '</td>' +
-                '<td>' + (session.ended_at === null
-                    ? '<span class="tag is-success is-light">live</span>'
-                    : '<span class="history-muted">' + escapeHtml(formatTime(session.ended_at)) + '</span>') +
-                '</td><td>' + escapeHtml([session.game, session.title].filter(Boolean).join(' · ') || '—') +
+                '<td class="num">' + escapeHtml(formatDuration((Number(end) || 0) - session.started_at)) + '</td>' +
+                '<td>' + sessionEndCell(session, 'live') + '</td><td>' + escapeHtml([session.game, session.title].filter(Boolean).join(' · ') || '—') +
                 '</td></tr>';
         }).join('');
 
-        var streakRows = (detail.events || []).filter(function (event) {
-            return event.type === 'watch_streak';
-        }).slice(0, 20).map(function (event) {
+        var streakRows = ((streaksPayload && streaksPayload.events) || []).map(function (event) {
             return '<tr><td class="history-muted">' + escapeHtml(formatTime(event.ts)) + '</td>' +
                 '<td>' + escapeHtml(event.label || 'Watch streak') + '</td></tr>';
         }).join('');

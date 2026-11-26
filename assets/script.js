@@ -323,6 +323,11 @@ $(document).ready(function () {
     // tab is Drops, hide Points only after chart initialization completes.
     chart.render().then(function () {
         chartRendered = true;
+        // A tab saved by an optional script (History) that did not load this
+        // time has no button or panel; open Points instead of nothing.
+        if (!document.getElementById('tab-' + savedDashboardTab)) {
+            savedDashboardTab = 'points';
+        }
         switchDashboardTab(savedDashboardTab);
     });
 
