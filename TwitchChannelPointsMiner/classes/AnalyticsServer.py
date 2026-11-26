@@ -661,9 +661,17 @@ def read_dashboard_prefs():
 
 def index(refresh=5, days_ago=7, log_poll_interval=5, miner_instance=None):
     assets_folder = get_assets_folder()
+    asset_files = (
+        "script.js",
+        "style.css",
+        "dark-theme.css",
+        "history.js",
+        "history.css",
+    )
     asset_version = max(
         os.path.getmtime(os.path.join(assets_folder, filename))
-        for filename in ("script.js", "style.css", "dark-theme.css")
+        for filename in asset_files
+        if os.path.isfile(os.path.join(assets_folder, filename))
     )
     latest_version = getattr(Settings, "latest_release_version", None)
     dismissed_version = request.cookies.get(UPDATE_DISMISSAL_COOKIE)
