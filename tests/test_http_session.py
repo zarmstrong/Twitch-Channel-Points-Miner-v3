@@ -434,8 +434,11 @@ def test_a_get_read_timeout_is_raised_without_a_retry(server):
 
 def test_connect_failures_raise_what_bare_requests_raise():
     def refused(get):
+        # Windows retries a refused connection for about two seconds before
+        # reporting it, so a shorter connect timeout races the refusal and
+        # can end as a ConnectTimeout instead.
         with pytest.raises(requests.exceptions.ConnectionError) as raised:
-            get("http://127.0.0.1:9/", timeout=2)
+            get("http://127.0.0.1:9/", timeout=6)
         return type(raised.value)
 
     assert _in_thread(lambda: refused(HttpSession.get)) is _in_thread(
