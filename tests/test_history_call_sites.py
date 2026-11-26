@@ -857,7 +857,18 @@ def test_a_stream_update_cannot_come_between_the_body_and_its_token(
             blocked.append(other)
         return body
 
+    real_attempt = journal.watch_attempt
+
+    def attempt(*args, **kwargs):
+        # The b1 reply arrives after the switch.  The watcher posts once it
+        # leaves the lock, so without this wait its reply could be handled
+        # before the other thread takes the lock.
+        if len(blocked) > 1:
+            blocked[1].join(5)
+        return real_attempt(*args, **kwargs)
+
     monkeypatch.setattr(twitch_module, "_minute_watched_request", request)
+    monkeypatch.setattr(journal, "watch_attempt", attempt)
     _watched(journal, monkeypatch, SimpleNamespace(status_code=204), streamer)
     blocked[1].join(5)
     assert blocked[0] is True

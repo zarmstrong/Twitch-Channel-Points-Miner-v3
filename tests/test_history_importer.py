@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import closing
 
 import pytest
 
@@ -72,7 +73,7 @@ def importer(store, folder, clock):
 
 
 def totals(store, streamer="alice"):
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         row = connection.execute(
             """
             SELECT COALESCE(SUM(watch_seconds), 0), COALESCE(SUM(watch_sessions), 0),
@@ -588,7 +589,7 @@ def test_a_lost_cursor_does_not_count_anything_twice(writer, importer, store):
     watch(writer, T0 + 20)
     points(writer, None)
     importer.poll()
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute("DELETE FROM journal_cursor")
     JournalImporter(store, importer.folder).poll()
     assert totals(store)["watch_seconds"] == 20
@@ -816,14 +817,14 @@ def test_retention_keeps_totals_and_never_recounts_a_broadcast(writer, importer,
 
 def test_a_database_from_the_snapshot_recorder_is_rebuilt(tmp_path):
     path = tmp_path / "history.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("CREATE TABLE streams (id INTEGER)")
         connection.execute("PRAGMA user_version=3")
     store = HistoryStore(str(path))
     store.initialize()
     assert store.ready
     assert any(name.startswith("history.sqlite3.bak-") for name in os.listdir(tmp_path))
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
