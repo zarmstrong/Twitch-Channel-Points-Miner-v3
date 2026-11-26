@@ -26,9 +26,11 @@ function tabState(detailStreamer = '') {
 }
 
 // A page whose DELETEs answer when the test says so.  `calls` records what
-// the flow did to the page, in order.
+// the flow did to the page, in order; `heads` records what each redraw of
+// the drill-down's header would show.
 function fakePage(s) {
   const calls = [];
+  const heads = [];
   const sent = [];
   const timers = new Map();
   let nextTimer = 1;
@@ -44,7 +46,14 @@ function fakePage(s) {
       sent.push({ streamer, answer, fail });
       return promise;
     },
-    renderHead() { calls.push(['renderHead']); },
+    renderHead() {
+      calls.push(['renderHead']);
+      heads.push({
+        streamer: s.detailStreamer,
+        button: deleteButtonState(s, s.detailStreamer),
+        message: detailMessageFor(s, s.detailStreamer),
+      });
+    },
     status() { calls.push(['status', s.notice]); },
     reload() { calls.push(['reload']); },
     // Like the page: forgetting the streamer the drill-down shows closes it.
@@ -65,6 +74,7 @@ function fakePage(s) {
   return {
     ui,
     calls,
+    heads,
     sent,
     timers,
     // Runs every timer still waiting, as if REQUEST_TIMEOUT_MS passed.
@@ -75,6 +85,14 @@ function fakePage(s) {
       }
     },
   };
+}
+
+const IDLE = { disabled: false, loading: false };
+const BUSY = { disabled: true, loading: true };
+
+// What the drill-down's header showed when it was last drawn.
+function lastHead(page) {
+  return page.heads[page.heads.length - 1];
 }
 
 // Lets the flow's promise callbacks run.
@@ -92,6 +110,7 @@ test('a delete that succeeds says so and forgets the streamer', async () => {
   assert.deepEqual(operation, { streamer: 'alice' });
   assert.equal(s.deleting, operation);
   assert.deepEqual(page.calls, [['renderHead'], ['send', 'alice']]);
+  assert.deepEqual(lastHead(page).button, BUSY, 'the header shows the delete running');
   assert.equal(page.timers.size, 1);
   assert.equal([...page.timers.values()][0].ms, 30000, 'the tab waits 30 seconds');
   assert.equal(REQUEST_TIMEOUT_MS, 30000);
@@ -105,6 +124,7 @@ test('a delete that succeeds says so and forgets the streamer', async () => {
     ['forget', 'alice'],
     ['renderHead'],
   ]);
+  assert.deepEqual(lastHead(page).button, IDLE);
   assert.equal(page.timers.size, 0, 'the 30-second timer is cleared');
 });
 
@@ -143,8 +163,15 @@ test('a failure is shown in the drill-down of the streamer being deleted', async
   const page = fakePage(s);
   runDelete(s, 'alice', page.ui);
   await settle();
+  const before = page.calls.length;
   page.sent[0].fail(new Error('History is temporarily unavailable.'));
   await settle();
+  assert.deepEqual(page.calls.slice(before), [['renderHead'], ['renderHead']]);
+  assert.deepEqual(page.heads.slice(-2).map((head) => head.button), [IDLE, IDLE]);
+  assert.equal(
+    lastHead(page).message,
+    'Could not delete the History for alice. History is temporarily unavailable.',
+  );
   assert.equal(s.deleting, null);
   assert.equal(
     detailMessageFor(s, 'alice'),
@@ -161,12 +188,21 @@ test('a failure goes to the status line when another drill-down is open', async 
   const page = fakePage(s);
   runDelete(s, 'alice', page.ui);
   await settle();
+  // Bob's drill-down opened while the delete ran: its button is disabled.
   s.detailStreamer = 'bob';
+  page.ui.renderHead();
+  assert.deepEqual(lastHead(page).button, { disabled: true, loading: false });
+  const before = page.calls.length;
   page.sent[0].fail(new Error('HTTP 500'));
   await settle();
   assert.equal(s.detailMessage, null);
   assert.equal(s.notice, 'Could not delete the History for alice. HTTP 500');
-  assert.ok(page.calls.some(([name]) => name === 'status'));
+  assert.deepEqual(page.calls.slice(before), [
+    ['status', 'Could not delete the History for alice. HTTP 500'],
+    ['renderHead'],
+  ]);
+  assert.deepEqual(lastHead(page), { streamer: 'bob', button: IDLE, message: '' },
+    "bob's delete is offered again");
 });
 
 test('a send that throws is reported like a failed delete', async () => {
@@ -179,6 +215,7 @@ test('a send that throws is reported like a failed delete', async () => {
   await settle();
   assert.equal(s.deleting, null);
   assert.equal(detailMessageFor(s, 'alice'), 'Could not delete the History for alice. offline');
+  assert.deepEqual(lastHead(page).button, IDLE);
 });
 
 test('starting a delete clears the last message about it', async () => {
@@ -199,7 +236,8 @@ test('after 30 s without an answer the tab stops waiting and reloads', async () 
   assert.match(detailMessageFor(s, 'alice'), /^History has not answered yet\./);
   assert.match(detailMessageFor(s, 'alice'), /You can delete again\.$/);
   assert.deepEqual(page.calls.slice(2), [['renderHead'], ['reload'], ['renderHead']]);
-  assert.deepEqual(deleteButtonState(s, 'alice'), { disabled: false, loading: false });
+  assert.deepEqual(page.heads.slice(-2).map((head) => head.button), [IDLE, IDLE]);
+  assert.match(lastHead(page).message, /^History has not answered yet\./);
 
   // The user may delete again.
   assert.notEqual(runDelete(s, 'alice', page.ui), null);
