@@ -66,6 +66,11 @@
         return (number > 0 ? '+' : '') + formatNumber(number);
     }
 
+    // A total the API did not report is shown as unknown, not as zero.
+    function formatKnown(value, format) {
+        return value === null || value === undefined ? '—' : format(value);
+    }
+
     function formatDuration(seconds) {
         var total = Math.max(0, Math.round(Number(seconds) || 0));
         if (total < 60) return total + 's';
@@ -325,9 +330,6 @@
                 state.days = days;
                 renderWindows();
                 refreshHistory(true);
-                if (state.detailStreamer) {
-                    loadStreamerDetail(state.detailStreamer, false);
-                }
             });
             container.appendChild(button);
         });
@@ -366,7 +368,9 @@
                 var link = event.target.closest('[data-history-streamer]');
                 if (!link) return;
                 event.preventDefault();
-                loadStreamerDetail(link.getAttribute('data-history-streamer'), true);
+                loadStreamerDetail(link.getAttribute('data-history-streamer'), {
+                    scroll: true
+                });
             });
         }
         var detail = byId('history-detail');
@@ -434,6 +438,11 @@
         };
         showError('');
         setStatus('Loading history…');
+        if (state.detailStreamer) {
+            // A selection change or Refresh reloads the open drill-down
+            // now; a timed refresh updates it in place.
+            loadStreamerDetail(state.detailStreamer, { background: !replace });
+        }
 
         var params = { days: selection.days };
         var filtered = { days: selection.days, streamer: selection.streamer };
@@ -804,16 +813,34 @@
         if (container) container.style.display = 'none';
     }
 
-    function loadStreamerDetail(streamer, scroll) {
+    function detailHead(streamer) {
+        return '<div class="history-detail-head">' +
+            '<h3 class="title is-4">' + escapeHtml(streamer) + '</h3>' +
+            '<button class="button is-small" type="button" data-history-detail-close>Close</button>' +
+            '</div>';
+    }
+
+    // options.scroll brings the drill-down into view once loaded;
+    // options.background keeps what is shown until the new data arrives and
+    // leaves a load already in flight alone.
+    function loadStreamerDetail(streamer, options) {
+        options = options || {};
         var container = byId('history-detail');
         if (!container) return;
-        if (state.detailRequest) state.detailRequest.cancel();
+        if (state.detailRequest) {
+            if (options.background) return;
+            state.detailRequest.cancel();
+        }
         var request = newRequest();
         state.detailRequest = request;
         state.detailStreamer = streamer;
         var days = state.days;
         container.style.display = 'block';
-        container.innerHTML = '<p class="history-empty">Loading ' + escapeHtml(streamer) + '…</p>';
+        if (!options.background) {
+            container.innerHTML = detailHead(streamer) +
+                '<p class="history-empty">Loading ' + escapeHtml(streamer) + '…</p>';
+        }
+        var scroll = options.scroll;
         request.run([
             fetchJson('streamer/' + encodeURIComponent(streamer), { days: days }, request),
             // The detail's own event list is the newest 100 of every type.
@@ -829,7 +856,8 @@
             if (scroll) container.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }).catch(function (error) {
             if (state.detailRequest !== request) return;
-            container.innerHTML = '<div class="notification is-danger">' +
+            container.innerHTML = detailHead(streamer) +
+                '<div class="notification is-danger">' +
                 escapeHtml(error.message || String(error)) + '</div>';
         }).finally(function () {
             request.cancel();
@@ -891,17 +919,14 @@
         }).join('');
 
         container.innerHTML = [
-            '<div class="history-detail-head">',
-            '  <h3 class="title is-4">' + escapeHtml(detail.streamer) + '</h3>',
-            '  <button class="button is-small" type="button" data-history-detail-close>Close</button>',
-            '</div>',
+            detailHead(detail.streamer),
             '<div class="history-cards">',
             '  <div class="history-card"><p class="history-card-label">Window gained</p><p class="history-card-value">' +
                 escapeHtml(formatSigned(totalGained)) + '</p><p class="history-card-meta">All-time ' +
-                escapeHtml(formatSigned(lifetime.points_gained)) + '</p></div>',
+                escapeHtml(formatKnown(lifetime.points_gained, formatSigned)) + '</p></div>',
             '  <div class="history-card"><p class="history-card-label">Window watch time</p><p class="history-card-value">' +
                 escapeHtml(formatDuration(totalWatch)) + '</p><p class="history-card-meta">All-time ' +
-                escapeHtml(formatDuration(lifetime.watch_seconds)) + '</p></div>',
+                escapeHtml(formatKnown(lifetime.watch_seconds, formatDuration)) + '</p></div>',
             '  <div class="history-card"><p class="history-card-label">Window streaks</p><p class="history-card-value">' +
                 escapeHtml(formatNumber(totalStreaks)) + '</p><p class="history-card-meta">Last ' +
                 escapeHtml(formatTime(summary.last_streak_at)) + '</p></div>',
