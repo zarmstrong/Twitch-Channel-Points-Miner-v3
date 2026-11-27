@@ -27,6 +27,8 @@ class EventPrediction(object):
         "bet",
         "confirmed_outcome_id",
         "confirmed_points",
+        "miner_bet_requested",
+        "placed_by_hand",
     ]
 
     def __init__(
@@ -57,6 +59,10 @@ class EventPrediction(object):
         # on another outcome than the miner's decision.
         self.confirmed_outcome_id = None
         self.confirmed_points = None
+        # The miner sent its own bet (set before the request), and
+        # bet_placed: Twitch accepted it.
+        self.miner_bet_requested = False
+        self.placed_by_hand = False
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -80,6 +86,10 @@ class EventPrediction(object):
     def confirm_bet(self, prediction):
         """Record the bet a predictions-user-v1 ``prediction`` reports."""
 
+        if not self.bet_confirmed and not self.miner_bet_requested:
+            # Twitch confirmed a bet before the miner sent one: at least part
+            # of it was placed by hand.
+            self.placed_by_hand = True
         self.bet_confirmed = True
         if not isinstance(prediction, dict):
             return
@@ -90,13 +100,25 @@ class EventPrediction(object):
         if points is not None:
             self.confirmed_points = points
 
+    def _miner_choice(self):
+        """The miner's decision, if Twitch accepted the bet it placed."""
+
+        choice = self.bet.decision.get("choice")
+        if (
+            self.bet_placed
+            and isinstance(choice, int)
+            and not isinstance(choice, bool)
+            and 0 <= choice < len(self.bet.outcomes)
+        ):
+            return choice
+        return None
+
     def placed_choice(self):
         """The index in ``bet.outcomes`` of the outcome the account bet on,
         or None when it isn't known."""
 
-        outcomes = self.bet.outcomes
         if self.confirmed_outcome_id is not None:
-            for index, outcome in enumerate(outcomes):
+            for index, outcome in enumerate(self.bet.outcomes):
                 if (
                     isinstance(outcome, dict)
                     and outcome.get("id") == self.confirmed_outcome_id
@@ -105,42 +127,42 @@ class EventPrediction(object):
             # Twitch named an outcome this event doesn't list: the miner's
             # decision may be another one.
             return None
-        choice = self.bet.decision.get("choice")
-        if (
-            isinstance(choice, int)
-            and not isinstance(choice, bool)
-            and 0 <= choice < len(outcomes)
-        ):
-            return choice
-        return None
+        return self._miner_choice()
 
     def placed_points(self):
         """The points the account bet, or None when they aren't known."""
 
         if self.confirmed_points is not None:
             return self.confirmed_points
-        choice = self.placed_choice()
-        if choice is None or choice != self.bet.decision.get("choice"):
-            # Not the miner's decision (or none was made): its amount is not
-            # what was bet.
+        choice = self._miner_choice()
+        if self.placed_by_hand or choice is None or choice != self.placed_choice():
+            # The miner's amount is the whole bet only when the miner alone
+            # placed it.
             return None
         return _points(self.bet.decision.get("amount"))
 
     def parse_result(self, result) -> dict:
+        """The points of a prediction-result ``result``: ``placed`` (the
+        wager), ``won`` (the payout, or the refund) and ``gained`` (the net
+        change), each None when it isn't known."""
+
         result_type = result["type"]
+        payout = _points(result.get("points_won"))
 
         points = {}
-        wager = self.placed_points() if result_type != "REFUND" else 0
-        points["placed"] = wager or 0
-        points["won"] = (
-            result["points_won"]
-            if result["points_won"] or result_type == "REFUND"
-            else 0
+        if result_type == "REFUND":
+            points["placed"] = self.placed_points()
+            points["won"] = payout if payout is not None else points["placed"]
+            points["gained"] = 0
+        else:
+            points["placed"] = self.placed_points()
+            points["won"] = payout or 0
+            points["gained"] = (
+                None if points["placed"] is None else points["won"] - points["placed"]
+            )
+        points["prefix"] = (
+            "+" if points["gained"] is not None and points["gained"] >= 0 else ""
         )
-        points["gained"] = (
-            points["won"] - points["placed"] if result_type != "REFUND" else 0
-        )
-        points["prefix"] = "+" if points["gained"] >= 0 else ""
 
         action = (
             "Lost"
@@ -150,7 +172,7 @@ class EventPrediction(object):
 
         amount = (
             f"{points['prefix']}{millify(points['gained'])}"
-            if wager is not None
+            if points["gained"] is not None
             else "unknown (the bet's points aren't known)"
         )
         self.result = {

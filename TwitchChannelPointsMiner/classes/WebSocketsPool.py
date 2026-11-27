@@ -269,6 +269,25 @@ class WebSocketsPool:
             websocket.close()
 
     @staticmethod
+    def _record_prediction_history(streamer, result_type, points):
+        """Count a prediction's result in the streamer's session history.
+
+        community-points-user-v1 already credited the payout of a win (as
+        PREDICTION) or the refund (as REFUND); they are replaced by the net
+        change.  A prediction whose wager isn't known is left out."""
+
+        if points["gained"] is None:
+            if result_type == "WIN":
+                streamer.update_history("PREDICTION", -points["won"], counter=-1)
+            return
+        streamer.update_history("PREDICTION", points["gained"])
+        if result_type == "REFUND":
+            if points["won"] is not None:
+                streamer.update_history("REFUND", -points["won"], counter=-1)
+        elif result_type == "WIN":
+            streamer.update_history("PREDICTION", -points["won"], counter=-1)
+
+    @staticmethod
     def _placed_decision(event_prediction):
         """The "Decision: ..." part of a prediction's result line: the
         outcome the account bet on, or nothing when it isn't known."""
@@ -649,21 +668,9 @@ class WebSocketsPool:
                                     },
                                 )
 
-                                streamer.update_history("PREDICTION", points["gained"])
-
-                                # Remove duplicate history records from previous message sent in community-points-user-v1
-                                if event_prediction.result["type"] == "REFUND":
-                                    streamer.update_history(
-                                        "REFUND",
-                                        -points["placed"],
-                                        counter=-1,
-                                    )
-                                elif event_prediction.result["type"] == "WIN":
-                                    streamer.update_history(
-                                        "PREDICTION",
-                                        -points["won"],
-                                        counter=-1,
-                                    )
+                                WebSocketsPool._record_prediction_history(
+                                    streamer, event_prediction.result["type"], points
+                                )
 
                                 if event_prediction.result["type"]:
                                     # Analytics switch

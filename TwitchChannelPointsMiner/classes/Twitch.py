@@ -8575,6 +8575,9 @@ class Twitch(object):
                         },
                     )
 
+                    # Before the request: Twitch's confirmation of this bet
+                    # can arrive before its answer.
+                    event.miner_bet_requested = True
                     try:
                         response = self.gql.make_prediction(
                             event.event_id, decision["id"], decision["amount"]
@@ -8596,6 +8599,8 @@ class Twitch(object):
                                     "event": Events.BET_FAILED,
                                 },
                             )
+                        else:
+                            event.bet_placed = True
                 else:
                     logger.info(
                         f"Bet won't be placed as the amount {_millify(decision['amount'])} is less than the minimum required 10",
