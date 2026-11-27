@@ -94,9 +94,23 @@ def _credit_book(streamer):
     """The streamer's entry in _prediction_credits; under its lock."""
 
     book = _prediction_credits.setdefault(
-        getattr(streamer, "username", None), {"credits": [], "owed": []}
+        getattr(streamer, "username", None),
+        {"credits": [], "owed": [], "results": []},
     )
     return book
+
+
+def _first_result(streamer, event_id):
+    """False for a prediction-result of ``event_id`` already handled: a
+    repeated delivery is neither reported nor matched again."""
+
+    with _prediction_credits_lock:
+        results = _credit_book(streamer)["results"]
+        if event_id in results:
+            return False
+        results.append(event_id)
+        del results[:-50]
+    return True
 
 
 def _prune_credit_book(book, newest):
@@ -936,6 +950,10 @@ class WebSocketsPool:
 
                     elif message.topic == "predictions-user-v1":
                         event_id = message.data["prediction"]["event_id"]
+                        if message.type == "prediction-result" and not _first_result(
+                            streamer, event_id
+                        ):
+                            return
                         if event_id in ws.events_predictions:
                             event_prediction = ws.events_predictions[event_id]
                             if message.type == "prediction-result":

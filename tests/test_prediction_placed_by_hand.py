@@ -818,6 +818,32 @@ def test_overlapping_results_and_credits_are_paired_in_order(streamer, event, lo
     }
 
 
+def test_a_repeated_result_is_handled_once(streamer, event, logger):
+    refund = {"outcome_id": "outcome-no", "result": {"type": "REFUND"}}
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(streamer, event, "prediction-result", refund, sent="2026-11-27T12:00:20Z")
+    _credited(streamer, event, "REFUND", 80, sent="2026-11-27T12:00:21Z")
+    # Delivered again, then another prediction (not tracked) is refunded.
+    _send(streamer, event, "prediction-result", refund, sent="2026-11-27T12:00:20Z")
+    untracked = _next_prediction(streamer)
+    _send(
+        streamer,
+        untracked,
+        "prediction-result",
+        refund,
+        sent="2026-11-27T12:00:25Z",
+        tracked=False,
+    )
+    _credited(streamer, event, "REFUND", 40, sent="2026-11-27T12:00:26Z")
+
+    # One result line, and only the untracked refund's credit stays.
+    assert _result_line(logger).endswith("Result: REFUND, Refunded: +0")
+    assert streamer.history == {
+        "REFUND": {"counter": 1, "amount": 40},
+        "PREDICTION": {"counter": 1, "amount": 0},
+    }
+
+
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
     _credited(streamer, event, "REFUND", 40)
