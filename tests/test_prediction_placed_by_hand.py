@@ -161,7 +161,7 @@ def _result_line(logger):
     return line
 
 
-UNKNOWN = "unknown (the bet's points aren't known)"
+UNKNOWN = "unknown (the amounts aren't known)"
 
 
 def test_a_bet_placed_before_the_timer_is_reported_from_the_messages(
@@ -393,3 +393,102 @@ def test_a_refund_replaces_its_credit_with_a_prediction(
         "REFUND": {"counter": 0, "amount": 0},
         "PREDICTION": {"counter": 1, "amount": 0},
     }
+
+
+@pytest.mark.parametrize("miner_first", [False, True], ids=["by-hand", "miner"])
+def test_points_added_without_a_total_make_the_wager_unknown(
+    streamer, event, logger, miner_first
+):
+    if miner_first:
+        _miner_bets(
+            event,
+            {"choice": 0, "amount": 100, "id": "outcome-yes"},
+            MakePredictionResponse(None),
+        )
+        _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+    else:
+        _send(
+            streamer,
+            event,
+            "prediction-made",
+            {"outcome_id": "outcome-yes", "points": 50},
+        )
+    _send(streamer, event, "prediction-updated", {"outcome_id": "outcome-yes"})
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-yes", "result": {"type": "LOSE", "points_won": None}},
+    )
+
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}
+
+
+def test_a_new_total_after_an_unknown_addition_is_used(streamer, event, logger):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-yes", "points": 50}
+    )
+    _send(streamer, event, "prediction-updated", {"outcome_id": "outcome-yes"})
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {
+            "outcome_id": "outcome-yes",
+            "points": 90,
+            "result": {"type": "LOSE", "points_won": None},
+        },
+    )
+
+    assert _result_line(logger).endswith("Result: LOSE, Lost: -90")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": -90}}
+
+
+def test_a_win_without_its_payout_is_unknown_but_counted(streamer, event, logger):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+    _credited(streamer, "PREDICTION", 120)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
+    )
+
+    assert _result_line(logger).endswith(f"Result: WIN, Gained: {UNKNOWN}")
+    # The payout credit, less the wager.
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 70}}
+
+
+def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _credited(streamer, "REFUND", 40)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "REFUND", "points_won": 40}},
+    )
+
+    assert _result_line(logger).endswith("Result: REFUND, Refunded: +0")
+    assert streamer.history == {
+        "REFUND": {"counter": 0, "amount": 0},
+        "PREDICTION": {"counter": 1, "amount": 0},
+    }
+
+
+def test_a_refund_with_no_amounts_is_left_as_credited(streamer, event, logger):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _credited(streamer, "REFUND", 40)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "REFUND", "points_won": None}},
+    )
+
+    logger.error.assert_not_called()
+    assert _result_line(logger).endswith("Result: REFUND, Refunded: +0")
+    assert streamer.history == {"REFUND": {"counter": 1, "amount": 40}}

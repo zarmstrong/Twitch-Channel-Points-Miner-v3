@@ -273,19 +273,31 @@ class WebSocketsPool:
         """Count a prediction's result in the streamer's session history.
 
         community-points-user-v1 already credited the payout of a win (as
-        PREDICTION) or the refund (as REFUND); they are replaced by the net
-        change.  A prediction whose wager isn't known is left out."""
+        PREDICTION) or the points a refund returned (as REFUND); the
+        prediction is counted once, with its net change.  A prediction whose
+        net change isn't known is left out, as far as the known amounts
+        allow."""
 
-        if points["gained"] is None:
-            if result_type == "WIN":
-                streamer.update_history("PREDICTION", -points["won"], counter=-1)
-            return
-        streamer.update_history("PREDICTION", points["gained"])
+        placed = points["placed"]
+        won = points["won"]
         if result_type == "REFUND":
-            if points["won"] is not None:
-                streamer.update_history("REFUND", -points["won"], counter=-1)
+            if won is None:
+                # Neither the refund nor the wager is known: the credit
+                # cannot be taken back.
+                return
+            streamer.update_history("PREDICTION", 0)
+            streamer.update_history("REFUND", -won, counter=-1)
         elif result_type == "WIN":
-            streamer.update_history("PREDICTION", -points["won"], counter=-1)
+            if placed is not None and won is not None:
+                streamer.update_history("PREDICTION", won - placed)
+                streamer.update_history("PREDICTION", -won, counter=-1)
+            elif placed is not None:
+                # The payout credit stands for the payout: take the wager off.
+                streamer.update_history("PREDICTION", -placed, counter=0)
+            elif won is not None:
+                streamer.update_history("PREDICTION", -won, counter=-1)
+        elif placed is not None:
+            streamer.update_history("PREDICTION", -placed)
 
     @staticmethod
     def _placed_decision(event_prediction):
@@ -695,7 +707,9 @@ class WebSocketsPool:
                             elif message.type == "prediction-updated":
                                 # More points added to the bet, by hand or by
                                 # the miner.
-                                event_prediction.confirm_bet(message.data["prediction"])
+                                event_prediction.confirm_bet(
+                                    message.data["prediction"], addition=True
+                                )
                     elif message.topic == "community-points-channel-v1":
                         if message.type == "community-goal-created":
                             # TODO Untested, hard to find this happening live

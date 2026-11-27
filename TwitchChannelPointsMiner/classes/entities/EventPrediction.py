@@ -29,6 +29,7 @@ class EventPrediction(object):
         "confirmed_points",
         "miner_bet_requested",
         "placed_by_hand",
+        "wager_unknown",
     ]
 
     def __init__(
@@ -63,6 +64,8 @@ class EventPrediction(object):
         # bet_placed: Twitch accepted it.
         self.miner_bet_requested = False
         self.placed_by_hand = False
+        # Points were added to the bet without a new total.
+        self.wager_unknown = False
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -83,8 +86,11 @@ class EventPrediction(object):
     def print_recap(self) -> str:
         return f"{self}\n\t\t{self.bet}\n\t\tResult: {self.result['string']}"
 
-    def confirm_bet(self, prediction):
-        """Record the bet a predictions-user-v1 ``prediction`` reports."""
+    def confirm_bet(self, prediction, addition=False):
+        """Record the bet a predictions-user-v1 ``prediction`` reports.
+
+        ``addition``: the message reports points added to the bet
+        (prediction-updated)."""
 
         if not self.bet_confirmed and not self.miner_bet_requested:
             # Twitch confirmed a bet before the miner sent one: at least part
@@ -92,13 +98,19 @@ class EventPrediction(object):
             self.placed_by_hand = True
         self.bet_confirmed = True
         if not isinstance(prediction, dict):
-            return
+            prediction = {}
         outcome_id = prediction.get("outcome_id")
         if isinstance(outcome_id, str) and outcome_id:
             self.confirmed_outcome_id = outcome_id
         points = _points(prediction.get("points"))
         if points is not None:
+            # The bet's total so far.
             self.confirmed_points = points
+            self.wager_unknown = False
+        elif addition:
+            # Points were added, but how many isn't known.
+            self.confirmed_points = None
+            self.wager_unknown = True
 
     def _miner_choice(self):
         """The miner's decision, if Twitch accepted the bet it placed."""
@@ -135,7 +147,12 @@ class EventPrediction(object):
         if self.confirmed_points is not None:
             return self.confirmed_points
         choice = self._miner_choice()
-        if self.placed_by_hand or choice is None or choice != self.placed_choice():
+        if (
+            self.placed_by_hand
+            or self.wager_unknown
+            or choice is None
+            or choice != self.placed_choice()
+        ):
             # The miner's amount is the whole bet only when the miner alone
             # placed it.
             return None
@@ -143,22 +160,29 @@ class EventPrediction(object):
 
     def parse_result(self, result) -> dict:
         """The points of a prediction-result ``result``: ``placed`` (the
-        wager), ``won`` (the payout, or the refund) and ``gained`` (the net
-        change), each None when it isn't known."""
+        wager), ``won`` (the payout, or for a refund the points returned) and
+        ``gained`` (the net change), each None when it isn't known."""
 
         result_type = result["type"]
         payout = _points(result.get("points_won"))
+        placed = self.placed_points()
 
         points = {}
         if result_type == "REFUND":
-            points["placed"] = self.placed_points()
-            points["won"] = payout if payout is not None else points["placed"]
+            # A refund returns the wager.
+            refunded = payout if payout is not None else placed
+            points["placed"] = refunded
+            points["won"] = refunded
             points["gained"] = 0
+        elif result_type == "LOSE":
+            points["placed"] = placed
+            points["won"] = 0
+            points["gained"] = None if placed is None else -placed
         else:
-            points["placed"] = self.placed_points()
-            points["won"] = payout or 0
+            points["placed"] = placed
+            points["won"] = payout
             points["gained"] = (
-                None if points["placed"] is None else points["won"] - points["placed"]
+                None if placed is None or payout is None else payout - placed
             )
         points["prefix"] = (
             "+" if points["gained"] is not None and points["gained"] >= 0 else ""
@@ -173,7 +197,7 @@ class EventPrediction(object):
         amount = (
             f"{points['prefix']}{millify(points['gained'])}"
             if points["gained"] is not None
-            else "unknown (the bet's points aren't known)"
+            else "unknown (the amounts aren't known)"
         )
         self.result = {
             "string": f"{result_type}, {action}: {amount}",
