@@ -565,25 +565,21 @@ def test_a_late_credit_goes_to_the_prediction_it_pays_out(
         "prediction-result",
         {"outcome_id": "outcome-no", "result": {"type": result, "points_won": None}},
     )
-    following = _next_prediction(streamer)
-    # Sent when the first prediction ended, delivered after the next one
-    # was created.
+    # Sent with the result, delivered after the next prediction was
+    # created.
     _credited(
         streamer,
         event,
         reason,
         120,
-        events={"event-1": event, "event-2": following},
-        sent="2026-11-27T12:00:40Z",
+        events={"event-1": event, "event-2": _next_prediction(streamer)},
+        sent="2026-11-27T12:00:31Z",
     )
 
     assert streamer.history[reason] == {"counter": 0, "amount": 0}
-    assert following.credits == {}
 
 
-def test_a_credit_after_the_next_prediction_was_created_is_its_own(
-    streamer, event, logger
-):
+def test_a_credit_sent_long_after_a_result_is_not_its_payout(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
     _send(
         streamer,
@@ -591,19 +587,42 @@ def test_a_credit_after_the_next_prediction_was_created_is_its_own(
         "prediction-result",
         {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
     )
-    following = _next_prediction(streamer)
-    _credited(
+    # The payout of a later prediction the miner didn't track (for example,
+    # one it skipped for the minimum balance): only the first is known.
+    _credited(streamer, event, "PREDICTION", 80, sent="2026-11-27T12:05:00Z")
+
+    assert streamer.history["PREDICTION"] == {"counter": 1, "amount": 80}
+
+
+def test_a_credit_before_its_prediction_was_known_is_still_taken_back(
+    streamer, event, logger
+):
+    # Delivered on the user topic's websocket before the channel topic's
+    # messages registered the prediction.
+    _credited(streamer, event, "PREDICTION", 120, events={})
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(
         streamer,
-        following,
-        "PREDICTION",
-        80,
-        events={"event-1": event, "event-2": following},
-        sent="2026-11-27T12:05:00Z",
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
     )
 
-    # Kept for the next prediction's result, not taken back for the first.
-    assert following.credits == {"PREDICTION": 80}
-    assert streamer.history["PREDICTION"] == {"counter": 1, "amount": 80}
+    assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
+
+
+def test_a_credit_without_a_send_time_is_left_as_credited(streamer, event, logger):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _credited(streamer, event, "PREDICTION", 120, sent="not a time")
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
+    )
+
+    assert _result_line(logger).endswith(f"Result: WIN, Gained: {UNKNOWN}")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 120}}
 
 
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):

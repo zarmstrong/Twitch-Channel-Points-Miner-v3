@@ -48,16 +48,89 @@ def _sent_at(message):
         return None
 
 
-def _created_at(event_prediction):
-    """A prediction's creation time in epoch seconds, or None."""
+# community-points-user-v1 credits of prediction payouts and refunds that
+# no result has claimed yet, and results still waiting for theirs, per
+# streamer (by username, like Streamer's module-level locks):
+# {"credits": [(sent_at, reason_code, points)], "owed": [(sent_at,
+# reason_code)]}.  A credit and its result are sent together when the
+# prediction is resolved, so they are matched by Twitch's send times, not by
+# the predictions the miner tracks: it doesn't track every prediction (it
+# skips some it won't bet on), and the two topics can arrive on different
+# websockets in either order.
+_prediction_credits = {}
+_prediction_credits_lock = Lock()
+# How far apart a credit and its result may have been sent.
+CREDIT_MATCH_SECONDS = 15
+# Unmatched entries older than this, next to the newest, are dropped.
+CREDIT_KEEP_SECONDS = 600
 
-    created = getattr(event_prediction, "created_at", None)
-    try:
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return created.timestamp()
-    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+
+def _credit_book(streamer):
+    """The streamer's entry in _prediction_credits; under its lock."""
+
+    book = _prediction_credits.setdefault(
+        getattr(streamer, "username", None), {"credits": [], "owed": []}
+    )
+    return book
+
+
+def _prune_credit_book(book, newest):
+    for key in ("credits", "owed"):
+        book[key] = [
+            entry for entry in book[key] if newest - entry[0] <= CREDIT_KEEP_SECONDS
+        ][-20:]
+
+
+def _match_credit(entries, reason_code, sent_at):
+    """The index of the entry in ``entries`` for ``reason_code`` sent
+    closest to ``sent_at``, within CREDIT_MATCH_SECONDS, or None."""
+
+    best = None
+    for index, entry in enumerate(entries):
+        gap = abs(entry[0] - sent_at)
+        if (
+            entry[1] == reason_code
+            and gap <= CREDIT_MATCH_SECONDS
+            and (best is None or gap < best[0])
+        ):
+            best = (gap, index)
+    return None if best is None else best[1]
+
+
+def _claim_prediction_credit(streamer, reason_code, result_at):
+    """The points of the ``reason_code`` credit sent with a result sent at
+    ``result_at``, which the result takes back; None when it hasn't
+    arrived, and it is then taken back when it does
+    (_note_prediction_credit).  Without a send time nothing can be
+    matched."""
+
+    if result_at is None:
         return None
+    with _prediction_credits_lock:
+        book = _credit_book(streamer)
+        index = _match_credit(book["credits"], reason_code, result_at)
+        if index is not None:
+            return book["credits"].pop(index)[2]
+        book["owed"].append((result_at, reason_code))
+        _prune_credit_book(book, result_at)
+    return None
+
+
+def _note_prediction_credit(streamer, reason_code, points, sent_at):
+    """Keep a PREDICTION or REFUND credit for its result; True when its
+    result already asked for it to be taken back."""
+
+    if reason_code not in ("PREDICTION", "REFUND") or sent_at is None:
+        return False
+    with _prediction_credits_lock:
+        book = _credit_book(streamer)
+        index = _match_credit(book["owed"], reason_code, sent_at)
+        if index is not None:
+            book["owed"].pop(index)
+            return True
+        book["credits"].append((sent_at, reason_code, points))
+        _prune_credit_book(book, sent_at)
+    return False
 
 
 def _apply_stream_down(message, streamer, received_at):
@@ -298,7 +371,7 @@ class WebSocketsPool:
             websocket.close()
 
     @staticmethod
-    def _record_prediction_history(streamer, event_prediction, result_type, points):
+    def _record_prediction_history(streamer, result_type, points, result_at):
         """Count a prediction's result in the streamer's session history.
 
         community-points-user-v1 credits the payout of a win (as
@@ -306,13 +379,13 @@ class WebSocketsPool:
         prediction is counted once, with its net change.  A prediction whose
         net change isn't known is left out: the credit is taken back, by the
         amount the result reports or, without one, by the credit itself
-        (claim_credit), whenever it arrives."""
+        (_claim_prediction_credit), whenever it arrives."""
 
         placed = points["placed"]
         won = points["won"]
         if result_type == "REFUND":
             if won is None:
-                won = event_prediction.claim_credit("REFUND")
+                won = _claim_prediction_credit(streamer, "REFUND", result_at)
             streamer.update_history("PREDICTION", 0)
             if won is not None:
                 streamer.update_history("REFUND", -won, counter=-1)
@@ -325,49 +398,16 @@ class WebSocketsPool:
                 streamer.update_history("PREDICTION", -placed, counter=0)
             else:
                 if won is None:
-                    won = event_prediction.claim_credit("PREDICTION")
+                    won = _claim_prediction_credit(streamer, "PREDICTION", result_at)
                 if won is not None:
                     streamer.update_history("PREDICTION", -won, counter=-1)
         elif placed is not None:
             streamer.update_history("PREDICTION", -placed)
 
     @staticmethod
-    def _note_prediction_credit(ws, streamer, reason_code, earned, credited_at):
-        """Keep a PREDICTION or REFUND credit with the prediction it pays
-        out, or take it back at once if its result needs that.
-
-        A channel has one prediction at a time, so the credit belongs to the
-        streamer's latest prediction created before it was sent
-        (``credited_at``, Twitch's time in epoch seconds): a later one was
-        created after the credited prediction ended."""
-
-        if reason_code not in ("PREDICTION", "REFUND"):
-            return
-        events = [
-            event
-            for event in list(ws.events_predictions.values())
-            if event.streamer is streamer
-        ]
-        created = [(_created_at(event), event) for event in events]
-        if credited_at is not None and any(at is not None for at, _ in created):
-            earlier = [
-                (at, event)
-                for at, event in created
-                if at is not None and at <= credited_at
-            ]
-            if not earlier:
-                return
-            event = max(earlier, key=lambda pair: pair[0])[1]
-        elif events:
-            event = events[-1]
-        else:
-            return
-        if event.note_credit(reason_code, earned):
-            streamer.update_history(reason_code, -earned, counter=-1)
-
-    @staticmethod
-    def _report_prediction_result(streamer, event_prediction, result):
-        """Log and count a prediction-result's ``result`` for the bet."""
+    def _report_prediction_result(streamer, event_prediction, result, result_at=None):
+        """Log and count a prediction-result's ``result`` for the bet, sent
+        at ``result_at`` (Twitch's time in epoch seconds, or None)."""
 
         points = event_prediction.parse_result(result)
         WebSocketsPool._record_prediction_result(streamer, event_prediction, points)
@@ -385,7 +425,7 @@ class WebSocketsPool:
         )
 
         WebSocketsPool._record_prediction_history(
-            streamer, event_prediction, event_prediction.result["type"], points
+            streamer, event_prediction.result["type"], points, result_at
         )
 
         if event_prediction.result["type"]:
@@ -707,9 +747,13 @@ class WebSocketsPool:
                             streamer.update_history(
                                 reason_code, earned, awarded_at=_sent_at(message)
                             )
-                            WebSocketsPool._note_prediction_credit(
-                                ws, streamer, reason_code, earned, _sent_at(message)
-                            )
+                            if _note_prediction_credit(
+                                streamer, reason_code, earned, _sent_at(message)
+                            ):
+                                # Its result's net change isn't known.
+                                streamer.update_history(
+                                    reason_code, -earned, counter=-1
+                                )
                             # Analytics switch
                             if Settings.enable_analytics is True:
                                 streamer.persistent_annotations(
@@ -859,6 +903,7 @@ class WebSocketsPool:
                                     streamer,
                                     event_prediction,
                                     message.data["prediction"]["result"],
+                                    _sent_at(message),
                                 )
                             elif message.type == "prediction-made":
                                 event_prediction.confirm_bet(message.data["prediction"])
