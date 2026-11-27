@@ -836,3 +836,20 @@ def test_retention_runs_when_the_last_poll_adds_nothing(analytics, tracked):
     assert recorder.backfill.status()["streamers_waiting"] == 0
     assert points(recorder.store) == []
     assert totals(recorder.store)["gained"] == 50
+
+
+def test_a_journal_starting_with_a_watch_starts_the_boundary_at_that_record(
+    analytics, tracked
+):
+    # A rebuild from journal files whose first record is a minute watched:
+    # its session starts a minute before the record, but no record is there.
+    analytics.write(
+        "alice", [entry(T0 - 100, 100), entry(T0 - 30, 110), entry(T0 + 10, 120)]
+    )
+    analytics.record("watch", at=T0, streamer="alice", seconds=60)
+    recorder = recorder_for(analytics, tracked)
+    recorder.poll_once()
+
+    assert recorder.backfill.status()["boundary"] == T0
+    assert [row["ts"] for row in points(recorder.store)] == [T0 - 100, T0 - 30]
+    assert totals(recorder.store)["gained"] == 10

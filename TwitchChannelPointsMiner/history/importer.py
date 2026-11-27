@@ -367,31 +367,33 @@ class JournalImporter(object):
                     deleted[row["streamer"]] = position
             runs = {}
             self._first_at = None
+            # Read before this batch adds anything: rows a database already
+            # held when it began keeping journal_first_at.
+            legacy = (
+                earliest_held(connection)
+                if connection.execute(
+                    "SELECT 1 FROM meta WHERE key = 'journal_first_at'"
+                ).fetchone()
+                is None
+                else None
+            )
             for start, raw, _end in batch:
                 self._apply_line_safely(connection, segment, start, raw, deleted, runs)
             self._flush_runs(connection, runs)
-            self._save_first_at(connection, self._first_at)
+            self._save_first_at(connection, self._first_at, legacy)
             self._set_cursor(connection, segment, end)
 
     @staticmethod
-    def _save_first_at(connection, first_at):
+    def _save_first_at(connection, first_at, legacy=None):
         """Keep the time of the earliest journal record imported into this
         database: the analytics JSON import (``backfill.py``) adds only what
-        came before it."""
+        came before it.  ``legacy``: the earliest time the database held
+        before it kept this (everything in it came from the journal); None
+        for a new or rebuilt database."""
 
-        if first_at is None:
+        times = [value for value in (first_at, legacy) if value is not None]
+        if not times:
             return
-        if (
-            connection.execute(
-                "SELECT 1 FROM meta WHERE key = 'journal_first_at'"
-            ).fetchone()
-            is None
-        ):
-            # A database from before this was kept: everything in it came
-            # from the journal.
-            held = earliest_held(connection)
-            if held is not None:
-                first_at = min(first_at, held)
         connection.execute(
             """
             INSERT INTO meta (key, value) VALUES ('journal_first_at', ?)
@@ -399,7 +401,7 @@ class JournalImporter(object):
                 WHEN CAST(value AS REAL) <= CAST(excluded.value AS REAL)
                 THEN value ELSE excluded.value END
             """,
-            (repr(float(first_at)),),
+            (repr(float(min(times))),),
         )
 
     @staticmethod

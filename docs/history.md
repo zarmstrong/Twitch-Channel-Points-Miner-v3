@@ -102,7 +102,10 @@ available after raw rows are pruned.
 
 Deleting the database while the miner is stopped makes History rebuild it
 from the journal files still on disk at the next start. Those are usually only
-the most recent ones, so a rebuild does not bring back older History.
+the most recent ones, so a rebuild doesn't bring back older watch time or live
+sessions. Older points, spends, watch streaks and predictions come back from
+the analytics data, if it still holds them: see
+[Importing existing analytics data](#importing-existing-analytics-data).
 
 ### Docker
 

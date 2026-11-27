@@ -71,16 +71,15 @@ def _float_or_none(value):
 
 
 def earliest_held(connection):
-    """The earliest time the database holds, or None when it is empty."""
+    """The earliest time of a journal record the database holds, or None
+    when it holds none.  Only times recorded as they happened count: a
+    watch session or a stream starts before the record that reports it."""
 
     earliest = None
     for statement in (
         "SELECT MIN(started_at) FROM runs",
         "SELECT MIN(ts) FROM points",
         "SELECT MIN(ts) FROM events",
-        "SELECT MIN(started_at) FROM watch_sessions",
-        "SELECT MIN(started_at) FROM streams",
-        "SELECT MIN(first_seen) FROM daily_stats",
     ):
         value = connection.execute(statement).fetchone()[0]
         if isinstance(value, (int, float)) and not isinstance(value, bool):
