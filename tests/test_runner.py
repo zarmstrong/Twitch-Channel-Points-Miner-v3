@@ -1083,3 +1083,43 @@ def test_failed_load_warns_when_the_dashboard_settings_cannot_be_restored(
     error = capsys.readouterr().err
     assert "Unable to restore the dashboard settings" in error
     assert ".web-config.json.migrated.bak" in error
+
+
+def test_requested_restart_imports_then_ends_the_journal_before_exec(
+    monkeypatch, tmp_path
+):
+    import TwitchChannelPointsMiner as package
+    import TwitchChannelPointsMiner.history as history
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(
+        Settings, "config_path", getattr(Settings, "config_path", None), raising=False
+    )
+    calls = []
+
+    class FakeMiner:
+        def __init__(self, **_kwargs):
+            self.queue_listener = SimpleNamespace(stop=lambda: None)
+            self.twitch = SimpleNamespace(restart_requested=threading.Event())
+
+        def mine(self, *_args, **_kwargs):
+            self.twitch.restart_requested.set()
+
+    monkeypatch.setattr(package, "TwitchChannelPointsMiner", FakeMiner)
+    monkeypatch.setattr(runner, "_watch_config", lambda *_args: None)
+    monkeypatch.setattr(runner, "restart_process", lambda: calls.append("restart"))
+    monkeypatch.setattr(history, "stop_journal", lambda: calls.append("journal"))
+    monkeypatch.setattr(
+        history,
+        "stop_history",
+        lambda timeout=10: calls.append(("stop", timeout)) or True,
+    )
+    config = SimpleNamespace(
+        MINER_CONFIG={}, MINE_CONFIG={}, STREAMERS=[], ANALYTICS_CONFIG=None
+    )
+
+    runner.run_config(config, tmp_path / "config.py")
+
+    # os.execv runs no atexit hooks.  The workers still run during a
+    # restart, so the run ends after History's import, right before exec.
+    assert calls == [("stop", 120), "journal", "restart"]
