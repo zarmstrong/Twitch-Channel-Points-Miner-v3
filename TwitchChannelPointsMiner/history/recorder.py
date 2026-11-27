@@ -37,6 +37,16 @@ def analytics_file_lock():
         yield
 
 
+def analytics_file_mutex():
+    """The miner's lock for its analytics JSON files, or None."""
+
+    try:
+        from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX
+    except Exception:
+        return None
+    return ANALYTICS_FILE_MUTEX
+
+
 class HistoryRecorder(threading.Thread):
     def __init__(
         self,
@@ -283,6 +293,6 @@ def build_recorder(
             recorder.importer,
             streamers,
             monotonic=recorder.monotonic,
-            file_lock=analytics_file_lock,
+            file_mutex=analytics_file_mutex(),
         )
     return recorder

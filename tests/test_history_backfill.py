@@ -385,7 +385,8 @@ def test_a_finished_streamer_is_not_read_again(analytics, tracked, monkeypatch):
     monkeypatch.setattr(
         AnalyticsBackfill,
         "_read",
-        lambda self, name, files: reads.append(name) or real_read(self, name, files),
+        lambda self, name, files, deadline: reads.append(name)
+        or real_read(self, name, files, deadline),
     )
     # A restart: a new recorder on the same database.
     again = recorder_for(analytics, tracked)
@@ -564,17 +565,107 @@ def test_the_file_is_read_under_the_analytics_file_lock(analytics, tracked):
     recorder = recorder_for(analytics, tracked)
     held = []
 
-    class Lock(object):
-        def __enter__(self):
-            held.append(True)
+    class Mutex(object):
+        def acquire(self, timeout):
+            held.append(("acquire", timeout))
+            return True
 
-        def __exit__(self, *exc):
-            held.append(False)
+        def release(self):
+            held.append("release")
 
-    recorder.backfill._file_lock = Lock
+    recorder.backfill._file_mutex = Mutex()
     recorder.poll_once()
 
-    assert held == [True, False]
+    assert held == [("acquire", 1.0), "release"]
+    assert len(points(recorder.store)) == 1
+
+
+def test_a_file_the_miner_is_writing_is_read_on_a_later_poll(
+    analytics, tracked, caplog
+):
+    import threading
+
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 110)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked)
+    mutex = threading.Lock()
+    recorder.backfill._file_mutex = mutex
+    timeouts = []
+    real_acquire = mutex.acquire
+
+    class Watched(object):
+        def acquire(self, timeout):
+            timeouts.append(timeout)
+            return real_acquire(timeout=0)
+
+        def release(self):
+            mutex.release()
+
+    recorder.backfill._file_mutex = Watched()
+    with caplog.at_level(logging.WARNING):
+        with mutex:
+            recorder.poll_once()
+        assert points(recorder.store) == []
+        # Waited no longer than the poll's time.
+        assert timeouts and max(timeouts) <= 1.0
+
+        recorder.poll_once()
+
+    assert len(points(recorder.store)) == 2
+    assert not [r for r in caplog.records if "alice.json" in r.getMessage()]
+
+
+def test_a_file_is_parsed_once_however_many_polls_its_import_takes(
+    analytics, tracked, monkeypatch
+):
+    analytics.write(
+        "alice", [entry(T0 - 1000 + index, 100 + index) for index in range(7)]
+    )
+    analytics.record("run_start")
+    mono = {"mono": 0.0}
+    recorder = recorder_for(analytics, tracked, batch_size=2, mono=mono)
+    real_step = recorder.backfill._step
+
+    def step(*args):
+        result = real_step(*args)
+        mono["mono"] += 5.0
+        return result
+
+    recorder.backfill._step = step
+    parsed = []
+    real_read = AnalyticsBackfill._read
+    monkeypatch.setattr(
+        AnalyticsBackfill,
+        "_read",
+        lambda self, *args: parsed.append(1) or real_read(self, *args),
+    )
+    for _ in range(6):
+        recorder.poll_once()
+
+    assert len(points(recorder.store)) == 7
+    assert len(parsed) == 1
+    assert recorder.backfill._snapshots == {}
+
+
+def test_a_slow_read_leaves_the_import_to_the_next_poll(
+    analytics, tracked, monkeypatch
+):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 110)])
+    analytics.record("run_start")
+    mono = {"mono": 0.0}
+    recorder = recorder_for(analytics, tracked, mono=mono)
+    real_read = AnalyticsBackfill._read
+
+    def slow_read(self, name, files, deadline):
+        mono["mono"] += 5.0
+        return real_read(self, name, files, deadline)
+
+    monkeypatch.setattr(AnalyticsBackfill, "_read", slow_read)
+    recorder.poll_once()
+    assert points(recorder.store) == []
+
+    recorder.poll_once()
+    assert len(points(recorder.store)) == 2
 
 
 # -- retention, option, reporting --------------------------------------------------

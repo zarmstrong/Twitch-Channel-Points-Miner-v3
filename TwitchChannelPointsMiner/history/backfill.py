@@ -24,7 +24,6 @@ import logging
 import math
 import os
 import time
-from contextlib import nullcontext
 
 from TwitchChannelPointsMiner.history.importer import (
     JournalImporter,
@@ -85,7 +84,7 @@ class AnalyticsBackfill(object):
         monotonic=time.monotonic,
         batch_size=BACKFILL_BATCH,
         step_seconds=STEP_SECONDS,
-        file_lock=None,
+        file_mutex=None,
     ):
         """``streamers`` returns the usernames History records, or None
         while the miner has not listed them yet."""
@@ -97,7 +96,12 @@ class AnalyticsBackfill(object):
         self.monotonic = monotonic
         self.batch_size = max(1, int(batch_size))
         self.step_seconds = step_seconds
-        self._file_lock = file_lock
+        # The lock the miner holds while it rewrites an analytics file
+        # (Settings.ANALYTICS_FILE_MUTEX), or None.
+        self._file_mutex = file_mutex
+        # streamer -> the file as read when its import began: parsed once,
+        # however many polls the import takes.
+        self._snapshots = {}
         self._logged = set()
 
     # -- state ---------------------------------------------------------------
@@ -243,8 +247,10 @@ class AnalyticsBackfill(object):
             files = self._files()
         except _Retry:
             return False
-        # Each file is parsed once per poll, however many steps it takes.
-        payloads = {}
+        payloads = self._snapshots
+        for name in list(payloads):
+            if name not in pending:
+                del payloads[name]
         deadline = self.monotonic() + self.step_seconds
         added = 0
         for name in pending:
@@ -252,12 +258,14 @@ class AnalyticsBackfill(object):
             try:
                 while not state["done"] and self.monotonic() < deadline:
                     state, rows = self._step(
-                        name, state, cutoff, file_deletes, files, payloads
+                        name, state, cutoff, file_deletes, files, payloads, deadline
                     )
                     added += rows
             except _Retry:
                 pass
             states[name] = state
+            if state["done"]:
+                payloads.pop(name, None)
         # The poll that finishes runs retention, even if its own steps added
         # nothing (the rows came in earlier polls).
         return (imported or added > 0) and all(states[name]["done"] for name in pending)
@@ -278,7 +286,7 @@ class AnalyticsBackfill(object):
                 files.setdefault(streamer, name)
         return files
 
-    def _read(self, name, files):
+    def _read(self, name, files, deadline):
         """The file's JSON; None when there is none, False when it is not
         valid JSON.  Raises ``_Retry`` when it cannot be read now."""
 
@@ -287,11 +295,8 @@ class AnalyticsBackfill(object):
             return None
         path = os.path.join(self.analytics_path, filename)
         try:
-            # The miner replaces the file under this lock; on Windows the
-            # replace fails while the file is open here.
-            with self._file_lock() if self._file_lock is not None else nullcontext():
-                with open(path, "r", encoding="utf-8") as handle:
-                    return json.load(handle)
+            data = self._read_bytes(path, deadline)
+            return json.loads(data.decode("utf-8"))
         except FileNotFoundError:
             return None
         except ValueError as error:
@@ -311,14 +316,35 @@ class AnalyticsBackfill(object):
                 )
             raise _Retry() from error
 
-    def _step(self, name, state, cutoff, file_deletes, files, payloads):
+    def _read_bytes(self, path, deadline):
+        """The file's bytes, read under the miner's lock for it: the miner
+        replaces the file under that lock, and on Windows the replace fails
+        while the file is open here.  Only the read holds it, never the
+        parse.  Raises ``_Retry`` when the lock isn't free by ``deadline``."""
+
+        mutex = self._file_mutex
+        if mutex is None:
+            with open(path, "rb") as handle:
+                return handle.read()
+        if not mutex.acquire(timeout=max(0.0, deadline - self.monotonic())):
+            raise _Retry()
+        try:
+            with open(path, "rb") as handle:
+                return handle.read()
+        finally:
+            mutex.release()
+
+    def _step(self, name, state, cutoff, file_deletes, files, payloads, deadline):
         """One transaction for ``name``: the next batch of entries, or the
         streamer marked done.  Returns ``(new state, rows added)``."""
 
         if name in file_deletes:
             return self._finish(name, state, "deleted"), 0
         if name not in payloads:
-            payloads[name] = self._read(name, files)
+            payloads[name] = self._read(name, files, deadline)
+            if isinstance(payloads[name], dict) and self.monotonic() >= deadline:
+                # Reading took this poll's time: import from it next poll.
+                return state, 0
         payload = payloads[name]
         if payload is None or payload is False or not isinstance(payload, dict):
             reason = "invalid" if payload is not None else "no file"
