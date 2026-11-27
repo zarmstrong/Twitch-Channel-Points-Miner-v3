@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import math
 import random
 import time
 from datetime import timezone
@@ -38,13 +39,23 @@ def _sent_at(message):
 
 
 def _payload_sent_at(message):
-    """The send time in a PubSub message's own payload (``data.timestamp``)
-    in epoch seconds, or None: unlike Message.timestamp, never the local
-    clock's time when Twitch sent none."""
+    """The send time in a PubSub message's own payload in epoch seconds:
+    ``data.timestamp``, else ``data.server_time`` (as Message.timestamp
+    reads them), or None: unlike Message.timestamp, never the local clock's
+    time when Twitch sent neither."""
 
     data = message.data if isinstance(message.data, dict) else {}
     timestamp = data.get("timestamp")
-    return _epoch(timestamp) if isinstance(timestamp, str) else None
+    if isinstance(timestamp, str) and timestamp:
+        return _epoch(timestamp)
+    server_time = data.get("server_time")
+    if (
+        isinstance(server_time, (int, float))
+        and not isinstance(server_time, bool)
+        and math.isfinite(server_time)
+    ):
+        return float(server_time)
+    return None
 
 
 def _epoch(timestamp):
@@ -424,6 +435,22 @@ class WebSocketsPool:
                 streamer.update_history("PREDICTION", -won, counter=-1)
         elif placed is not None:
             streamer.update_history("PREDICTION", -placed)
+
+    @staticmethod
+    def _reserve_prediction_credit(streamer, message):
+        """Claim the credit of a prediction-result ``message`` for a
+        prediction the miner doesn't track, without counting the result."""
+
+        prediction = message.data.get("prediction")
+        result = prediction.get("result") if isinstance(prediction, dict) else None
+        result_type = result.get("type") if isinstance(result, dict) else None
+        if result_type in ("WIN", "REFUND"):
+            _claim_prediction_credit(
+                streamer,
+                "REFUND" if result_type == "REFUND" else "PREDICTION",
+                _payload_sent_at(message),
+                take_back=False,
+            )
 
     @staticmethod
     def _report_prediction_result(streamer, event_prediction, result, result_at=None):
@@ -952,6 +979,11 @@ class WebSocketsPool:
                                 event_prediction.confirm_bet(
                                     message.data["prediction"], addition=True
                                 )
+                        elif message.type == "prediction-result":
+                            # A bet on a prediction the miner doesn't track:
+                            # its credit is claimed, so no other result
+                            # takes it back.
+                            WebSocketsPool._reserve_prediction_credit(streamer, message)
                     elif message.topic == "community-points-channel-v1":
                         if message.type == "community-goal-created":
                             # TODO Untested, hard to find this happening live

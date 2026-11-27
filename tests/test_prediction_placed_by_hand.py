@@ -100,12 +100,24 @@ def analytics(monkeypatch):
     monkeypatch.setattr(Settings, "enable_analytics", True, raising=False)
 
 
-def _send(streamer, event, message_type, prediction, sent="2026-11-27T12:00:30Z"):
+def _send(
+    streamer,
+    event,
+    message_type,
+    prediction,
+    sent="2026-11-27T12:00:30Z",
+    server_time=None,
+    tracked=True,
+):
+    """A predictions-user-v1 message about ``event``, sent at ``sent``
+    (data.timestamp) or ``server_time`` (data.server_time); ``tracked``:
+    the miner holds ``event``."""
+
     websocket = SimpleNamespace(
         index=0,
         streamers=[streamer],
         twitch=MagicMock(),
-        events_predictions={event.event_id: event},
+        events_predictions={event.event_id: event} if tracked else {},
         last_message_timestamp=None,
         last_message_type_channel=None,
     )
@@ -122,6 +134,8 @@ def _send(streamer, event, message_type, prediction, sent="2026-11-27T12:00:30Z"
     }
     if sent is not None:
         message["data"]["timestamp"] = sent
+    if server_time is not None:
+        message["data"]["server_time"] = server_time
     WebSocketsPool.on_message(
         websocket,
         json.dumps(
@@ -157,10 +171,17 @@ def _miner_bets(event, decision, response):
 
 
 def _credited(
-    streamer, event, reason, amount, events=None, sent="2026-11-27T12:00:40Z"
+    streamer,
+    event,
+    reason,
+    amount,
+    events=None,
+    sent="2026-11-27T12:00:40Z",
+    server_time=None,
 ):
     """community-points-user-v1's credit of a payout or refund, sent at
-    ``sent`` while the miner holds ``events`` (by default only ``event``)."""
+    ``sent`` (data.timestamp) or ``server_time`` (data.server_time) while
+    the miner holds ``events`` (by default only ``event``)."""
 
     websocket = SimpleNamespace(
         index=0,
@@ -180,6 +201,8 @@ def _credited(
     }
     if sent is not None:
         message["data"]["timestamp"] = sent
+    if server_time is not None:
+        message["data"]["server_time"] = server_time
     WebSocketsPool.on_message(
         websocket,
         json.dumps(
@@ -689,6 +712,58 @@ def test_a_credit_is_claimed_once(streamer, event, logger, credit_first):
     )
 
     assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 70}}
+
+
+def test_an_untracked_predictions_credit_is_not_taken_for_another(
+    streamer, event, logger
+):
+    untracked = _next_prediction(streamer)
+    refund = {"outcome_id": "outcome-no", "result": {"type": "REFUND"}}
+    # A refund of a prediction the miner doesn't track...
+    _send(
+        streamer,
+        untracked,
+        "prediction-result",
+        refund,
+        sent="2026-11-27T12:00:25Z",
+        tracked=False,
+    )
+    _credited(streamer, event, "REFUND", 40, sent="2026-11-27T12:00:26Z")
+    # ...then the tracked one's, before its own credit.
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(streamer, event, "prediction-result", refund, sent="2026-11-27T12:00:30Z")
+    _credited(streamer, event, "REFUND", 80, sent="2026-11-27T12:00:31Z")
+
+    # The untracked refund stays as credited; the tracked one is net 0.
+    assert streamer.history == {
+        "REFUND": {"counter": 1, "amount": 40},
+        "PREDICTION": {"counter": 1, "amount": 0},
+    }
+
+
+@pytest.mark.parametrize(
+    "credit_first", [True, False], ids=["credit-first", "result-first"]
+)
+def test_a_server_time_is_a_send_time(streamer, event, logger, credit_first):
+    if credit_first:
+        _credited(
+            streamer, event, "PREDICTION", 120, sent=None, server_time=1764244831.0
+        )
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
+        sent=None,
+        server_time=1764244830.0,
+    )
+    if not credit_first:
+        _credited(
+            streamer, event, "PREDICTION", 120, sent=None, server_time=1764244831.0
+        )
+
+    assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
 
 
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
