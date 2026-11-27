@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 10
 RETENTION_INTERVAL_SECONDS = 24 * 60 * 60
 _RETRY_SECONDS = 30
+# A failure that repeats logs its traceback at most this often.
+WARNING_INTERVAL_SECONDS = 60.0
 
 
 @contextmanager
@@ -58,6 +60,7 @@ class HistoryRecorder(threading.Thread):
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._last_retention = None
+        self._last_warning = {}
 
     # -- thread ----------------------------------------------------------------
     def run(self):
@@ -74,12 +77,24 @@ class HistoryRecorder(threading.Thread):
     def stop(self):
         self._stop_event.set()
 
+    def _warn(self, message):
+        """Log the current exception; a repeat within the interval logs one
+        DEBUG line without the traceback."""
+
+        now = self.monotonic()
+        last = self._last_warning.get(message)
+        if last is None or now - last >= WARNING_INTERVAL_SECONDS:
+            self._last_warning[message] = now
+            logger.warning(message, exc_info=True)
+        else:
+            logger.debug("%s (repeated)", message)
+
     def _initialize(self):
         try:
             self.store.initialize()
             return True
         except Exception:
-            logger.warning("Unable to open the History database", exc_info=True)
+            self._warn("Unable to open the History database")
             return False
 
     @property
@@ -115,14 +130,9 @@ class HistoryRecorder(threading.Thread):
                 except Exception:
                     # The thread keeps running and initializes again.
                     self.store.ready = False
-                    logger.warning(
-                        "Unable to rebuild the History database; retrying",
-                        exc_info=True,
-                    )
+                    self._warn("Unable to rebuild the History database; retrying")
                     return False
-                logger.warning(
-                    "Unable to import the History journal; retrying", exc_info=True
-                )
+                self._warn("Unable to import the History journal; retrying")
                 return False
             self._maybe_apply_retention()
             return True
@@ -145,7 +155,7 @@ class HistoryRecorder(threading.Thread):
             )
             self._last_retention = now
         except Exception:
-            logger.warning("Unable to prune old History rows", exc_info=True)
+            self._warn("Unable to prune old History rows")
 
     # -- deleting ----------------------------------------------------------------
     def delete_streamer(self, streamer, remove_source=None):
@@ -154,14 +164,15 @@ class HistoryRecorder(threading.Thread):
         Everything the miner journalled for the streamer before this moment
         stays deleted, even records not imported yet; records written after
         it are new.  ``remove_source`` (deleting the analytics JSON) runs under
-        the miner's analytics file lock once History is cleared.
+        the miner's analytics file lock once History is cleared.  Only that
+        step holds the lock: the miner's analytics JSON writes take it too,
+        and must not wait for the import and database delete.
         """
 
         streamer = clean_streamer(streamer)
-        with self._lock, analytics_file_lock():
+        with self._lock:
             if not streamer:
-                if remove_source is not None:
-                    remove_source()
+                _remove_source(remove_source)
                 return {}
             if not self.store.ready and not self._initialize():
                 raise HistoryUnavailableError("History is still starting")
@@ -217,9 +228,14 @@ class HistoryRecorder(threading.Thread):
                     # the commit failed: the streamer's next stream update
                     # must be recorded again.
                     self.journal.forget(streamer)
-            if remove_source is not None:
-                remove_source()
+            _remove_source(remove_source)
             return counts
+
+
+def _remove_source(remove_source):
+    if remove_source is not None:
+        with analytics_file_lock():
+            remove_source()
 
 
 def build_recorder(analytics_path, retention_days=DEFAULT_RETENTION_DAYS):

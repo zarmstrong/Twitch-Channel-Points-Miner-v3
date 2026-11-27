@@ -1193,3 +1193,93 @@ def test_a_saved_cutoff_the_import_has_passed_keeps_later_activity(
 
     importer.poll()
     assert totals(store)["watch_seconds"] == 20
+
+
+def test_the_drill_down_lists_only_the_newest_100_points(writer, importer, store):
+    writer.add("run_start")
+    for index in range(150):
+        points(writer, f"k{index}", at=T0 + index)
+    importer.poll()
+    detail = store.streamer_detail("alice", days=30, now=T0 + 1000)
+    assert [row["ts"] for row in detail["points"]] == [
+        T0 + index for index in range(149, 49, -1)
+    ]
+    # The daily totals still count every points message.
+    assert sum(day["points_gained"] for day in detail["daily"]) == 1500
+
+
+def test_a_delete_holds_the_analytics_file_lock_only_to_remove_the_source(
+    writer, importer, store
+):
+    from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX
+
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    recorder = HistoryRecorder(store, importer.folder)
+    held = []
+    real_poll = recorder.importer.poll
+    real_delete = store.delete_streamer
+
+    def poll():
+        held.append(("import", ANALYTICS_FILE_MUTEX.locked()))
+        return real_poll()
+
+    def delete(*args, **kwargs):
+        held.append(("delete", ANALYTICS_FILE_MUTEX.locked()))
+        return real_delete(*args, **kwargs)
+
+    recorder.importer.poll = poll
+    store.delete_streamer = delete
+    recorder.delete_streamer(
+        "alice",
+        remove_source=lambda: held.append(("json", ANALYTICS_FILE_MUTEX.locked())),
+    )
+    recorder.delete_streamer(
+        "", remove_source=lambda: held.append(("blank", ANALYTICS_FILE_MUTEX.locked()))
+    )
+    assert held == [
+        ("import", False),
+        ("delete", False),
+        ("json", True),
+        ("blank", True),
+    ]
+    assert totals(store)["watch_seconds"] == 0
+
+
+def test_a_repeating_failure_logs_its_traceback_at_most_once_a_minute(
+    store, folder, caplog
+):
+    import logging
+
+    clock = {"mono": 0.0}
+    recorder = HistoryRecorder(store, folder, monotonic=lambda: clock["mono"])
+
+    def fail():
+        raise OSError("read-only")
+
+    recorder.importer.poll = fail
+    caplog.set_level(logging.DEBUG, logger="TwitchChannelPointsMiner.history.recorder")
+    for now in (0.0, 10.0, 59.0, 60.0, 70.0):
+        clock["mono"] = now
+        assert recorder.poll_once() is False
+    records = [
+        (record.levelno, record.exc_info is not None)
+        for record in caplog.records
+        if "Unable to import the History journal" in record.getMessage()
+    ]
+    assert records == [
+        (logging.WARNING, True),
+        (logging.DEBUG, False),
+        (logging.DEBUG, False),
+        (logging.WARNING, True),
+        (logging.DEBUG, False),
+    ]
+
+    # Another failure has its own interval.
+    store.ready = False
+    store.initialize = fail
+    caplog.clear()
+    recorder.poll_once()
+    assert [
+        (record.levelno, record.exc_info is not None) for record in caplog.records
+    ] == [(logging.WARNING, True)]

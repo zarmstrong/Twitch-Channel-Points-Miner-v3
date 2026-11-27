@@ -859,7 +859,8 @@ class HistoryStore(object):
                 """,
                 (streamer, cutoff_day, utc_day(now)),
             ).fetchall()
-            # The newest 100 of each within the same window as the totals.
+            # The newest 100 of each within the same window as the totals
+            # (the daily rows carry the full points series).
             watch_rows = connection.execute(
                 f"""
                 SELECT * FROM watch_sessions
@@ -885,7 +886,7 @@ class HistoryStore(object):
             point_rows = connection.execute(
                 """
                 SELECT * FROM points WHERE streamer = ? AND ts >= ? AND ts < ?
-                ORDER BY ts
+                ORDER BY ts DESC, id DESC LIMIT 100
                 """,
                 (streamer, cutoff, end),
             ).fetchall()
