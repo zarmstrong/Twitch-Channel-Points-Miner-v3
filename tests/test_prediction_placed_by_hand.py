@@ -129,7 +129,8 @@ def _send(streamer, event, message_type, prediction):
 
 def _miner_bets(event, decision, response):
     """The miner's timer firing for ``event``: it decides ``decision`` and
-    Twitch answers ``response`` (an exception is raised)."""
+    Twitch answers ``response`` (an exception is raised; a function is
+    called with the request and returns the answer)."""
 
     def calculate(bet, balance):
         bet.decision = dict(decision)
@@ -137,7 +138,7 @@ def _miner_bets(event, decision, response):
 
     twitch = object.__new__(Twitch)
     twitch.gql = MagicMock()
-    if isinstance(response, Exception):
+    if isinstance(response, Exception) or callable(response):
         twitch.gql.make_prediction.side_effect = response
     else:
         twitch.gql.make_prediction.return_value = response
@@ -492,3 +493,34 @@ def test_a_refund_with_no_amounts_is_left_as_credited(streamer, event, logger):
     logger.error.assert_not_called()
     assert _result_line(logger).endswith("Result: REFUND, Refunded: +0")
     assert streamer.history == {"REFUND": {"counter": 1, "amount": 40}}
+
+
+def test_a_result_before_the_miners_request_answers_is_the_miners_bet(
+    streamer, event, logger
+):
+    def answer_after_the_result(event_id, outcome_id, amount):
+        # Twitch's confirmation and the result arrive while the request
+        # still waits for its answer.
+        _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+        _credited(streamer, "PREDICTION", 250)
+        _send(
+            streamer,
+            event,
+            "prediction-result",
+            {
+                "outcome_id": "outcome-yes",
+                "result": {"type": "WIN", "points_won": 250},
+            },
+        )
+        return MakePredictionResponse(None)
+
+    _miner_bets(
+        event,
+        {"choice": 0, "amount": 100, "id": "outcome-yes"},
+        answer_after_the_result,
+    )
+
+    assert event.placed_by_hand is False
+    assert _result_line(logger).endswith("Result: WIN, Gained: +150")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 150}}
+    assert (event.bet_placed, event.miner_bet_pending) == (True, False)

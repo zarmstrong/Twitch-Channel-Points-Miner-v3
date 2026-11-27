@@ -28,6 +28,7 @@ class EventPrediction(object):
         "confirmed_outcome_id",
         "confirmed_points",
         "miner_bet_requested",
+        "miner_bet_pending",
         "placed_by_hand",
         "wager_unknown",
     ]
@@ -63,6 +64,7 @@ class EventPrediction(object):
         # The miner sent its own bet (set before the request), and
         # bet_placed: Twitch accepted it.
         self.miner_bet_requested = False
+        self.miner_bet_pending = False
         self.placed_by_hand = False
         # Points were added to the bet without a new total.
         self.wager_unknown = False
@@ -113,11 +115,12 @@ class EventPrediction(object):
             self.wager_unknown = True
 
     def _miner_choice(self):
-        """The miner's decision, if Twitch accepted the bet it placed."""
+        """The miner's decision, if Twitch accepted the bet it placed (or
+        the request is still waiting for Twitch's answer)."""
 
         choice = self.bet.decision.get("choice")
         if (
-            self.bet_placed
+            (self.bet_placed or self.miner_bet_pending)
             and isinstance(choice, int)
             and not isinstance(choice, bool)
             and 0 <= choice < len(self.bet.outcomes)
