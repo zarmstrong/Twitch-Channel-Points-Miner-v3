@@ -34,6 +34,7 @@ class EventPrediction(object):
         "placed_by_hand",
         "wager_unknown",
         "state_lock",
+        "confirmations",
     ]
 
     def __init__(
@@ -76,6 +77,8 @@ class EventPrediction(object):
         # The websocket thread confirms bets while the miner's timer thread
         # places its own.
         self.state_lock = threading.Lock()
+        # predictions-user-v1 messages about the bet so far.
+        self.confirmations = 0
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -112,6 +115,7 @@ class EventPrediction(object):
                 # part of it was placed by hand.
                 self.placed_by_hand = True
             self.bet_confirmed = True
+            self.confirmations += 1
             if isinstance(outcome_id, str) and outcome_id:
                 self.confirmed_outcome_id = outcome_id
             if points is not None:
@@ -130,27 +134,38 @@ class EventPrediction(object):
         with self.state_lock:
             self.miner_bet_requested = True
             self.miner_bet_answered.clear()
-            return (self.bet_confirmed, self.confirmed_points)
+            return (self.bet_confirmed, self.confirmed_points, self.confirmations)
 
     def miner_bet_accepted(self, before, amount):
         """Twitch accepted the miner's bet of ``amount`` points; ``before``
         is what begin_miner_bet returned."""
 
-        confirmed_before, points_before = before
+        confirmed_before, points_before, confirmations_before = before
+        amount = _points(amount)
+        # The bet's total before the miner's points, None when unknown.
+        base = points_before if confirmed_before else 0
+        expected = None if base is None or amount is None else base + amount
         with self.state_lock:
             self.bet_placed = True
-            if (
+            unchanged = self.confirmations == confirmations_before or (
+                # Reported again, with nothing added.
                 confirmed_before
                 and points_before is not None
-                and self.confirmed_points is not None
-                and _points(amount) is not None
-            ):
-                # The miner added to a bet Twitch had already confirmed. A
-                # total can only grow: one from before the addition, or from
-                # while it was being made, is at least this much now.
-                self.confirmed_points = max(
-                    self.confirmed_points, points_before + amount
-                )
+                and self.confirmed_points == points_before
+            )
+            if unchanged:
+                if confirmed_before:
+                    # The miner added to a bet Twitch had confirmed, and
+                    # nothing was reported since.
+                    self.confirmed_points = expected
+                    self.wager_unknown = expected is None
+            elif expected is None or self.confirmed_points != expected:
+                # Twitch reported the bet while the request was made: by
+                # hand, or the miner's points, or both. Only a total of
+                # exactly the earlier total plus the miner's points says
+                # which; otherwise the wager is unknown until a new total.
+                self.confirmed_points = None
+                self.wager_unknown = True
 
     def miner_bet_settled(self):
         """Twitch answered the miner's bet request (or it failed)."""

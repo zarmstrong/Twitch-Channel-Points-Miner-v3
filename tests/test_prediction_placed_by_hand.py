@@ -548,7 +548,12 @@ def test_a_result_before_the_miners_request_answers_is_the_miners_bet(
     streamer, event, logger
 ):
     def deliver():
-        _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+        _send(
+            streamer,
+            event,
+            "prediction-made",
+            {"outcome_id": "outcome-yes", "points": 100},
+        )
         _credited(streamer, "PREDICTION", 250)
         _send(
             streamer,
@@ -632,7 +637,12 @@ def test_a_result_waiting_for_the_request_does_not_hold_up_the_websocket(
     assert sent.wait(5)
 
     def deliver():
-        _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+        _send(
+            streamer,
+            event,
+            "prediction-made",
+            {"outcome_id": "outcome-yes", "points": 100},
+        )
         _credited(streamer, "PREDICTION", 250)
         _send(
             streamer,
@@ -767,3 +777,87 @@ def test_a_refused_addition_to_a_known_bet_is_not_counted(streamer, event, logge
     )
 
     assert _result_line(logger).endswith("Result: LOSE, Lost: -50")
+
+
+def test_a_bet_reported_without_points_while_the_miners_request_is_made_is_unknown(
+    streamer, event, logger
+):
+    def request(event_id, outcome_id, amount):
+        # A bet placed by hand before the timer, confirmed only now; or the
+        # miner's own: without points, it can't be told which.
+        _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+        return MakePredictionResponse(None)
+
+    _miner_bets(event, {"choice": 1, "amount": 300, "id": "outcome-no"}, request)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "LOSE", "points_won": None}},
+    )
+
+    line = _result_line(logger)
+    assert "300" not in line
+    assert line.endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}
+
+
+@pytest.mark.parametrize(
+    "result_points, expected",
+    [(None, f"Lost: {UNKNOWN}"), (370, "Lost: -370")],
+    ids=["result-without-total", "result-with-total"],
+)
+def test_points_added_by_hand_while_the_miner_adds_make_the_total_unknown(
+    streamer, event, logger, result_points, expected
+):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+
+    def request(event_id, outcome_id, amount):
+        # 20 more added by hand while the miner's 300 are being added.
+        _send(
+            streamer,
+            event,
+            "prediction-updated",
+            {"outcome_id": "outcome-no", "points": 70},
+        )
+        return MakePredictionResponse(None)
+
+    _miner_bets(event, {"choice": 1, "amount": 300, "id": "outcome-no"}, request)
+    prediction = {
+        "outcome_id": "outcome-no",
+        "result": {"type": "LOSE", "points_won": None},
+    }
+    if result_points is not None:
+        prediction["points"] = result_points
+    _send(streamer, event, "prediction-result", prediction)
+
+    assert _result_line(logger).endswith(f"Result: LOSE, {expected}")
+
+
+def test_a_result_during_the_request_keeps_its_own_total(streamer, event, logger):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+
+    def deliver():
+        _send(
+            streamer,
+            event,
+            "prediction-result",
+            {
+                "outcome_id": "outcome-no",
+                "points": 370,
+                "result": {"type": "LOSE", "points_won": None},
+            },
+        )
+
+    request, threads = _while_the_request_waits(
+        streamer, event, deliver, MakePredictionResponse(None)
+    )
+    _miner_bets(event, {"choice": 1, "amount": 300, "id": "outcome-no"}, request)
+    _join(threads)
+
+    assert _result_line(logger).endswith("Result: LOSE, Lost: -370")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": -370}}

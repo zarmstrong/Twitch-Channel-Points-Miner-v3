@@ -329,13 +329,18 @@ class WebSocketsPool:
                 )
 
     @staticmethod
-    def _report_prediction_result_later(streamer, event_prediction, result):
-        """_report_prediction_result, once the miner's bet request has been
-        answered."""
+    def _report_prediction_result_later(streamer, event_prediction, prediction):
+        """_report_prediction_result for a prediction-result's
+        ``prediction``, once the miner's bet request has been answered."""
 
         try:
             event_prediction.wait_for_miner_bet()
-            WebSocketsPool._report_prediction_result(streamer, event_prediction, result)
+            # The result's total is the bet's final one: it stands over what
+            # the answer made of the totals reported before it.
+            event_prediction.confirm_bet(prediction)
+            WebSocketsPool._report_prediction_result(
+                streamer, event_prediction, prediction["result"]
+            )
         except Exception:
             logger.error(
                 f"Failed to report the result of {event_prediction}",
@@ -714,7 +719,11 @@ class WebSocketsPool:
                                     # this websocket.
                                     Thread(
                                         target=WebSocketsPool._report_prediction_result_later,
-                                        args=(streamer, event_prediction, result),
+                                        args=(
+                                            streamer,
+                                            event_prediction,
+                                            message.data["prediction"],
+                                        ),
                                         name=f"prediction-result-{event_id}",
                                         daemon=True,
                                     ).start()
