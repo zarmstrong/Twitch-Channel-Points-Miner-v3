@@ -381,9 +381,6 @@ class WebSocketsPool:
 
         try:
             event_prediction.wait_for_miner_bet()
-            # The result's total is the bet's final one: it stands over what
-            # the answer made of the totals reported before it.
-            event_prediction.confirm_bet(prediction)
             WebSocketsPool._report_prediction_result(
                 streamer, event_prediction, prediction["result"]
             )
@@ -755,7 +752,9 @@ class WebSocketsPool:
                                 # even when the earlier messages were missed
                                 # (Twitch sends it only for the account's own
                                 # bets).
-                                event_prediction.confirm_bet(message.data["prediction"])
+                                event_prediction.confirm_bet(
+                                    message.data["prediction"], final=True
+                                )
                                 result = message.data["prediction"]["result"]
                                 if event_prediction.miner_bet_pending():
                                     # Whether the miner's own bet is part of

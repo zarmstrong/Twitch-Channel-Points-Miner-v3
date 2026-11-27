@@ -981,3 +981,82 @@ def test_stopping_reports_a_result_whose_request_does_not_answer_in_time(
     assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
     release.set()
     _join([timer])
+
+
+def _lose(streamer, event, points=None):
+    prediction = {
+        "outcome_id": "outcome-no",
+        "result": {"type": "LOSE", "points_won": None},
+    }
+    if points is not None:
+        prediction["points"] = points
+    _send(streamer, event, "prediction-result", prediction)
+
+
+def test_the_results_total_stands_when_the_request_answers_meanwhile(
+    streamer, event, logger, monkeypatch
+):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+    before = event.begin_miner_bet()
+    real_pending = EventPrediction.miner_bet_pending
+
+    def answered_meanwhile(self):
+        # Twitch accepts the miner's 300 between the result's confirmation
+        # and this check.
+        self.miner_bet_accepted(before, 300)
+        self.miner_bet_settled()
+        return real_pending(self)
+
+    monkeypatch.setattr(EventPrediction, "miner_bet_pending", answered_meanwhile)
+    _lose(streamer, event, points=370)
+
+    assert _result_line(logger).endswith("Result: LOSE, Lost: -370")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": -370}}
+
+
+def test_a_bet_by_hand_confirmed_after_the_miners_is_not_the_miners_alone(
+    streamer, event, logger
+):
+    _miner_bets(
+        event,
+        {"choice": 1, "amount": 300, "id": "outcome-no"},
+        MakePredictionResponse(None),
+    )
+    # A bet of 50 by hand from before the timer, reported only now.
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+    _lose(streamer, event)
+
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}
+
+
+def test_the_miners_own_bet_reported_after_its_answer_is_its_total(
+    streamer, event, logger
+):
+    _miner_bets(
+        event,
+        {"choice": 1, "amount": 300, "id": "outcome-no"},
+        MakePredictionResponse(None),
+    )
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 300}
+    )
+    _lose(streamer, event)
+
+    assert _result_line(logger).endswith("Result: LOSE, Lost: -300")
+
+
+def test_an_older_total_does_not_clear_an_unknown_addition(streamer, event, logger):
+    made = {"outcome_id": "outcome-no", "points": 50}
+    _send(streamer, event, "prediction-made", made)
+    _send(streamer, event, "prediction-updated", {"outcome_id": "outcome-no"})
+    # The first message, delivered again.
+    _send(streamer, event, "prediction-made", made)
+    _lose(streamer, event)
+
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}

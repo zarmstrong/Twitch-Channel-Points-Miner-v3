@@ -94,3 +94,10 @@ Here's a concrete example. Let's suppose we have a bet that is opened with a tim
 - **FROM_START** with `delay=20`: The bet will be placed 20s after the bet is opened
 - **FROM_END** with `delay=20`: The bet will be placed 20s before the end of the bet (so 9mins 40s after the bet is opened)
 - **PERCENTAGE** with `delay=0.2`: The bet will be placed when the timer went down by 20% (so 2mins after the bet is opened)
+
+## Results of bets placed by hand
+
+The miner still bets when its timer fires even if you've already bet on that prediction in the browser. Twitch accepts the miner's bet only when it's on the outcome you picked, and then adds it to yours. The result line, the prediction annotations on the Points tab and the session report use the bet Twitch reports: its outcome and the points on it.
+
+- If Twitch's messages don't say how many points are on the bet, the miner's amount is used only when the miner placed the whole bet. Otherwise the result shows the amount as unknown and leaves that prediction out of the session report.
+- If a result arrives while Twitch hasn't yet answered the miner's own bet, the miner waits for the answer before reporting the result. When you stop the miner, it waits up to 30 seconds for that answer, then reports the result with the amount unknown.

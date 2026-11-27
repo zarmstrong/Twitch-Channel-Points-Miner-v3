@@ -36,6 +36,8 @@ class EventPrediction(object):
         "state_lock",
         "confirmations",
         "points_floor",
+        "totals_seen",
+        "final_points",
     ]
 
     def __init__(
@@ -73,16 +75,22 @@ class EventPrediction(object):
         self.miner_bet_answered = threading.Event()
         self.miner_bet_answered.set()
         self.placed_by_hand = False
-        # Points were added to the bet without a new total.
+        # The bet may hold more than any total known: points were added
+        # without a new total, or a report can't be placed.  Only a new,
+        # larger total or the result's clears it.
         self.wager_unknown = False
         # The websocket thread confirms bets while the miner's timer thread
         # places its own.
         self.state_lock = threading.Lock()
         # predictions-user-v1 messages about the bet so far.
         self.confirmations = 0
-        # The bet is at least this many points: a total only grows, so a
-        # smaller one is an older message delivered late.
+        # The bet is at least this many points.
         self.points_floor = 0
+        # Every total Twitch reported: one seen again is an older message
+        # delivered late (a total only grows).
+        self.totals_seen = set()
+        # The total on the prediction-result: the bet's final one.
+        self.final_points = None
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -103,11 +111,11 @@ class EventPrediction(object):
     def print_recap(self) -> str:
         return f"{self}\n\t\t{self.bet}\n\t\tResult: {self.result['string']}"
 
-    def confirm_bet(self, prediction, addition=False):
+    def confirm_bet(self, prediction, addition=False, final=False):
         """Record the bet a predictions-user-v1 ``prediction`` reports.
 
         ``addition``: the message reports points added to the bet
-        (prediction-updated)."""
+        (prediction-updated). ``final``: it is the prediction-result."""
 
         if not isinstance(prediction, dict):
             prediction = {}
@@ -122,16 +130,29 @@ class EventPrediction(object):
             self.confirmations += 1
             if isinstance(outcome_id, str) and outcome_id:
                 self.confirmed_outcome_id = outcome_id
-            if points is not None:
-                if points >= self.points_floor:
-                    # The bet's total so far.
-                    self.confirmed_points = points
-                    self.wager_unknown = False
-                    self.points_floor = points
-            elif addition:
-                # Points were added, but how many isn't known.
-                self.confirmed_points = None
+            if final and points is not None:
+                self.final_points = points
+            elif points is None:
+                if addition:
+                    # Points were added, but how many isn't known.
+                    self.wager_unknown = True
+            elif points in self.totals_seen:
+                # Reported before: nothing newer.
+                pass
+            elif points >= self.points_floor:
+                # The bet's total so far.
+                self.totals_seen.add(points)
+                self.confirmed_points = points
+                self.points_floor = points
+                self.wager_unknown = False
+            else:
+                # Less than the bet is known to hold, and never reported: a
+                # part of the bet (placed by hand) the miner didn't know of.
+                self.totals_seen.add(points)
                 self.wager_unknown = True
+
+    def _known_points(self):
+        return None if self.wager_unknown else self.confirmed_points
 
     def begin_miner_bet(self):
         """The miner is about to send its own bet. Returns what was known of
@@ -140,7 +161,7 @@ class EventPrediction(object):
         with self.state_lock:
             self.miner_bet_requested = True
             self.miner_bet_answered.clear()
-            return (self.bet_confirmed, self.confirmed_points, self.confirmations)
+            return (self.bet_confirmed, self._known_points(), self.confirmations)
 
     def miner_bet_accepted(self, before, amount):
         """Twitch accepted the miner's bet of ``amount`` points; ``before``
@@ -153,28 +174,29 @@ class EventPrediction(object):
         expected = None if base is None or amount is None else base + amount
         with self.state_lock:
             self.bet_placed = True
-            unchanged = self.confirmations == confirmations_before or (
-                # Reported again, with nothing added.
+            known = self._known_points()
+            if self.confirmations == confirmations_before or (
+                # Reported again during the request, with nothing added.
                 confirmed_before
                 and points_before is not None
-                and self.confirmed_points == points_before
-            )
-            if unchanged:
+                and known == points_before
+            ):
                 if confirmed_before:
-                    # The miner added to a bet Twitch had confirmed, and
-                    # nothing was reported since.
-                    self.confirmed_points = expected
-                    self.wager_unknown = expected is None
-            elif expected is None or self.confirmed_points != expected:
+                    # The miner added to a bet Twitch had confirmed.
+                    if expected is None:
+                        self.wager_unknown = True
+                    else:
+                        self.confirmed_points = expected
+                        self.wager_unknown = False
+            elif expected is None or known != expected:
                 # Twitch reported the bet while the request was made: by
                 # hand, or the miner's points, or both. Only a total of
                 # exactly the earlier total plus the miner's points says
                 # which; otherwise the wager is unknown until a new total.
-                self.confirmed_points = None
                 self.wager_unknown = True
             if amount is not None:
                 self.points_floor = max(
-                    self.points_floor, (points_before or 0) + amount
+                    self.points_floor, expected if expected is not None else amount
                 )
 
     def abandon_miner_bet(self):
@@ -185,7 +207,6 @@ class EventPrediction(object):
         with self.state_lock:
             if self.miner_bet_answered.is_set():
                 return
-            self.confirmed_points = None
             self.wager_unknown = True
             self.miner_bet_answered.set()
 
@@ -239,8 +260,13 @@ class EventPrediction(object):
     def placed_points(self):
         """The points the account bet, or None when they aren't known."""
 
-        if self.confirmed_points is not None:
-            return self.confirmed_points
+        with self.state_lock:
+            if self.final_points is not None:
+                return self.final_points
+            if self.wager_unknown:
+                return None
+            if self.confirmed_points is not None:
+                return self.confirmed_points
         choice = self._miner_choice()
         if (
             self.placed_by_hand
