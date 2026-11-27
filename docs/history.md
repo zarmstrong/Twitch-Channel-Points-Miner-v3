@@ -6,8 +6,7 @@ The optional **History** feature adds durable, account-scoped statistics to the
 analytics server: watch sessions and watch time, live sessions, points gained
 and spent, watch streaks and prediction events. It serves them through a JSON
 API: daily totals, an activity heatmap, streamer totals and a per-streamer
-drill-down. A History tab for the dashboard that shows this data is a separate
-change; until it ships, the data is only available through the [API](#api).
+drill-down, and the dashboard's **History** tab shows them.
 
 History runs only when `MINER_CONFIG["enable_analytics"]` is `True`, and is
 served by the analytics server (`ANALYTICS_CONFIG`).
@@ -125,14 +124,38 @@ History logs a warning and retries without affecting the miner.
 
 ## Deleting a streamer
 
-Deleting a streamer's analytics data from the dashboard also clears that
-streamer's History. Everything the miner journalled for that streamer before
+There are two ways to delete a streamer's History from the dashboard:
+
+- **Delete history** in a streamer's drill-down on the History tab deletes only
+  their History: points, spends, predictions, watch and live sessions, watch
+  streaks, and their daily and all-time totals. Their analytics data and the
+  Points tab are not changed.
+- Deleting a streamer's analytics data on the Points tab also clears that
+  streamer's History.
+
+Neither removes the streamer from your miner configuration. For a streamer
+still in it, what the miner does after the delete is recorded again, so the
+streamer comes back to History with their new activity. For a streamer you
+have already removed from the configuration, the delete is the final cleanup.
+
+In both cases, everything the miner journalled for that streamer before
 the delete stays deleted, including lines History had not imported yet;
 anything after it is recorded as usual, also after the database is rebuilt
 from the journal. If History cannot be cleared, for
 example while it is still starting or because another process holds a lock on
-the database, the analytics data is kept too and the delete returns an error,
-so you can retry it.
+the database, the delete returns an error and changes nothing, so you can retry
+it; a delete from the Points tab then keeps the analytics data too. The delete
+takes effect when History saves it beside the journal; if the database fails
+only after that (for example because the disk is full), the delete still
+returns an error, and History finishes clearing the database before it imports
+anything else. If the save itself fails but the disk kept part of it, History
+may finish the delete after a restart; it then removes only what was recorded
+before the delete, never anything imported since.
+
+A delete waits for History to finish what it is importing. If History has
+not answered after 30 seconds, the History tab says the delete may still
+finish, shows what is there now and lets you delete again; it still updates
+when the delete finishes.
 
 ## Watch streaks
 

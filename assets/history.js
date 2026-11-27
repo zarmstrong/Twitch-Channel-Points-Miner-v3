@@ -14,6 +14,20 @@
     var DAY_OPTIONS = [7, 30, 90, 365];
     var numberFormat = new Intl.NumberFormat();
 
+    // Node loads this file only for the delete flow's decisions (tested in
+    // tests/js/history-delete.test.js); the tab itself needs a browser.
+    if (typeof window === 'undefined') {
+        if (typeof module === 'object' && module.exports) {
+            module.exports = {
+                REQUEST_TIMEOUT_MS: REQUEST_TIMEOUT_MS,
+                deleteButtonState: deleteButtonState,
+                detailMessageFor: detailMessageFor,
+                runDelete: runDelete
+            };
+        }
+        return;
+    }
+
     var state = {
         days: 30,
         streamer: '',
@@ -31,7 +45,17 @@
         lastDaily: null,
         chartThemeStale: false,
         detailStreamer: '',
-        detailRequest: null
+        detailRequest: null,
+        // The delete waiting for its answer, if any ({ streamer }); one
+        // runs at a time.  lastDelete is the newest delete started: only
+        // its answer may change what the tab says.
+        deleting: null,
+        lastDelete: null,
+        // { streamer, text }: why the last delete failed, shown in that
+        // streamer's drill-down until it is closed or retried.
+        detailMessage: null,
+        // Shown with the status of the next refresh that completes.
+        notice: ''
     };
 
     // The Windows desktop shell authenticates this page through a token on
@@ -193,8 +217,9 @@
         return request;
     }
 
-    function fetchJson(path, params, request) {
+    function fetchJson(path, params, request, method) {
         return fetch(buildUrl(path, params), {
+            method: method || 'GET',
             credentials: 'same-origin',
             headers: { Accept: 'application/json' },
             signal: request && request.controller ? request.controller.signal : undefined
@@ -208,9 +233,12 @@
         });
     }
 
+    // state.notice (what a delete did) leads every status until a refresh
+    // has shown it with fresh data.
     function setStatus(message) {
         var status = byId('history-status');
-        if (status) status.textContent = message || '';
+        var text = [state.notice, message].filter(Boolean).join(' ');
+        if (status) status.textContent = text;
     }
 
     function showError(message) {
@@ -387,6 +415,11 @@
             detail.addEventListener('click', function (event) {
                 if (event.target.closest('[data-history-detail-close]')) {
                     closeStreamerDetail();
+                    return;
+                }
+                var remove = event.target.closest('[data-history-delete]');
+                if (remove && !remove.disabled) {
+                    confirmDeleteHistory(remove.getAttribute('data-history-delete'));
                 }
             });
         }
@@ -493,6 +526,7 @@
             state.loadedAt = Date.now();
             state.loadedKey = selection.key;
             setStatus('Updated ' + new Date().toLocaleTimeString());
+            state.notice = '';
         }).catch(function (error) {
             if (state.request !== request) return;
             var message = error && error.message ? error.message : String(error);
@@ -829,15 +863,235 @@
             state.detailRequest = null;
         }
         state.detailStreamer = '';
+        state.detailMessage = null;
         var container = byId('history-detail');
         if (container) container.style.display = 'none';
     }
 
+    function sameStreamer(a, b) {
+        return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+    }
+
     function detailHead(streamer) {
-        return '<div class="history-detail-head">' +
+        var message = detailMessageFor(state, streamer);
+        var button = deleteButtonState(state, streamer);
+        return '<div class="history-detail-top">' +
+            '<div class="history-detail-head">' +
             '<h3 class="title is-4">' + escapeHtml(streamer) + '</h3>' +
+            '<div class="buttons">' +
+            '<button class="button is-small is-danger is-outlined' + (button.loading ? ' is-loading' : '') +
+                '" type="button" data-history-delete="' + escapeHtml(streamer) + '"' +
+                (button.disabled ? ' disabled' : '') + '>Delete history</button>' +
             '<button class="button is-small" type="button" data-history-detail-close>Close</button>' +
+            '</div></div>' +
+            (message
+                ? '<div class="notification is-danger is-light history-detail-message" role="alert">' +
+                    escapeHtml(message) + '</div>'
+                : '') +
             '</div>';
+    }
+
+    // Redraws the drill-down's header (its buttons and message) without
+    // touching the data below it.
+    function renderDetailHead() {
+        var container = byId('history-detail');
+        if (!container || !state.detailStreamer) return;
+        var top = container.querySelector('.history-detail-top');
+        if (top) top.outerHTML = detailHead(state.detailStreamer);
+    }
+
+    // What the panels show includes History that is gone: clear them until a
+    // refresh replaces them, so a reload that fails never leaves the deleted
+    // numbers on screen.
+    function clearPanels() {
+        destroyChart('points');
+        destroyChart('watch');
+        state.lastDaily = null;
+        ['history-cards', 'history-points-chart', 'history-watch-chart', 'history-activity',
+            'history-streamers', 'history-sessions', 'history-events'].forEach(function (id) {
+            var element = byId(id);
+            if (element) element.innerHTML = '<p class="history-empty">Reloading…</p>';
+        });
+    }
+
+    // -- deleting a streamer's History -----------------------------------------
+    function confirmDeleteHistory(streamer) {
+        if (!streamer || state.deleting) return;
+        var message = 'This deletes everything History recorded for ' + streamer +
+            ': points, spends, predictions, watch and live sessions, watch streaks, and the ' +
+            'daily and all-time totals. Their analytics data and the Points tab are not changed. ' +
+            'If ' + streamer + ' is still in your miner configuration, activity after the ' +
+            'delete is recorded again.';
+        var onConfirm = function () { deleteHistory(streamer); };
+        if (typeof window.showConfirmDialog === 'function' && byId('confirm-modal')) {
+            window.showConfirmDialog({
+                title: 'Delete History for ' + streamer + '?',
+                message: message,
+                confirmLabel: 'Delete history',
+                onConfirm: onConfirm
+            });
+        } else if (window.confirm(message)) {
+            onConfirm();
+        }
+    }
+
+    // -- the delete flow --------------------------------------------------------
+    // These functions read and change only the state object `s` they are
+    // given (the tab's state) and reach the page only through `ui`, so the
+    // tests drive them without a browser.
+
+    // The drill-down's message for streamer, if it has one.
+    function detailMessageFor(s, streamer) {
+        return s.detailMessage && sameStreamer(s.detailMessage.streamer, streamer)
+            ? s.detailMessage.text : '';
+    }
+
+    // One delete runs at a time: every Delete history button is disabled
+    // while one does, and the deleting streamer's shows it is busy.
+    function deleteButtonState(s, streamer) {
+        return {
+            disabled: !!s.deleting,
+            loading: !!(s.deleting && sameStreamer(s.deleting.streamer, streamer))
+        };
+    }
+
+    // Says why a delete failed: in the drill-down when it shows that
+    // streamer, otherwise in the status line.
+    function reportDeleteProblem(s, ui, streamer, text) {
+        if (s.detailStreamer && sameStreamer(s.detailStreamer, streamer)) {
+            s.detailMessage = { streamer: streamer, text: text };
+            ui.renderHead();
+        } else {
+            s.notice = text;
+            ui.status();
+        }
+    }
+
+    // Deletes streamer's History.  `ui` holds what the flow does outside
+    // `s`:
+    //   send(streamer)     sends the DELETE; a Promise of the answer's body
+    //   renderHead()       redraws the drill-down's buttons and message
+    //   status()           redraws the status line (s.notice leads it)
+    //   reload()           reloads every panel
+    //   forget(streamer)   drops what the tab shows of streamer and reloads
+    //   setTimeout(fn, ms) / clearTimeout(id)
+    // Returns the operation started, or null when one is already running.
+    function runDelete(s, streamer, ui) {
+        if (!streamer || s.deleting) return null;
+        var operation = { streamer: streamer };
+        s.deleting = operation;
+        s.lastDelete = operation;
+        s.detailMessage = null;
+        ui.renderHead();
+        // The DELETE itself is not given up: the miner may still be
+        // finishing it, and whenever it answers the tab follows.  After
+        // REQUEST_TIMEOUT_MS the tab stops waiting for it, though: it says
+        // the outcome is not known yet, reloads, and lets the user delete
+        // again (deleting twice is harmless).
+        var slow = ui.setTimeout(function () {
+            if (s.deleting !== operation) return;
+            s.deleting = null;
+            reportDeleteProblem(s, ui, streamer, 'History has not answered yet. The delete of ' +
+                streamer + "'s History may still finish; the tab shows what is there now " +
+                'and updates if it does. You can delete again.');
+            ui.reload();
+            ui.renderHead();
+        }, REQUEST_TIMEOUT_MS);
+        Promise.resolve().then(function () {
+            return ui.send(streamer);
+        }).then(function (body) {
+            if (s.deleting === operation) s.deleting = null;
+            if (s.lastDelete !== operation) {
+                // A newer delete was started since (after this one stopped
+                // being waited for): the History is gone all the same, but
+                // what the newer delete reported stays, in the status line
+                // once the drill-down closes.
+                var newer = detailMessageFor(s, streamer);
+                ui.forget(streamer);
+                if (newer) {
+                    s.notice = newer;
+                    ui.status();
+                }
+                ui.renderHead();
+                return;
+            }
+            var deleted = (body && body.deleted) || {};
+            var rows = Object.keys(deleted).reduce(function (sum, table) {
+                return sum + (Number(deleted[table]) || 0);
+            }, 0);
+            s.notice = rows
+                ? 'Deleted the History for ' + streamer + '.'
+                : 'There was no History for ' + streamer + ' to delete.';
+            ui.status();
+            ui.forget(streamer);
+            // Another drill-down open now may offer its delete again.
+            ui.renderHead();
+        }).catch(function (error) {
+            if (s.deleting === operation) s.deleting = null;
+            if (s.lastDelete === operation) {
+                var text = error && error.message ? error.message : String(error);
+                s.detailMessage = null;
+                reportDeleteProblem(s, ui, streamer,
+                    'Could not delete the History for ' + streamer + '. ' + text);
+            }
+            ui.renderHead();
+        }).finally(function () {
+            ui.clearTimeout(slow);
+        });
+        return operation;
+    }
+
+    var pageDeleteUi = {
+        send: function (streamer) {
+            return fetchJson('streamer/' + encodeURIComponent(streamer), null, null, 'DELETE');
+        },
+        renderHead: function () { renderDetailHead(); },
+        status: function () { setStatus(''); },
+        reload: function () {
+            state.loadedAt = 0;
+            state.loadedKey = '';
+            refreshHistory(true);
+        },
+        forget: function (streamer) { forgetStreamers([streamer]); },
+        setTimeout: function (fn, ms) { return setTimeout(fn, ms); },
+        clearTimeout: function (id) { clearTimeout(id); }
+    };
+
+    function deleteHistory(streamer) {
+        runDelete(state, streamer, pageDeleteUi);
+    }
+
+    // These streamers' History is gone (deleted here, or with their
+    // analytics data on the Points tab): drop what the tab shows of them.
+    function forgetStreamers(names) {
+        var gone = names.map(function (name) {
+            return String(name).replace(/\.json$/i, '').toLowerCase();
+        });
+        state.loadedAt = 0;
+        state.loadedKey = '';
+        if (state.detailStreamer && gone.indexOf(state.detailStreamer.toLowerCase()) !== -1) {
+            closeStreamerDetail();
+        }
+        var select = byId('history-streamer');
+        if (state.streamer && gone.indexOf(state.streamer.toLowerCase()) !== -1) {
+            // The filter would only show an empty History now.
+            state.streamer = '';
+            if (select) select.value = '';
+        }
+        if (select) {
+            Array.prototype.slice.call(select.options).forEach(function (option) {
+                if (option.value && gone.indexOf(option.value.toLowerCase()) !== -1) {
+                    select.removeChild(option);
+                }
+            });
+        }
+        clearPanels();
+        if (state.visible) {
+            refreshHistory(true);
+        } else if (state.request) {
+            state.request.cancel();
+            state.request = null;
+        }
     }
 
     // options.scroll brings the drill-down into view once loaded;
@@ -851,6 +1105,7 @@
             if (options.background) return;
             state.detailRequest.cancel();
         }
+        if (!sameStreamer(streamer, state.detailStreamer)) state.detailMessage = null;
         var request = newRequest();
         state.detailRequest = request;
         state.detailStreamer = streamer;
@@ -976,21 +1231,7 @@
     // Deleting a streamer's analytics on the Points tab also deletes their
     // History (script.js dispatches this after a successful delete).
     window.addEventListener('analytics-streamers-deleted', function (event) {
-        var names = ((event.detail && event.detail.streamers) || []).map(function (name) {
-            return String(name).replace(/\.json$/i, '').toLowerCase();
-        });
-        state.loadedAt = 0;
-        state.loadedKey = '';
-        if (state.detailStreamer &&
-                names.indexOf(state.detailStreamer.toLowerCase()) !== -1) {
-            closeStreamerDetail();
-        }
-        if (state.visible) {
-            refreshHistory(true);
-        } else if (state.request) {
-            state.request.cancel();
-            state.request = null;
-        }
+        forgetStreamers((event.detail && event.detail.streamers) || []);
     });
 
     document.addEventListener('visibilitychange', function () {

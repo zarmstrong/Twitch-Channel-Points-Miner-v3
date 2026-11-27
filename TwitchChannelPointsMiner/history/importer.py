@@ -112,8 +112,10 @@ class JournalImporter(object):
         self._stall = None
         self._last_ack = None
         self._bad_line_logged = False
-        # Delete cutoffs from DELETES_FILE (loaded when first needed).
+        # Delete cutoffs from DELETES_FILE (loaded when first needed): all
+        # of them, and those apply_saved_deletes may finish.
         self._file_deletes = None
+        self._finishable_deletes = None
 
     # -- delete cutoffs --------------------------------------------------------
     def _load_deletes(self):
@@ -129,10 +131,21 @@ class JournalImporter(object):
         applies it; raises ``OSError`` when it cannot be saved."""
 
         cutoffs = self._load_deletes()
-        save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
+        finishable = self._load_finishable_deletes()
         position = (str(segment), int(offset))
-        if position > cutoffs.get(streamer, ("", 0)):
-            cutoffs[streamer] = position
+        # Raises when the line may not be durable (even if it was written):
+        # the delete then fails.  Should the line have reached the file
+        # anyway, a later import honours it only while it has not passed
+        # the cutoff (``apply_saved_deletes``).
+        save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
+        for known in (cutoffs, finishable):
+            if position > known.get(streamer, ("", 0)):
+                known[streamer] = position
+
+    def _load_finishable_deletes(self):
+        if self._finishable_deletes is None:
+            self._finishable_deletes = read_delete_cutoffs(self.folder, finishable=True)
+        return self._finishable_deletes
 
     # -- reading -------------------------------------------------------------
     def _cursor(self, connection):
@@ -146,9 +159,48 @@ class JournalImporter(object):
 
         return journal_end(self.folder)
 
+    def apply_saved_deletes(self):
+        """Finish the deletes whose cutoff was saved but whose database
+        change did not commit (see ``HistoryRecorder.delete_streamer``), and
+        record the cutoffs a rebuilt database has not seen yet.
+
+        Runs before anything is imported.  The streamer's rows are deleted
+        only while the import has not passed the cutoff, so they are all from
+        before it; if the database already holds records from after the
+        cutoff (it was rebuilt by an earlier build, which did not record
+        cutoffs, or the line of a delete that failed reached the file
+        anyway), only the cutoff is recorded and the activity is kept.
+        Cutoffs saved before this was done (without ``CUTOFF_VERSION``) are
+        left alone."""
+
+        cutoffs = self._load_finishable_deletes()
+        if not cutoffs:
+            return
+        with self.store._read_connection() as connection:
+            applied = {
+                row["streamer"]: (row["segment"], row["offset"])
+                for row in connection.execute(
+                    "SELECT streamer, segment, offset FROM deleted_streamers"
+                )
+            }
+            cursor = self._cursor(connection) or ("", 0)
+        for streamer, position in cutoffs.items():
+            if position <= applied.get(streamer, ("", 0)):
+                continue
+            if cursor <= position:
+                self.store.delete_streamer(streamer, position[0], position[1])
+            else:
+                logger.warning(
+                    "History already holds records after %s's saved delete; "
+                    "recording the delete without removing them",
+                    streamer,
+                )
+                self.store.record_delete(streamer, position[0], position[1])
+
     def poll(self):
         """Import everything complete; returns the number of lines read."""
 
+        self.apply_saved_deletes()
         names = list_segments(self.folder)
         if not names:
             return 0

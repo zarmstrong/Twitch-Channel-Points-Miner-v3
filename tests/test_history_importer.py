@@ -925,6 +925,276 @@ def test_a_failed_delete_keeps_the_watch_going(tmp_path):
     journal.stop()
 
 
+def test_a_delete_blocked_by_a_database_lock_changes_nothing(tmp_path, monkeypatch):
+    """Another process holds the database's write lock: the delete fails
+    before its cutoff is saved or the watch is ended, so a retry is the
+    only thing that deletes anything."""
+
+    from types import SimpleNamespace
+
+    from TwitchChannelPointsMiner.history import store as store_module
+    from TwitchChannelPointsMiner.history.journal import Journal, read_delete_cutoffs
+
+    clock = {"mono": 0.0}
+    folder = str(tmp_path / "history")
+    journal = Journal(monotonic=lambda: clock["mono"])
+    journal.start(folder)
+    alice = SimpleNamespace(
+        username="alice",
+        is_online=True,
+        explicitly_configured=True,
+        from_followers=False,
+        from_category=False,
+        from_badge_campaign=False,
+        from_wildcard_category=False,
+        stream=SimpleNamespace(broadcast_id="b1", game={}, title="Title"),
+    )
+    journal.record_live(alice)
+    journal.watch_selection({"alice": (alice, "points")})
+    token = journal.watch_token(alice)
+    clock["mono"] = 30.0
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    store.initialize()
+    recorder = HistoryRecorder(store, folder, journal=journal)
+    recorder.poll_once()
+
+    class QuickConnection(sqlite3.Connection):
+        # Give up on the lock at once instead of after five seconds.
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA busy_timeout"):
+                sql = "PRAGMA busy_timeout=50"
+            return super().execute(sql, *args)
+
+    real_connect = sqlite3.connect
+
+    def quick_connect(*args, **kwargs):
+        kwargs["timeout"] = 0.05
+        kwargs["factory"] = QuickConnection
+        return real_connect(*args, **kwargs)
+
+    holder = sqlite3.connect(store.path)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(store_module.sqlite3, "connect", quick_connect)
+            with pytest.raises(sqlite3.OperationalError):
+                recorder.delete_streamer("alice")
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert read_delete_cutoffs(folder) == {}
+    # The watch went on: the request answered after the failed delete
+    # credits its 30 seconds, and the live session is still there.
+    journal.watch_attempt(alice, True, broadcast_id="b1", token=token)
+    recorder.poll_once()
+    assert totals(store)["watch_seconds"] == 30
+    assert totals(store)["stream_sessions"] == 1
+    journal.stop()
+
+
+def _watching_alice(tmp_path):
+    from types import SimpleNamespace
+
+    from TwitchChannelPointsMiner.history.journal import Journal
+
+    clock = {"mono": 0.0}
+    folder = str(tmp_path / "history")
+    journal = Journal(monotonic=lambda: clock["mono"])
+    journal.start(folder)
+    alice = SimpleNamespace(
+        username="alice",
+        is_online=True,
+        explicitly_configured=True,
+        from_followers=False,
+        from_category=False,
+        from_badge_campaign=False,
+        from_wildcard_category=False,
+        stream=SimpleNamespace(broadcast_id="b1", game={}, title="Title"),
+    )
+    journal.record_live(alice)
+    journal.watch_selection({"alice": (alice, "points")})
+    token = journal.watch_token(alice)
+    clock["mono"] = 30.0
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    store.initialize()
+    recorder = HistoryRecorder(store, folder, journal=journal)
+    recorder.poll_once()
+    return SimpleNamespace(
+        journal=journal,
+        alice=alice,
+        token=token,
+        clock=clock,
+        folder=folder,
+        store=store,
+        recorder=recorder,
+    )
+
+
+def test_a_delete_whose_rows_cannot_be_deleted_changes_nothing(tmp_path, monkeypatch):
+    from TwitchChannelPointsMiner.history.journal import read_delete_cutoffs
+
+    setup = _watching_alice(tmp_path)
+
+    def failing(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(setup.store, "_delete_streamer_rows", failing)
+    with pytest.raises(sqlite3.OperationalError):
+        setup.recorder.delete_streamer("alice")
+    monkeypatch.undo()
+
+    assert read_delete_cutoffs(setup.folder) == {}
+    setup.journal.watch_attempt(setup.alice, True, broadcast_id="b1", token=setup.token)
+    setup.recorder.poll_once()
+    assert totals(setup.store)["watch_seconds"] == 30
+    assert totals(setup.store)["stream_sessions"] == 1
+    setup.journal.stop()
+
+
+def test_a_delete_whose_commit_fails_is_finished_by_the_next_import(
+    tmp_path, monkeypatch
+):
+    """The cutoff was saved (the delete happened) but the database did not
+    commit: History deletes the rows before it imports anything else."""
+
+    from TwitchChannelPointsMiner.history import store as store_module
+    from TwitchChannelPointsMiner.history.journal import read_delete_cutoffs
+
+    setup = _watching_alice(tmp_path)
+    setup.journal.watch_attempt(setup.alice, True, broadcast_id="b1", token=setup.token)
+    setup.recorder.poll_once()
+    assert totals(setup.store)["watch_seconds"] == 30
+    failing = {"commit": False}
+
+    class FailingCommit(sqlite3.Connection):
+        def commit(self):
+            if failing["commit"]:
+                failing["commit"] = False
+                raise sqlite3.OperationalError("database or disk is full")
+            return super().commit()
+
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        kwargs["factory"] = FailingCommit
+        return real_connect(*args, **kwargs)
+
+    real_save = setup.recorder.importer.save_delete
+
+    def save_then_fail_commit(*args):
+        real_save(*args)
+        failing["commit"] = True
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    monkeypatch.setattr(setup.recorder.importer, "save_delete", save_then_fail_commit)
+    with pytest.raises(sqlite3.OperationalError):
+        setup.recorder.delete_streamer("alice")
+    monkeypatch.undo()
+
+    assert "alice" in read_delete_cutoffs(setup.folder)
+    assert totals(setup.store)["watch_seconds"] == 30  # not committed yet
+    assert setup.recorder.poll_once() is True
+    assert totals(setup.store)["watch_seconds"] == 0
+    assert totals(setup.store)["stream_sessions"] == 0
+    # The same broadcast, title and game: alice is recorded live again.
+    setup.journal.record_live(setup.alice)
+    setup.recorder.poll_once()
+    assert totals(setup.store)["stream_sessions"] == 1
+    setup.journal.stop()
+
+
+def test_cutoffs_saved_before_finishing_existed_never_delete_later_activity(
+    writer, importer, store
+):
+    """A database rebuilt by an earlier build holds activity after a delete
+    without the delete's row; its cutoff line (no version) only skips."""
+
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    cutoff = os.path.getsize(writer.path(1))
+    with open(os.path.join(writer.folder, journal_module.DELETES_FILE), "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "streamer": "alice",
+                    "segment": segment_name(1, 1),
+                    "offset": cutoff,
+                    "at": T0 + 30,
+                }
+            )
+            + "\n"
+        )
+    watch(writer, T0 + 40)
+    # The earlier build imported without recording the cutoff in the database.
+    importer.apply_saved_deletes = lambda: None
+    importer.poll()
+    assert totals(store)["watch_seconds"] == 20
+    del importer.apply_saved_deletes
+
+    importer.poll()
+    assert totals(store)["watch_seconds"] == 20
+
+
+def test_a_delete_whose_cutoff_was_written_but_not_synced_fails_and_keeps_later_activity(
+    writer, importer, store, monkeypatch
+):
+    """The cutoff line reached the file but the fsync raised: the delete
+    fails and changes nothing, and once activity after the cutoff has been
+    imported, a restart that finds the line keeps that activity."""
+
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    importer.poll()
+    recorder = HistoryRecorder(store, importer.folder)
+
+    def failing_fsync(_fd):
+        raise OSError("fsync failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal_module.os, "fsync", failing_fsync)
+        with pytest.raises(OSError):
+            recorder.delete_streamer("alice")
+    assert totals(store)["watch_seconds"] == 20
+
+    watch(writer, T0 + 40)
+    recorder.poll_once()
+    assert totals(store)["watch_seconds"] == 40
+    # A restart reads the line: the activity after it stays.
+    HistoryRecorder(store, importer.folder).poll_once()
+    assert totals(store)["watch_seconds"] == 40
+
+
+def test_a_saved_cutoff_the_import_has_passed_keeps_later_activity(
+    writer, importer, store
+):
+    writer.add("run_start")
+    watch(writer, T0 + 20)
+    cutoff = os.path.getsize(writer.path(1))
+    with open(os.path.join(writer.folder, journal_module.DELETES_FILE), "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": journal_module.CUTOFF_VERSION,
+                    "streamer": "alice",
+                    "segment": segment_name(1, 1),
+                    "offset": cutoff,
+                    "at": T0 + 30,
+                }
+            )
+            + "\n"
+        )
+    watch(writer, T0 + 40)
+    # Imported past the cutoff without the database recording it.
+    importer.apply_saved_deletes = lambda: None
+    importer.poll()
+    del importer.apply_saved_deletes
+    assert totals(store)["watch_seconds"] == 20
+
+    importer.poll()
+    assert totals(store)["watch_seconds"] == 20
+
+
 def test_the_drill_down_lists_only_the_newest_100_points(writer, importer, store):
     writer.add("run_start")
     for index in range(150):

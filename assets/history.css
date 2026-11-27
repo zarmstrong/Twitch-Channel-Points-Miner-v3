@@ -333,6 +333,19 @@
     margin-bottom: 0;
 }
 
+.history-detail-head .buttons {
+    margin-bottom: 0;
+    flex-wrap: nowrap;
+}
+
+.history-detail-head .buttons .button {
+    margin-bottom: 0;
+}
+
+.history-detail-message {
+    margin-top: 0.75rem;
+}
+
 .history-detail-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

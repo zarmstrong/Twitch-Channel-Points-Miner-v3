@@ -183,24 +183,51 @@ class HistoryRecorder(threading.Thread):
             writing_here = self._sync_active_run()
             deleted_at = self.clock()
 
-            # Saved first: the database is rebuilt from the journal after
-            # corruption, and the cutoff must survive that.
-            def save(position):
-                self.importer.save_delete(
-                    streamer, position[0], position[1], deleted_at
-                )
+            counts = {}
+            decided = []
 
-            position = (
-                self.journal.delete_cutoff(streamer, save) if writing_here else None
-            )
-            if position is None:
-                position = self.importer.end_position()
-                save(position)
-            counts = self.store.delete_streamer(
-                streamer, position[0], position[1], deleted_at=deleted_at
-            )
-            if writing_here:
-                self.journal.forget(streamer)
+            # The database's write lock is taken before anything changes, and
+            # the rows are deleted (not yet committed) before the cutoff is
+            # saved: a delete that cannot get the lock, or whose rows cannot
+            # be deleted, fails having changed nothing.  Saving the cutoff
+            # beside the journal is the point where the delete happens: the
+            # database is rebuilt from the journal after corruption, and the
+            # cutoff must survive that.  Only once it is saved does the
+            # streamer's watch end (``Journal.delete_cutoff``).  If the commit
+            # then fails, the importer finishes the delete from the saved
+            # cutoff before it imports anything else
+            # (``JournalImporter.apply_saved_deletes``).
+            try:
+                with self.store.transaction() as connection:
+
+                    def save(position):
+                        counts.update(
+                            self.store.delete_streamer(
+                                streamer,
+                                position[0],
+                                position[1],
+                                deleted_at=deleted_at,
+                                connection=connection,
+                            )
+                        )
+                        self.importer.save_delete(
+                            streamer, position[0], position[1], deleted_at
+                        )
+                        decided.append(position)
+
+                    position = (
+                        self.journal.delete_cutoff(streamer, save)
+                        if writing_here
+                        else None
+                    )
+                    if position is None:
+                        save(self.importer.end_position())
+            finally:
+                if decided and writing_here:
+                    # The delete happened once its cutoff was saved, even if
+                    # the commit failed: the streamer's next stream update
+                    # must be recorded again.
+                    self.journal.forget(streamer)
             _remove_source(remove_source)
             return counts
 

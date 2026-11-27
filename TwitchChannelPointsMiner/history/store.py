@@ -514,39 +514,68 @@ class HistoryStore(object):
                 counts[name] = max(0, cursor.rowcount)
         return counts
 
-    def delete_streamer(self, streamer, segment, offset, deleted_at=None):
+    def delete_streamer(
+        self, streamer, segment, offset, deleted_at=None, connection=None
+    ):
         """Delete one streamer's rows; its journal records before
-        ``(segment, offset)`` (the journal's end at the time) stay ignored."""
+        ``(segment, offset)`` (the journal's end at the time) stay ignored.
+
+        ``connection`` is a write transaction the caller already holds
+        (see ``transaction``); without one, a transaction is opened here."""
 
         streamer = clean_streamer(streamer)
         if not streamer:
             return {}
-        counts = {}
-        with self.transaction() as connection:
-            for table in _STREAMER_TABLES:
-                cursor = connection.execute(
-                    f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
+        if connection is None:
+            with self.transaction() as connection:
+                return self._delete_streamer_rows(
+                    connection, streamer, segment, offset, deleted_at
                 )
-                counts[table] = max(0, cursor.rowcount)
-            existing = connection.execute(
-                "SELECT segment, offset FROM deleted_streamers WHERE streamer = ?",
-                (streamer,),
-            ).fetchone()
-            position = (str(segment or ""), int(offset or 0))
-            if existing is not None:
-                position = max(position, (existing["segment"], existing["offset"]))
-            connection.execute(
-                """
-                INSERT INTO deleted_streamers (streamer, segment, offset, deleted_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(streamer) DO UPDATE SET
-                    segment = excluded.segment,
-                    offset = excluded.offset,
-                    deleted_at = excluded.deleted_at
-                """,
-                (streamer, position[0], position[1], float(deleted_at or time.time())),
+        return self._delete_streamer_rows(
+            connection, streamer, segment, offset, deleted_at
+        )
+
+    @staticmethod
+    def _delete_streamer_rows(connection, streamer, segment, offset, deleted_at):
+        counts = {}
+        for table in _STREAMER_TABLES:
+            cursor = connection.execute(
+                f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
             )
+            counts[table] = max(0, cursor.rowcount)
+        HistoryStore._record_delete(connection, streamer, segment, offset, deleted_at)
         return {table: count for table, count in counts.items() if count}
+
+    def record_delete(self, streamer, segment, offset, deleted_at=None):
+        """Record a delete cutoff without deleting rows (see
+        ``JournalImporter.apply_saved_deletes``)."""
+
+        streamer = clean_streamer(streamer)
+        if not streamer:
+            return
+        with self.transaction() as connection:
+            self._record_delete(connection, streamer, segment, offset, deleted_at)
+
+    @staticmethod
+    def _record_delete(connection, streamer, segment, offset, deleted_at):
+        existing = connection.execute(
+            "SELECT segment, offset FROM deleted_streamers WHERE streamer = ?",
+            (streamer,),
+        ).fetchone()
+        position = (str(segment or ""), int(offset or 0))
+        if existing is not None:
+            position = max(position, (existing["segment"], existing["offset"]))
+        connection.execute(
+            """
+            INSERT INTO deleted_streamers (streamer, segment, offset, deleted_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(streamer) DO UPDATE SET
+                segment = excluded.segment,
+                offset = excluded.offset,
+                deleted_at = excluded.deleted_at
+            """,
+            (streamer, position[0], position[1], float(deleted_at or time.time())),
+        )
 
     def journal_status(self):
         with self._read_connection() as connection:
