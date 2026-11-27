@@ -20,6 +20,7 @@ from TwitchChannelPointsMiner.classes.Settings import (
 )
 from TwitchChannelPointsMiner.constants import URL, WATCH_STREAK_CLOCK_SKEW_SECONDS
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
+from TwitchChannelPointsMiner.history import journal as history_journal
 from TwitchChannelPointsMiner.utils import _millify
 
 logger = logging.getLogger(__name__)
@@ -388,10 +389,14 @@ class Streamer(object):
                     seen_live_at = snapshot_seen_live_at or 0
             else:
                 broadcast_id = self.stream.broadcast_id
-        if self.is_online is True:
-            self.offline_at = time.time()
-            self.is_online = False
-            bump_streamer_state(self.username)
+        with history_journal.lifecycle_lock(self.username):
+            went_offline = self.is_online is True
+            if went_offline:
+                self.offline_at = time.time()
+                self.is_online = False
+                bump_streamer_state(self.username)
+                history_journal.JOURNAL.record_offline(self, broadcast_id)
+        if went_offline:
             # Stop the watch timers now rather than at the watcher's next
             # cycle, and keep them stopped until the stream is back online:
             # if the same broadcast comes back, its streak state carries on,
@@ -420,14 +425,20 @@ class Streamer(object):
         )
 
     def set_online(self, drops_description=None):
-        if self.is_online is False:
-            self.online_at = time.time()
-            self.online_history = (getattr(self, "online_history", ()) or ()) + (
-                (self.stream.broadcast_id, self.online_at),
-            )
-            self.online_history = self.online_history[-ONLINE_HISTORY_SIZE:]
-            self.is_online = True
-            bump_streamer_state(self.username)
+        # The transition and its History record happen together, so two
+        # threads can't interleave them (see history/journal.py).
+        with history_journal.lifecycle_lock(self.username):
+            went_online = self.is_online is False
+            if went_online:
+                self.online_at = time.time()
+                self.online_history = (getattr(self, "online_history", ()) or ()) + (
+                    (self.stream.broadcast_id, self.online_at),
+                )
+                self.online_history = self.online_history[-ONLINE_HISTORY_SIZE:]
+                self.is_online = True
+                bump_streamer_state(self.username)
+                history_journal.JOURNAL.record_live(self)
+        if went_online:
             resume = getattr(self.stream, "resume_watch_streak", None)
             if callable(resume):
                 resumed = resume() is True

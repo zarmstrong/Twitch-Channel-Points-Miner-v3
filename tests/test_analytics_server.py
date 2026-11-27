@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -939,17 +940,28 @@ def test_filter_datas_filters_and_sorts_chart_records():
     assert [entry["x"] for entry in result["annotations"]] == [1500, 2500]
 
 
+# filter_datas reads its dates as local time. A date near 1970 makes CPython
+# look up a time before the epoch east of UTC, which Windows refuses (#405).
+FILTER_DAY = "2020-01-02"
+FILTER_DAY_START_MS = int(datetime(2020, 1, 2).timestamp() * 1000)
+FILTER_DAY_END_MS = int(datetime(2020, 1, 2, 23, 59, 59).timestamp() * 1000)
+
+
 def test_filter_datas_builds_no_stream_line_from_prior_balance():
     data = {
         "series": [
-            {"x": 1000, "y": 10, "z": "Watch"},
-            {"x": 2000, "y": 20, "z": "Watch"},
+            {"x": FILTER_DAY_START_MS - 2000, "y": 10, "z": "Watch"},
+            {"x": FILTER_DAY_START_MS - 1000, "y": 20, "z": "Watch"},
         ]
     }
 
-    result = filter_datas("1970-01-02", "1970-01-02", data)
+    result = filter_datas(FILTER_DAY, FILTER_DAY, data)
 
     assert [entry["y"] for entry in result["series"]] == [20, 20]
+    assert [entry["x"] for entry in result["series"]] == [
+        FILTER_DAY_START_MS,
+        FILTER_DAY_END_MS,
+    ]
     assert all(entry["z"] == "No Stream" for entry in result["series"])
 
 
@@ -972,9 +984,9 @@ def test_filter_datas_handles_non_dict_document():
 
 def test_filter_datas_defaults_missing_prior_balance_to_zero():
     result = filter_datas(
-        "1970-01-02",
-        "1970-01-02",
-        {"series": [{"x": 1000, "z": "Watch"}]},
+        FILTER_DAY,
+        FILTER_DAY,
+        {"series": [{"x": FILTER_DAY_START_MS - 1000, "z": "Watch"}]},
     )
 
     assert [entry["y"] for entry in result["series"]] == [0, 0]
@@ -982,16 +994,16 @@ def test_filter_datas_defaults_missing_prior_balance_to_zero():
 
 def test_filter_datas_ignores_malformed_numeric_fields():
     result = filter_datas(
-        "1970-01-02",
-        "1970-01-02",
+        FILTER_DAY,
+        FILTER_DAY,
         {
             "series": [
                 {"x": "bad", "y": 999},
-                {"x": 1000, "y": "bad"},
+                {"x": FILTER_DAY_START_MS - 1000, "y": "bad"},
             ],
             "annotations": [
                 {"x": "bad", "label": "invalid"},
-                {"x": 120000000, "label": "valid"},
+                {"x": FILTER_DAY_START_MS + 12 * 3600 * 1000, "label": "valid"},
             ],
         },
     )
@@ -1670,6 +1682,10 @@ def test_miner_passes_its_log_file_to_the_dashboard(monkeypatch):
             pass
 
     monkeypatch.setattr(server_module, "AnalyticsServer", FakeServer)
+    # analytics() also starts History, which would write a database.
+    monkeypatch.setattr(
+        "TwitchChannelPointsMiner.history.start_history", lambda *a, **k: None
+    )
     monkeypatch.setattr(Settings, "enable_analytics", True, raising=False)
     miner = object.__new__(TwitchChannelPointsMiner)
     miner.username = "someone"
@@ -1678,3 +1694,95 @@ def test_miner_passes_its_log_file_to_the_dashboard(monkeypatch):
     miner.analytics()
 
     assert created[0]["logs_file"] == "/logs/someone.20260101-120000.log"
+
+
+def test_analytics_delete_keeps_the_file_when_history_cannot_be_cleared(
+    monkeypatch, tmp_path
+):
+    import TwitchChannelPointsMiner.history as history_module
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "alice.json").write_text("{}", encoding="utf-8")
+
+    def locked(streamer, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(history_module, "delete_streamer_history", locked)
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 503
+    assert (tmp_path / "alice.json").exists()
+
+    deleted = []
+    monkeypatch.setattr(
+        history_module,
+        "delete_streamer_history",
+        lambda streamer, remove_source=None, **kwargs: (
+            deleted.append(streamer),
+            remove_source(),
+        ),
+    )
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 204
+    assert deleted == ["alice"]
+    assert not (tmp_path / "alice.json").exists()
+
+
+def test_analytics_delete_clears_history_written_before_it(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+    from TwitchChannelPointsMiner.history.importer import JournalImporter
+    from TwitchChannelPointsMiner.history.journal import Journal
+    from TwitchChannelPointsMiner.history.store import HistoryStore
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "alice.json").write_text("{}", encoding="utf-8")
+    journal = Journal()
+    journal.start(str(tmp_path / "history"))
+    alice = SimpleNamespace(
+        username="alice",
+        explicitly_configured=True,
+        stream=SimpleNamespace(broadcast_id="b1"),
+    )
+    journal.record_spend(alice, "goal", 100, "goal:1")
+    journal.stop()
+    store = HistoryStore(str(tmp_path / "history.sqlite3"))
+    store.initialize()
+
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 204
+    assert not (tmp_path / "alice.json").exists()
+    # The spend was journalled before the delete but not imported yet.
+    JournalImporter(store, str(tmp_path / "history")).poll()
+    assert store.streamers(days=3650) == []
+
+
+def test_analytics_delete_keeps_the_file_when_history_cannot_load(
+    monkeypatch, tmp_path
+):
+    import sys
+
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "alice.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "history.sqlite3").write_bytes(b"")
+    # The History package cannot be imported (for example, no sqlite3).
+    monkeypatch.setitem(sys.modules, "TwitchChannelPointsMiner.history", None)
+
+    response = server_module.delete_streamer_analytics("alice")
+
+    assert response.status_code == 503
+    assert (tmp_path / "alice.json").exists()
+
+    (tmp_path / "history.sqlite3").unlink()
+    response = server_module.delete_streamer_analytics("alice")
+    assert response.status_code == 204
+    assert not (tmp_path / "alice.json").exists()

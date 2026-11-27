@@ -4,4 +4,4 @@
 # a package only when it uses the matching feature.
 #
 # Apprise notifier (LoggerSettings(apprise=Apprise(...)))
-apprise==2.2.0
+apprise==2.3.0

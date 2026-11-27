@@ -23,6 +23,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
+from TwitchChannelPointsMiner.history import journal as history_journal
 from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_available
 
 # from pathlib import Path
@@ -111,8 +112,25 @@ def _stream_down_predates_online(message, streamer):
     )
 
 
+def _wager(prediction):
+    """The points of a predictions-user-v1 ``prediction``, or None."""
+
+    points = prediction.get("points") if isinstance(prediction, dict) else None
+    if isinstance(points, bool) or not isinstance(points, int) or points < 0:
+        return None
+    return points
+
+
 class WebSocketsPool:
-    __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
+    __slots__ = [
+        "ws",
+        "twitch",
+        "streamers",
+        "events_predictions",
+        "topic_lock",
+        "prediction_timers",
+        "ended",
+    ]
 
     def __init__(self, twitch, streamers, events_predictions):
         # Read without topic_lock by the main loop's checks; see CopyOnWriteList.
@@ -121,6 +139,10 @@ class WebSocketsPool:
         self.streamers = streamers
         self.events_predictions = events_predictions
         self.topic_lock = RLock()
+        # Bets scheduled to be placed, and whether end() ran; under
+        # topic_lock.
+        self.prediction_timers = set()
+        self.ended = False
 
     """
     API Limits
@@ -265,8 +287,85 @@ class WebSocketsPool:
             websockets = list(self.ws)
             for websocket in websockets:
                 websocket.forced_close = True
+            # A stopped miner places no more bets.
+            self.ended = True
+            for timer in getattr(self, "prediction_timers", ()):
+                timer.cancel()
         for websocket in websockets:
             websocket.close()
+
+    @staticmethod
+    def _record_prediction_result(streamer, event_prediction, data):
+        """Journal a prediction's result with what the account actually
+        gained: the points won less the confirmed wager, unknown (None) when
+        the wager is."""
+
+        prediction = data.get("prediction") if isinstance(data, dict) else None
+        result = prediction.get("result") if isinstance(prediction, dict) else None
+        if not isinstance(result, dict):
+            return
+        result_type = result.get("type")
+        if not isinstance(result_type, str) or not result_type:
+            return
+        wager = _wager(prediction)
+        if wager is None:
+            wager = getattr(event_prediction, "confirmed_points", None)
+        won = result.get("points_won") or 0
+        if result_type == "REFUND":
+            delta = 0
+        elif wager is None or isinstance(won, bool) or not isinstance(won, int):
+            delta = None
+        else:
+            delta = won - wager
+        history_journal.JOURNAL.record_event(
+            streamer, result_type, f"{event_prediction.title}", points_delta=delta
+        )
+
+    @staticmethod
+    def _prediction_made_label(event_prediction, data):
+        """History's label for a prediction the account made, from the
+        message itself: the bet may have been placed by hand, before the
+        miner decided anything or on another outcome."""
+
+        title = event_prediction.title
+        prediction = data.get("prediction") if isinstance(data, dict) else None
+        outcome_id = (
+            prediction.get("outcome_id") if isinstance(prediction, dict) else None
+        )
+        outcomes = getattr(event_prediction.bet, "outcomes", None) or ()
+        for outcome in outcomes:
+            if (
+                outcome_id is not None
+                and isinstance(outcome, dict)
+                and outcome.get("id") == outcome_id
+                and outcome.get("title")
+            ):
+                return f"Decision: {outcome['title']} - {title}"
+        return f"{title}"
+
+    @staticmethod
+    def _schedule_prediction(ws, delay, event):
+        """Place ``event``'s bet after ``delay`` seconds; False once the pool
+        has ended."""
+
+        timer = Timer(delay, ws.twitch.make_predictions, (event,))
+        timer.daemon = True
+        pool = getattr(ws, "parent_pool", None)
+        if pool is None:
+            timer.start()
+            return True
+        with pool.topic_lock:
+            if getattr(pool, "ended", False):
+                return False
+            timers = getattr(pool, "prediction_timers", None)
+            if timers is not None:
+                for started in list(timers):
+                    alive = getattr(started, "is_alive", None)
+                    if callable(alive) and not alive():
+                        timers.discard(started)
+                timers.add(timer)
+            timer.start()
+        return True
 
     @staticmethod
     def on_open(ws):
@@ -398,6 +497,30 @@ class WebSocketsPool:
                 self.__submit(ws.index, topic, replay=True, target=replacement)
 
     @staticmethod
+    def _record_history(ws, message):
+        """Journal a points message or redemption for History (which applies
+        its own eligibility rule and duplicate check)."""
+
+        if message.topic != "community-points-user-v1":
+            return
+        try:
+            if message.type == "reward-redeemed":
+                # A redemption's generic channel_id falls back to the user's
+                # own id, so find its channel from the redemption itself.
+                redemption = (message.data or {}).get("redemption") or {}
+                redeemed_on = get_streamer(ws.streamers, redemption.get("channel_id"))
+                if redeemed_on is not None:
+                    history_journal.JOURNAL.record_redemption(redeemed_on, message.data)
+            elif message.type in ("points-earned", "points-spent"):
+                streamer = get_streamer(ws.streamers, message.channel_id)
+                if streamer is not None:
+                    history_journal.JOURNAL.record_points_message(
+                        streamer, message.type, message.data
+                    )
+        except Exception:
+            logger.debug("Unable to journal a points message", exc_info=True)
+
+    @staticmethod
     def on_message(ws, message):
         logger.debug(f"#{ws.index} - Received: {message.strip()}")
         response = json.loads(message)
@@ -405,6 +528,11 @@ class WebSocketsPool:
         if response["type"] == "MESSAGE":
             # We should create a Message class ...
             message = Message(response["data"])
+
+            # History dedupes points messages and redemptions itself, so it
+            # sees them before the coarse filter below, which also drops a
+            # distinct message that shares a timestamp with the previous one.
+            WebSocketsPool._record_history(ws, message)
 
             # If we have more than one PubSub connection, messages may be duplicated
             # Check the concatenation between message_type.top.channel_id
@@ -427,6 +555,13 @@ class WebSocketsPool:
                 elif message.type == "drop-progress":
                     logger.debug(f"Drop progress: {message.data}")
                     ws.twitch.record_drop_progress_event(message.data)
+                return
+
+            # History recorded the redemption above; nothing else uses it.
+            if (
+                message.topic == "community-points-user-v1"
+                and message.type == "reward-redeemed"
+            ):
                 return
 
             # Resolve the streamer once: the list can shrink or reorder while
@@ -566,13 +701,12 @@ class WebSocketsPool:
                                             current_tmsp
                                         )
 
-                                        place_bet_thread = Timer(
+                                        if not WebSocketsPool._schedule_prediction(
+                                            ws,
                                             start_after,
-                                            ws.twitch.make_predictions,
-                                            (ws.events_predictions[event_id],),
-                                        )
-                                        place_bet_thread.daemon = True
-                                        place_bet_thread.start()
+                                            ws.events_predictions[event_id],
+                                        ):
+                                            return
 
                                         logger.info(
                                             f"Place the bet after: {start_after}s for: {ws.events_predictions[event_id]}",
@@ -612,6 +746,12 @@ class WebSocketsPool:
                                 message.type == "prediction-result"
                                 and event_prediction.bet_confirmed
                             ):
+                                # First, and from the message alone: the bet
+                                # may have been placed by hand, with no (or
+                                # another) decision by the miner.
+                                WebSocketsPool._record_prediction_result(
+                                    streamer, event_prediction, message.data
+                                )
                                 points = event_prediction.parse_result(
                                     message.data["prediction"]["result"]
                                 )
@@ -657,6 +797,16 @@ class WebSocketsPool:
                                         )
                             elif message.type == "prediction-made":
                                 event_prediction.bet_confirmed = True
+                                event_prediction.confirmed_points = _wager(
+                                    message.data.get("prediction")
+                                )
+                                history_journal.JOURNAL.record_event(
+                                    streamer,
+                                    "PREDICTION_MADE",
+                                    WebSocketsPool._prediction_made_label(
+                                        event_prediction, message.data
+                                    ),
+                                )
                                 # Analytics switch
                                 if Settings.enable_analytics is True:
                                     streamer.persistent_annotations(
