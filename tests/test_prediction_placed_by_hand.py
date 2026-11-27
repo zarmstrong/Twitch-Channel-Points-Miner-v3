@@ -2,6 +2,7 @@
 own decision (#404)."""
 
 import json
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -495,12 +496,49 @@ def test_a_refund_with_no_amounts_is_left_as_credited(streamer, event, logger):
     assert streamer.history == {"REFUND": {"counter": 1, "amount": 40}}
 
 
+class _WaitSignal(threading.Event):
+    """miner_bet_answered that says when a result starts waiting on it."""
+
+    def __init__(self):
+        super().__init__()
+        self.waiting = threading.Event()
+        self.set()
+
+    def wait(self, timeout=None):
+        self.waiting.set()
+        return super().wait(timeout)
+
+
+def _while_the_request_waits(streamer, event, deliver, answer):
+    """A request function for _miner_bets: on the websocket's thread,
+    ``deliver()`` sends messages; the request answers ``answer`` (raises it)
+    only once a result waits for that answer."""
+
+    event.miner_bet_answered = _WaitSignal()
+    threads = []
+
+    def request(event_id, outcome_id, amount):
+        thread = threading.Thread(target=deliver, daemon=True)
+        threads.append(thread)
+        thread.start()
+        assert event.miner_bet_answered.waiting.wait(5)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return request, threads
+
+
+def _join(threads):
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+
+
 def test_a_result_before_the_miners_request_answers_is_the_miners_bet(
     streamer, event, logger
 ):
-    def answer_after_the_result(event_id, outcome_id, amount):
-        # Twitch's confirmation and the result arrive while the request
-        # still waits for its answer.
+    def deliver():
         _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
         _credited(streamer, "PREDICTION", 250)
         _send(
@@ -512,15 +550,46 @@ def test_a_result_before_the_miners_request_answers_is_the_miners_bet(
                 "result": {"type": "WIN", "points_won": 250},
             },
         )
-        return MakePredictionResponse(None)
 
-    _miner_bets(
-        event,
-        {"choice": 0, "amount": 100, "id": "outcome-yes"},
-        answer_after_the_result,
+    request, threads = _while_the_request_waits(
+        streamer, event, deliver, MakePredictionResponse(None)
     )
+    _miner_bets(event, {"choice": 0, "amount": 100, "id": "outcome-yes"}, request)
+    _join(threads)
 
     assert event.placed_by_hand is False
     assert _result_line(logger).endswith("Result: WIN, Gained: +150")
     assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 150}}
-    assert (event.bet_placed, event.miner_bet_pending) == (True, False)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        MakePredictionResponse(Error("NOT_ALLOWED")),
+        RetryError("MakePrediction", []),
+    ],
+    ids=["refused", "request-failed"],
+)
+def test_a_bet_by_hand_while_the_miners_request_fails_does_not_use_its_amount(
+    streamer, event, logger, answer
+):
+    def deliver():
+        _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+        _send(
+            streamer,
+            event,
+            "prediction-result",
+            {
+                "outcome_id": "outcome-yes",
+                "result": {"type": "LOSE", "points_won": None},
+            },
+        )
+
+    request, threads = _while_the_request_waits(streamer, event, deliver, answer)
+    _miner_bets(event, {"choice": 0, "amount": 300, "id": "outcome-yes"}, request)
+    _join(threads)
+
+    line = _result_line(logger)
+    assert "300" not in line
+    assert line.endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}

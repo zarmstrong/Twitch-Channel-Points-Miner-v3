@@ -1,7 +1,13 @@
+import threading
+
 from TwitchChannelPointsMiner.classes.entities.Bet import Bet
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.utils import float_round, millify
+
+# How long a prediction result waits for the miner's own bet request to be
+# answered (see wait_for_miner_bet).
+MINER_BET_WAIT_SECONDS = 30.0
 
 
 def _points(value):
@@ -28,7 +34,7 @@ class EventPrediction(object):
         "confirmed_outcome_id",
         "confirmed_points",
         "miner_bet_requested",
-        "miner_bet_pending",
+        "miner_bet_answered",
         "placed_by_hand",
         "wager_unknown",
     ]
@@ -64,7 +70,9 @@ class EventPrediction(object):
         # The miner sent its own bet (set before the request), and
         # bet_placed: Twitch accepted it.
         self.miner_bet_requested = False
-        self.miner_bet_pending = False
+        # Clear while the miner's bet request waits for Twitch's answer.
+        self.miner_bet_answered = threading.Event()
+        self.miner_bet_answered.set()
         self.placed_by_hand = False
         # Points were added to the bet without a new total.
         self.wager_unknown = False
@@ -114,13 +122,21 @@ class EventPrediction(object):
             self.confirmed_points = None
             self.wager_unknown = True
 
+    def wait_for_miner_bet(self, timeout=MINER_BET_WAIT_SECONDS):
+        """Wait (at most ``timeout`` seconds) for Twitch's answer to the
+        miner's bet request, if one is being made: until then it isn't known
+        whether the miner's decision is part of the bet."""
+
+        answered = getattr(self, "miner_bet_answered", None)
+        if answered is not None:
+            answered.wait(timeout)
+
     def _miner_choice(self):
-        """The miner's decision, if Twitch accepted the bet it placed (or
-        the request is still waiting for Twitch's answer)."""
+        """The miner's decision, if Twitch accepted the bet it placed."""
 
         choice = self.bet.decision.get("choice")
         if (
-            (self.bet_placed or self.miner_bet_pending)
+            self.bet_placed
             and isinstance(choice, int)
             and not isinstance(choice, bool)
             and 0 <= choice < len(self.bet.outcomes)

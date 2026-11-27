@@ -660,8 +660,12 @@ class WebSocketsPool:
                                 # The result names the bet too; prefer it to
                                 # the miner's decision, which may be missing
                                 # (a bet placed by hand before the timer) or
-                                # on another outcome.
+                                # on another outcome.  If the miner's own bet
+                                # request is still waiting for Twitch's
+                                # answer, whether it is part of the bet is
+                                # known only once it is answered.
                                 event_prediction.confirm_bet(message.data["prediction"])
+                                event_prediction.wait_for_miner_bet()
                                 points = event_prediction.parse_result(
                                     message.data["prediction"]["result"]
                                 )

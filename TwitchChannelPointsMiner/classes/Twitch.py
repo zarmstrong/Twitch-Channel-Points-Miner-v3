@@ -8576,10 +8576,12 @@ class Twitch(object):
                     )
 
                     # Before the request: Twitch's confirmation of this bet,
-                    # even its result, can arrive before its answer, and
-                    # counts as the miner's while the request is pending.
+                    # even its result, can arrive before its answer.  A result
+                    # waits for the answer (EventPrediction.wait_for_miner_bet).
                     event.miner_bet_requested = True
-                    event.miner_bet_pending = True
+                    answered = getattr(event, "miner_bet_answered", None)
+                    if answered is not None:
+                        answered.clear()
                     try:
                         response = self.gql.make_prediction(
                             event.event_id, decision["id"], decision["amount"]
@@ -8604,7 +8606,8 @@ class Twitch(object):
                         else:
                             event.bet_placed = True
                     finally:
-                        event.miner_bet_pending = False
+                        if answered is not None:
+                            answered.set()
                 else:
                     logger.info(
                         f"Bet won't be placed as the amount {_millify(decision['amount'])} is less than the minimum required 10",
