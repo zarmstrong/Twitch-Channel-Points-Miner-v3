@@ -48,7 +48,9 @@ ANALYTICS_CONFIG = {
 
 The guard accepts `127.0.0.1`, `localhost`, `::1`, and the names in
 `allowed_hosts`; it rejects any other `Host` header. Add only hostnames you
-control.
+control. An entry can also be a URL such as `https://miner.example.com`:
+the miner keeps only its host name, and logs a warning at startup for any
+entry it can't read as a host name.
 
 ## Docker Compose labels
 

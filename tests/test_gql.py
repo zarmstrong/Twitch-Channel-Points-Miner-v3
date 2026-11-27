@@ -1067,6 +1067,24 @@ def test_watch_streak_operations_use_current_persisted_queries():
     )
 
 
+@pytest.mark.parametrize("operation", ["get_stream_live_status", "get_reward_list"])
+def test_watch_streak_operations_do_not_retry(operation):
+    # Both run on the minute watcher; a failed check is retried minutes later,
+    # so retries would only hold up minute-watched events.
+    calls = []
+
+    def post(url, json, headers):
+        calls.append(json["operationName"])
+        raise requests.ConnectionError("offline")
+
+    gql = GQL(client_session(), post_request=post)
+
+    with pytest.raises(RetryError):
+        getattr(gql, operation)("channel-1")
+
+    assert len(calls) == 1
+
+
 def test_playback_authorization_accepts_null_forbidden_reason():
     payload = {
         "data": {

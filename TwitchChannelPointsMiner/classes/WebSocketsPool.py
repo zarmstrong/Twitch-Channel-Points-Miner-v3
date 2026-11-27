@@ -1,7 +1,9 @@
+import functools
 import json
 import logging
 import random
 import time
+from datetime import timezone
 
 # import os
 from threading import Lock, RLock, Thread, Timer
@@ -13,7 +15,11 @@ from TwitchChannelPointsMiner.classes.entities.CommunityGoal import CommunityGoa
 from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPrediction
 from TwitchChannelPointsMiner.classes.entities.Message import Message
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
-from TwitchChannelPointsMiner.classes.entities.Streamer import is_drop_discovered
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    bump_streamer_state,
+    is_drop_discovered,
+    run_under_state_lock,
+)
 from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
@@ -23,6 +29,86 @@ from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_ava
 
 
 logger = logging.getLogger(__name__)
+
+
+def _sent_at(message):
+    """Twitch's send time of a PubSub message in epoch seconds, or None."""
+    try:
+        sent = parser.parse(message.timestamp)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if sent.tzinfo is None:
+        # Twitch's timestamps are UTC; without an offset, timestamp() would
+        # read it as the host's local time.
+        sent = sent.replace(tzinfo=timezone.utc)
+    try:
+        return sent.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _apply_stream_down(message, streamer, received_at):
+    """Handle a stream-down; called under the streamer's state lock, maybe
+    later than it arrived (received_at, local time)."""
+    if streamer.is_online is not True:
+        return
+    seen_live_at = getattr(getattr(streamer, "stream", None), "live_seen_at", 0) or 0
+    if seen_live_at > received_at:
+        # A refresh sent after this stream-down arrived found the stream
+        # live: newer than the stream-down, so the stream stays online.
+        logger.debug(
+            f"Ignoring a stream-down for {streamer.username}: a later "
+            "refresh found it live"
+        )
+        return
+    if _stream_down_predates_online(message, streamer):
+        # Ask Twitch on the next online check instead of ending a broadcast
+        # that may still be live.
+        request_refresh = getattr(streamer.stream, "request_refresh", None)
+        if callable(request_refresh):
+            request_refresh()
+        logger.debug(
+            f"Rechecking a stream-down for {streamer.username} sent before "
+            "it was last marked online"
+        )
+        return
+    streamer.set_offline()
+
+
+def _check_online_in_background(twitch, streamer):
+    """Run a websocket-triggered online check on its own thread.
+
+    The check makes Twitch requests; on the socket's thread it would hold up
+    every later message on that socket (stream-downs, awards, predictions,
+    pongs). It doesn't wait for a refresh already running on another thread.
+    """
+
+    def check():
+        try:
+            twitch.check_streamer_online(streamer, blocking=False)
+        except Exception:
+            logger.error(
+                f"Exception raised while checking whether {streamer.username} "
+                "is online",
+                exc_info=True,
+            )
+
+    Thread(target=check, name=f"online-check-{streamer.username}", daemon=True).start()
+
+
+def _stream_down_predates_online(message, streamer):
+    """Whether Twitch sent this stream-down before the miner last marked the
+    streamer online (see Streamer.sent_before_online()).
+
+    Such a stream-down can be about the earlier broadcast: delayed in
+    delivery, or sent while the refresh that found the next broadcast was
+    in flight. It can also be the current broadcast's, if that ended while
+    the reply that showed it live was in flight. Only Twitch can tell.
+    """
+    sent_before_online = getattr(streamer, "sent_before_online", None)
+    return (
+        callable(sent_before_online) and sent_before_online(_sent_at(message)) is True
+    )
 
 
 class WebSocketsPool:
@@ -382,7 +468,9 @@ class WebSocketsPool:
                                     "event": Events.get(f"GAIN_FOR_{reason_code}"),
                                 },
                             )
-                            streamer.update_history(reason_code, earned)
+                            streamer.update_history(
+                                reason_code, earned, awarded_at=_sent_at(message)
+                            )
                             # Analytics switch
                             if Settings.enable_analytics is True:
                                 streamer.persistent_annotations(
@@ -399,11 +487,26 @@ class WebSocketsPool:
                         if message.type == "stream-up":
                             streamer.stream_up = time.time()
                         elif message.type == "stream-down":
-                            if streamer.is_online is True:
-                                streamer.set_offline()
+                            # The bump makes a refresh whose requests are out
+                            # drop its reply, which may predate this
+                            # stream-down, instead of putting the ended
+                            # broadcast back online. The rest runs under the
+                            # state lock, deferred if a refresh is applying
+                            # its reply right now.
+                            bump_streamer_state(streamer.username)
+                            run_under_state_lock(
+                                streamer.username,
+                                functools.partial(
+                                    _apply_stream_down,
+                                    message,
+                                    streamer,
+                                    time.time(),
+                                ),
+                                "stream-down",
+                            )
                         elif message.type == "viewcount":
                             if streamer.stream_up_elapsed():
-                                ws.twitch.check_streamer_online(streamer)
+                                _check_online_in_background(ws.twitch, streamer)
 
                     elif message.topic == "raid":
                         if message.type == "raid_update_v2":

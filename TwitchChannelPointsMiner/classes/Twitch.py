@@ -16,6 +16,7 @@ import string
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import choice, token_hex
@@ -59,6 +60,9 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_sources,
     is_category_tier,
     is_drop_discovered,
+    streamer_refresh_lock,
+    streamer_state_generation,
+    streamer_state_lock,
 )
 from TwitchChannelPointsMiner.classes.Exceptions import (
     CategoryLookupFailedException,
@@ -90,6 +94,7 @@ from TwitchChannelPointsMiner.constants import (
     DROP_ID,
     URL,
     USER_AGENTS,
+    WATCH_STREAK_MAX_MINUTES_DEFAULT,
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
@@ -177,6 +182,17 @@ def _watch_reward_claim_pass_lock(twitch):
 def _watch_reward_lock(twitch):
     # Same defensive getattr as below: some tests build Twitch via __new__.
     return getattr(twitch, "watch_reward_lock", None) or _WATCH_REWARD_FALLBACK_LOCK
+
+
+_DROP_REPORT_ORDER_FALLBACK_LOCK = RLock()
+
+
+def _drop_report_order_lock(twitch):
+    # Same defensive getattr as above.
+    return (
+        getattr(twitch, "drop_report_order_lock", None)
+        or _DROP_REPORT_ORDER_FALLBACK_LOCK
+    )
 
 
 def _channel_progress_query_lock(twitch):
@@ -284,6 +300,10 @@ STREAK_ONLY_WATCH_MINUTES = 10
 # milestone that advances mid-broadcast does not stay pending all stream long.
 WATCH_STREAK_RECONCILE_AFTER_MINUTES = 5
 WATCH_STREAK_RECONCILE_INTERVAL_SECONDS = 3 * 60
+# Answered milestone checks a streak_only channel gets after its window
+# closes, a cooldown apart: Twitch may not have processed the window's last
+# minutes by the first one.
+WATCH_STREAK_FINAL_CHECKS = 3
 
 
 class Twitch(object):
@@ -384,6 +404,7 @@ class Twitch(object):
         "campaign_game_slugs",
         "watch_reward_campaigns",
         "watch_reward_lock",
+        "drop_report_order_lock",
         "watch_reward_lookup_failures",
         "watch_reward_claim_thread",
         "watch_reward_claim_pass_lock",
@@ -573,8 +594,19 @@ class Twitch(object):
         # last channel listing that included them (see RewardCampaign.py).
         self.watch_reward_campaigns = {}
         # Held while a record is compared with the stored one and replaced:
-        # the discovery and sync threads both store them.
+        # the discovery and sync threads both store them. Only ever for as
+        # long as that takes, never across a request or a write to disk: the
+        # claim thread and the main loop read what is due under it.
         self.watch_reward_lock = Lock()
+        # Keeps the rows of the Drops report in the order they were decided
+        # in (see __save_drop_snapshot_if_new). Held across a write to disk,
+        # which can stall, so nothing that only reads the stored records
+        # takes it. Taken after the claim locks and before the watch-reward
+        # lock, never while holding that one or the analytics mutex.
+        # Reentrant: the write is a callback, and one that came to store a
+        # record or mark a claim accepted would take it again on the same
+        # thread.
+        self.drop_report_order_lock = RLock()
         # The drop each accepted claim ID was last accepted for. A repeating
         # reward group is claimed under one ID once per repeat.
         self.accepted_claim_drop_ids = {}
@@ -613,6 +645,9 @@ class Twitch(object):
         self.completed_badge_campaign_unsignable_warned_at = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
+        # A restart requested from the dashboard ends a TV login that is
+        # still waiting for the user to enter the activation code.
+        self.twitch_login.stop_event = self.restart_requested
         self.stream_segment_watchers = {}
         # channel_id -> (ChannelBanStatus or None while unknown, next check
         # time). Only the minute watcher reads and writes it.
@@ -977,23 +1012,35 @@ class Twitch(object):
         """Call `save` to write this progress snapshot to the report if it
         is to be saved, recording it as saved. Returns whether it was.
 
-        Decided, recorded and written in one step, under the lock a reward
-        campaign's record is stored under: the sync and the minute watcher
-        work on copies, and a listing that finds a window started over
+        Decided, recorded and written in one step, under the report-order
+        lock: the sync and the minute watcher work on copies of a reward
+        campaign's record, and a listing that finds a window started over
         forgets what was saved for the drop. A copy from before that
         listing, recorded or written after it, would put the old window's
-        minutes back in the report over the new one's."""
-        with _watch_reward_lock(self):
-            if self.__reward_snapshot_is_stale(
-                str(tracking_key).split("|", 1)[0], minutes_watched, status
-            ):
-                return False
-            if (
-                self.__should_save_drop_snapshot(tracking_key, minutes_watched, status)
-                is False
-            ):
-                return False
-            self.__mark_drop_snapshot_saved(tracking_key, minutes_watched, status)
+        minutes back in the report over the new one's. So a listing takes
+        this lock too, to store its record (see
+        __remember_watch_reward_campaign).
+
+        The watch-reward lock, which the stored records are read under, is
+        held for the decision alone and not for the write: a write can
+        stall (a slow disk, a network share), and the claim thread and the
+        main loop take that lock to see what is due. A claim to send again
+        in a campaign's last minutes would wait behind the write, past the
+        campaign's end."""
+        with _drop_report_order_lock(self):
+            with _watch_reward_lock(self):
+                if self.__reward_snapshot_is_stale(
+                    str(tracking_key).split("|", 1)[0], minutes_watched, status
+                ):
+                    return False
+                if (
+                    self.__should_save_drop_snapshot(
+                        tracking_key, minutes_watched, status
+                    )
+                    is False
+                ):
+                    return False
+                self.__mark_drop_snapshot_saved(tracking_key, minutes_watched, status)
             save()
             return True
 
@@ -1003,15 +1050,18 @@ class Twitch(object):
         before (-1 for none), or None when there was nothing new to save.
         See __save_drop_snapshot_if_new."""
         progress_key = drop.id
-        with _watch_reward_lock(self):
-            last_saved_minutes = self.drop_progress_last_saved.get(progress_key, -1)
-            if drop.current_minutes_watched <= last_saved_minutes:
-                return None
-            if self.__reward_snapshot_is_stale(
-                str(progress_key), drop.current_minutes_watched
-            ):
-                return None
-            self.drop_progress_last_saved[progress_key] = drop.current_minutes_watched
+        with _drop_report_order_lock(self):
+            with _watch_reward_lock(self):
+                last_saved_minutes = self.drop_progress_last_saved.get(progress_key, -1)
+                if drop.current_minutes_watched <= last_saved_minutes:
+                    return None
+                if self.__reward_snapshot_is_stale(
+                    str(progress_key), drop.current_minutes_watched
+                ):
+                    return None
+                self.drop_progress_last_saved[progress_key] = (
+                    drop.current_minutes_watched
+                )
             save()
             return last_saved_minutes
 
@@ -1772,6 +1822,10 @@ class Twitch(object):
         )
         return saved
 
+    def __restart_pending(self):
+        restart_requested = getattr(self, "restart_requested", None)
+        return restart_requested is not None and restart_requested.is_set()
+
     def __client_id(self):
         """The client ID that issued the login token (TV, or Android when
         android_login is on); Twitch rejects a token sent with another."""
@@ -1780,7 +1834,19 @@ class Twitch(object):
     def login(self):
         if not os.path.isfile(self.cookies_file):
             if self.twitch_login.login_flow():
-                self.twitch_login.save_cookies(self.cookies_file)
+                try:
+                    self.twitch_login.save_cookies(self.cookies_file)
+                except Exception:
+                    # A restart landing during the last request must not turn
+                    # a failed save into a crash; the runner restarts and the
+                    # next start logs in again.
+                    if not self.__restart_pending():
+                        raise
+                    logger.exception("Could not save the login before restarting")
+                    return
+            elif self.__restart_pending():
+                # The login was stopped for a restart; run() returns next.
+                return
             elif self.__client_id() == ANDROID_CLIENT_ID:
                 # Unlike the TV flow, nothing here can wait for the user:
                 # without a token every request would fail.
@@ -1805,43 +1871,125 @@ class Twitch(object):
         self.update_client_version()
 
     # === STREAMER / STREAM / INFO === #
+    @staticmethod
+    def _streamer_state_lock(streamer):
+        """The lock that guards this streamer's online state (see
+        streamer_state_lock())."""
+        username = getattr(streamer, "username", None)
+        if username is None:
+            return nullcontext()
+        return streamer_state_lock(username)
+
+    @staticmethod
+    def _streamer_refresh_lock(streamer):
+        """The lock that serializes this streamer's refreshes (see
+        streamer_refresh_lock()); a private one for a streamer without a
+        username."""
+        username = getattr(streamer, "username", None)
+        if username is None:
+            return RLock()
+        return streamer_refresh_lock(username)
+
+    @staticmethod
+    def _streamer_state_generation(streamer):
+        username = getattr(streamer, "username", None)
+        return 0 if username is None else streamer_state_generation(username)
+
+    def _refresh_superseded(self, streamer, generation):
+        """Whether the streamer's state moved on since generation was read,
+        while a refresh's requests were out (see bump_streamer_state()).
+
+        The reply is then older than what happened meanwhile, so it is
+        dropped and the next online check asks Twitch again. Called under
+        the state lock.
+        """
+        if self._streamer_state_generation(streamer) == generation:
+            return False
+        request_refresh = getattr(streamer.stream, "request_refresh", None)
+        if callable(request_refresh):
+            request_refresh()
+        logger.debug(
+            f"Dropping a stream refresh for {streamer.username}: its online "
+            "state changed while Twitch answered"
+        )
+        return True
+
     def update_stream(self, streamer):
-        if streamer.stream.update_required() is True:
-            stream_info = self.get_stream_info(streamer)
-            if stream_info is not None:
-                streamer.stream.update(
-                    broadcast_id=stream_info["stream"]["id"],
-                    title=stream_info["broadcastSettings"]["title"],
-                    game=stream_info["broadcastSettings"]["game"],
-                    tags=stream_info["stream"]["tags"],
-                    viewers_count=stream_info["stream"]["viewersCount"],
-                )
+        """Refresh the stream info if it is due.
 
-                event_properties = {
-                    "channel_id": streamer.channel_id,
-                    "broadcast_id": streamer.stream.broadcast_id,
-                    "player": "site",
-                    "user_id": self.twitch_login.get_user_id(),
-                    "live": True,
-                    "channel": streamer.username,
-                }
+        Raises StreamerIsOfflineException when Twitch reports the stream
+        offline. The requests run outside the state lock, so websocket
+        handlers never wait for Twitch; a reply that something newer
+        overtook meanwhile is dropped.
+        """
+        with self._streamer_refresh_lock(streamer):
+            generation = self._streamer_state_generation(streamer)
+            fetched = self._fetch_stream_update(streamer)
+            if fetched is None:
+                return
+            with self._streamer_state_lock(streamer):
+                if self._refresh_superseded(streamer, generation):
+                    return
+                self._apply_stream_update(streamer, fetched)
+            self._update_stream_campaigns(streamer)
 
-                if (
-                    streamer.stream.game_name() is not None
-                    and streamer.stream.game_id() is not None
-                ):
-                    event_properties["game"] = streamer.stream.game_name()
-                    event_properties["game_id"] = streamer.stream.game_id()
+    def _fetch_stream_update(self, streamer):
+        """Fetch the stream info if a refresh is due.
 
-                if streamer.settings.claim_drops is True:
-                    # Update also the campaigns_ids so we are sure to tracking the correct campaign
-                    streamer.stream.campaigns_ids = (
-                        self.__get_campaign_ids_from_streamer(streamer)
-                    )
+        Returns (request time, stream info), or None when no refresh is due
+        or the request failed. Raises StreamerIsOfflineException.
+        """
+        if streamer.stream.update_required() is not True:
+            return None
+        # The response proves the stream was live at some point after the
+        # request went out, so the request time is a safe "seen live".
+        requested_at = time.time()
+        stream_info = self.get_stream_info(streamer)
+        if stream_info is None:
+            return None
+        return requested_at, stream_info
 
-                streamer.stream.payload = [
-                    {"event": "minute-watched", "properties": event_properties}
-                ]
+    def _apply_stream_update(self, streamer, fetched):
+        """Apply a _fetch_stream_update() reply. Called under the state
+        lock; makes no requests."""
+        requested_at, stream_info = fetched
+        streamer.stream.update(
+            seen_live_at=requested_at,
+            broadcast_id=stream_info["stream"]["id"],
+            title=stream_info["broadcastSettings"]["title"],
+            game=stream_info["broadcastSettings"]["game"],
+            tags=stream_info["stream"]["tags"],
+            viewers_count=stream_info["stream"]["viewersCount"],
+        )
+
+        event_properties = {
+            "channel_id": streamer.channel_id,
+            "broadcast_id": streamer.stream.broadcast_id,
+            "player": "site",
+            "user_id": self.twitch_login.get_user_id(),
+            "live": True,
+            "channel": streamer.username,
+        }
+
+        if (
+            streamer.stream.game_name() is not None
+            and streamer.stream.game_id() is not None
+        ):
+            event_properties["game"] = streamer.stream.game_name()
+            event_properties["game_id"] = streamer.stream.game_id()
+
+        streamer.stream.payload = [
+            {"event": "minute-watched", "properties": event_properties}
+        ]
+
+    def _update_stream_campaigns(self, streamer):
+        """Resolve the campaigns of the stream info just applied. Makes
+        requests, so it runs outside the state lock."""
+        if streamer.settings.claim_drops is True:
+            # Update also the campaigns_ids so we are sure to tracking the correct campaign
+            streamer.stream.campaigns_ids = self.__get_campaign_ids_from_streamer(
+                streamer
+            )
 
     def get_spade_url(self, streamer):
         try:
@@ -1922,33 +2070,125 @@ class Twitch(object):
             },
         }
 
-    def check_streamer_online(self, streamer):
-        if time.time() < streamer.offline_at + 60:
-            return
+    def check_streamer_online(self, streamer, blocking=True):
+        """Refresh the streamer and mark it online or offline to match.
 
+        Refreshes of one streamer run one at a time (the refresh lock). With
+        blocking=False, return at once when another thread is already
+        refreshing it: a websocket handler must not wait for Twitch.
+        """
+        refresh_lock = self._streamer_refresh_lock(streamer)
+        if not refresh_lock.acquire(blocking=blocking):
+            return
+        try:
+            went_online = self._check_streamer_online_locked(streamer)
+        finally:
+            refresh_lock.release()
+        if went_online is True:
+            # After both locks: two GQL requests, and the check already
+            # handles the broadcast changing while they run.
+            self.reconcile_watch_streak(streamer)
+
+    def _check_streamer_online_locked(self, streamer):
+        """Called under the refresh lock. Returns whether the streamer went
+        online. The requests run outside the state lock, and each reply is
+        applied, with the online/offline change it leads to, in one hold of
+        it, unless the state moved on while the requests were out."""
+        if time.time() < streamer.offline_at + 60:
+            return False
+
+        generation = self._streamer_state_generation(streamer)
         if streamer.is_online is False:
             try:
                 self.get_spade_url(streamer)
-                self.update_stream(streamer)
-                # get_stream_info() returns None on a transient GQL failure
-                # instead of raising, which leaves the stream un-updated. Only
-                # announce the streamer online once its stream info loaded;
-                # otherwise the next check retries.
-                if streamer.stream.update_required() is True:
-                    return
+                fetched = self._fetch_stream_update(streamer)
+            except StreamerIsOfflineException:
+                with self._streamer_state_lock(streamer):
+                    if not self._refresh_superseded(streamer, generation):
+                        streamer.set_offline()
+                return False
+            if fetched is not None:
+                with self._streamer_state_lock(streamer):
+                    if self._refresh_superseded(streamer, generation):
+                        return False
+                    self._apply_stream_update(streamer, fetched)
+                self._update_stream_campaigns(streamer)
+            # get_stream_info() returns None on a transient GQL failure
+            # instead of raising, which leaves the stream un-updated. Only
+            # announce the streamer online once its stream info loaded;
+            # otherwise the next check retries.
+            if streamer.stream.update_required() is True:
+                return False
+            with self._streamer_state_lock(streamer):
+                # Checked again: a stream-down can arrive while the
+                # campaigns load, and the stream is not online yet, so the
+                # handler leaves it to this check.
+                if self._refresh_superseded(streamer, generation):
+                    return False
                 streamer.set_online(self.__streamer_drops_description(streamer))
-                self.reconcile_watch_streak(streamer)
-            except StreamerIsOfflineException:
-                streamer.set_offline()
+            return True
+
+        try:
+            fetched = self._fetch_stream_update(streamer)
+        except StreamerIsOfflineException:
+            with self._streamer_state_lock(streamer):
+                if not self._refresh_superseded(streamer, generation):
+                    streamer.set_offline()
+            return False
+        if fetched is not None:
+            with self._streamer_state_lock(streamer):
+                if self._refresh_superseded(streamer, generation):
+                    return False
+                self._apply_stream_update_and_transition(streamer, fetched)
+            self._update_stream_campaigns(streamer)
+        # A failed extraction while going online is otherwise never
+        # retried for this broadcast, and minute-watched events need it.
+        if streamer.stream.spade_url is None:
+            self.get_spade_url(streamer)
+        return False
+
+    def _apply_stream_update_and_transition(self, streamer, fetched):
+        """Apply a refresh of an online streamer and, when it shows a new
+        broadcast, run the offline/online change the miner missed. Called
+        under the state lock."""
+        live_snapshot = getattr(streamer.stream, "live_snapshot", None)
+        if callable(live_snapshot):
+            # One read of both, so this broadcast's ID is never paired with
+            # another broadcast's last-seen time, inventing a short gap.
+            previous_broadcast_id, previous_seen_live_at = live_snapshot()
         else:
-            try:
-                self.update_stream(streamer)
-                # A failed extraction while going online is otherwise never
-                # retried for this broadcast, and minute-watched events need it.
-                if streamer.stream.spade_url is None:
-                    self.get_spade_url(streamer)
-            except StreamerIsOfflineException:
-                streamer.set_offline()
+            previous_broadcast_id = streamer.stream.broadcast_id
+            previous_seen_live_at = getattr(streamer.stream, "live_seen_at", 0)
+        self._apply_stream_update(streamer, fetched)
+        claim_transition = getattr(streamer.stream, "claim_broadcast_transition", None)
+        if (
+            previous_broadcast_id not in (None, "")
+            and streamer.stream.broadcast_id not in (None, "", previous_broadcast_id)
+            and (
+                not callable(claim_transition)
+                or claim_transition(previous_broadcast_id, streamer.stream.broadcast_id)
+            )
+        ):
+            # A new broadcast without the offline in between (a missed
+            # stream-down while the machine slept or the network was out).
+            # Run the transition the miner missed, so the new broadcast gets
+            # its own watch-streak state instead of inheriting the previous
+            # one's watched minutes and claim.
+            logger.info(
+                f"{streamer.username} started a new broadcast while the miner "
+                "still saw the previous one live",
+                extra={"emoji": ":arrows_counterclockwise:"},
+            )
+            streamer.set_offline(
+                broadcast_id=previous_broadcast_id,
+                seen_live_at=previous_seen_live_at,
+            )
+            streamer.set_online(self.__streamer_drops_description(streamer))
+            # Queue the new broadcast's milestone check for the minute
+            # watcher's budgeted rechecks: after an outage many channels can
+            # change broadcast at once, and checking each here would hold up
+            # minute-watched events.
+            streamer.stream.watch_streak_check_due = True
 
     def reconcile_watch_streak(self, streamer):
         """Clear a pending streak Twitch already awarded for this broadcast.
@@ -1969,27 +2209,50 @@ class Twitch(object):
             return False
 
         stream.watch_streak_checked_at = time.time()
+        stream.watch_streak_check_due = False
+        snapshot = getattr(stream, "watch_streak_check_snapshot", None)
+        if callable(snapshot):
+            state_broadcast_id, checked_minutes = snapshot()
+        else:
+            state_broadcast_id = stream.broadcast_id
+            checked_minutes = getattr(stream, "minute_watched", 0) or 0
+        # A check after a streak_only window closed counts as one of its final
+        # checks only once Twitch has answered, so a failed one is retried.
+        final_check = self._is_streak_only(streamer) is True and (
+            checked_minutes or 0
+        ) >= self._streak_only_watch_window(streamer)
+        # Other threads refresh the stream while the lookups run; everything
+        # below is about this broadcast, so never read the live attribute.
+        broadcast_id = state_broadcast_id
         logger.debug(
             "[watch-streak] checking Twitch milestone for "
-            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+            f"streamer={streamer.username}; broadcast={broadcast_id}"
         )
         try:
             live_status = self.gql.get_stream_live_status(streamer.channel_id)
             live_stream = live_status.stream
             if (
                 live_stream is None
-                or live_stream.id != stream.broadcast_id
+                or live_stream.id != broadcast_id
                 or live_stream.created_at is None
             ):
                 logger.debug(
                     "[watch-streak] broadcast changed while checking "
-                    f"streamer={streamer.username}; local={stream.broadcast_id}, "
+                    f"streamer={streamer.username}; local={broadcast_id}, "
                     f"twitch={getattr(live_stream, 'id', None)}"
                 )
                 return False
+            if self._watch_streak_continues_claimed_stream(
+                streamer, broadcast_id, live_stream.created_at
+            ):
+                if final_check:
+                    self._record_final_watch_streak_check(stream, state_broadcast_id)
+                return True
             milestone = self.gql.get_reward_list(
                 streamer.channel_id
             ).watch_streak_milestone
+            if final_check:
+                self._record_final_watch_streak_check(stream, state_broadcast_id)
         except GQLError as error:
             logger.warning(
                 "[watch-streak] unable to check Twitch milestone for "
@@ -2000,7 +2263,7 @@ class Twitch(object):
         if milestone is None:
             logger.info(
                 "[watch-streak] no Twitch milestone for "
-                f"streamer={streamer.username}; broadcast={stream.broadcast_id} "
+                f"streamer={streamer.username}; broadcast={broadcast_id} "
                 "still pending"
             )
             return False
@@ -2010,7 +2273,7 @@ class Twitch(object):
                 "[watch-streak] last milestone for "
                 f"streamer={streamer.username} "
                 f"({milestone.achievement_timestamp.isoformat()}Z) predates "
-                f"broadcast={stream.broadcast_id} "
+                f"broadcast={broadcast_id} "
                 f"({live_stream.created_at.isoformat()}Z); still pending"
             )
             return False
@@ -2024,18 +2287,88 @@ class Twitch(object):
             )
             return False
 
-        stream.watch_streak_missing = False
-        if getattr(streamer, "watch_streak_cache", None) is not None:
-            streamer.watch_streak_cache.mark_claimed(
-                streamer.username, stream.broadcast_id
+        cache = getattr(streamer, "watch_streak_cache", None)
+        if self._clear_pending_watch_streak(stream, broadcast_id) is not True:
+            # The milestone still confirms the checked broadcast, and a short
+            # continuation inherits its claim. Only for a session the cache
+            # already tracks: creating one now would close the new
+            # broadcast's session.
+            if cache is not None and cache.get(streamer.username, broadcast_id):
+                cache.mark_claimed(streamer.username, broadcast_id)
+            logger.debug(
+                "[watch-streak] broadcast changed while checking "
+                f"streamer={streamer.username}; checked={broadcast_id}, "
+                f"now={stream.broadcast_id}"
             )
+            return False
+        if cache is not None:
+            cache.mark_claimed(streamer.username, broadcast_id)
         logger.info(
             "[watch-streak] Twitch already confirmed streak for "
-            f"streamer={streamer.username}; broadcast={stream.broadcast_id}"
+            f"streamer={streamer.username}; broadcast={broadcast_id}"
         )
         return True
 
-    def _reconcile_due_watch_streaks(self, streamers, now=None):
+    @staticmethod
+    def _record_final_watch_streak_check(stream, broadcast_id):
+        record = getattr(stream, "record_final_watch_streak_check", None)
+        if callable(record):
+            return record(broadcast_id)
+        if getattr(stream, "broadcast_id", None) != broadcast_id:
+            return False
+        stream.watch_streak_final_checks = (
+            getattr(stream, "watch_streak_final_checks", 0) or 0
+        ) + 1
+        return True
+
+    def _watch_streak_continues_claimed_stream(
+        self, streamer, broadcast_id, created_at
+    ):
+        """Clear a pending streak whose broadcast continues a claimed stream.
+
+        set_online() measures the gap to the previous broadcast from the moment
+        the miner noticed this one, which can be long after it started (a
+        missed stream-up, or a miner restarted mid-stream). Twitch's own start
+        time gives the real gap, so a continuation of an already-claimed stream
+        is not farmed again. The previous broadcast's milestone predates this
+        broadcast's start, so the milestone check alone cannot tell.
+        """
+        cache = getattr(streamer, "watch_streak_cache", None)
+        if cache is None or created_at is None:
+            return False
+        started_at = created_at.replace(tzinfo=timezone.utc).timestamp()
+        cache.record_started_at(streamer.username, broadcast_id, started_at)
+        if (
+            cache.claimed_at_for_logical_stream(
+                streamer.username, broadcast_id, started_at=started_at
+            )
+            is None
+            or self._clear_pending_watch_streak(streamer.stream, broadcast_id)
+            is not True
+        ):
+            return False
+        logger.info(
+            "[watch-streak] broadcast continues an already-claimed stream for "
+            f"streamer={streamer.username}; broadcast={broadcast_id}"
+        )
+        return True
+
+    @staticmethod
+    def _clear_pending_watch_streak(stream, broadcast_id):
+        confirm = getattr(stream, "confirm_watch_streak_for", None)
+        if callable(confirm):
+            return confirm(broadcast_id)
+        if getattr(stream, "broadcast_id", None) != broadcast_id:
+            return False
+        stream.watch_streak_missing = False
+        return True
+
+    def _reconcile_due_watch_streaks(
+        self,
+        streamers,
+        now=None,
+        max_minutes=WATCH_STREAK_MAX_MINUTES_DEFAULT,
+    ):
         """Recheck pending streaks that have had time to advance mid-broadcast.
 
         The first broadcast of a streak moves Twitch's milestone forward
@@ -2044,28 +2377,81 @@ class Twitch(object):
         for the whole stream. Once enough time has been watched, poll Twitch's
         milestone on a cooldown until the streak is confirmed or the broadcast
         ends.
+
+        A streak Twitch never confirms (a channel without channel points, or
+        watch time that is not credited) stops counting as pending after
+        ``max_minutes`` watched minutes, so it cannot hold a slot and bypass
+        points_limit for the whole broadcast.
         """
-        if getattr(self, "gql", None) is None:
-            return
         current = time.time() if now is None else now
+        # At most one milestone lookup per watch cycle: each is a GQL round
+        # trip on the minute watcher, and a slow Twitch must not hold up
+        # minute-watched events for every other channel. The lookup goes to
+        # the due channel that waited longest (queued checks first), so a
+        # channel late in the list is not starved by earlier ones whose
+        # cooldowns keep expiring.
+        due = []
         for streamer in streamers:
+            if getattr(self, "running", True) is not True:
+                return
             if getattr(streamer, "is_online", False) is not True:
                 continue
             if self._has_pending_watch_streak(streamer) is not True:
                 continue
             stream = getattr(streamer, "stream", None)
+            minutes = getattr(stream, "minute_watched", 0) or 0
+            # The cap also counts slot time whose minute-watched posts failed,
+            # so a channel Twitch isn't crediting can't keep its slot.
+            cap_minutes = getattr(stream, "watch_streak_minutes", None)
+            cap_minutes = cap_minutes() if callable(cap_minutes) else minutes
+            if cap_minutes >= max_minutes:
+                stop_waiting = getattr(stream, "stop_waiting_for_watch_streak", None)
+                if callable(stop_waiting):
+                    if stop_waiting(max_minutes) is not True:
+                        # A new broadcast reset the state meanwhile.
+                        continue
+                else:
+                    stream.watch_streak_missing = False
+                logger.info(
+                    "[watch-streak] Twitch has not confirmed the streak for "
+                    f"streamer={streamer.username} after {cap_minutes:.0f} "
+                    "minutes in a watch slot "
+                    f"(watch_streak_max_minutes={max_minutes:g}); "
+                    "no longer prioritizing it for this broadcast"
+                )
+                continue
+            check_due = getattr(stream, "watch_streak_check_due", False) is True
+            final_check = False
+            if self._is_streak_only(streamer) is True:
+                window = self._streak_only_watch_window(streamer)
+                if minutes >= window:
+                    # Past its window a streak-only channel is no longer
+                    # watched, so its milestone can't advance any more. A few
+                    # last checks cover the window's final minutes; after
+                    # that only a late WATCH_STREAK event clears it.
+                    final_checks = getattr(stream, "watch_streak_final_checks", 0) or 0
+                    if final_checks >= WATCH_STREAK_FINAL_CHECKS:
+                        continue
+                    final_check = True
             if (
-                getattr(stream, "minute_watched", 0)
-                < WATCH_STREAK_RECONCILE_AFTER_MINUTES
+                not check_due
+                and not final_check
+                and minutes < WATCH_STREAK_RECONCILE_AFTER_MINUTES
             ):
                 continue
             checked_at = getattr(stream, "watch_streak_checked_at", 0) or 0
             if (
-                checked_at
+                not check_due
+                and checked_at
                 and current - checked_at < WATCH_STREAK_RECONCILE_INTERVAL_SECONDS
             ):
                 continue
-            self.reconcile_watch_streak(streamer)
+            due.append((not check_due, checked_at, len(due), streamer))
+        if not due or getattr(self, "gql", None) is None:
+            return
+        if getattr(self, "running", True) is not True:
+            return
+        self.reconcile_watch_streak(min(due)[-1])
 
     def __streamer_drops_description(self, streamer):
         if not is_drop_discovered(streamer):
@@ -5121,6 +5507,7 @@ class Twitch(object):
         streamer_source,
         is_drop_stream,
         interval_minutes=15,
+        streak_selected_indexes=None,
     ):
         def watch_reason(index):
             source = streamer_source(index)
@@ -5141,7 +5528,9 @@ class Twitch(object):
         streak_indexes = {
             index
             for index in streamers_watching
-            if self._has_pending_watch_streak(streamers[index])
+            if self._watching_for_streak(
+                streamers[index], index in (streak_selected_indexes or ())
+            )
         }
         points_streams = [
             f"{streamers[index].username} ({watch_reason(index)})"
@@ -6726,6 +7115,22 @@ class Twitch(object):
             and getattr(stream, "watch_streak_missing", False) is True
         )
 
+    @classmethod
+    def _watching_for_streak(cls, streamer, selected_by_streak):
+        """Is a pending watch streak why this channel holds its slot?
+
+        Only when the streak decides it: Priority.STREAK filled the slot, the
+        channel is streak_only, or its points_limit is reached and the streak
+        is what lets it be watched. Otherwise it would be watched anyway.
+        """
+        if cls._has_pending_watch_streak(streamer) is not True:
+            return False
+        return (
+            selected_by_streak is True
+            or cls._is_streak_only(streamer) is True
+            or cls._has_reached_points_limit(streamer)
+        )
+
     @staticmethod
     def _is_streak_only(streamer):
         settings = getattr(streamer, "settings", None)
@@ -6939,6 +7344,7 @@ class Twitch(object):
         drop_progress_stall_minutes=10,
         drop_pick_stickiness_minutes=0,
         watch_status_interval_minutes=15,
+        watch_streak_max_minutes=WATCH_STREAK_MAX_MINUTES_DEFAULT,
     ):
         # Streamers already warned about a missing spade URL, so the warning
         # is logged once per outage instead of on every watch cycle.
@@ -6955,7 +7361,9 @@ class Twitch(object):
                 # A pending streak can be confirmed mid-broadcast without a
                 # WATCH_STREAK event; clear it before choosing this cycle's
                 # slots so it stops bypassing points_limit and priority order.
-                self._reconcile_due_watch_streaks(streamers_snapshot, now)
+                self._reconcile_due_watch_streaks(
+                    streamers_snapshot, now, max_minutes=watch_streak_max_minutes
+                )
                 drop_progress_cooldowns = self.__drop_progress_streamer_cooldowns(
                     streamers_snapshot,
                     now,
@@ -6976,7 +7384,12 @@ class Twitch(object):
                     stale_after_seconds = (
                         120 if is_drop_discovered(streamers_snapshot[i]) else 600
                     )
+                    refresh_requested = getattr(
+                        streamers_snapshot[i].stream, "refresh_requested", None
+                    )
                     if (
+                        callable(refresh_requested) and refresh_requested() is True
+                    ) or (
                         streamers_snapshot[i].stream.update_elapsed()
                         >= stale_after_seconds
                     ):
@@ -7041,6 +7454,9 @@ class Twitch(object):
                 # most one selection for a discovered Drops stream.
                 max_watch_amount = streams_watched
                 streamers_watching = set()
+                # Slots Priority.STREAK filled, as opposed to channels with a
+                # pending streak that an earlier priority already picked.
+                streak_selected_indexes = set()
 
                 default_source_priority = [
                     StreamerSource.STREAMERS,
@@ -7315,6 +7731,8 @@ class Twitch(object):
                                 if self._has_pending_watch_streak(
                                     streamers_snapshot[index]
                                 ):
+                                    if index not in streamers_watching:
+                                        streak_selected_indexes.add(index)
                                     streamers_watching.add(index)
                                     if remaining_watch_amount() <= 0:
                                         break
@@ -7860,11 +8278,33 @@ class Twitch(object):
                 watched_indexes = set(streamers_watching)
                 for index, streamer in enumerate(streamers_snapshot):
                     streamer.is_watching = index in watched_indexes
+                    if streamer.is_watching is True:
+                        hold = getattr(
+                            getattr(streamer, "stream", None),
+                            "hold_watch_slot",
+                            None,
+                        )
+                        if callable(hold):
+                            hold()
+                    else:
+                        # Time out of a watch slot is not watch time: the next
+                        # post after the channel gets a slot back starts
+                        # counting again instead of adding the whole gap.
+                        pause = getattr(
+                            getattr(streamer, "stream", None),
+                            "pause_minute_watched",
+                            None,
+                        )
+                        if callable(pause):
+                            pause()
 
                 self._forget_idle_stream_segment_watchers()
 
                 self.__save_now_watching_analytics(
-                    streamers_snapshot, streamers_watching, streamer_source
+                    streamers_snapshot,
+                    streamers_watching,
+                    streamer_source,
+                    streak_selected_indexes=streak_selected_indexes,
                 )
 
                 self.__log_watched_streamers(
@@ -7873,6 +8313,7 @@ class Twitch(object):
                     streamer_source,
                     is_drop_stream=_is_drop_stream,
                     interval_minutes=watch_status_interval_minutes,
+                    streak_selected_indexes=streak_selected_indexes,
                 )
 
                 # Segment requests are what earn Drop progress now, so start
@@ -7905,6 +8346,12 @@ class Twitch(object):
                             )
                             continue
                         spade_url_warned.discard(streamer.username)
+                        # The broadcast this post's watch time belongs to,
+                        # in case the state is reset for the next one before
+                        # Twitch answers.
+                        posted_for = getattr(
+                            streamer.stream, "watch_streak_broadcast_id", None
+                        )
                         for attempt in range(2):
                             try:
                                 response = HttpSession.post(
@@ -7927,7 +8374,9 @@ class Twitch(object):
                             f"Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
-                            streamer.stream.update_minute_watched()
+                            streamer.stream.update_minute_watched(
+                                broadcast_id=posted_for
+                            )
 
                             """
                             Remember, you can only earn progress towards a time-based Drop on one participating channel at a time.  [ ! ! ! ]
@@ -9544,7 +9993,13 @@ class Twitch(object):
         )
         # Compared and stored under one lock: the reward-group lookup runs on
         # the discovery thread while a channel listing can arrive on another.
-        with _watch_reward_lock(self):
+        # Under the report-order lock too: this forgets what was saved for a
+        # drop that started over and notes the rewards seen earned, and a
+        # row decided on the record before must be written before either
+        # (see __save_drop_snapshot_if_new). So a listing waits for a row
+        # being written, the main loop's category refresh included; the
+        # claim thread and the main loop's checks of what is due do not.
+        with _drop_report_order_lock(self), _watch_reward_lock(self):
             previous = known.get(campaign_id)
             if (
                 previous is not None
@@ -9810,9 +10265,10 @@ class Twitch(object):
                 f"unable to mark earned reward rows in the report: {error}",
                 level=logging.DEBUG,
             )
-        # Outside the report's lock: a row is saved under the watch-reward
-        # lock, which is taken before that one. The rows an earlier record
-        # could not write come first: its repeat is in no later record.
+        # Outside the report's lock: a row is saved under the report-order
+        # and watch-reward locks, which are taken before that one. The rows
+        # an earlier record could not write come first: its repeat is in no
+        # later record.
         with _watch_reward_lock(self):
             to_write = dict(getattr(self, "watch_reward_unwritten_rows", None) or {})
         for drop_id, drop in counted.items():
@@ -9829,7 +10285,7 @@ class Twitch(object):
                     f"{error}; trying again with the next listing",
                     level=logging.DEBUG,
                 )
-            with _watch_reward_lock(self):
+            with _drop_report_order_lock(self), _watch_reward_lock(self):
                 unwritten = dict(
                     getattr(self, "watch_reward_unwritten_rows", None) or {}
                 )
@@ -10131,7 +10587,7 @@ class Twitch(object):
     def __forget_saved_drop_snapshots(self, drop_ids):
         """Forget what was last saved to the report for these drops, so
         that their next snapshot is saved whatever its minutes. Called with
-        the watch-reward lock held."""
+        the report-order and watch-reward locks held."""
         if not drop_ids:
             return
         # Keys are the drop ID alone (the watcher's) or start with it and a
@@ -11554,7 +12010,11 @@ class Twitch(object):
         )
 
     def __save_now_watching_analytics(
-        self, streamers_snapshot, streamers_watching, streamer_source
+        self,
+        streamers_snapshot,
+        streamers_watching,
+        streamer_source,
+        streak_selected_indexes=None,
     ):
         if getattr(Settings, "enable_analytics", False) is not True:
             return
@@ -11574,7 +12034,9 @@ class Twitch(object):
                 StreamerSource.WILDCARD_CATEGORIES,
             ):
                 reason = "drops"
-            elif self._has_pending_watch_streak(streamer):
+            elif self._watching_for_streak(
+                streamer, index in (streak_selected_indexes or ())
+            ):
                 reason = "streak"
             else:
                 reason = "points"
@@ -11919,7 +12381,14 @@ class Twitch(object):
             # sends the claim again in the meantime; a listing that still
             # reports it claimable brings the ID back.
             claimed_in = []
-            with _watch_reward_lock(self):
+            # Under the report-order lock as well: this can note rewards as
+            # earned, like a listing (see __remember_watch_reward_campaign).
+            # The claim lock is held here, as it is for the rows the caller
+            # writes next: a write stalled on disk holds up whatever takes
+            # the claim lock meanwhile (the claim after this one, and the
+            # inventory sync in __reconcile_unlinked_claims), though no
+            # longer a claim that is only due (#377).
+            with _drop_report_order_lock(self), _watch_reward_lock(self):
                 for campaign in list(
                     (getattr(self, "watch_reward_campaigns", None) or {}).values()
                 ):
@@ -11929,7 +12398,7 @@ class Twitch(object):
                         stored_drop["self"]["dropInstanceID"] = None
                         claimed_in.append(campaign)
                         self.__note_accepted_reward_claim(campaign, stored_drop)
-            # Outside the watch-reward lock, which a row is saved under.
+            # Outside those locks, which a row is saved under.
             for campaign in claimed_in:
                 self.__finish_earned_reward_rows(campaign, {})
         self.__forget_inventory_minutes(drop)

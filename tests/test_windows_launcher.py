@@ -44,6 +44,22 @@ def _isolate_single_instance_lock(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _refuse_real_message_boxes(monkeypatch):
+    # A real MessageBoxW waits for someone to click it: on Windows CI a test
+    # that reaches one hangs the whole run. Fail that test instead. Tests
+    # that check the dialog replace ctypes.windll with a fake, which this
+    # doesn't touch. pytest.fail raises a BaseException, so the launcher's
+    # `except Exception` around the dialog can't swallow it.
+    if os.name != "nt":
+        return
+
+    def refuse(hwnd, text, caption, flags):
+        pytest.fail(f"a test opened a real message box: {caption}: {text}")
+
+    monkeypatch.setattr(windows_launcher.ctypes.windll.user32, "MessageBoxW", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_launcher_logger_state():
     # main() -> _configure_launcher_logging() mutates the module-level
     # `logger` singleton in place (adds a StreamHandler, sets
@@ -721,6 +737,7 @@ def test_main_prints_guidance_when_shell_fails_before_username_is_set(
     )
     opened = []
     paused = []
+    shown = []
     monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
     monkeypatch.setattr(
@@ -735,6 +752,9 @@ def test_main_prints_guidance_when_shell_fails_before_username_is_set(
         ),
     )
     monkeypatch.setattr(
+        windows_launcher, "_show_fatal_error_message", lambda text: shown.append(text)
+    )
+    monkeypatch.setattr(
         windows_launcher.webbrowser, "open", lambda url: opened.append(url)
     )
     monkeypatch.setattr(
@@ -747,6 +767,7 @@ def test_main_prints_guidance_when_shell_fails_before_username_is_set(
     # No dashboard exists to fall back to when mining never started.
     assert opened == []
     assert paused == [True]
+    assert len(shown) == 1 and "no WebView2 runtime" in shown[0]
     assert "No Twitch username is configured yet." in capsys.readouterr().out
 
 
@@ -903,6 +924,7 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(
     opened = []
     paused = []
     joins = []
+    shown = []
 
     class MinerThread:
         def __init__(self, **kwargs):
@@ -929,6 +951,9 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(
         ),
     )
     monkeypatch.setattr(
+        windows_launcher, "_show_fatal_error_message", lambda text: shown.append(text)
+    )
+    monkeypatch.setattr(
         windows_launcher.webbrowser, "open", lambda url: opened.append(url)
     )
     monkeypatch.setattr(
@@ -949,6 +974,7 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(
     # The unbounded join keeps the daemon miner alive without a GUI or stdin.
     assert joins[0] is None
     assert paused == [True]
+    assert len(shown) == 1 and "no WebView2 runtime" in shown[0]
 
 
 def test_first_run_pauses_on_windows(monkeypatch):

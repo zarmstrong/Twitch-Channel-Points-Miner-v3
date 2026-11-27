@@ -1,13 +1,15 @@
 import errno
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread, Timer
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from flask import Flask, Response, cli, g, render_template, request
 
@@ -31,6 +33,9 @@ RESPONSE_CACHE_TTL_SECONDS = 10.0
 # event wakes the main loop: the restart execs the process once it lands, and
 # a connection reset on the request that triggered it would look like a failure.
 RESTART_REQUEST_DELAY_SECONDS = 0.5
+# Response header naming this server process. It changes when the miner
+# restarts, which is how the dashboard tells the new process from the old one.
+MINER_INSTANCE_HEADER = "X-Miner-Instance"
 
 # Extensions the static-file route serves without authentication (see
 # require_authentication() below) - the assets folder this route reads from
@@ -161,10 +166,117 @@ def _secret_matches(supplied, expected):
     )
 
 
+_IPV4_NUMBERS_RE = re.compile(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+)){0,3}\.?")
+_HOSTNAME_RE = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?\.?")
+
+
+def _parse_ipv4_numbers(hostname):
+    """Dotted IPv4 text for "192.168.257", "0300.0250.1.1" or "0x", else None.
+
+    The WHATWG URL rules browsers use: one to four numbers, each decimal,
+    0-prefixed octal or 0x hexadecimal ("0x" alone is 0), with the last number
+    filling the remaining bytes, and one trailing dot dropped.
+    """
+    parts = hostname.split(".")
+    if parts[-1] == "" and len(parts) > 1:
+        parts.pop()
+    if len(parts) > 4:
+        return None
+    numbers = []
+    for part in parts:
+        try:
+            if part[:2] in ("0x", "0X"):
+                numbers.append(int(part[2:] or "0", 16))
+            elif len(part) > 1 and part[0] == "0":
+                numbers.append(int(part, 8))
+            else:
+                numbers.append(int(part, 10))
+        except ValueError:
+            return None
+    if any(number > 255 for number in numbers[:-1]):
+        return None
+    if numbers[-1] >= 256 ** (5 - len(numbers)):
+        return None
+    value = numbers[-1]
+    for position, number in enumerate(numbers[:-1]):
+        value += number << (8 * (3 - position))
+    return str(ipaddress.IPv4Address(value))
+
+
+def _canonical_hostname(hostname):
+    """Lowercase host in one spelling: IP addresses compressed, names as IDNA.
+
+    Applied to both the configured entries and the request's Host header, so
+    "2001:db8:0:0:0:0:0:1" matches "[2001:db8::1]" and "münchen.example.com"
+    matches the "xn--mnchen-3ya.example.com" that HTTP clients send.
+    """
+    hostname = (hostname or "").lower()
+    if not hostname:
+        return ""
+    if not hostname.isascii():
+        try:
+            import idna
+
+            # UTS 46 mapping and Punycode as browsers do it (non-transitional,
+            # so "ß" stays), not the stdlib "idna" codec, which folds it
+            # into "ss" and would allow a different domain.
+            hostname = idna.encode(hostname, uts46=True, transitional=False).decode(
+                "ascii"
+            )
+        except (ImportError, UnicodeError):
+            # idna.IDNAError is a UnicodeError. Without the package (requests
+            # depends on it, so it is normally there) or for a name it
+            # refuses, give up: an approximate mapping could admit a
+            # different domain than the one configured.
+            return ""
+    try:
+        return str(ipaddress.ip_address(hostname))
+    except ValueError:
+        pass
+    if _IPV4_NUMBERS_RE.fullmatch(hostname):
+        # Browsers read "192.168.257" or "0300.0250.1.1" as an IPv4 address.
+        return _parse_ipv4_numbers(hostname) or hostname
+    return hostname
+
+
 def _request_hostname(host_header):
     """Hostname from a Host header, lowercased, without port or IPv6 brackets."""
     try:
-        return (urlsplit(f"//{host_header}").hostname or "").lower()
+        return _canonical_hostname(urlsplit(f"//{host_header}").hostname)
+    except ValueError:
+        return ""
+
+
+def _allowed_hostname(entry):
+    """Host name for one ANALYTICS_CONFIG["allowed_hosts"] entry, or "".
+
+    Accepts what users paste besides a bare name: a port, a full URL such as
+    "https://miner.example.com/", and a bare IPv6 address.
+    """
+    entry = str(entry).strip()
+    if "://" in entry:
+        if "\\" in re.split(r"[/?#]", entry.split("://", 1)[1], maxsplit=1)[0]:
+            # Browsers read a backslash as a slash, urlsplit does not, so the
+            # two would disagree about which host the URL names.
+            return ""
+        try:
+            # Clients percent-decode the host of a URL.
+            hostname = _canonical_hostname(
+                unquote(urlsplit(entry).hostname or "", errors="strict")
+            )
+        except ValueError:
+            return ""
+    else:
+        try:
+            # A bare IPv6 address has colons that urlsplit would take for a port.
+            return str(ipaddress.ip_address(entry))
+        except ValueError:
+            hostname = _request_hostname(entry)
+    # Anything else is no host name: spaces, "%", "@" and the like.
+    if _HOSTNAME_RE.fullmatch(hostname):
+        return hostname
+    try:
+        return str(ipaddress.ip_address(hostname))
     except ValueError:
         return ""
 
@@ -547,7 +659,7 @@ def read_dashboard_prefs():
     }
 
 
-def index(refresh=5, days_ago=7, log_poll_interval=5):
+def index(refresh=5, days_ago=7, log_poll_interval=5, miner_instance=None):
     assets_folder = get_assets_folder()
     asset_files = (
         "script.js",
@@ -580,6 +692,7 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
         dashboardPrefs=read_dashboard_prefs(),
         buildCommit=os.environ.get(BUILD_COMMIT_ENV_VAR),
+        minerInstance=miner_instance,
     )
 
 
@@ -846,15 +959,25 @@ class AnalyticsServer(Thread):
         self.trust_proxy_auth = trust_proxy_auth
         if isinstance(allowed_hosts, str):
             allowed_hosts = [allowed_hosts]
-        self.allowed_hosts = frozenset(
-            hostname
-            for hostname in (
-                _request_hostname(str(name).strip()) for name in (allowed_hosts or [])
-            )
-            if hostname
-        )
+        hostnames = set()
+        for position, entry in enumerate(allowed_hosts or []):
+            hostname = _allowed_hostname(entry)
+            if hostname:
+                hostnames.add(hostname)
+            else:
+                # Without this, a typo only shows up as a 403 on the proxy.
+                logger.warning(
+                    # The entry itself is not logged: a pasted URL can carry
+                    # a user name, password or token.
+                    "Ignoring entry %d of ANALYTICS_CONFIG['allowed_hosts']: "
+                    "it is not a host name.",
+                    position + 1,
+                    extra={"emoji": ":warning:"},
+                )
+        self.allowed_hosts = frozenset(hostnames)
         self.on_restart = on_restart
         self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
+        self.instance_id = secrets.token_hex(8)
 
         if host not in LOOPBACK_HOSTS and not password and not trust_proxy_auth:
             raise ValueError(
@@ -1038,6 +1161,11 @@ class AnalyticsServer(Thread):
                 )
             return response
 
+        @self.app.after_request
+        def add_miner_instance_header(response):
+            response.headers[MINER_INSTANCE_HEADER] = self.instance_id
+            return response
+
         def request_miner_restart():
             if self.on_restart is None:
                 return Response(
@@ -1064,6 +1192,7 @@ class AnalyticsServer(Thread):
                 "refresh": refresh,
                 "days_ago": days_ago,
                 "log_poll_interval": log_poll_interval,
+                "miner_instance": self.instance_id,
             },
             methods=["GET"],
         )
