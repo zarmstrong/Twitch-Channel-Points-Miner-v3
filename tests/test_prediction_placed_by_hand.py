@@ -151,21 +151,24 @@ def _miner_bets(event, decision, response):
     return twitch.gql.make_prediction
 
 
-def _credited(streamer, event, reason, amount):
-    """community-points-user-v1's credit of a payout or refund."""
+def _credited(
+    streamer, event, reason, amount, events=None, sent="2026-11-27T12:00:40Z"
+):
+    """community-points-user-v1's credit of a payout or refund, sent at
+    ``sent`` while the miner holds ``events`` (by default only ``event``)."""
 
     websocket = SimpleNamespace(
         index=0,
         streamers=[streamer],
         twitch=MagicMock(),
-        events_predictions={"event-1": event},
+        events_predictions=events if events is not None else {"event-1": event},
         last_message_timestamp=None,
         last_message_type_channel=None,
     )
     message = {
         "type": "points-earned",
         "data": {
-            "timestamp": "2026-11-27T12:00:40Z",
+            "timestamp": sent,
             "channel_id": "1001",
             "point_gain": {"total_points": amount, "reason_code": reason},
             "balance": {"balance": 2000, "channel_id": "1001"},
@@ -536,6 +539,71 @@ def test_a_win_with_nothing_known_takes_its_credit_back(
     # Neither the wager nor the payout is known: the gross credit is not a
     # gain.
     assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
+
+
+def _next_prediction(streamer):
+    return EventPrediction(
+        streamer,
+        "event-2",
+        "And now?",
+        datetime(2026, 11, 27, 12, 1, tzinfo=timezone.utc),
+        120,
+        "ACTIVE",
+        _outcomes(),
+    )
+
+
+@pytest.mark.parametrize("reason", ["PREDICTION", "REFUND"])
+def test_a_late_credit_goes_to_the_prediction_it_pays_out(
+    streamer, event, logger, reason
+):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    result = "WIN" if reason == "PREDICTION" else "REFUND"
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": result, "points_won": None}},
+    )
+    following = _next_prediction(streamer)
+    # Sent when the first prediction ended, delivered after the next one
+    # was created.
+    _credited(
+        streamer,
+        event,
+        reason,
+        120,
+        events={"event-1": event, "event-2": following},
+        sent="2026-11-27T12:00:40Z",
+    )
+
+    assert streamer.history[reason] == {"counter": 0, "amount": 0}
+    assert following.credits == {}
+
+
+def test_a_credit_after_the_next_prediction_was_created_is_its_own(
+    streamer, event, logger
+):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
+    )
+    following = _next_prediction(streamer)
+    _credited(
+        streamer,
+        following,
+        "PREDICTION",
+        80,
+        events={"event-1": event, "event-2": following},
+        sent="2026-11-27T12:05:00Z",
+    )
+
+    # Kept for the next prediction's result, not taken back for the first.
+    assert following.credits == {"PREDICTION": 80}
+    assert streamer.history["PREDICTION"] == {"counter": 1, "amount": 80}
 
 
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):

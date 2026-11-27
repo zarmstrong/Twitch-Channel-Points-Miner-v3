@@ -48,6 +48,18 @@ def _sent_at(message):
         return None
 
 
+def _created_at(event_prediction):
+    """A prediction's creation time in epoch seconds, or None."""
+
+    created = getattr(event_prediction, "created_at", None)
+    try:
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created.timestamp()
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _apply_stream_down(message, streamer, received_at):
     """Handle a stream-down; called under the streamer's state lock, maybe
     later than it arrived (received_at, local time)."""
@@ -320,9 +332,14 @@ class WebSocketsPool:
             streamer.update_history("PREDICTION", -placed)
 
     @staticmethod
-    def _note_prediction_credit(ws, streamer, reason_code, earned):
-        """Keep a PREDICTION or REFUND credit with the streamer's latest
-        prediction, or take it back at once if its result needs that."""
+    def _note_prediction_credit(ws, streamer, reason_code, earned, credited_at):
+        """Keep a PREDICTION or REFUND credit with the prediction it pays
+        out, or take it back at once if its result needs that.
+
+        A channel has one prediction at a time, so the credit belongs to the
+        streamer's latest prediction created before it was sent
+        (``credited_at``, Twitch's time in epoch seconds): a later one was
+        created after the credited prediction ended."""
 
         if reason_code not in ("PREDICTION", "REFUND"):
             return
@@ -331,7 +348,21 @@ class WebSocketsPool:
             for event in list(ws.events_predictions.values())
             if event.streamer is streamer
         ]
-        if events and events[-1].note_credit(reason_code, earned):
+        created = [(_created_at(event), event) for event in events]
+        if credited_at is not None and any(at is not None for at, _ in created):
+            earlier = [
+                (at, event)
+                for at, event in created
+                if at is not None and at <= credited_at
+            ]
+            if not earlier:
+                return
+            event = max(earlier, key=lambda pair: pair[0])[1]
+        elif events:
+            event = events[-1]
+        else:
+            return
+        if event.note_credit(reason_code, earned):
             streamer.update_history(reason_code, -earned, counter=-1)
 
     @staticmethod
@@ -677,7 +708,7 @@ class WebSocketsPool:
                                 reason_code, earned, awarded_at=_sent_at(message)
                             )
                             WebSocketsPool._note_prediction_credit(
-                                ws, streamer, reason_code, earned
+                                ws, streamer, reason_code, earned, _sent_at(message)
                             )
                             # Analytics switch
                             if Settings.enable_analytics is True:
