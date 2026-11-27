@@ -951,6 +951,47 @@ def test_a_credit_after_the_streamer_was_re_added_is_taken_back(
     assert replacement.history == {reason: {"counter": 0, "amount": 0}}
 
 
+def test_a_credit_on_the_retired_streamer_moves_to_its_result(streamer, event, logger):
+    # The channel was removed and added again; the new object counts the
+    # result, then a credit handler still holding the old object runs.
+    replacement = RecordingStreamer()
+    _send(
+        replacement,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-no", "points": 50},
+    )
+    _send(
+        replacement,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": 120}},
+    )
+    _credited(streamer, event, "PREDICTION", 120, sent="2026-11-27T12:00:31Z")
+
+    assert replacement.history == {"PREDICTION": {"counter": 1, "amount": 70}}
+    assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
+
+
+@pytest.mark.parametrize("result_type", ["WIN", "REFUND"])
+def test_an_untracked_result_never_takes_its_credit_back(
+    streamer, event, logger, result_type
+):
+    reason = "PREDICTION" if result_type == "WIN" else "REFUND"
+    _send(
+        streamer,
+        _next_prediction(streamer),
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": result_type}},
+        tracked=False,
+    )
+    # Removed and added again before the credit arrives.
+    replacement = RecordingStreamer()
+    _credited(replacement, event, reason, 40, sent="2026-11-27T12:00:31Z")
+
+    assert replacement.history == {reason: {"counter": 1, "amount": 40}}
+
+
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
     _credited(streamer, event, "REFUND", 40)

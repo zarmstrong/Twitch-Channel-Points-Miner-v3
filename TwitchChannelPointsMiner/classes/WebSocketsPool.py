@@ -78,7 +78,8 @@ def _epoch(timestamp):
 # streamer (by username, like Streamer's module-level locks):
 # {"credits": [(sent_at, reason_code, points, credited streamer object)],
 # "owed": [(sent_at,
-# reason_code, take_back, result's streamer object)], "results": {event ids handled}}.  Kept for the
+# reason_code, take_back, Streamer object the result was counted on, or None
+# for a result the miner doesn't track)], "results": {event ids handled}}.  Kept for the
 # session: each prediction the account bets on adds at most one entry, and a
 # matched pair removes its own.  A credit and its result are sent together when the
 # prediction is resolved, so they are matched by Twitch's send times, not by
@@ -129,14 +130,17 @@ def _match_credit(entries, reason_code, sent_at):
     return best
 
 
-def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):
+def _claim_prediction_credit(
+    streamer, reason_code, result_at, take_back=True, counted=True
+):
     """Claim the ``reason_code`` credit sent with a result sent at
     ``result_at``, once: (its points, the Streamer object it was counted
     on), or (None, None) when it hasn't arrived.  A
     credit that arrives later is then taken back if ``take_back`` (the
     result needs the credit's own amount), and otherwise only kept from
-    being claimed again (_note_prediction_credit).  Without a send time
-    nothing can be matched."""
+    being claimed again (_note_prediction_credit).  ``counted``: the result
+    was counted on ``streamer`` (False for one the miner doesn't track).
+    Without a send time nothing can be matched."""
 
     if result_at is None:
         return None, None
@@ -145,26 +149,34 @@ def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):
         index = _match_credit(book["credits"], reason_code, result_at)
         if index is not None:
             return book["credits"].pop(index)[2:]
-        book["owed"].append((result_at, reason_code, take_back, streamer))
+        book["owed"].append(
+            (result_at, reason_code, take_back, streamer if counted else None)
+        )
     return None, None
 
 
 def _note_prediction_credit(streamer, reason_code, points, sent_at):
-    """Keep a PREDICTION or REFUND credit for its result; True when it is
-    to be taken back: its result asked for that, or its result was counted
-    on a Streamer object since replaced (the channel removed and added
-    again), whose corrections this object's history never got."""
+    """Keep a PREDICTION or REFUND credit, counted on ``streamer``, for its
+    result.  Returns what to do with it now: None (nothing), True (take it
+    back: its result asked for that) or the Streamer object its result was
+    counted on, when that is another one (the channel was removed and added
+    again in between): the credit moves there, to the result's
+    corrections."""
 
     if reason_code not in ("PREDICTION", "REFUND") or sent_at is None:
-        return False
+        return None
     with _prediction_credits_lock:
         book = _credit_book(streamer)
         index = _match_credit(book["owed"], reason_code, sent_at)
         if index is not None:
             _, _, take_back, counted_on = book["owed"].pop(index)
-            return take_back or counted_on is not streamer
+            if take_back:
+                return True
+            if counted_on is not None and counted_on is not streamer:
+                return counted_on
+            return None
         book["credits"].append((sent_at, reason_code, points, streamer))
-    return False
+    return None
 
 
 def _apply_stream_down(message, streamer, received_at):
@@ -463,6 +475,7 @@ class WebSocketsPool:
                 "REFUND" if result_type == "REFUND" else "PREDICTION",
                 _payload_sent_at(message),
                 take_back=False,
+                counted=False,
             )
 
     @staticmethod
@@ -808,13 +821,16 @@ class WebSocketsPool:
                             streamer.update_history(
                                 reason_code, earned, awarded_at=_sent_at(message)
                             )
-                            if _note_prediction_credit(
+                            action = _note_prediction_credit(
                                 streamer, reason_code, earned, _payload_sent_at(message)
-                            ):
-                                # Its result's net change isn't known.
+                            )
+                            if action is not None:
                                 streamer.update_history(
                                     reason_code, -earned, counter=-1
                                 )
+                                if action is not True:
+                                    # To the object its result was counted on.
+                                    action.update_history(reason_code, earned)
                             # Analytics switch
                             if Settings.enable_analytics is True:
                                 streamer.persistent_annotations(
