@@ -37,6 +37,8 @@ class EventPrediction(object):
         "points_floor",
         "totals_seen",
         "final_points",
+        "credits",
+        "credit_owed",
     ]
 
     def __init__(
@@ -89,6 +91,11 @@ class EventPrediction(object):
         self.totals_seen = set()
         # The total on the prediction-result: the bet's final one.
         self.final_points = None
+        # community-points-user-v1 credits of this prediction's payout or
+        # refund (reason code -> points), and the reason code of one its
+        # reported result needs taken back but hadn't arrived.
+        self.credits = {}
+        self.credit_owed = None
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -124,14 +131,19 @@ class EventPrediction(object):
             self.confirmations += 1
             if isinstance(outcome_id, str) and outcome_id:
                 self.confirmed_outcome_id = outcome_id
-            if final and points is not None:
-                # The bet's final total.
-                self.final_points = points
+            if final:
+                if points is not None:
+                    # The bet's final total.
+                    self.final_points = points
+                elif self.miner_bet_in_flight:
+                    # Whether the bet includes the miner's points, still
+                    # being placed, can't be told.
+                    self.wager_unknown = True
                 return
-            if self.miner_bet_in_flight:
+            if self.miner_bet_in_flight or self.bet_placed:
                 # Reported while the miner's bet request waits for its
-                # answer: whether it includes the miner's points can't be
-                # told.
+                # answer, or after Twitch accepted it: whether it includes
+                # the miner's points can't be told.
                 self.wager_unknown = True
             if points is None:
                 if addition:
@@ -194,6 +206,28 @@ class EventPrediction(object):
                 self.points_floor = max(
                     self.points_floor, (points_before or 0) + amount
                 )
+
+    def note_credit(self, reason_code, amount):
+        """A community-points-user-v1 credit of this prediction's payout or
+        refund. Returns True when the reported result needs it taken back
+        (see claim_credit); otherwise it is kept for the result."""
+
+        with self.state_lock:
+            if self.credit_owed == reason_code:
+                self.credit_owed = None
+                return True
+            self.credits[reason_code] = amount
+            return False
+
+    def claim_credit(self, reason_code):
+        """The credit the result needs taken back, or None: it is then taken
+        back when it arrives (note_credit)."""
+
+        with self.state_lock:
+            amount = self.credits.pop(reason_code, None)
+            if amount is None:
+                self.credit_owed = reason_code
+            return amount
 
     def miner_bet_indeterminate(self):
         """The miner's bet request failed without an answer: Twitch may

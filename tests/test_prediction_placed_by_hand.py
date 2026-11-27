@@ -32,6 +32,10 @@ class RecordingStreamer:
         self.settings = SimpleNamespace(bet=bet)
         self.history = {}
         self.annotations = []
+        self.explicitly_configured = True
+
+    def persistent_series(self, event_type="Watch"):
+        pass
 
     def update_history(self, reason_code, earned, counter=1, awarded_at=None):
         entry = self.history.setdefault(reason_code, {"counter": 0, "amount": 0})
@@ -147,10 +151,38 @@ def _miner_bets(event, decision, response):
     return twitch.gql.make_prediction
 
 
-def _credited(streamer, reason, amount):
+def _credited(streamer, event, reason, amount):
     """community-points-user-v1's credit of a payout or refund."""
 
-    streamer.update_history(reason, amount)
+    websocket = SimpleNamespace(
+        index=0,
+        streamers=[streamer],
+        twitch=MagicMock(),
+        events_predictions={"event-1": event},
+        last_message_timestamp=None,
+        last_message_type_channel=None,
+    )
+    message = {
+        "type": "points-earned",
+        "data": {
+            "timestamp": "2026-11-27T12:00:40Z",
+            "channel_id": "1001",
+            "point_gain": {"total_points": amount, "reason_code": reason},
+            "balance": {"balance": 2000, "channel_id": "1001"},
+        },
+    }
+    WebSocketsPool.on_message(
+        websocket,
+        json.dumps(
+            {
+                "type": "MESSAGE",
+                "data": {
+                    "topic": "community-points-user-v1.1001",
+                    "message": json.dumps(message),
+                },
+            }
+        ),
+    )
 
 
 def _result_line(logger):
@@ -186,7 +218,7 @@ def test_a_bet_placed_before_the_timer_is_reported_from_the_messages(
         "prediction-made",
         {"outcome_id": "outcome-no", "points": 50, "result": None},
     )
-    _credited(streamer, "PREDICTION", 120)
+    _credited(streamer, event, "PREDICTION", 120)
     _send(
         streamer,
         event,
@@ -201,6 +233,7 @@ def test_a_bet_placed_before_the_timer_is_reported_from_the_messages(
     logger.error.assert_not_called()
     assert streamer.annotations == [
         ("PREDICTION_MADE", "Decision: 1 - Will it work?"),
+        ("PREDICTION", "+120 - PREDICTION"),
         ("WIN", "Will it work?"),
     ]
     line = _result_line(logger)
@@ -251,7 +284,7 @@ def test_a_bet_by_hand_after_a_failed_miner_bet_does_not_use_its_amount(
     assert (event.miner_bet_requested, event.bet_placed) == (True, False)
 
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
-    _credited(streamer, "PREDICTION", 500)
+    _credited(streamer, event, "PREDICTION", 500)
     _send(
         streamer,
         event,
@@ -368,7 +401,7 @@ def test_the_miners_own_bet_is_reported_as_before(streamer, event, logger):
         "prediction-made",
         {"outcome_id": "outcome-yes", "points": 100},
     )
-    _credited(streamer, "PREDICTION", 250)
+    _credited(streamer, event, "PREDICTION", 250)
     _send(
         streamer,
         event,
@@ -394,7 +427,7 @@ def test_a_refund_replaces_its_credit_with_a_prediction(
     _send(
         streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 40}
     )
-    _credited(streamer, "REFUND", 40)
+    _credited(streamer, event, "REFUND", 40)
     _send(
         streamer,
         event,
@@ -468,7 +501,7 @@ def test_a_win_without_its_payout_is_unknown_but_counted(streamer, event, logger
     _send(
         streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
     )
-    _credited(streamer, "PREDICTION", 120)
+    _credited(streamer, event, "PREDICTION", 120)
     _send(
         streamer,
         event,
@@ -481,9 +514,33 @@ def test_a_win_without_its_payout_is_unknown_but_counted(streamer, event, logger
     assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 70}}
 
 
+@pytest.mark.parametrize(
+    "credit_first", [True, False], ids=["credit-first", "result-first"]
+)
+def test_a_win_with_nothing_known_takes_its_credit_back(
+    streamer, event, logger, credit_first
+):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    if credit_first:
+        _credited(streamer, event, "PREDICTION", 120)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
+    )
+    if not credit_first:
+        _credited(streamer, event, "PREDICTION", 120)
+
+    assert _result_line(logger).endswith(f"Result: WIN, Gained: {UNKNOWN}")
+    # Neither the wager nor the payout is known: the gross credit is not a
+    # gain.
+    assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
+
+
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
-    _credited(streamer, "REFUND", 40)
+    _credited(streamer, event, "REFUND", 40)
     _send(
         streamer,
         event,
@@ -498,9 +555,9 @@ def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, 
     }
 
 
-def test_a_refund_with_no_amounts_is_left_as_credited(streamer, event, logger):
+def test_a_refund_with_no_amounts_takes_its_credit_back(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
-    _credited(streamer, "REFUND", 40)
+    _credited(streamer, event, "REFUND", 40)
     _send(
         streamer,
         event,
@@ -510,7 +567,11 @@ def test_a_refund_with_no_amounts_is_left_as_credited(streamer, event, logger):
 
     logger.error.assert_not_called()
     assert _result_line(logger).endswith("Result: REFUND, Refunded: +0")
-    assert streamer.history == {"REFUND": {"counter": 1, "amount": 40}}
+    # The credit is the refund: counted as the prediction, net 0.
+    assert streamer.history == {
+        "REFUND": {"counter": 0, "amount": 0},
+        "PREDICTION": {"counter": 1, "amount": 0},
+    }
 
 
 def test_the_miners_addition_to_a_known_bet_is_counted(streamer, event, logger):
@@ -560,7 +621,9 @@ def test_a_total_reported_while_the_miner_adds_makes_the_wager_unknown(
     assert streamer.history == {}
 
 
-def test_a_total_after_the_miners_addition_is_used(streamer, event, logger):
+def test_a_total_after_the_miners_addition_makes_the_wager_unknown(
+    streamer, event, logger
+):
     _send(
         streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
     )
@@ -569,7 +632,8 @@ def test_a_total_after_the_miners_addition_is_used(streamer, event, logger):
         {"choice": 1, "amount": 300, "id": "outcome-no"},
         MakePredictionResponse(None),
     )
-    # More added by hand afterwards.
+    # 50 + 350 by hand, reported late: whether the miner's 300 is in it
+    # can't be told.
     _send(
         streamer,
         event,
@@ -583,7 +647,7 @@ def test_a_total_after_the_miners_addition_is_used(streamer, event, logger):
         {"outcome_id": "outcome-no", "result": {"type": "LOSE", "points_won": None}},
     )
 
-    assert _result_line(logger).endswith("Result: LOSE, Lost: -400")
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
 
 
 def test_a_refused_addition_to_a_known_bet_is_not_counted(streamer, event, logger):
@@ -662,7 +726,7 @@ def test_points_added_by_hand_while_the_miner_adds_make_the_total_unknown(
     assert _result_line(logger).endswith(f"Result: LOSE, {expected}")
 
 
-def test_an_older_total_delivered_after_the_miners_addition_is_ignored(
+def test_an_older_total_delivered_after_the_miners_addition_makes_the_wager_unknown(
     streamer, event, logger
 ):
     _send(
@@ -687,13 +751,13 @@ def test_an_older_total_delivered_after_the_miners_addition_is_ignored(
         {"outcome_id": "outcome-no", "result": {"type": "LOSE", "points_won": None}},
     )
 
-    assert _result_line(logger).endswith("Result: LOSE, Lost: -350")
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
 
 
 def test_a_result_is_reported_when_the_earlier_messages_were_missed(
     streamer, event, logger
 ):
-    _credited(streamer, "PREDICTION", 120)
+    _credited(streamer, event, "PREDICTION", 120)
     _send(
         streamer,
         event,
@@ -705,7 +769,10 @@ def test_a_result_is_reported_when_the_earlier_messages_were_missed(
         },
     )
 
-    assert streamer.annotations == [("WIN", "Will it work?")]
+    assert streamer.annotations == [
+        ("PREDICTION", "+120 - PREDICTION"),
+        ("WIN", "Will it work?"),
+    ]
     line = _result_line(logger)
     assert "Decision: 1: No (PINK)" in line
     assert line.endswith("Result: WIN, Gained: +70")
@@ -774,7 +841,7 @@ def test_the_miners_amount_alone_is_not_the_wager(streamer, event, logger):
     # No points on either message: a bet placed by hand before the timer
     # could be part of it.
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
-    _credited(streamer, "PREDICTION", 250)
+    _credited(streamer, event, "PREDICTION", 250)
     _send(
         streamer,
         event,

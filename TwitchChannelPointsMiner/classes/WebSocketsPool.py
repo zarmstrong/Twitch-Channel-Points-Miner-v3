@@ -269,24 +269,24 @@ class WebSocketsPool:
             websocket.close()
 
     @staticmethod
-    def _record_prediction_history(streamer, result_type, points):
+    def _record_prediction_history(streamer, event_prediction, result_type, points):
         """Count a prediction's result in the streamer's session history.
 
-        community-points-user-v1 already credited the payout of a win (as
+        community-points-user-v1 credits the payout of a win (as
         PREDICTION) or the points a refund returned (as REFUND); the
         prediction is counted once, with its net change.  A prediction whose
-        net change isn't known is left out, as far as the known amounts
-        allow."""
+        net change isn't known is left out: the credit is taken back, by the
+        amount the result reports or, without one, by the credit itself
+        (claim_credit), whenever it arrives."""
 
         placed = points["placed"]
         won = points["won"]
         if result_type == "REFUND":
             if won is None:
-                # Neither the refund nor the wager is known: the credit
-                # cannot be taken back.
-                return
+                won = event_prediction.claim_credit("REFUND")
             streamer.update_history("PREDICTION", 0)
-            streamer.update_history("REFUND", -won, counter=-1)
+            if won is not None:
+                streamer.update_history("REFUND", -won, counter=-1)
         elif result_type == "WIN":
             if placed is not None and won is not None:
                 streamer.update_history("PREDICTION", won - placed)
@@ -294,10 +294,28 @@ class WebSocketsPool:
             elif placed is not None:
                 # The payout credit stands for the payout: take the wager off.
                 streamer.update_history("PREDICTION", -placed, counter=0)
-            elif won is not None:
-                streamer.update_history("PREDICTION", -won, counter=-1)
+            else:
+                if won is None:
+                    won = event_prediction.claim_credit("PREDICTION")
+                if won is not None:
+                    streamer.update_history("PREDICTION", -won, counter=-1)
         elif placed is not None:
             streamer.update_history("PREDICTION", -placed)
+
+    @staticmethod
+    def _note_prediction_credit(ws, streamer, reason_code, earned):
+        """Keep a PREDICTION or REFUND credit with the streamer's latest
+        prediction, or take it back at once if its result needs that."""
+
+        if reason_code not in ("PREDICTION", "REFUND"):
+            return
+        events = [
+            event
+            for event in list(ws.events_predictions.values())
+            if event.streamer is streamer
+        ]
+        if events and events[-1].note_credit(reason_code, earned):
+            streamer.update_history(reason_code, -earned, counter=-1)
 
     @staticmethod
     def _report_prediction_result(streamer, event_prediction, result):
@@ -318,7 +336,7 @@ class WebSocketsPool:
         )
 
         WebSocketsPool._record_prediction_history(
-            streamer, event_prediction.result["type"], points
+            streamer, event_prediction, event_prediction.result["type"], points
         )
 
         if event_prediction.result["type"]:
@@ -544,6 +562,9 @@ class WebSocketsPool:
                             )
                             streamer.update_history(
                                 reason_code, earned, awarded_at=_sent_at(message)
+                            )
+                            WebSocketsPool._note_prediction_credit(
+                                ws, streamer, reason_code, earned
                             )
                             # Analytics switch
                             if Settings.enable_analytics is True:
