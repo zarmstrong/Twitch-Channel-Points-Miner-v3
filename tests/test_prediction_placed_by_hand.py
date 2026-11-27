@@ -844,6 +844,64 @@ def test_a_repeated_result_is_handled_once(streamer, event, logger):
     }
 
 
+def _untracked_results(streamer, count, start_minute=10):
+    """``count`` results of predictions the miner doesn't track, a minute
+    apart from 12:``start_minute``."""
+
+    for index in range(count):
+        other = EventPrediction(
+            streamer,
+            f"other-{index}",
+            "Another one?",
+            datetime(2026, 11, 27, 12, 0, tzinfo=timezone.utc),
+            120,
+            "ACTIVE",
+            _outcomes(),
+        )
+        hour, minute = divmod(start_minute + index, 60)
+        _send(
+            streamer,
+            other,
+            "prediction-result",
+            {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": 9}},
+            sent=f"2026-11-27T{12 + hour:02d}:{minute:02d}:00Z",
+            tracked=False,
+        )
+
+
+def test_a_result_repeated_after_many_others_is_handled_once(streamer, event, logger):
+    lose = {
+        "outcome_id": "outcome-no",
+        "points": 50,
+        "result": {"type": "LOSE", "points_won": None},
+    }
+    _send(streamer, event, "prediction-result", lose)
+    _untracked_results(streamer, 60)
+    _send(streamer, event, "prediction-result", lose)
+
+    assert _result_line(logger).endswith("Result: LOSE, Lost: -50")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": -50}}
+
+
+def test_a_delayed_credit_is_matched_after_many_later_results(streamer, event, logger):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "REFUND"}},
+    )
+    # Later results (over ten minutes and many entries later), then the
+    # refund's credit, sent with its result.
+    _untracked_results(streamer, 30)
+    _credited(streamer, event, "REFUND", 40, sent="2026-11-27T12:00:31Z")
+
+    assert streamer.history == {
+        "REFUND": {"counter": 0, "amount": 0},
+        "PREDICTION": {"counter": 1, "amount": 0},
+    }
+
+
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
     _credited(streamer, event, "REFUND", 40)

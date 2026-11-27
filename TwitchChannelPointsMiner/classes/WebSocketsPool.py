@@ -77,7 +77,9 @@ def _epoch(timestamp):
 # no result has claimed yet, and results still waiting for theirs, per
 # streamer (by username, like Streamer's module-level locks):
 # {"credits": [(sent_at, reason_code, points)], "owed": [(sent_at,
-# reason_code, take_back)]}.  A credit and its result are sent together when the
+# reason_code, take_back)], "results": {event ids handled}}.  Kept for the
+# session: each prediction the account bets on adds at most one entry, and a
+# matched pair removes its own.  A credit and its result are sent together when the
 # prediction is resolved, so they are matched by Twitch's send times, not by
 # the predictions the miner tracks: it doesn't track every prediction (it
 # skips some it won't bet on), and the two topics can arrive on different
@@ -86,8 +88,6 @@ _prediction_credits = {}
 _prediction_credits_lock = Lock()
 # How far apart a credit and its result may have been sent.
 CREDIT_MATCH_SECONDS = 15
-# Unmatched entries older than this, next to the newest, are dropped.
-CREDIT_KEEP_SECONDS = 600
 
 
 def _credit_book(streamer):
@@ -95,7 +95,7 @@ def _credit_book(streamer):
 
     book = _prediction_credits.setdefault(
         getattr(streamer, "username", None),
-        {"credits": [], "owed": [], "results": []},
+        {"credits": [], "owed": [], "results": set()},
     )
     return book
 
@@ -108,16 +108,8 @@ def _first_result(streamer, event_id):
         results = _credit_book(streamer)["results"]
         if event_id in results:
             return False
-        results.append(event_id)
-        del results[:-50]
+        results.add(event_id)
     return True
-
-
-def _prune_credit_book(book, newest):
-    for key in ("credits", "owed"):
-        book[key] = [
-            entry for entry in book[key] if newest - entry[0] <= CREDIT_KEEP_SECONDS
-        ][-20:]
 
 
 def _match_credit(entries, reason_code, sent_at):
@@ -152,7 +144,6 @@ def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):
         if index is not None:
             return book["credits"].pop(index)[2]
         book["owed"].append((result_at, reason_code, take_back))
-        _prune_credit_book(book, result_at)
     return None
 
 
@@ -168,7 +159,6 @@ def _note_prediction_credit(streamer, reason_code, points, sent_at):
         if index is not None:
             return book["owed"].pop(index)[2]
         book["credits"].append((sent_at, reason_code, points))
-        _prune_credit_book(book, sent_at)
     return False
 
 
