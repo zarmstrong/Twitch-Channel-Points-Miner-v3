@@ -8575,15 +8575,16 @@ class Twitch(object):
                         },
                     )
 
-                    # Before the request: Twitch's confirmation of this bet,
-                    # even its result, can arrive before its answer.  A result
-                    # waits for the answer (EventPrediction.wait_for_miner_bet).
+                    # Before the request: Twitch's report of this bet, even
+                    # its result, can arrive before its answer.
                     before = event.begin_miner_bet()
                     try:
                         response = self.gql.make_prediction(
                             event.event_id, decision["id"], decision["amount"]
                         )
                     except RetryError as error:
+                        # Twitch may have placed it all the same.
+                        event.miner_bet_indeterminate()
                         logger.error(
                             f"Failed to place bet: {error}",
                             extra={

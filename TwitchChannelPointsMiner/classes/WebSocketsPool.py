@@ -6,7 +6,7 @@ import time
 from datetime import timezone
 
 # import os
-from threading import Condition, Lock, RLock, Thread, Timer
+from threading import Lock, RLock, Thread, Timer
 
 from dateutil import parser
 
@@ -24,10 +24,6 @@ from TwitchChannelPointsMiner.classes.Settings import Events, Settings
 from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
 from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_available
-
-# How long stopping the miner waits for prediction results that wait for the
-# answer to the miner's own bet request.
-RESULT_WAIT_SECONDS = 30.0
 
 # from pathlib import Path
 
@@ -116,17 +112,7 @@ def _stream_down_predates_online(message, streamer):
 
 
 class WebSocketsPool:
-    __slots__ = [
-        "ws",
-        "twitch",
-        "streamers",
-        "events_predictions",
-        "topic_lock",
-        "results_lock",
-        "results_idle",
-        "results_active",
-        "results_closed",
-    ]
+    __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
 
     def __init__(self, twitch, streamers, events_predictions):
         # Read without topic_lock by the main loop's checks; see CopyOnWriteList.
@@ -135,14 +121,6 @@ class WebSocketsPool:
         self.streamers = streamers
         self.events_predictions = events_predictions
         self.topic_lock = RLock()
-        # Prediction results being reported (event predictions, one per
-        # result), on a websocket's thread or one of their own; end() waits
-        # for them, and once results_closed is set no result waits for the
-        # miner's bet request any more.
-        self.results_lock = Lock()
-        self.results_idle = Condition(self.results_lock)
-        self.results_active = []
-        self.results_closed = False
 
     """
     API Limits
@@ -289,84 +267,6 @@ class WebSocketsPool:
                 websocket.forced_close = True
         for websocket in websockets:
             websocket.close()
-        self._finish_prediction_results()
-
-    def _finish_prediction_results(self):
-        """Let the results being reported finish before the session's
-        report: wait up to RESULT_WAIT_SECONDS for the answers to the
-        miner's bet requests they wait for, then report the rest with the
-        wager unknown."""
-
-        with self.results_idle:
-            self.results_closed = True
-            deadline = time.monotonic() + RESULT_WAIT_SECONDS
-            while self.results_active:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self.results_idle.wait(remaining)
-            waiting = list(self.results_active)
-        for event_prediction in waiting:
-            logger.warning(
-                f"Reporting the result of {event_prediction} without the "
-                "answer to the bet the miner was placing"
-            )
-            event_prediction.abandon_miner_bet()
-        if waiting:
-            with self.results_idle:
-                deadline = time.monotonic() + 5.0
-                while self.results_active:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    self.results_idle.wait(remaining)
-
-    def _result_done(self, event_prediction):
-        with self.results_idle:
-            self.results_active.remove(event_prediction)
-            self.results_idle.notify_all()
-
-    @staticmethod
-    def _handle_prediction_result(pool, streamer, event_prediction, prediction):
-        """Report a prediction-result's ``prediction``. If the miner's own
-        bet request is still waiting for Twitch's answer, whether its points
-        are part of the bet is known once it is answered: wait for that on
-        another thread, as the websocket's thread reads all its messages.
-        ``pool`` (or None) tracks the result until it is reported."""
-
-        if not isinstance(pool, WebSocketsPool):
-            pool = None
-        closed = False
-        if pool is not None:
-            with pool.results_lock:
-                pool.results_active.append(event_prediction)
-                closed = pool.results_closed
-        deferred = False
-        try:
-            # The result names the bet too: its outcome, and its points are
-            # the bet's final total.  It confirms the bet even when the
-            # earlier messages were missed (Twitch sends it only for the
-            # account's own bets).
-            event_prediction.confirm_bet(prediction, final=True)
-            if event_prediction.miner_bet_pending():
-                if closed:
-                    # The miner is stopping: no waiting.
-                    event_prediction.abandon_miner_bet()
-                else:
-                    Thread(
-                        target=WebSocketsPool._report_prediction_result_later,
-                        args=(pool, streamer, event_prediction, prediction),
-                        name=f"prediction-result-{event_prediction.event_id}",
-                        daemon=True,
-                    ).start()
-                    deferred = True
-                    return
-            WebSocketsPool._report_prediction_result(
-                streamer, event_prediction, prediction["result"]
-            )
-        finally:
-            if pool is not None and not deferred:
-                pool._result_done(event_prediction)
 
     @staticmethod
     def _record_prediction_history(streamer, result_type, points):
@@ -427,25 +327,6 @@ class WebSocketsPool:
                 streamer.persistent_annotations(
                     event_prediction.result["type"], f"{event_prediction.title}"
                 )
-
-    @staticmethod
-    def _report_prediction_result_later(pool, streamer, event_prediction, prediction):
-        """_report_prediction_result once the miner's bet request has been
-        answered."""
-
-        try:
-            event_prediction.wait_for_miner_bet()
-            WebSocketsPool._report_prediction_result(
-                streamer, event_prediction, prediction["result"]
-            )
-        except Exception:
-            logger.error(
-                f"Failed to report the result of {event_prediction}",
-                exc_info=True,
-            )
-        finally:
-            if pool is not None:
-                pool._result_done(event_prediction)
 
     @staticmethod
     def _placed_decision(event_prediction):
@@ -802,11 +683,18 @@ class WebSocketsPool:
                         if event_id in ws.events_predictions:
                             event_prediction = ws.events_predictions[event_id]
                             if message.type == "prediction-result":
-                                WebSocketsPool._handle_prediction_result(
-                                    getattr(ws, "parent_pool", None),
+                                # The result names the bet too: its outcome,
+                                # and its points are the bet's final total.
+                                # It confirms the bet even when the earlier
+                                # messages were missed (Twitch sends it only
+                                # for the account's own bets).
+                                event_prediction.confirm_bet(
+                                    message.data["prediction"], final=True
+                                )
+                                WebSocketsPool._report_prediction_result(
                                     streamer,
                                     event_prediction,
-                                    message.data["prediction"],
+                                    message.data["prediction"]["result"],
                                 )
                             elif message.type == "prediction-made":
                                 event_prediction.confirm_bet(message.data["prediction"])
