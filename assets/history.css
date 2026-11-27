@@ -1,0 +1,350 @@
+/* Optional History tab. Kept small and additive so the upstream dashboard
+   styles stay untouched. */
+
+#history-panel {
+    --history-text: #4a4a4a;
+    --history-muted: #6b7280;
+    --history-subtle: #4b5563;
+    --history-border: rgba(0, 0, 0, 0.1);
+    --history-surface: rgba(0, 0, 0, 0.035);
+    --history-hover: rgba(0, 0, 0, 0.045);
+    --history-sticky: #ffffff;
+    color: var(--history-text);
+}
+
+#history-panel.history-dark {
+    --history-text: rgba(255, 255, 255, 0.92);
+    --history-muted: rgba(255, 255, 255, 0.72);
+    --history-subtle: rgba(255, 255, 255, 0.86);
+    --history-border: rgba(255, 255, 255, 0.16);
+    --history-surface: rgba(255, 255, 255, 0.055);
+    --history-hover: rgba(255, 255, 255, 0.075);
+    --history-sticky: #2b2d3e;
+}
+
+#history-panel .title,
+#history-panel .subtitle {
+    color: inherit;
+}
+
+#history-panel .box {
+    color: var(--history-text);
+}
+
+.history-header {
+    margin-top: 0.75rem;
+}
+
+.history-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.history-windows,
+.history-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+}
+
+.history-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: inherit;
+}
+
+.history-status {
+    min-height: 1.1rem;
+    margin-top: 0.4rem;
+    font-size: 0.75rem;
+    color: var(--history-muted);
+    text-align: right;
+}
+
+.history-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.65rem;
+    margin: 0.75rem 0;
+}
+
+.history-card {
+    padding: 0.75rem;
+    border: 1px solid var(--history-border);
+    border-radius: 6px;
+    background: var(--history-surface);
+}
+
+.history-card-label {
+    margin: 0;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--history-muted);
+}
+
+.history-card-value {
+    margin: 0.2rem 0 0.15rem;
+    font-size: 1.45rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--history-subtle);
+}
+
+.history-card-meta {
+    margin: 0;
+    font-size: 0.72rem;
+    color: var(--history-muted);
+}
+
+.history-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.history-chart-box {
+    min-width: 0;
+}
+
+.history-chart {
+    min-height: 260px;
+}
+
+.history-panel-box {
+    margin-bottom: 0.75rem;
+}
+
+/* Long lists scroll inside their panel instead of stretching the page. */
+.history-table-wrap {
+    max-height: 420px;
+    overflow: auto;
+    scrollbar-gutter: stable;
+}
+
+.history-detail-table {
+    max-height: 280px;
+}
+
+#history-panel .table {
+    margin-bottom: 0;
+    font-size: 0.82rem;
+    color: inherit;
+    background-color: transparent;
+}
+
+#history-panel .table th,
+#history-panel .table td {
+    padding: 0.35rem 0.45rem;
+    vertical-align: middle;
+    border-color: var(--history-border);
+    color: inherit;
+}
+
+#history-panel .table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--history-sticky);
+    color: var(--history-muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+#history-panel .table.is-hoverable tbody tr:not(.is-selected):hover {
+    background-color: var(--history-hover);
+}
+
+#history-panel .table .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+#history-panel .table th.history-muted,
+#history-panel .table td.history-muted {
+    color: var(--history-muted);
+}
+
+.history-muted {
+    color: var(--history-muted);
+}
+
+.history-empty {
+    margin: 0.5rem 0;
+    color: var(--history-muted);
+    font-size: 0.85rem;
+}
+
+.history-summary-line {
+    margin: 0 0 0.5rem;
+    color: var(--history-muted);
+    font-size: 0.78rem;
+}
+
+.history-active-row {
+    background: rgba(72, 199, 142, 0.08);
+}
+
+.history-activity {
+    max-height: 460px;
+    overflow: auto;
+    scrollbar-gutter: stable;
+}
+
+.history-heatmap-scroll {
+    overflow: visible;
+}
+
+.history-heatmap {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    font-size: 0.7rem;
+}
+
+.history-heatmap th,
+.history-heatmap td {
+    padding: 0.2rem 0.3rem;
+    text-align: center;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--history-border);
+    border-right: 1px solid var(--history-border);
+}
+
+.history-heatmap th {
+    color: var(--history-muted);
+    font-weight: 600;
+}
+
+.history-heatmap thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--history-sticky);
+}
+
+.history-heatmap-streamer {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    text-align: left !important;
+    min-width: 6.5rem;
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: var(--history-sticky);
+}
+
+.history-heatmap thead .history-heatmap-streamer {
+    z-index: 3;
+}
+
+.history-heatmap-cell {
+    min-width: 1.7rem;
+    height: 1.3rem;
+    color: inherit;
+    font-variant-numeric: tabular-nums;
+}
+
+.history-events {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 360px;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding-right: 0.25rem;
+}
+
+.history-event {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    align-items: baseline;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--history-border);
+    font-size: 0.82rem;
+}
+
+.history-event:last-child {
+    border-bottom: 0;
+}
+
+.history-event-streamer {
+    font-weight: 600;
+}
+
+.history-event-label {
+    color: var(--history-muted);
+}
+
+.history-event-time {
+    margin-left: auto;
+    color: var(--history-muted);
+    font-size: 0.75rem;
+}
+
+.history-event-tag {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+}
+
+.history-event-watch_streak {
+    background: #45c1ff;
+    color: #101014;
+}
+
+.history-event-win {
+    background: #36b535;
+    color: #101014;
+}
+
+.history-event-lose,
+.history-event-loss {
+    background: #ff4545;
+    color: #fff;
+}
+
+.history-event-prediction_made {
+    background: #ffe045;
+    color: #101014;
+}
+
+.history-detail {
+    margin-bottom: 1.5rem;
+}
+
+.history-detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.history-detail-head .title {
+    margin-bottom: 0;
+}
+
+.history-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+    .history-toolbar {
+        align-items: flex-start;
+    }
+
+    .history-status {
+        text-align: left;
+    }
+}
