@@ -107,19 +107,19 @@ def _prune_credit_book(book, newest):
 
 
 def _match_credit(entries, reason_code, sent_at):
-    """The index of the entry in ``entries`` for ``reason_code`` sent
-    closest to ``sent_at``, within CREDIT_MATCH_SECONDS, or None."""
+    """The index of the earliest-sent entry in ``entries`` for
+    ``reason_code`` within CREDIT_MATCH_SECONDS of ``sent_at``, or None.
+
+    Earliest, not closest: results and their credits are sent in the same
+    order, so pairing them in order keeps two overlapping pairs from
+    swapping."""
 
     best = None
     for index, entry in enumerate(entries):
-        gap = abs(entry[0] - sent_at)
-        if (
-            entry[1] == reason_code
-            and gap <= CREDIT_MATCH_SECONDS
-            and (best is None or gap < best[0])
-        ):
-            best = (gap, index)
-    return None if best is None else best[1]
+        if entry[1] == reason_code and abs(entry[0] - sent_at) <= CREDIT_MATCH_SECONDS:
+            if best is None or entry[0] < entries[best][0]:
+                best = index
+    return best
 
 
 def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):

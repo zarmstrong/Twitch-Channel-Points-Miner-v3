@@ -266,8 +266,14 @@ class EventPrediction(object):
 
         points = {}
         if result_type == "REFUND":
-            # A refund returns the wager.
-            refunded = payout if payout is not None else placed
+            # A refund returns the wager.  Without it, a points_won of 0
+            # says nothing about what came back.
+            if placed is not None:
+                refunded = placed
+            elif payout:
+                refunded = payout
+            else:
+                refunded = None
             points["placed"] = refunded
             points["won"] = refunded
             points["gained"] = 0
