@@ -300,6 +300,49 @@ class WebSocketsPool:
             streamer.update_history("PREDICTION", -placed)
 
     @staticmethod
+    def _report_prediction_result(streamer, event_prediction, result):
+        """Log and count a prediction-result's ``result`` for the bet."""
+
+        points = event_prediction.parse_result(result)
+
+        logger.info(
+            (
+                f"{event_prediction} - "
+                f"{WebSocketsPool._placed_decision(event_prediction)}"
+                f"Result: {event_prediction.result['string']}"
+            ),
+            extra={
+                "emoji": ":bar_chart:",
+                "event": Events.get(f"BET_{event_prediction.result['type']}"),
+            },
+        )
+
+        WebSocketsPool._record_prediction_history(
+            streamer, event_prediction.result["type"], points
+        )
+
+        if event_prediction.result["type"]:
+            # Analytics switch
+            if Settings.enable_analytics is True:
+                streamer.persistent_annotations(
+                    event_prediction.result["type"], f"{event_prediction.title}"
+                )
+
+    @staticmethod
+    def _report_prediction_result_later(streamer, event_prediction, result):
+        """_report_prediction_result, once the miner's bet request has been
+        answered."""
+
+        try:
+            event_prediction.wait_for_miner_bet()
+            WebSocketsPool._report_prediction_result(streamer, event_prediction, result)
+        except Exception:
+            logger.error(
+                f"Failed to report the result of {event_prediction}",
+                exc_info=True,
+            )
+
+    @staticmethod
     def _placed_decision(event_prediction):
         """The "Decision: ..." part of a prediction's result line: the
         outcome the account bet on, or nothing when it isn't known."""
@@ -660,41 +703,25 @@ class WebSocketsPool:
                                 # The result names the bet too; prefer it to
                                 # the miner's decision, which may be missing
                                 # (a bet placed by hand before the timer) or
-                                # on another outcome.  If the miner's own bet
-                                # request is still waiting for Twitch's
-                                # answer, whether it is part of the bet is
-                                # known only once it is answered.
+                                # on another outcome.
                                 event_prediction.confirm_bet(message.data["prediction"])
-                                event_prediction.wait_for_miner_bet()
-                                points = event_prediction.parse_result(
-                                    message.data["prediction"]["result"]
-                                )
-
-                                logger.info(
-                                    (
-                                        f"{event_prediction} - "
-                                        f"{WebSocketsPool._placed_decision(event_prediction)}"
-                                        f"Result: {event_prediction.result['string']}"
-                                    ),
-                                    extra={
-                                        "emoji": ":bar_chart:",
-                                        "event": Events.get(
-                                            f"BET_{event_prediction.result['type']}"
-                                        ),
-                                    },
-                                )
-
-                                WebSocketsPool._record_prediction_history(
-                                    streamer, event_prediction.result["type"], points
-                                )
-
-                                if event_prediction.result["type"]:
-                                    # Analytics switch
-                                    if Settings.enable_analytics is True:
-                                        streamer.persistent_annotations(
-                                            event_prediction.result["type"],
-                                            f"{ws.events_predictions[event_id].title}",
-                                        )
+                                result = message.data["prediction"]["result"]
+                                if event_prediction.miner_bet_pending():
+                                    # Whether the miner's own bet is part of
+                                    # the bet is known once Twitch answers its
+                                    # request.  Wait for that on another
+                                    # thread: this one reads every message of
+                                    # this websocket.
+                                    Thread(
+                                        target=WebSocketsPool._report_prediction_result_later,
+                                        args=(streamer, event_prediction, result),
+                                        name=f"prediction-result-{event_id}",
+                                        daemon=True,
+                                    ).start()
+                                else:
+                                    WebSocketsPool._report_prediction_result(
+                                        streamer, event_prediction, result
+                                    )
                             elif message.type == "prediction-made":
                                 event_prediction.confirm_bet(message.data["prediction"])
                                 # Analytics switch
