@@ -100,12 +100,12 @@ def analytics(monkeypatch):
     monkeypatch.setattr(Settings, "enable_analytics", True, raising=False)
 
 
-def _send(streamer, event, message_type, prediction):
+def _send(streamer, event, message_type, prediction, sent="2026-11-27T12:00:30Z"):
     websocket = SimpleNamespace(
         index=0,
         streamers=[streamer],
         twitch=MagicMock(),
-        events_predictions={"event-1": event},
+        events_predictions={event.event_id: event},
         last_message_timestamp=None,
         last_message_type_channel=None,
     )
@@ -113,10 +113,15 @@ def _send(streamer, event, message_type, prediction):
         "server_time": 1700000000.0,
         "type": message_type,
         "data": {
-            "timestamp": "2026-11-27T12:00:30Z",
-            "prediction": {"event_id": "event-1", "channel_id": "1001", **prediction},
+            "prediction": {
+                "event_id": event.event_id,
+                "channel_id": "1001",
+                **prediction,
+            },
         },
     }
+    if sent is not None:
+        message["data"]["timestamp"] = sent
     WebSocketsPool.on_message(
         websocket,
         json.dumps(
@@ -168,12 +173,13 @@ def _credited(
     message = {
         "type": "points-earned",
         "data": {
-            "timestamp": sent,
             "channel_id": "1001",
             "point_gain": {"total_points": amount, "reason_code": reason},
             "balance": {"balance": 2000, "channel_id": "1001"},
         },
     }
+    if sent is not None:
+        message["data"]["timestamp"] = sent
     WebSocketsPool.on_message(
         websocket,
         json.dumps(
@@ -623,6 +629,66 @@ def test_a_credit_without_a_send_time_is_left_as_credited(streamer, event, logge
 
     assert _result_line(logger).endswith(f"Result: WIN, Gained: {UNKNOWN}")
     assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 120}}
+
+
+@pytest.mark.parametrize(
+    "result_sent, credit_sent",
+    [
+        (None, "2026-11-27T12:00:31Z"),
+        ("2026-11-27T12:00:30Z", None),
+        (None, None),
+    ],
+    ids=["result", "credit", "both"],
+)
+def test_a_credit_or_result_without_a_send_time_is_not_matched(
+    streamer, event, logger, result_sent, credit_sent
+):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": None}},
+        sent=result_sent,
+    )
+    _credited(streamer, event, "PREDICTION", 120, sent=credit_sent)
+
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 120}}
+
+
+@pytest.mark.parametrize(
+    "credit_first", [True, False], ids=["credit-first", "result-first"]
+)
+def test_a_credit_is_claimed_once(streamer, event, logger, credit_first):
+    # A known payout claims its credit...
+    if credit_first:
+        _credited(streamer, event, "PREDICTION", 120, sent="2026-11-27T12:00:31Z")
+    _send(
+        streamer,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-no", "points": 50},
+    )
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "WIN", "points_won": 120}},
+    )
+    if not credit_first:
+        _credited(streamer, event, "PREDICTION", 120, sent="2026-11-27T12:00:31Z")
+    # ...so another result sent close to it can't take it back again.
+    other = _next_prediction(streamer)
+    _send(streamer, other, "prediction-made", {"outcome_id": "outcome-no"})
+    other_result = {
+        "outcome_id": "outcome-no",
+        "result": {"type": "WIN", "points_won": None},
+    }
+    _send(
+        streamer, other, "prediction-result", other_result, sent="2026-11-27T12:00:35Z"
+    )
+
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 70}}
 
 
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):

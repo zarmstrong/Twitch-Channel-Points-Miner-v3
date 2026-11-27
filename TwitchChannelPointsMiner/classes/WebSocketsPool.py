@@ -34,8 +34,22 @@ logger = logging.getLogger(__name__)
 
 def _sent_at(message):
     """Twitch's send time of a PubSub message in epoch seconds, or None."""
+    return _epoch(message.timestamp)
+
+
+def _payload_sent_at(message):
+    """The send time in a PubSub message's own payload (``data.timestamp``)
+    in epoch seconds, or None: unlike Message.timestamp, never the local
+    clock's time when Twitch sent none."""
+
+    data = message.data if isinstance(message.data, dict) else {}
+    timestamp = data.get("timestamp")
+    return _epoch(timestamp) if isinstance(timestamp, str) else None
+
+
+def _epoch(timestamp):
     try:
-        sent = parser.parse(message.timestamp)
+        sent = parser.parse(timestamp)
     except (TypeError, ValueError, OverflowError):
         return None
     if sent.tzinfo is None:
@@ -52,7 +66,7 @@ def _sent_at(message):
 # no result has claimed yet, and results still waiting for theirs, per
 # streamer (by username, like Streamer's module-level locks):
 # {"credits": [(sent_at, reason_code, points)], "owed": [(sent_at,
-# reason_code)]}.  A credit and its result are sent together when the
+# reason_code, take_back)]}.  A credit and its result are sent together when the
 # prediction is resolved, so they are matched by Twitch's send times, not by
 # the predictions the miner tracks: it doesn't track every prediction (it
 # skips some it won't bet on), and the two topics can arrive on different
@@ -97,12 +111,13 @@ def _match_credit(entries, reason_code, sent_at):
     return None if best is None else best[1]
 
 
-def _claim_prediction_credit(streamer, reason_code, result_at):
-    """The points of the ``reason_code`` credit sent with a result sent at
-    ``result_at``, which the result takes back; None when it hasn't
-    arrived, and it is then taken back when it does
-    (_note_prediction_credit).  Without a send time nothing can be
-    matched."""
+def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):
+    """Claim the ``reason_code`` credit sent with a result sent at
+    ``result_at``, once: its points, or None when it hasn't arrived.  A
+    credit that arrives later is then taken back if ``take_back`` (the
+    result needs the credit's own amount), and otherwise only kept from
+    being claimed again (_note_prediction_credit).  Without a send time
+    nothing can be matched."""
 
     if result_at is None:
         return None
@@ -111,7 +126,7 @@ def _claim_prediction_credit(streamer, reason_code, result_at):
         index = _match_credit(book["credits"], reason_code, result_at)
         if index is not None:
             return book["credits"].pop(index)[2]
-        book["owed"].append((result_at, reason_code))
+        book["owed"].append((result_at, reason_code, take_back))
         _prune_credit_book(book, result_at)
     return None
 
@@ -126,8 +141,7 @@ def _note_prediction_credit(streamer, reason_code, points, sent_at):
         book = _credit_book(streamer)
         index = _match_credit(book["owed"], reason_code, sent_at)
         if index is not None:
-            book["owed"].pop(index)
-            return True
+            return book["owed"].pop(index)[2]
         book["credits"].append((sent_at, reason_code, points))
         _prune_credit_book(book, sent_at)
     return False
@@ -383,9 +397,19 @@ class WebSocketsPool:
 
         placed = points["placed"]
         won = points["won"]
+        if result_type in ("WIN", "REFUND"):
+            # Claimed even when the result's amounts are known, so no other
+            # result claims the same credit.
+            needs_credit = won is None and (result_type == "REFUND" or placed is None)
+            credit = _claim_prediction_credit(
+                streamer,
+                "REFUND" if result_type == "REFUND" else "PREDICTION",
+                result_at,
+                take_back=needs_credit,
+            )
+            if needs_credit:
+                won = credit
         if result_type == "REFUND":
-            if won is None:
-                won = _claim_prediction_credit(streamer, "REFUND", result_at)
             streamer.update_history("PREDICTION", 0)
             if won is not None:
                 streamer.update_history("REFUND", -won, counter=-1)
@@ -396,11 +420,8 @@ class WebSocketsPool:
             elif placed is not None:
                 # The payout credit stands for the payout: take the wager off.
                 streamer.update_history("PREDICTION", -placed, counter=0)
-            else:
-                if won is None:
-                    won = _claim_prediction_credit(streamer, "PREDICTION", result_at)
-                if won is not None:
-                    streamer.update_history("PREDICTION", -won, counter=-1)
+            elif won is not None:
+                streamer.update_history("PREDICTION", -won, counter=-1)
         elif placed is not None:
             streamer.update_history("PREDICTION", -placed)
 
@@ -748,7 +769,7 @@ class WebSocketsPool:
                                 reason_code, earned, awarded_at=_sent_at(message)
                             )
                             if _note_prediction_credit(
-                                streamer, reason_code, earned, _sent_at(message)
+                                streamer, reason_code, earned, _payload_sent_at(message)
                             ):
                                 # Its result's net change isn't known.
                                 streamer.update_history(
@@ -903,7 +924,7 @@ class WebSocketsPool:
                                     streamer,
                                     event_prediction,
                                     message.data["prediction"]["result"],
-                                    _sent_at(message),
+                                    _payload_sent_at(message),
                                 )
                             elif message.type == "prediction-made":
                                 event_prediction.confirm_bet(message.data["prediction"])
