@@ -78,7 +78,7 @@ def _epoch(timestamp):
 # streamer (by username, like Streamer's module-level locks):
 # {"credits": [(sent_at, reason_code, points, credited streamer object)],
 # "owed": [(sent_at,
-# reason_code, take_back)], "results": {event ids handled}}.  Kept for the
+# reason_code, take_back, result's streamer object)], "results": {event ids handled}}.  Kept for the
 # session: each prediction the account bets on adds at most one entry, and a
 # matched pair removes its own.  A credit and its result are sent together when the
 # prediction is resolved, so they are matched by Twitch's send times, not by
@@ -145,13 +145,15 @@ def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):
         index = _match_credit(book["credits"], reason_code, result_at)
         if index is not None:
             return book["credits"].pop(index)[2:]
-        book["owed"].append((result_at, reason_code, take_back))
+        book["owed"].append((result_at, reason_code, take_back, streamer))
     return None, None
 
 
 def _note_prediction_credit(streamer, reason_code, points, sent_at):
-    """Keep a PREDICTION or REFUND credit for its result; True when its
-    result already asked for it to be taken back."""
+    """Keep a PREDICTION or REFUND credit for its result; True when it is
+    to be taken back: its result asked for that, or its result was counted
+    on a Streamer object since replaced (the channel removed and added
+    again), whose corrections this object's history never got."""
 
     if reason_code not in ("PREDICTION", "REFUND") or sent_at is None:
         return False
@@ -159,7 +161,8 @@ def _note_prediction_credit(streamer, reason_code, points, sent_at):
         book = _credit_book(streamer)
         index = _match_credit(book["owed"], reason_code, sent_at)
         if index is not None:
-            return book["owed"].pop(index)[2]
+            _, _, take_back, counted_on = book["owed"].pop(index)
+            return take_back or counted_on is not streamer
         book["credits"].append((sent_at, reason_code, points, streamer))
     return False
 
