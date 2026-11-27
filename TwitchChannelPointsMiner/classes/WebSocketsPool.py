@@ -25,6 +25,10 @@ from TwitchChannelPointsMiner.classes.TwitchWebSocket import TwitchWebSocket
 from TwitchChannelPointsMiner.constants import WEBSOCKET
 from TwitchChannelPointsMiner.utils import get_streamer, internet_connection_available
 
+# How long stopping the miner waits for prediction results that wait for the
+# answer to the miner's own bet request.
+RESULT_WAIT_SECONDS = 30.0
+
 # from pathlib import Path
 
 
@@ -112,7 +116,15 @@ def _stream_down_predates_online(message, streamer):
 
 
 class WebSocketsPool:
-    __slots__ = ["ws", "twitch", "streamers", "events_predictions", "topic_lock"]
+    __slots__ = [
+        "ws",
+        "twitch",
+        "streamers",
+        "events_predictions",
+        "topic_lock",
+        "results_lock",
+        "result_workers",
+    ]
 
     def __init__(self, twitch, streamers, events_predictions):
         # Read without topic_lock by the main loop's checks; see CopyOnWriteList.
@@ -121,6 +133,10 @@ class WebSocketsPool:
         self.streamers = streamers
         self.events_predictions = events_predictions
         self.topic_lock = RLock()
+        # Prediction results waiting for the miner's bet request to be
+        # answered: (thread, event prediction).
+        self.results_lock = Lock()
+        self.result_workers = []
 
     """
     API Limits
@@ -267,6 +283,36 @@ class WebSocketsPool:
                 websocket.forced_close = True
         for websocket in websockets:
             websocket.close()
+        self._finish_prediction_results()
+
+    def _finish_prediction_results(self):
+        """Let results waiting for the miner's bet requests be reported
+        before the session's report: wait up to RESULT_WAIT_SECONDS for the
+        answers, then report the rest with the wager unknown."""
+
+        with getattr(self, "results_lock", Lock()):
+            workers = list(getattr(self, "result_workers", ()))
+        deadline = time.monotonic() + RESULT_WAIT_SECONDS
+        for thread, _event in workers:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        for thread, event_prediction in workers:
+            if thread.is_alive():
+                logger.warning(
+                    f"Reporting the result of {event_prediction} without the "
+                    "answer to the bet the miner was placing"
+                )
+                event_prediction.abandon_miner_bet()
+                thread.join(5)
+
+    def _start_result_worker(self, thread, event_prediction):
+        # Started under the lock: _finish_prediction_results never sees a
+        # thread it cannot join yet.
+        with self.results_lock:
+            self.result_workers[:] = [
+                worker for worker in self.result_workers if worker[0].is_alive()
+            ]
+            self.result_workers.append((thread, event_prediction))
+            thread.start()
 
     @staticmethod
     def _record_prediction_history(streamer, result_type, points):
@@ -701,14 +747,14 @@ class WebSocketsPool:
                         event_id = message.data["prediction"]["event_id"]
                         if event_id in ws.events_predictions:
                             event_prediction = ws.events_predictions[event_id]
-                            if (
-                                message.type == "prediction-result"
-                                and event_prediction.bet_confirmed
-                            ):
+                            if message.type == "prediction-result":
                                 # The result names the bet too; prefer it to
                                 # the miner's decision, which may be missing
                                 # (a bet placed by hand before the timer) or
-                                # on another outcome.
+                                # on another outcome.  It confirms the bet
+                                # even when the earlier messages were missed
+                                # (Twitch sends it only for the account's own
+                                # bets).
                                 event_prediction.confirm_bet(message.data["prediction"])
                                 result = message.data["prediction"]["result"]
                                 if event_prediction.miner_bet_pending():
@@ -717,7 +763,7 @@ class WebSocketsPool:
                                     # request.  Wait for that on another
                                     # thread: this one reads every message of
                                     # this websocket.
-                                    Thread(
+                                    worker = Thread(
                                         target=WebSocketsPool._report_prediction_result_later,
                                         args=(
                                             streamer,
@@ -726,7 +772,15 @@ class WebSocketsPool:
                                         ),
                                         name=f"prediction-result-{event_id}",
                                         daemon=True,
-                                    ).start()
+                                    )
+                                    pool = getattr(ws, "parent_pool", None)
+                                    if isinstance(pool, WebSocketsPool):
+                                        # Stopping the miner waits for it.
+                                        pool._start_result_worker(
+                                            worker, event_prediction
+                                        )
+                                    else:
+                                        worker.start()
                                 else:
                                     WebSocketsPool._report_prediction_result(
                                         streamer, event_prediction, result

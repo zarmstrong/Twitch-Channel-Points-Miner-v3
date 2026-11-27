@@ -35,6 +35,7 @@ class EventPrediction(object):
         "wager_unknown",
         "state_lock",
         "confirmations",
+        "points_floor",
     ]
 
     def __init__(
@@ -79,6 +80,9 @@ class EventPrediction(object):
         self.state_lock = threading.Lock()
         # predictions-user-v1 messages about the bet so far.
         self.confirmations = 0
+        # The bet is at least this many points: a total only grows, so a
+        # smaller one is an older message delivered late.
+        self.points_floor = 0
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -119,9 +123,11 @@ class EventPrediction(object):
             if isinstance(outcome_id, str) and outcome_id:
                 self.confirmed_outcome_id = outcome_id
             if points is not None:
-                # The bet's total so far.
-                self.confirmed_points = points
-                self.wager_unknown = False
+                if points >= self.points_floor:
+                    # The bet's total so far.
+                    self.confirmed_points = points
+                    self.wager_unknown = False
+                    self.points_floor = points
             elif addition:
                 # Points were added, but how many isn't known.
                 self.confirmed_points = None
@@ -166,6 +172,22 @@ class EventPrediction(object):
                 # which; otherwise the wager is unknown until a new total.
                 self.confirmed_points = None
                 self.wager_unknown = True
+            if amount is not None:
+                self.points_floor = max(
+                    self.points_floor, (points_before or 0) + amount
+                )
+
+    def abandon_miner_bet(self):
+        """Stop waiting for the answer to the miner's bet request (the miner
+        is stopping): whether its points are part of the bet stays
+        unknown."""
+
+        with self.state_lock:
+            if self.miner_bet_answered.is_set():
+                return
+            self.confirmed_points = None
+            self.wager_unknown = True
+            self.miner_bet_answered.set()
 
     def miner_bet_settled(self):
         """Twitch answered the miner's bet request (or it failed)."""

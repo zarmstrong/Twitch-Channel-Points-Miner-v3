@@ -97,8 +97,9 @@ def analytics(monkeypatch):
     monkeypatch.setattr(Settings, "enable_analytics", True, raising=False)
 
 
-def _send(streamer, event, message_type, prediction):
+def _send(streamer, event, message_type, prediction, pool=None):
     websocket = SimpleNamespace(
+        parent_pool=pool,
         index=0,
         streamers=[streamer],
         twitch=MagicMock(),
@@ -861,3 +862,122 @@ def test_a_result_during_the_request_keeps_its_own_total(streamer, event, logger
 
     assert _result_line(logger).endswith("Result: LOSE, Lost: -370")
     assert streamer.history == {"PREDICTION": {"counter": 1, "amount": -370}}
+
+
+def test_an_older_total_delivered_after_the_miners_addition_is_ignored(
+    streamer, event, logger
+):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+    _miner_bets(
+        event,
+        {"choice": 1, "amount": 300, "id": "outcome-no"},
+        MakePredictionResponse(None),
+    )
+    # A total from before the addition, delivered late.
+    _send(
+        streamer,
+        event,
+        "prediction-updated",
+        {"outcome_id": "outcome-no", "points": 50},
+    )
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "LOSE", "points_won": None}},
+    )
+
+    assert _result_line(logger).endswith("Result: LOSE, Lost: -350")
+
+
+def test_a_result_is_reported_when_the_earlier_messages_were_missed(
+    streamer, event, logger
+):
+    _credited(streamer, "PREDICTION", 120)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {
+            "outcome_id": "outcome-no",
+            "points": 50,
+            "result": {"type": "WIN", "points_won": 120},
+        },
+    )
+
+    assert streamer.annotations == [("WIN", "Will it work?")]
+    line = _result_line(logger)
+    assert "Decision: 1: No (PINK)" in line
+    assert line.endswith("Result: WIN, Gained: +70")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 70}}
+
+
+def _result_while_the_request_waits(streamer, event, pool):
+    """The miner's request for 100 on "Yes" waits for ``release``; Twitch
+    reports the bet, then a result without a total. Returns (release, timer
+    thread)."""
+
+    request, sent, release = _blocked_request(MakePredictionResponse(None))
+    timer = threading.Thread(
+        target=_miner_bets,
+        args=(event, {"choice": 0, "amount": 100, "id": "outcome-yes"}, request),
+        daemon=True,
+    )
+    timer.start()
+    assert sent.wait(5)
+    _send(
+        streamer,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-yes", "points": 100},
+        pool,
+    )
+    _credited(streamer, "PREDICTION", 250)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-yes", "result": {"type": "WIN", "points_won": 250}},
+        pool,
+    )
+    return release, timer
+
+
+def test_stopping_waits_for_a_result_waiting_for_the_miners_request(
+    streamer, event, logger
+):
+    pool = WebSocketsPool(MagicMock(), [streamer], {"event-1": event})
+    release, timer = _result_while_the_request_waits(streamer, event, pool)
+    (worker,) = [thread for thread, _event in pool.result_workers]
+
+    stopping = threading.Thread(target=pool.end, daemon=True)
+    stopping.start()
+    assert worker.is_alive()
+    release.set()
+    _join([stopping, timer])
+
+    logger.warning.assert_not_called()
+    assert _result_line(logger).endswith("Result: WIN, Gained: +150")
+    assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 150}}
+
+
+def test_stopping_reports_a_result_whose_request_does_not_answer_in_time(
+    streamer, event, logger, monkeypatch
+):
+    monkeypatch.setattr(f"{POOL_MODULE}.RESULT_WAIT_SECONDS", 0.0)
+    pool = WebSocketsPool(MagicMock(), [streamer], {"event-1": event})
+    release, timer = _result_while_the_request_waits(streamer, event, pool)
+
+    pool.end()
+
+    (warning,) = logger.warning.call_args_list
+    assert "without the answer" in warning.args[0]
+    # Twitch's 100 may be the miner's or a bet by hand with the miner's
+    # still to come: unknown.
+    assert _result_line(logger).endswith(f"Result: WIN, Gained: {UNKNOWN}")
+    # The payout credit is taken back; the prediction isn't counted.
+    assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
+    release.set()
+    _join([timer])
