@@ -251,6 +251,35 @@ def test_mine_does_not_stop_workers_again_after_end():
     miner.ws_pool.end.assert_not_called()
 
 
+def test_mine_returns_only_once_another_threads_shutdown_finished():
+    """The desktop app's window stops the workers on its own thread; the
+    miner thread's cleanup (ending History's journal run) must follow it."""
+
+    miner = _miner()
+    miner.ws_pool = MagicMock()
+    miner.twitch.restart_requested = threading.Event()
+    miner.workers_stopping = threading.Event()
+    miner.workers_stopped = threading.Event()
+    miner.running = False
+
+    def window_stops_the_miner(*_args, **_kwargs):
+        miner.running = True
+        miner.workers_stopping.set()
+        miner.running = miner.twitch.running = False
+
+    with patch.object(
+        TwitchChannelPointsMiner, "run", side_effect=window_stops_the_miner
+    ):
+        mining = threading.Thread(target=miner.mine, args=([],))
+        mining.start()
+        mining.join(timeout=0.2)
+        assert mining.is_alive()
+        miner.workers_stopped.set()
+        mining.join(timeout=5)
+    assert not mining.is_alive()
+    miner.ws_pool.end.assert_not_called()
+
+
 def test_mine_called_again_while_running_keeps_the_active_session():
     # run() refuses a second session and returns; that must not stop the
     # session that is already running.
@@ -798,3 +827,35 @@ def test_start_does_not_run_a_socket_force_closed_before_its_thread_ran(monkeypa
     threads[0].join(timeout=5)
 
     assert ran == []
+
+
+def test_shutdown_ends_the_journal_run_after_the_workers_stopped():
+    miner = _miner()
+    order = []
+
+    def save_state(self, retire_all=False):
+        order.append("save")
+
+    with (
+        patch.object(TwitchChannelPointsMiner, "run", side_effect=IndexError("boom")),
+        patch.object(
+            TwitchChannelPointsMiner,
+            "_TwitchChannelPointsMiner__save_daily_report_state_safely",
+            save_state,
+        ),
+        patch(
+            "TwitchChannelPointsMiner.history.stop_journal",
+            lambda: order.append("journal"),
+        ),
+        patch(
+            "TwitchChannelPointsMiner.history.stop_history",
+            lambda: order.append("history"),
+        ),
+        patch(f"{MODULE}.logger"),
+    ):
+        with pytest.raises(SystemExit):
+            miner.mine([])
+
+    # run_end is written once nothing writes records any more, then History
+    # imports it, then the report state is saved.
+    assert order[-3:] == ["journal", "history", "save"]

@@ -323,6 +323,11 @@ $(document).ready(function () {
     // tab is Drops, hide Points only after chart initialization completes.
     chart.render().then(function () {
         chartRendered = true;
+        // A tab saved by an optional script (History) that did not load this
+        // time has no button or panel; open Points instead of nothing.
+        if (!document.getElementById('tab-' + savedDashboardTab)) {
+            savedDashboardTab = 'points';
+        }
         switchDashboardTab(savedDashboardTab);
     });
 
@@ -725,6 +730,13 @@ function confirmStreamerAnalyticsDeletion() {
     Promise.allSettled(deleteRequests).then(function (results) {
         var deletedStreamers = streamers.filter((_streamer, index) => results[index].status === 'fulfilled');
         var failedStreamers = streamers.filter((_streamer, index) => results[index].status === 'rejected');
+        if (deletedStreamers.length > 0) {
+            // The optional History tab shows these streamers' History, which
+            // the delete removed too.
+            window.dispatchEvent(new CustomEvent('analytics-streamers-deleted', {
+                detail: { streamers: deletedStreamers }
+            }));
+        }
 
         if (deletedStreamers.includes(currentStreamer)) {
             if (streamerRefreshTimeout) {

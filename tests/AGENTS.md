@@ -23,6 +23,13 @@ Tests never reach Twitch, notification services or the internet.
 - For a race, drive the interleaving deterministically (patch the sleep or the call where the other thread would run) rather than hoping threads collide.
 - A test that waits on a thread must use a join timeout, so a bug fails the test instead of hanging the run.
 
+## Dashboard JavaScript tests
+
+`tests/js/*.test.js` test the dashboard's scripts in `assets/` with Node's built-in test runner, for example `node tests/js/history-delete.test.js`. CI runs each one in the Node job of `.github/workflows/tests.yml`; add a new file there.
+
+- A script that needs a browser exports only the parts the tests drive when it is loaded by Node (`typeof window === 'undefined'`), and returns before touching the page. See the top of `assets/history.js`.
+- Those parts reach the page through functions they are given, so tests pass fakes for requests, timers and redraws. Drive a timer by calling it, never by waiting.
+
 ## Windows-specific tests
 
 - `tests/test_windows_launcher.py` covers the desktop app. Mock `ctypes`, `winreg`, `subprocess` and pywebview. Never create real mutexes, registry values, scheduled tasks, processes or message boxes. A real `MessageBoxW` blocks the run until someone clicks it.

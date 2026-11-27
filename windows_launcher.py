@@ -1206,6 +1206,16 @@ def _run_miner_thread(argv, on_miner_ready):
         _show_fatal_error_message(
             f"Twitch Channel Points Miner failed to start:\n\n{error}"
         )
+    finally:
+        # The shell can stay open after the miner stops; History shows what
+        # was imported, so take in the end of the run.
+        try:
+            from TwitchChannelPointsMiner.history import stop_history, stop_journal
+
+            stop_journal()
+            stop_history()
+        except Exception:
+            pass
 
 
 class _MinerThreadHandle:

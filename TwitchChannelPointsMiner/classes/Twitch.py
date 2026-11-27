@@ -15,6 +15,7 @@ import re
 import string
 import time
 import unicodedata
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,7 @@ from TwitchChannelPointsMiner.classes.entities.RewardCampaign import (
     with_claim_instance_ids,
     with_reward_category,
 )
+from TwitchChannelPointsMiner.classes.entities.Stream import Stream
 from TwitchChannelPointsMiner.classes.entities.Streamer import (
     discovery_source,
     discovery_sources,
@@ -98,6 +100,7 @@ from TwitchChannelPointsMiner.constants import (
     GQLOperations,
 )
 from TwitchChannelPointsMiner.data_migration import ANALYTICS_DATA_VERSION
+from TwitchChannelPointsMiner.history import journal as history_journal
 from TwitchChannelPointsMiner.logger import (
     ANDROID_LOGIN_COLOR,
     SKIP_NOTIFICATIONS,
@@ -304,6 +307,26 @@ WATCH_STREAK_RECONCILE_INTERVAL_SECONDS = 3 * 60
 # closes, a cooldown apart: Twitch may not have processed the window's last
 # minutes by the first one.
 WATCH_STREAK_FINAL_CHECKS = 3
+
+
+def _minute_watched_request(stream):
+    """``(request body, broadcast id)`` from one read of ``stream.payload``.
+
+    A stream refresh replaces the payload with a new list, so the body and
+    the broadcast it names always match.
+    """
+
+    payload = getattr(stream, "payload", None)
+    if not isinstance(payload, list):
+        return stream.encode_payload(), getattr(stream, "broadcast_id", None)
+    broadcast_id = None
+    try:
+        broadcast_id = payload[0]["properties"].get("broadcast_id")
+    except (IndexError, KeyError, TypeError, AttributeError):
+        pass
+    if broadcast_id in (None, ""):
+        broadcast_id = getattr(stream, "broadcast_id", None)
+    return Stream.encode(payload), broadcast_id
 
 
 class Twitch(object):
@@ -1953,34 +1976,40 @@ class Twitch(object):
         """Apply a _fetch_stream_update() reply. Called under the state
         lock; makes no requests."""
         requested_at, stream_info = fetched
-        streamer.stream.update(
-            seen_live_at=requested_at,
-            broadcast_id=stream_info["stream"]["id"],
-            title=stream_info["broadcastSettings"]["title"],
-            game=stream_info["broadcastSettings"]["game"],
-            tags=stream_info["stream"]["tags"],
-            viewers_count=stream_info["stream"]["viewersCount"],
-        )
+        with history_journal.lifecycle_lock(streamer.username):
+            streamer.stream.update(
+                seen_live_at=requested_at,
+                broadcast_id=stream_info["stream"]["id"],
+                title=stream_info["broadcastSettings"]["title"],
+                game=stream_info["broadcastSettings"]["game"],
+                tags=stream_info["stream"]["tags"],
+                viewers_count=stream_info["stream"]["viewersCount"],
+            )
+            # A new broadcast, game or title while online (repeats of the
+            # last one are skipped).
+            history_journal.JOURNAL.record_live(streamer)
 
-        event_properties = {
-            "channel_id": streamer.channel_id,
-            "broadcast_id": streamer.stream.broadcast_id,
-            "player": "site",
-            "user_id": self.twitch_login.get_user_id(),
-            "live": True,
-            "channel": streamer.username,
-        }
+            # Under the same lock: the minute watcher reads the payload and
+            # History's watch token together, so they name one broadcast.
+            event_properties = {
+                "channel_id": streamer.channel_id,
+                "broadcast_id": streamer.stream.broadcast_id,
+                "player": "site",
+                "user_id": self.twitch_login.get_user_id(),
+                "live": True,
+                "channel": streamer.username,
+            }
 
-        if (
-            streamer.stream.game_name() is not None
-            and streamer.stream.game_id() is not None
-        ):
-            event_properties["game"] = streamer.stream.game_name()
-            event_properties["game_id"] = streamer.stream.game_id()
+            if (
+                streamer.stream.game_name() is not None
+                and streamer.stream.game_id() is not None
+            ):
+                event_properties["game"] = streamer.stream.game_name()
+                event_properties["game_id"] = streamer.stream.game_id()
 
-        streamer.stream.payload = [
-            {"event": "minute-watched", "properties": event_properties}
-        ]
+            streamer.stream.payload = [
+                {"event": "minute-watched", "properties": event_properties}
+            ]
 
     def _update_stream_campaigns(self, streamer):
         """Resolve the campaigns of the stream info just applied. Makes
@@ -2150,7 +2179,16 @@ class Twitch(object):
     def _apply_stream_update_and_transition(self, streamer, fetched):
         """Apply a refresh of an online streamer and, when it shows a new
         broadcast, run the offline/online change the miner missed. Called
-        under the state lock."""
+        under the state lock.
+
+        All of it under the streamer's lifecycle lock (reentrant): the
+        minute watcher never sees the new broadcast before the missed
+        offline/online, which would end the watch its request belongs to.
+        """
+        with history_journal.lifecycle_lock(streamer.username):
+            self.__apply_stream_update_and_transition(streamer, fetched)
+
+    def __apply_stream_update_and_transition(self, streamer, fetched):
         live_snapshot = getattr(streamer.stream, "live_snapshot", None)
         if callable(live_snapshot):
             # One read of both, so this broadcast's ID is never paired with
@@ -8300,6 +8338,21 @@ class Twitch(object):
 
                 self._forget_idle_stream_segment_watchers()
 
+                history_journal.JOURNAL.watch_selection(
+                    {
+                        streamers_snapshot[index].username: (
+                            streamers_snapshot[index],
+                            self._watch_reason(
+                                streamers_snapshot[index],
+                                index,
+                                streamer_source,
+                                streak_selected_indexes,
+                            ),
+                        )
+                        for index in streamers_watching
+                    }
+                )
+
                 self.__save_now_watching_analytics(
                     streamers_snapshot,
                     streamers_watching,
@@ -8329,8 +8382,20 @@ class Twitch(object):
                     # next_iteration = time.time() + 60 / len(streamers_watching)
                     next_iteration = time.time() + 20 / len(streamers_watching)
 
+                    # History credits watch time only for an accepted
+                    # request; every other outcome, including a skip or an
+                    # exception, only moves its accounting boundary.
+                    history_attempt = None
                     try:
                         streamer = streamers_snapshot[index]
+                        # Under the lifecycle lock, where a stream update
+                        # changes both: the broadcast and the token agree.
+                        with history_journal.lifecycle_lock(streamer.username):
+                            history_attempt = (
+                                streamer,
+                                getattr(streamer.stream, "broadcast_id", None),
+                                history_journal.JOURNAL.watch_token(streamer),
+                            )
                         if streamer.stream.spade_url is None:
                             # Posting to a None URL raises MissingSchema, which
                             # would abort this loop for every later streamer.
@@ -8341,6 +8406,15 @@ class Twitch(object):
                             else:
                                 spade_url_warned.add(streamer.username)
                                 logger.warning(message)
+                            # The skip is this slot's attempt: move History's
+                            # boundary now, not after the sleep.
+                            history_journal.JOURNAL.watch_attempt(
+                                history_attempt[0],
+                                False,
+                                broadcast_id=history_attempt[1],
+                                token=history_attempt[2],
+                            )
+                            history_attempt = None
                             self.__chuncked_sleep(
                                 next_iteration - time.time(), chunk_size=chunk_size
                             )
@@ -8353,10 +8427,25 @@ class Twitch(object):
                             streamer.stream, "watch_streak_broadcast_id", None
                         )
                         for attempt in range(2):
+                            # One snapshot per request: its body and the
+                            # broadcast History credits come from the same
+                            # payload, even if a refresh replaces it.
+                            # Under the lifecycle lock, where a stream update
+                            # replaces the payload and moves History to the
+                            # new broadcast: the body and token agree.
+                            with history_journal.lifecycle_lock(streamer.username):
+                                data, sent_for = _minute_watched_request(
+                                    streamer.stream
+                                )
+                                history_attempt = (
+                                    streamer,
+                                    sent_for,
+                                    history_journal.JOURNAL.watch_token(streamer),
+                                )
                             try:
                                 response = HttpSession.post(
                                     streamer.stream.spade_url,
-                                    data=streamer.stream.encode_payload(),
+                                    data=data,
                                     headers={"User-Agent": self.user_agent},
                                     # timeout=60,
                                     timeout=20,
@@ -8367,6 +8456,14 @@ class Twitch(object):
                                     logger.warning(
                                         f"Connection error sending minute watched for {streamer}, retrying once: {e}"
                                     )
+                                    # The time until this failure is not
+                                    # watch time, whatever the retry gets.
+                                    history_journal.JOURNAL.watch_attempt(
+                                        streamer,
+                                        False,
+                                        broadcast_id=history_attempt[1],
+                                        token=history_attempt[2],
+                                    )
                                     continue
                                 raise
                         logger.debug(
@@ -8374,6 +8471,13 @@ class Twitch(object):
                             f"Status code: {response.status_code}"
                         )
                         if response.status_code == 204:
+                            history_journal.JOURNAL.watch_attempt(
+                                streamer,
+                                True,
+                                broadcast_id=history_attempt[1],
+                                token=history_attempt[2],
+                            )
+                            history_attempt = None
                             streamer.stream.update_minute_watched(
                                 broadcast_id=posted_for
                             )
@@ -8456,9 +8560,27 @@ class Twitch(object):
 
                     except requests.exceptions.ConnectionError as e:
                         logger.error(f"Error while trying to send minute watched: {e}")
+                        # The failure is the attempt: move History's boundary
+                        # now, not after waiting for the connection.
+                        if history_attempt is not None:
+                            history_journal.JOURNAL.watch_attempt(
+                                history_attempt[0],
+                                False,
+                                broadcast_id=history_attempt[1],
+                                token=history_attempt[2],
+                            )
+                            history_attempt = None
                         self.__check_connection_handler(chunk_size)
                     except requests.exceptions.Timeout as e:
                         logger.error(f"Error while trying to send minute watched: {e}")
+                    finally:
+                        if history_attempt is not None:
+                            history_journal.JOURNAL.watch_attempt(
+                                history_attempt[0],
+                                False,
+                                broadcast_id=history_attempt[1],
+                                token=history_attempt[2],
+                            )
 
                     self.__chuncked_sleep(
                         next_iteration - time.time(), chunk_size=chunk_size
@@ -8575,36 +8697,60 @@ class Twitch(object):
                         },
                     )
 
-                    # Before the request: Twitch's report of this bet, even
-                    # its result, can arrive before its answer.
-                    before = event.begin_miner_bet()
-                    try:
-                        response = self.gql.make_prediction(
-                            event.event_id, decision["id"], decision["amount"]
-                        )
-                    except RetryError as error:
-                        # Twitch may have placed it all the same.
-                        event.miner_bet_indeterminate()
-                        logger.error(
-                            f"Failed to place bet: {error}",
-                            extra={
-                                "emoji": ":four_leaf_clover:",
-                                "event": Events.BET_FAILED,
-                            },
-                        )
-                    else:
-                        if response.error is not None:
+                    # The amount actually sent, for History's spend record.
+                    amount = decision["amount"]
+                    # Registered while it runs, so stopping the miner waits
+                    # for its spend record (see Journal.spend_in_progress).
+                    with history_journal.JOURNAL.spend_in_progress() as admitted:
+                        if not admitted:
+                            logger.info(
+                                f"Not placing the bet for {event}: the miner is stopping",
+                                extra={
+                                    "emoji": ":four_leaf_clover:",
+                                    "event": Events.BET_GENERAL,
+                                },
+                            )
+                            return
+                        # Before the request: Twitch's report of this bet,
+                        # even its result, can arrive before its answer.
+                        before = event.begin_miner_bet()
+                        try:
+                            response = self.gql.make_prediction(
+                                event.event_id, decision["id"], amount
+                            )
+                        except RetryError as error:
+                            # Twitch may have placed it all the same.
+                            event.miner_bet_indeterminate()
                             logger.error(
-                                f"Failed to place bet, error: {response.error.code}",
+                                f"Failed to place bet: {error}",
                                 extra={
                                     "emoji": ":four_leaf_clover:",
                                     "event": Events.BET_FAILED,
                                 },
                             )
                         else:
-                            event.miner_bet_accepted(before, decision["amount"])
-                    finally:
-                        event.miner_bet_settled()
+                            if response.error is not None:
+                                logger.error(
+                                    f"Failed to place bet, error: {response.error.code}",
+                                    extra={
+                                        "emoji": ":four_leaf_clover:",
+                                        "event": Events.BET_FAILED,
+                                    },
+                                )
+                            else:
+                                event.miner_bet_accepted(before, amount)
+                                # Only the miner's own accepted bet: a bet placed
+                                # by hand also confirms the event, and the
+                                # decision is calculated before filters skip it.
+                                history_journal.JOURNAL.record_spend(
+                                    event.streamer,
+                                    "prediction",
+                                    amount,
+                                    f"prediction:{event.event_id}",
+                                    title=getattr(event, "title", None),
+                                )
+                        finally:
+                            event.miner_bet_settled()
                 else:
                     logger.info(
                         f"Bet won't be placed as the amount {_millify(decision['amount'])} is less than the minimum required 10",
@@ -12018,6 +12164,30 @@ class Twitch(object):
             ]
         )
 
+    def _watch_reason(
+        self, streamer, index, streamer_source, streak_selected_indexes=None
+    ):
+        """Why a selected streamer is watched: badge, drops, streak or points.
+
+        A pending watch streak outranks the points fallback, so report the
+        streak rather than implying the channel is watched only to accrue
+        channel points. Drops and badge campaigns keep their own label because
+        those streams may earn a reward as well.
+        """
+        source = streamer_source(index)
+        if source == StreamerSource.BADGES:
+            return "badge"
+        if source in (
+            StreamerSource.CATEGORIES,
+            StreamerSource.WILDCARD_CATEGORIES,
+        ):
+            return "drops"
+        if self._watching_for_streak(
+            streamer, index in (streak_selected_indexes or ())
+        ):
+            return "streak"
+        return "points"
+
     def __save_now_watching_analytics(
         self,
         streamers_snapshot,
@@ -12031,24 +12201,9 @@ class Twitch(object):
         entries = []
         for index in streamers_watching:
             streamer = streamers_snapshot[index]
-            source = streamer_source(index)
-            # A pending watch streak outranks the points fallback, so report
-            # the streak rather than implying the channel is watched only to
-            # accrue channel points. Drops and badge campaigns keep their own
-            # label because those streams may earn a reward as well.
-            if source == StreamerSource.BADGES:
-                reason = "badge"
-            elif source in (
-                StreamerSource.CATEGORIES,
-                StreamerSource.WILDCARD_CATEGORIES,
-            ):
-                reason = "drops"
-            elif self._watching_for_streak(
-                streamer, index in (streak_selected_indexes or ())
-            ):
-                reason = "streak"
-            else:
-                reason = "points"
+            reason = self._watch_reason(
+                streamer, index, streamer_source, streak_selected_indexes
+            )
 
             game = streamer.stream.game or {}
             game_name = (game.get("displayName") or game.get("name")) if game else None
@@ -13983,6 +14138,17 @@ class Twitch(object):
                         )
 
     def contribute_to_community_goal(self, streamer, goal_id, title, amount):
+        # Registered while it runs, so stopping the miner waits for its spend
+        # record (see Journal.spend_in_progress).
+        with history_journal.JOURNAL.spend_in_progress() as admitted:
+            if not admitted:
+                logger.info(
+                    f"Not contributing to community goal '{title}': the miner is stopping"
+                )
+                return
+            self._contribute_to_community_goal(streamer, goal_id, title, amount)
+
+    def _contribute_to_community_goal(self, streamer, goal_id, title, amount):
         try:
             response = self.gql.contribute_to_community_goal(
                 streamer.channel_id, goal_id, amount
@@ -14001,3 +14167,10 @@ class Twitch(object):
                 f"Contributed {amount} channel points to community goal '{title}'"
             )
             streamer.channel_points -= amount
+            history_journal.JOURNAL.record_spend(
+                streamer,
+                "goal",
+                amount,
+                f"goal:{goal_id}:{uuid.uuid4().hex}",
+                title=title,
+            )
