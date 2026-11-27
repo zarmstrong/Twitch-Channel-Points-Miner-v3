@@ -902,6 +902,28 @@ def test_a_delayed_credit_is_matched_after_many_later_results(streamer, event, l
     }
 
 
+def test_a_credit_counted_before_the_streamer_was_re_added_is_moved(
+    streamer, event, logger
+):
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
+    _credited(streamer, event, "REFUND", 40, sent="2026-11-27T12:00:29Z")
+    # The channel is removed from the configuration and added again: a new
+    # Streamer object with an empty session history.
+    replacement = RecordingStreamer()
+    _send(
+        replacement,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-no", "result": {"type": "REFUND"}},
+    )
+
+    assert replacement.history == {
+        "REFUND": {"counter": 0, "amount": 0},
+        "PREDICTION": {"counter": 1, "amount": 0},
+    }
+    assert streamer.history == {"REFUND": {"counter": 0, "amount": 0}}
+
+
 def test_a_refund_of_an_unknown_wager_uses_the_refunded_points(streamer, event, logger):
     _send(streamer, event, "prediction-made", {"outcome_id": "outcome-no"})
     _credited(streamer, event, "REFUND", 40)

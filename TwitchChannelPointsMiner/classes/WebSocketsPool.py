@@ -76,7 +76,8 @@ def _epoch(timestamp):
 # community-points-user-v1 credits of prediction payouts and refunds that
 # no result has claimed yet, and results still waiting for theirs, per
 # streamer (by username, like Streamer's module-level locks):
-# {"credits": [(sent_at, reason_code, points)], "owed": [(sent_at,
+# {"credits": [(sent_at, reason_code, points, credited streamer object)],
+# "owed": [(sent_at,
 # reason_code, take_back)], "results": {event ids handled}}.  Kept for the
 # session: each prediction the account bets on adds at most one entry, and a
 # matched pair removes its own.  A credit and its result are sent together when the
@@ -130,21 +131,22 @@ def _match_credit(entries, reason_code, sent_at):
 
 def _claim_prediction_credit(streamer, reason_code, result_at, take_back=True):
     """Claim the ``reason_code`` credit sent with a result sent at
-    ``result_at``, once: its points, or None when it hasn't arrived.  A
+    ``result_at``, once: (its points, the Streamer object it was counted
+    on), or (None, None) when it hasn't arrived.  A
     credit that arrives later is then taken back if ``take_back`` (the
     result needs the credit's own amount), and otherwise only kept from
     being claimed again (_note_prediction_credit).  Without a send time
     nothing can be matched."""
 
     if result_at is None:
-        return None
+        return None, None
     with _prediction_credits_lock:
         book = _credit_book(streamer)
         index = _match_credit(book["credits"], reason_code, result_at)
         if index is not None:
-            return book["credits"].pop(index)[2]
+            return book["credits"].pop(index)[2:]
         book["owed"].append((result_at, reason_code, take_back))
-    return None
+    return None, None
 
 
 def _note_prediction_credit(streamer, reason_code, points, sent_at):
@@ -158,7 +160,7 @@ def _note_prediction_credit(streamer, reason_code, points, sent_at):
         index = _match_credit(book["owed"], reason_code, sent_at)
         if index is not None:
             return book["owed"].pop(index)[2]
-        book["credits"].append((sent_at, reason_code, points))
+        book["credits"].append((sent_at, reason_code, points, streamer))
     return False
 
 
@@ -416,12 +418,16 @@ class WebSocketsPool:
             # Claimed even when the result's amounts are known, so no other
             # result claims the same credit.
             needs_credit = won is None and (result_type == "REFUND" or placed is None)
-            credit = _claim_prediction_credit(
-                streamer,
-                "REFUND" if result_type == "REFUND" else "PREDICTION",
-                result_at,
-                take_back=needs_credit,
+            reason_code = "REFUND" if result_type == "REFUND" else "PREDICTION"
+            credit, credited = _claim_prediction_credit(
+                streamer, reason_code, result_at, take_back=needs_credit
             )
+            if credit is not None and credited is not streamer:
+                # Counted on a Streamer object since replaced (the channel was
+                # removed and added again): move it to this one, which the
+                # corrections below apply to.
+                credited.update_history(reason_code, -credit, counter=-1)
+                streamer.update_history(reason_code, credit)
             if needs_credit:
                 won = credit
         if result_type == "REFUND":
