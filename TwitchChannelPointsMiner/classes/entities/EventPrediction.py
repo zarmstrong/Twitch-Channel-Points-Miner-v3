@@ -175,7 +175,12 @@ class EventPrediction(object):
             if self.confirmations != confirmations_before:
                 # Reported while the request was made (confirm_bet).
                 self.wager_unknown = True
-            elif confirmed_before:
+            elif not confirmed_before:
+                # Nothing was reported before the miner's points: a later
+                # report may be the miner's bet, a bet by hand from before
+                # it, or both together, and none of them says which.
+                self.wager_unknown = True
+            else:
                 # The miner added to a bet Twitch had confirmed, and nothing
                 # was reported since.
                 if points_before is None or amount is None:

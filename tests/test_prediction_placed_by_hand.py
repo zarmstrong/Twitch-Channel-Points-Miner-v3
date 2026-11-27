@@ -373,7 +373,11 @@ def test_the_miners_own_bet_is_reported_as_before(streamer, event, logger):
         streamer,
         event,
         "prediction-result",
-        {"outcome_id": "outcome-yes", "result": {"type": "WIN", "points_won": 250}},
+        {
+            "outcome_id": "outcome-yes",
+            "points": 100,
+            "result": {"type": "WIN", "points_won": 250},
+        },
     )
 
     logger.error.assert_not_called()
@@ -726,20 +730,27 @@ def test_a_bet_by_hand_confirmed_after_the_miners_is_not_the_miners_alone(
     assert streamer.history == {}
 
 
-def test_the_miners_own_bet_reported_after_its_answer_is_its_total(
-    streamer, event, logger
+@pytest.mark.parametrize("reported", [50, 300, 350], ids=["less", "equal", "more"])
+def test_a_report_after_the_miners_first_bet_does_not_say_what_was_bet(
+    streamer, event, logger, reported
 ):
     _miner_bets(
         event,
         {"choice": 1, "amount": 300, "id": "outcome-no"},
         MakePredictionResponse(None),
     )
+    # The miner's own bet, or a bet by hand from before the timer reported
+    # only now (300 of the miner's may come on top): Twitch doesn't say.
     _send(
-        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 300}
+        streamer,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-no", "points": reported},
     )
     _lose(streamer, event)
 
-    assert _result_line(logger).endswith("Result: LOSE, Lost: -300")
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}
 
 
 def test_an_older_total_does_not_clear_an_unknown_addition(streamer, event, logger):
