@@ -55,9 +55,10 @@ account that has mined for months doesn't start with an empty History tab.
   spends recorded as `Spent`, watch streaks, and placed and finished
   predictions. Watch time and live sessions are not in the analytics data, so
   the imported days have none. The History tab says which days were imported.
-- **Only before History:** only entries older than the first journal record
-  History holds are imported. Everything after it comes from the journal, so
-  nothing is counted twice.
+- **Only before History:** only entries from before the second of the first
+  journal record History holds are imported (the analytics data keeps whole
+  seconds). Everything after it comes from the journal, so nothing is counted
+  twice.
 - **Which streamers:** only the streamers History records, as the miner lists
   them once it has loaded its streamers. Channels it tracks only for Drops,
   and streamers no longer in the configuration, are not imported. A streamer

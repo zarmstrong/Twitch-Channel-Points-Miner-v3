@@ -218,8 +218,8 @@ class AnalyticsBackfill(object):
     # -- importing -------------------------------------------------------------
     def poll(self):
         """Import for at most ``step_seconds``.  Returns True when this call
-        added rows and left nothing to import for the streamers it knows of
-        (retention should then run)."""
+        finished the import for the streamers it knows of and rows were
+        imported (retention should then run)."""
 
         names = self._eligible()
         if not names:
@@ -227,8 +227,12 @@ class AnalyticsBackfill(object):
         boundary = self._boundary()
         if boundary is None:
             return False
+        # The analytics data keeps whole seconds: an entry in the boundary's
+        # own second may come after the journal's first record.
+        cutoff = math.floor(boundary)
         with self.store._read_connection() as connection:
             states = self._states(connection)
+            imported = self._meta(connection, META_IMPORTED) == "1"
         pending = [name for name in names if not states.get(name, {}).get("done")]
         if not pending:
             return False
@@ -248,13 +252,15 @@ class AnalyticsBackfill(object):
             try:
                 while not state["done"] and self.monotonic() < deadline:
                     state, rows = self._step(
-                        name, state, boundary, file_deletes, files, payloads
+                        name, state, cutoff, file_deletes, files, payloads
                     )
                     added += rows
             except _Retry:
                 pass
             states[name] = state
-        return added > 0 and all(states[name]["done"] for name in pending)
+        # The poll that finishes runs retention, even if its own steps added
+        # nothing (the rows came in earlier polls).
+        return (imported or added > 0) and all(states[name]["done"] for name in pending)
 
     def _files(self):
         """``streamer -> file name`` of the analytics JSON files."""
@@ -305,7 +311,7 @@ class AnalyticsBackfill(object):
                 )
             raise _Retry() from error
 
-    def _step(self, name, state, boundary, file_deletes, files, payloads):
+    def _step(self, name, state, cutoff, file_deletes, files, payloads):
         """One transaction for ``name``: the next batch of entries, or the
         streamer marked done.  Returns ``(new state, rows added)``."""
 
@@ -339,12 +345,12 @@ class AnalyticsBackfill(object):
             for index in range(state["series"], series_end):
                 entry = series[index]
                 inserted, balance = self._apply_series(
-                    connection, name, index, entry, balance, boundary
+                    connection, name, index, entry, balance, cutoff
                 )
                 added += inserted
             for index in range(state["annotations"], annotations_end):
                 added += self._apply_annotation(
-                    connection, name, index, annotations[index], boundary
+                    connection, name, index, annotations[index], cutoff
                 )
             state.update(
                 series=series_end, annotations=annotations_end, balance=balance
@@ -380,18 +386,19 @@ class AnalyticsBackfill(object):
 
     # -- entries ---------------------------------------------------------------
     @staticmethod
-    def _apply_series(connection, name, index, entry, balance, boundary):
+    def _apply_series(connection, name, index, entry, balance, cutoff):
         """Add one series entry; returns ``(rows added, balance after it)``."""
 
         if not isinstance(entry, dict):
-            return 0, balance
+            # No readable balance: the next change can't be worked out.
+            return 0, None
         y = _int(entry.get("y"))
         if y is None or y < 0:
             # The next change can't be worked out from an unknown balance.
             return 0, None
         previous, balance = balance, y
         x = _number(entry.get("x"))
-        if x is None or x <= 0 or x / 1000.0 >= boundary:
+        if x is None or x <= 0 or x / 1000.0 >= cutoff:
             return 0, balance
         ts = x / 1000.0
         reason = reason_code(entry.get("z"))
@@ -441,11 +448,11 @@ class AnalyticsBackfill(object):
         return 1, balance
 
     @staticmethod
-    def _apply_annotation(connection, name, index, entry, boundary):
+    def _apply_annotation(connection, name, index, entry, cutoff):
         if not isinstance(entry, dict):
             return 0
         x = _number(entry.get("x"))
-        if x is None or x <= 0 or x / 1000.0 >= boundary:
+        if x is None or x <= 0 or x / 1000.0 >= cutoff:
             return 0
         event_type = ANNOTATION_EVENTS.get(
             str(entry.get("borderColor") or "").strip().lower()

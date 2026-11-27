@@ -674,3 +674,74 @@ def test_the_miner_lists_the_streamers_history_records(monkeypatch):
 
     miner.history_streamers_loaded = True
     assert names() == ["alice"]
+
+
+def test_entries_in_the_journals_first_second_are_left_to_the_journal(
+    analytics, tracked
+):
+    # The analytics data keeps whole seconds; the journal does not.
+    analytics.write(
+        "alice",
+        [entry(T0 - 1, 100), entry(T0, 150)],
+        [annotation(T0, "#ff4545", "In the same second")],
+    )
+    analytics.record("run_start", at=T0 + 0.4)
+    recorder = recorder_for(analytics, tracked)
+    recorder.poll_once()
+
+    assert [row["ts"] for row in points(recorder.store)] == [T0 - 1]
+    assert events(recorder.store) == []
+    assert totals(recorder.store)["gained"] == 0
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [None, ["x"], "entry", 7],
+    ids=["null", "list", "string", "number"],
+)
+def test_an_entry_that_is_not_an_object_restarts_the_change(
+    analytics, tracked, unreadable
+):
+    analytics.write(
+        "alice",
+        [entry(T0 - 300, 100), unreadable, entry(T0 - 100, 500), entry(T0 - 50, 510)],
+    )
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked)
+    recorder.poll_once()
+
+    assert [row["delta"] for row in points(recorder.store)] == [None, None, 10]
+    assert totals(recorder.store)["gained"] == 10
+
+
+def test_retention_runs_when_the_last_poll_adds_nothing(analytics, tracked):
+    analytics.write(
+        "alice",
+        [entry(T0 - 900 * DAY, 100), entry(T0 - 800 * DAY, 150)],
+        # Not imported: the streak's series entry counts it.
+        [annotation(T0 - 800 * DAY, "#45c1ff", "+50 - WATCH_STREAK")],
+    )
+    analytics.record("run_start")
+    mono = {"mono": 0.0}
+    recorder = recorder_for(analytics, tracked, batch_size=2, mono=mono)
+    real_step = recorder.backfill._step
+
+    def step(*args):
+        result = real_step(*args)
+        mono["mono"] += 5.0
+        return result
+
+    recorder.backfill._step = step
+    recorder.retention_days = 730
+    # Retention ran just before the import began.
+    recorder._last_retention = mono["mono"]
+
+    recorder.poll_once()
+    assert len(points(recorder.store)) == 2
+
+    # This poll only finishes the annotations; it adds no row.
+    recorder.poll_once()
+
+    assert recorder.backfill.status()["streamers_waiting"] == 0
+    assert points(recorder.store) == []
+    assert totals(recorder.store)["gained"] == 50
