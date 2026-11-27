@@ -100,8 +100,10 @@ class AnalyticsBackfill(object):
         # (Settings.ANALYTICS_FILE_MUTEX), or None.
         self._file_mutex = file_mutex
         # streamer -> the file as read when its import began: parsed once,
-        # however many polls the import takes.
+        # however many polls the import takes.  Kept only for the boundary
+        # it was read under (_snapshot_boundary).
         self._snapshots = {}
+        self._snapshot_boundary = None
         self._logged = set()
 
     # -- state ---------------------------------------------------------------
@@ -247,6 +249,11 @@ class AnalyticsBackfill(object):
             files = self._files()
         except _Retry:
             return False
+        if boundary != self._snapshot_boundary:
+            # A rebuilt database with a later boundary: a file read earlier
+            # may lack entries the miner added since that come before it.
+            self._snapshots.clear()
+            self._snapshot_boundary = boundary
         payloads = self._snapshots
         for name in list(payloads):
             if name not in pending:

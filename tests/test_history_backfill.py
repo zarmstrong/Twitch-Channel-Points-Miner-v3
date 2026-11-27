@@ -853,3 +853,71 @@ def test_a_journal_starting_with_a_watch_starts_the_boundary_at_that_record(
     assert recorder.backfill.status()["boundary"] == T0
     assert [row["ts"] for row in points(recorder.store)] == [T0 - 100, T0 - 30]
     assert totals(recorder.store)["gained"] == 10
+
+
+def test_a_legacy_database_counts_the_daily_totals_retention_kept(analytics, tracked):
+    analytics.write(
+        "alice",
+        [entry(T0 - 3 * DAY - 100, 100), entry(T0 - 2 * DAY, 150)],
+    )
+    analytics.record("run_start", at=T0 - 3 * DAY)
+    recorder = recorder_for(analytics, tracked)
+    recorder.backfill = None
+    recorder.poll_once()
+    # A database from before journal_first_at was kept, whose raw rows
+    # retention has pruned: only the daily totals of those days remain.
+    with closing(sqlite3.connect(recorder.store.path)) as connection, connection:
+        connection.execute("DELETE FROM meta")
+        connection.execute("DELETE FROM runs")
+        connection.execute(
+            "INSERT INTO daily_stats (day, streamer, points_gained, first_seen, "
+            "last_seen) VALUES (?, 'alice', 50, ?, ?)",
+            (utc_day(T0 - 2 * DAY), T0 - 2 * DAY, T0 - 2 * DAY),
+        )
+
+    analytics.record("run_start", at=T0, run=2)
+    recorder.backfill = recorder_for(analytics, tracked).backfill
+    recorder.poll_once()
+
+    # The journal counted the second entry's day already.
+    assert recorder.backfill.status()["boundary"] == T0 - 2 * DAY
+    assert [row["ts"] for row in points(recorder.store)] == [T0 - 3 * DAY - 100]
+    assert totals(recorder.store)["gained"] == 50
+
+
+def test_a_rebuild_with_a_later_boundary_reads_the_file_again(analytics, tracked):
+    analytics.write(
+        "alice", [entry(T0 - 1000 + index, 100 + index) for index in range(4)]
+    )
+    analytics.record("run_start", at=T0)
+    mono = {"mono": 0.0}
+    recorder = recorder_for(analytics, tracked, batch_size=2, mono=mono)
+    real_step = recorder.backfill._step
+
+    def step(*args):
+        result = real_step(*args)
+        mono["mono"] += 5.0
+        return result
+
+    recorder.backfill._step = step
+    recorder.poll_once()
+    assert len(points(recorder.store)) == 2
+
+    # The miner adds an entry; the first run's journal file is deleted (the
+    # size limit), and the database is rebuilt from the next run's.
+    analytics.record("run_start", at=T0 + 100, run=2)
+    analytics.write(
+        "alice",
+        [entry(T0 - 1000 + index, 100 + index) for index in range(4)]
+        + [entry(T0 + 50, 200)],
+    )
+    os.remove(os.path.join(analytics.journal, segment_name(1, 1)))
+    assert recorder.store.recover_if_corrupt(
+        sqlite3.DatabaseError("database disk image is malformed")
+    )
+    for _ in range(5):
+        recorder.poll_once()
+
+    assert recorder.backfill.status()["boundary"] == T0 + 100
+    assert [row["ts"] for row in points(recorder.store)][-1] == T0 + 50
+    assert len(points(recorder.store)) == 5
