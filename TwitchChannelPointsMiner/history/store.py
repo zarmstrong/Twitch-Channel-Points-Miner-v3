@@ -779,6 +779,43 @@ class HistoryStore(object):
             result.append(item)
         return result
 
+    @staticmethod
+    def _idle_streamer_summary(connection, streamer, active, live):
+        lifetime = connection.execute(
+            """
+            SELECT ? AS streamer,
+                   COALESCE(SUM(points_gained), 0) AS points_gained,
+                   COALESCE(SUM(points_spent), 0) AS points_spent,
+                   COALESCE(SUM(watch_seconds), 0) AS watch_seconds,
+                   COALESCE(SUM(streak_count), 0) AS streak_count
+            FROM daily_stats WHERE streamer = ?
+            """,
+            (streamer, streamer),
+        ).fetchone()
+        last_streak = connection.execute(
+            """
+            SELECT MAX(ts) FROM events
+            WHERE type = 'watch_streak' AND streamer = ?
+            """,
+            (streamer,),
+        ).fetchone()[0]
+        return {
+            "streamer": streamer,
+            "points_gained": 0,
+            "points_spent": 0,
+            "watch_seconds": 0.0,
+            "watch_sessions": 0,
+            "stream_sessions": 0,
+            "streak_count": 0,
+            "first_seen": None,
+            "last_seen": None,
+            "lifetime": dict(lifetime),
+            "active_watch": active,
+            "live_stream": live,
+            "last_streak_at": last_streak,
+            "live_streak_at": None,
+        }
+
     def streamer_detail(self, streamer, days=90, now=None):
         streamer = clean_streamer(streamer)
         now = float(now or time.time())
@@ -837,6 +874,12 @@ class HistoryStore(object):
             )
             active = self._active_watches(connection, now).get(streamer)
             live = self._live_streams(connection, now).get(streamer)
+            if summary is None:
+                # No activity in this window: zero window totals, but the
+                # lifetime totals and last streak still describe the streamer.
+                summary = self._idle_streamer_summary(
+                    connection, streamer, active, live
+                )
         watch_sessions = []
         for row in watch_rows:
             item = dict(row)
@@ -846,10 +889,16 @@ class HistoryStore(object):
         for row in stream_rows:
             item = dict(row)
             item["active"] = live is not None and live["id"] == item["id"]
+            # Measured on the server's clock, as in sessions().
+            finished = item["ended_at"]
+            if finished is None:
+                finished = now if item["active"] else item["last_seen_at"]
+            item["duration_seconds"] = max(0.0, finished - item["started_at"])
             streams.append(item)
         return {
             "streamer": streamer,
             "days": int(days),
+            "generated_at": now,
             "summary": summary,
             "daily": [dict(row) for row in daily_rows],
             "watch_sessions": watch_sessions,

@@ -138,3 +138,33 @@ def test_history_returns_503_when_the_database_fails(client, monkeypatch, store)
     response = client.get("/history/overview?days=30")
     assert response.status_code == 503
     assert "temporarily unavailable" in response.get_json()["error"]
+
+
+def test_streamer_detail_keeps_lifetime_totals_outside_the_window(store):
+    # A month later alice has no activity in a one-day window, but her
+    # lifetime totals and last streak still describe her.
+    later = NOW + 30 * 86400
+    store.active_run = None
+    detail = store.streamer_detail("alice", days=1, now=later)
+
+    summary = detail["summary"]
+    assert summary["points_gained"] == 0
+    assert summary["watch_seconds"] == 0
+    assert summary["lifetime"]["points_gained"] == 40
+    assert summary["lifetime"]["watch_seconds"] == 20
+    assert summary["live_stream"] is None
+    assert summary["active_watch"] is None
+
+
+def test_streamer_detail_measures_live_streams_on_the_server_clock(store):
+    # The drill-down's live duration uses the same clock as the sessions
+    # list, not the browser's.
+    later = NOW + 100
+    detail = store.streamer_detail("alice", days=30, now=later)
+    listed = store.sessions(kind="stream", days=30, now=later)["sessions"]
+
+    assert detail["generated_at"] == later
+    stream = detail["streams"][0]
+    assert stream["active"] is True
+    assert stream["duration_seconds"] == pytest.approx(100)
+    assert stream["duration_seconds"] == listed[0]["duration_seconds"]
