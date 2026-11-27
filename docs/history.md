@@ -83,7 +83,8 @@ SQLite locking and WAL are unreliable on network shares such as NFS and SMB.
 Keep the analytics directory on local disk. If the database is on a network
 share, expect lock errors, slow queries or a database rebuild. History logs a
 warning and retries or rebuilds; mining and the existing points chart
-continue.
+continue. A failure that keeps repeating logs its traceback at most once a
+minute.
 
 ## Concurrency
 
@@ -182,7 +183,7 @@ before it, so `days=1` is today only.
 | --- | --- |
 | `GET /history/overview?days=30` | Window and lifetime totals |
 | `GET /history/streamers?days=30` | Streamer list and live streak state |
-| `GET /history/streamer/<name>?days=90` | Per-streamer drill-down |
+| `GET /history/streamer/<name>?days=90` | Per-streamer drill-down: daily totals for the window, and the newest 100 watch sessions, streams, events and points messages in it |
 | `GET /history/daily?days=30&streamer=<name>` | Daily chart series |
 | `GET /history/sessions?kind=watch\|stream\|run` | Recent sessions |
 | `GET /history/events?type=<type>` | Recent events |
