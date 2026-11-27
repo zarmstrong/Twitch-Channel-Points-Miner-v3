@@ -2306,12 +2306,13 @@ def test_crlf_and_cr_configs_migrate_with_their_header_first(tmp_path, newline):
     assert namespace["MINER_CONFIG"]["logger_settings"].console_level == logging.INFO
     assert migrate_config_source(migrated)[0] == migrated
 
-    # The file: read with universal newlines, so it is saved with LF endings.
+    # The file: read with universal newlines and written in text mode, so it
+    # is saved with the platform's line endings (CRLF on Windows).
     config = tmp_path / "config.py"
     config.write_bytes(source.encode("utf-8"))
 
     assert migrate_config(config) is True
-    assert config.read_bytes().decode("utf-8").split("\n")[:4] == header
+    assert config.read_bytes().decode("utf-8").split(os.linesep)[:4] == header
     assert migrate_config(config) is False
 
 
