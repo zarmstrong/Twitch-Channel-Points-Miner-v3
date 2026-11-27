@@ -354,8 +354,12 @@ def test_the_miners_own_bet_is_reported_as_before(streamer, event, logger):
         MakePredictionResponse(None),
     )
 
-    # No points on either message: the miner's amount is the bet.
-    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+    _send(
+        streamer,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-yes", "points": 100},
+    )
     _credited(streamer, "PREDICTION", 250)
     _send(
         streamer,
@@ -572,7 +576,6 @@ def test_a_result_before_the_miners_request_answers_is_the_miners_bet(
     _miner_bets(event, {"choice": 0, "amount": 100, "id": "outcome-yes"}, request)
     _join(threads)
 
-    assert event.placed_by_hand is False
     assert _result_line(logger).endswith("Result: WIN, Gained: +150")
     assert streamer.history == {"PREDICTION": {"counter": 1, "amount": 150}}
 
@@ -950,7 +953,7 @@ def test_stopping_waits_for_a_result_waiting_for_the_miners_request(
 ):
     pool = WebSocketsPool(MagicMock(), [streamer], {"event-1": event})
     release, timer = _result_while_the_request_waits(streamer, event, pool)
-    (worker,) = [thread for thread, _event in pool.result_workers]
+    (worker,) = _result_threads()
 
     stopping = threading.Thread(target=pool.end, daemon=True)
     stopping.start()
@@ -1060,3 +1063,146 @@ def test_an_older_total_does_not_clear_an_unknown_addition(streamer, event, logg
 
     assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
     assert streamer.history == {}
+
+
+def test_the_miners_amount_alone_is_not_the_wager(streamer, event, logger):
+    _miner_bets(
+        event,
+        {"choice": 0, "amount": 100, "id": "outcome-yes"},
+        MakePredictionResponse(None),
+    )
+    # No points on either message: a bet placed by hand before the timer
+    # could be part of it.
+    _send(streamer, event, "prediction-made", {"outcome_id": "outcome-yes"})
+    _credited(streamer, "PREDICTION", 250)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-yes", "result": {"type": "WIN", "points_won": 250}},
+    )
+
+    line = _result_line(logger)
+    assert "Decision: 0: Yes (BLUE)" in line
+    assert line.endswith(f"Result: WIN, Gained: {UNKNOWN}")
+    assert streamer.history == {"PREDICTION": {"counter": 0, "amount": 0}}
+
+
+def test_a_late_report_of_the_miners_addition_does_not_clear_a_later_one(
+    streamer, event, logger
+):
+    _send(
+        streamer, event, "prediction-made", {"outcome_id": "outcome-no", "points": 50}
+    )
+    _miner_bets(
+        event,
+        {"choice": 1, "amount": 300, "id": "outcome-no"},
+        MakePredictionResponse(None),
+    )
+    # More added by hand, without a total; then Twitch's report of the
+    # miner's addition, delivered late.
+    _send(streamer, event, "prediction-updated", {"outcome_id": "outcome-no"})
+    _send(
+        streamer,
+        event,
+        "prediction-updated",
+        {"outcome_id": "outcome-no", "points": 350},
+    )
+    _lose(streamer, event)
+
+    assert _result_line(logger).endswith(f"Result: LOSE, Lost: {UNKNOWN}")
+    assert streamer.history == {}
+
+
+def test_stopping_waits_for_a_result_that_was_being_handled(
+    streamer, event, logger, monkeypatch
+):
+    pool = WebSocketsPool(MagicMock(), [streamer], {"event-1": event})
+    request, sent, release = _blocked_request(MakePredictionResponse(None))
+    timer = threading.Thread(
+        target=_miner_bets,
+        args=(event, {"choice": 0, "amount": 100, "id": "outcome-yes"}, request),
+        daemon=True,
+    )
+    timer.start()
+    assert sent.wait(5)
+    _send(
+        streamer,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-yes", "points": 100},
+        pool,
+    )
+
+    stopped = threading.Event()
+    reported_when_stopped = []
+    real_pending = EventPrediction.miner_bet_pending
+
+    def stop_meanwhile(self):
+        # The miner starts stopping while this result is being handled.
+        def stop():
+            pool.end()
+            reported_when_stopped.append(
+                any("Result:" in c.args[0] for c in logger.info.call_args_list)
+            )
+            stopped.set()
+
+        threading.Thread(target=stop, daemon=True).start()
+        for _ in range(500):
+            if pool.results_closed:
+                break
+            threading.Event().wait(0.01)
+        assert pool.results_closed
+        return real_pending(self)
+
+    monkeypatch.setattr(EventPrediction, "miner_bet_pending", stop_meanwhile)
+    _credited(streamer, "PREDICTION", 250)
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-yes", "result": {"type": "WIN", "points_won": 250}},
+        pool,
+    )
+    assert not stopped.is_set()
+    release.set()
+    assert stopped.wait(5)
+    _join([timer])
+
+    assert reported_when_stopped == [True]
+    assert _result_line(logger).endswith("Result: WIN, Gained: +150")
+
+
+def test_a_result_after_stopping_began_does_not_wait_for_the_request(
+    streamer, event, logger
+):
+    pool = WebSocketsPool(MagicMock(), [streamer], {"event-1": event})
+    pool.end()
+    request, sent, release = _blocked_request(MakePredictionResponse(None))
+    timer = threading.Thread(
+        target=_miner_bets,
+        args=(event, {"choice": 0, "amount": 100, "id": "outcome-yes"}, request),
+        daemon=True,
+    )
+    timer.start()
+    assert sent.wait(5)
+    _send(
+        streamer,
+        event,
+        "prediction-made",
+        {"outcome_id": "outcome-yes", "points": 100},
+        pool,
+    )
+    _send(
+        streamer,
+        event,
+        "prediction-result",
+        {"outcome_id": "outcome-yes", "result": {"type": "WIN", "points_won": 250}},
+        pool,
+    )
+
+    # Reported at once, on the websocket's thread.
+    assert _result_threads() == []
+    assert _result_line(logger).endswith(f"Result: WIN, Gained: {UNKNOWN}")
+    release.set()
+    _join([timer])

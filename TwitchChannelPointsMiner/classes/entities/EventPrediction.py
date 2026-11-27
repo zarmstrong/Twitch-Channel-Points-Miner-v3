@@ -31,7 +31,6 @@ class EventPrediction(object):
         "confirmed_points",
         "miner_bet_requested",
         "miner_bet_answered",
-        "placed_by_hand",
         "wager_unknown",
         "state_lock",
         "confirmations",
@@ -74,7 +73,6 @@ class EventPrediction(object):
         # Clear while the miner's bet request waits for Twitch's answer.
         self.miner_bet_answered = threading.Event()
         self.miner_bet_answered.set()
-        self.placed_by_hand = False
         # The bet may hold more than any total known: points were added
         # without a new total, or a report can't be placed.  Only a new,
         # larger total or the result's clears it.
@@ -122,10 +120,6 @@ class EventPrediction(object):
         outcome_id = prediction.get("outcome_id")
         points = _points(prediction.get("points"))
         with self.state_lock:
-            if not self.bet_confirmed and not self.miner_bet_requested:
-                # Twitch confirmed a bet before the miner sent one: at least
-                # part of it was placed by hand.
-                self.placed_by_hand = True
             self.bet_confirmed = True
             self.confirmations += 1
             if isinstance(outcome_id, str) and outcome_id:
@@ -188,6 +182,9 @@ class EventPrediction(object):
                     else:
                         self.confirmed_points = expected
                         self.wager_unknown = False
+                        # As if Twitch had reported it: its own report of
+                        # this total, delivered later, adds nothing.
+                        self.totals_seen.add(expected)
             elif expected is None or known != expected:
                 # Twitch reported the bet while the request was made: by
                 # hand, or the miner's points, or both. Only a total of
@@ -265,19 +262,10 @@ class EventPrediction(object):
                 return self.final_points
             if self.wager_unknown:
                 return None
-            if self.confirmed_points is not None:
-                return self.confirmed_points
-        choice = self._miner_choice()
-        if (
-            self.placed_by_hand
-            or self.wager_unknown
-            or choice is None
-            or choice != self.placed_choice()
-        ):
-            # The miner's amount is the whole bet only when the miner alone
-            # placed it.
-            return None
-        return _points(self.bet.decision.get("amount"))
+            # Only a total Twitch reported says what the bet holds: even the
+            # miner's own amount may share the bet with points placed by
+            # hand that Twitch hasn't reported yet.
+            return self.confirmed_points
 
     def parse_result(self, result) -> dict:
         """The points of a prediction-result ``result``: ``placed`` (the

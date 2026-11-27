@@ -99,5 +99,5 @@ Here's a concrete example. Let's suppose we have a bet that is opened with a tim
 
 The miner still bets when its timer fires even if you've already bet on that prediction in the browser. Twitch accepts the miner's bet only when it's on the outcome you picked, and then adds it to yours. The result line, the prediction annotations on the Points tab and the session report use the bet Twitch reports: its outcome and the points on it.
 
-- If Twitch's messages don't say how many points are on the bet, the miner's amount is used only when the miner placed the whole bet. Otherwise the result shows the amount as unknown and leaves that prediction out of the session report.
+- The points come from the totals Twitch reports. If those don't say how many points are on the bet, for example because points were added without a new total, the result shows the amount as unknown and leaves that prediction out of the session report. The miner's own amount alone isn't taken as the bet, since it may share the bet with points placed by hand.
 - If a result arrives while Twitch hasn't yet answered the miner's own bet, the miner waits for the answer before reporting the result. When you stop the miner, it waits up to 30 seconds for that answer, then reports the result with the amount unknown.
