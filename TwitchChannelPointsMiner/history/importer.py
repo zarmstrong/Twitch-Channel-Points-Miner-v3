@@ -31,6 +31,7 @@ from TwitchChannelPointsMiner.history.journal import (
 from TwitchChannelPointsMiner.history.store import (
     SESSION_GAP_SECONDS,
     clean_streamer,
+    earliest_held,
     utc_day,
 )
 
@@ -116,6 +117,8 @@ class JournalImporter(object):
         # of them, and those apply_saved_deletes may finish.
         self._file_deletes = None
         self._finishable_deletes = None
+        # The earliest record time of the batch being applied.
+        self._first_at = None
 
     # -- delete cutoffs --------------------------------------------------------
     def _load_deletes(self):
@@ -139,7 +142,7 @@ class JournalImporter(object):
         # the cutoff (``apply_saved_deletes``).
         save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
         for known in (cutoffs, finishable):
-            if position > known.get(streamer, ("", 0)):
+            if streamer not in known or position > known[streamer]:
                 known[streamer] = position
 
     def _load_finishable_deletes(self):
@@ -363,10 +366,41 @@ class JournalImporter(object):
                 if position > deleted.get(row["streamer"], ("", 0)):
                     deleted[row["streamer"]] = position
             runs = {}
+            self._first_at = None
             for start, raw, _end in batch:
                 self._apply_line_safely(connection, segment, start, raw, deleted, runs)
             self._flush_runs(connection, runs)
+            self._save_first_at(connection, self._first_at)
             self._set_cursor(connection, segment, end)
+
+    @staticmethod
+    def _save_first_at(connection, first_at):
+        """Keep the time of the earliest journal record imported into this
+        database: the analytics JSON import (``backfill.py``) adds only what
+        came before it."""
+
+        if first_at is None:
+            return
+        if (
+            connection.execute(
+                "SELECT 1 FROM meta WHERE key = 'journal_first_at'"
+            ).fetchone()
+            is None
+        ):
+            # A database from before this was kept: everything in it came
+            # from the journal.
+            held = earliest_held(connection)
+            if held is not None:
+                first_at = min(first_at, held)
+        connection.execute(
+            """
+            INSERT INTO meta (key, value) VALUES ('journal_first_at', ?)
+            ON CONFLICT(key) DO UPDATE SET value = CASE
+                WHEN CAST(value AS REAL) <= CAST(excluded.value AS REAL)
+                THEN value ELSE excluded.value END
+            """,
+            (repr(float(first_at)),),
+        )
 
     @staticmethod
     def _flush_runs(connection, runs):
@@ -445,6 +479,9 @@ class JournalImporter(object):
         if at is None:
             at = runs.get(run, (None, None))[1] or time.time()
         runs[run] = (seq, at)
+        first_at = getattr(self, "_first_at", None)
+        if first_at is None or at < first_at:
+            self._first_at = at
 
         streamer = clean_streamer(record.get("streamer"))
         cutoff = deleted.get(streamer) if streamer else None

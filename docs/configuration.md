@@ -113,11 +113,12 @@ The streamer list itself belongs in `STREAMERS`, not in this dictionary.
 
 Set `ANALYTICS_CONFIG` to `None` when the web server is not needed. Otherwise,
 provide the keyword arguments for `analytics(...)`, such as `host`, `port`,
-`refresh`, `days_ago`, `password`, `log_poll_interval`, and
-`history_retention_days`. Analytics storage also requires
-`MINER_CONFIG["enable_analytics"] = True`. See [Analytics](analytics.md#analytics)
-for configuration and security guidance, and [History](history.md#history) for
-the retention window and database location.
+`refresh`, `days_ago`, `password`, `log_poll_interval`,
+`history_retention_days`, and `history_import_analytics`. Analytics storage
+also requires `MINER_CONFIG["enable_analytics"] = True`. See
+[Analytics](analytics.md#analytics) for configuration and security guidance,
+and [History](history.md#history) for the retention window, the import of
+existing analytics data and the database location.
 
 ## Runner behavior
 

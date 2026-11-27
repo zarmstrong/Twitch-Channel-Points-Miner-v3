@@ -81,7 +81,9 @@ jobs:
           node .github/scripts/nightly-release.test.js
 
       - name: Run dashboard script tests
-        run: node tests/js/history-delete.test.js
+        run: |
+          node tests/js/history-delete.test.js
+          node tests/js/history-import-note.test.js
 
   black:
     name: Black

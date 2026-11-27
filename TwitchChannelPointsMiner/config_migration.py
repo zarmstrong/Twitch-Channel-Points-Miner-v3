@@ -144,6 +144,7 @@ ANALYTICS_CONFIG_DEFAULTS = (
     ("trust_proxy_auth", "False"),
     ("allowed_hosts", "None"),
     ("history_retention_days", "730"),
+    ("history_import_analytics", "True"),
 )
 
 

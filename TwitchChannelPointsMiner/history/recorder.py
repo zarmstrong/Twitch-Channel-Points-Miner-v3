@@ -12,6 +12,7 @@ from TwitchChannelPointsMiner.history import (
     HistoryUnavailableError,
 )
 from TwitchChannelPointsMiner.history import journal as journal_module
+from TwitchChannelPointsMiner.history.backfill import AnalyticsBackfill
 from TwitchChannelPointsMiner.history.importer import JournalImporter
 from TwitchChannelPointsMiner.history.store import HistoryStore, clean_streamer
 
@@ -61,6 +62,8 @@ class HistoryRecorder(threading.Thread):
         self._stop_event = threading.Event()
         self._last_retention = None
         self._last_warning = {}
+        # The analytics JSON import (see backfill.py), when enabled.
+        self.backfill = None
 
     # -- thread ----------------------------------------------------------------
     def run(self):
@@ -134,8 +137,27 @@ class HistoryRecorder(threading.Thread):
                     return False
                 self._warn("Unable to import the History journal; retrying")
                 return False
+            self._import_analytics()
             self._maybe_apply_retention()
             return True
+
+    def _import_analytics(self):
+        if self.backfill is None:
+            return
+        try:
+            if self.backfill.poll():
+                # Imported rows older than the retention window are pruned
+                # now rather than after a day.
+                self._last_retention = None
+        except Exception as error:
+            try:
+                if self.store.recover_if_corrupt(error):
+                    return
+            except Exception:
+                self.store.ready = False
+                self._warn("Unable to rebuild the History database; retrying")
+                return
+            self._warn("Unable to import the analytics data into History; retrying")
 
     def drain(self):
         """One last import (the miner stopped)."""
@@ -238,10 +260,29 @@ def _remove_source(remove_source):
             remove_source()
 
 
-def build_recorder(analytics_path, retention_days=DEFAULT_RETENTION_DAYS):
+def build_recorder(
+    analytics_path,
+    retention_days=DEFAULT_RETENTION_DAYS,
+    import_analytics=False,
+    streamers=None,
+):
+    """The account's recorder; with ``import_analytics``, it also imports
+    the analytics JSON of the streamers ``streamers()`` lists (see
+    ``backfill.py``)."""
+
     store = HistoryStore(os.path.join(analytics_path, "history.sqlite3"))
-    return HistoryRecorder(
+    recorder = HistoryRecorder(
         store,
         os.path.join(analytics_path, "history"),
         retention_days=retention_days,
     )
+    if import_analytics:
+        recorder.backfill = AnalyticsBackfill(
+            store,
+            analytics_path,
+            recorder.importer,
+            streamers,
+            monotonic=recorder.monotonic,
+            file_lock=analytics_file_lock,
+        )
+    return recorder
