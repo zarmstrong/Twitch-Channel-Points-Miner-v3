@@ -269,6 +269,20 @@ class WebSocketsPool:
             websocket.close()
 
     @staticmethod
+    def _placed_decision(event_prediction):
+        """The "Decision: ..." part of a prediction's result line: the
+        outcome the account bet on, or nothing when it isn't known."""
+
+        choice = event_prediction.placed_choice()
+        if choice is None:
+            return ""
+        outcome = event_prediction.bet.outcomes[choice]
+        return (
+            f"Decision: {choice}: {outcome.get('title')} "
+            f"({outcome.get('color')}) - "
+        )
+
+    @staticmethod
     def on_open(ws):
         # run_forever() resets keep_running to True, so a close() that landed
         # before it started (end() racing a freshly started socket) is lost.
@@ -612,17 +626,20 @@ class WebSocketsPool:
                                 message.type == "prediction-result"
                                 and event_prediction.bet_confirmed
                             ):
+                                # The result names the bet too; prefer it to
+                                # the miner's decision, which may be missing
+                                # (a bet placed by hand before the timer) or
+                                # on another outcome.
+                                event_prediction.confirm_bet(message.data["prediction"])
                                 points = event_prediction.parse_result(
                                     message.data["prediction"]["result"]
                                 )
 
-                                decision = event_prediction.bet.get_decision()
-                                choice = event_prediction.bet.decision["choice"]
-
                                 logger.info(
                                     (
-                                        f"{event_prediction} - Decision: {choice}: {decision['title']} "
-                                        f"({decision['color']}) - Result: {event_prediction.result['string']}"
+                                        f"{event_prediction} - "
+                                        f"{WebSocketsPool._placed_decision(event_prediction)}"
+                                        f"Result: {event_prediction.result['string']}"
                                     ),
                                     extra={
                                         "emoji": ":bar_chart:",
@@ -656,13 +673,22 @@ class WebSocketsPool:
                                             f"{ws.events_predictions[event_id].title}",
                                         )
                             elif message.type == "prediction-made":
-                                event_prediction.bet_confirmed = True
+                                event_prediction.confirm_bet(message.data["prediction"])
                                 # Analytics switch
                                 if Settings.enable_analytics is True:
+                                    choice = event_prediction.placed_choice()
                                     streamer.persistent_annotations(
                                         "PREDICTION_MADE",
-                                        f"Decision: {event_prediction.bet.decision['choice']} - {event_prediction.title}",
+                                        (
+                                            f"Decision: {choice} - {event_prediction.title}"
+                                            if choice is not None
+                                            else f"{event_prediction.title}"
+                                        ),
                                     )
+                            elif message.type == "prediction-updated":
+                                # More points added to the bet, by hand or by
+                                # the miner.
+                                event_prediction.confirm_bet(message.data["prediction"])
                     elif message.topic == "community-points-channel-v1":
                         if message.type == "community-goal-created":
                             # TODO Untested, hard to find this happening live
