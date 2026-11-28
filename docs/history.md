@@ -82,9 +82,10 @@ existing analytics data automatically** in the Config tab's **History** box.
 With it off, the same box shows **Import existing analytics data** while some
 streamer's analytics data hasn't been imported. The button runs the import
 once, with the same rules as above. The request is saved in the database, so
-a restart finishes it. A streamer whose import had begun but who isn't loaded
-at the next start (one that failed to load, say) keeps the request, and its
-import resumes once it is loaded again. Once every streamer History records has been imported,
+a restart finishes it. The import covers the streamers the miner has loaded
+while it runs. One loaded only later (added to the configuration, or one that
+failed to load at a start) shows the button again, and the next import
+resumes where it stopped. Once every streamer History records has been imported,
 the button is hidden and the box says so. A streamer added to the
 configuration later shows the button again; it isn't imported until it is
 clicked. With the automatic import on, the box shows the import's progress

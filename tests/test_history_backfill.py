@@ -790,9 +790,7 @@ def test_a_streamer_added_after_a_requested_import_waits_for_the_next(
     assert recorder.backfill.status()["complete"] is True
 
 
-def test_a_request_waits_for_a_started_streamer_who_is_not_listed_now(
-    analytics, tracked
-):
+def test_a_started_streamer_not_listed_now_shows_the_button_again(analytics, tracked):
     analytics.write("alice", [entry(T0 - 300 + i, 100 + i) for i in range(4)])
     analytics.write("bob", [entry(T0 - 300, 10), entry(T0 - 200, 30)])
     analytics.record("run_start")
@@ -813,52 +811,31 @@ def test_a_request_waits_for_a_started_streamer_who_is_not_listed_now(
     recorder.backfill._step = one_step
     recorder.poll_once()
     recorder.backfill._step = real_step
-    assert recorder.backfill.status()["streamers_waiting"] == 2
+    assert totals(recorder.store)["gained"] == 0
 
-    # The next start loads only bob (alice failed to load).
+    # The next start loads only bob (alice failed to load): the request
+    # covers bob and is done once he is.
     tracked["names"] = ["bob"]
     recorder.poll_once()
     assert totals(recorder.store, "bob")["gained"] == 20
-    assert recorder.backfill.status()["requested"] is True
+    status = recorder.backfill.status()
+    assert (status["complete"], status["requested"]) == (True, False)
 
-    # With nobody listed, the request stays too.
-    tracked["names"] = []
-    recorder.poll_once()
-    assert recorder.backfill.status()["requested"] is True
-
+    # Alice loads again: not imported, so the button is offered.
     tracked["names"] = ["alice", "bob"]
+    recorder.poll_once()
+    status = recorder.backfill.status()
+    assert (status["complete"], status["streamers_waiting"]) == (False, 1)
+    assert totals(recorder.store)["gained"] == 0
+
+    # The next request resumes alice's import where it stopped.
+    recorder.request_import()
     recorder.poll_once()
     assert totals(recorder.store)["gained"] == 3
-    status = recorder.backfill.status()
-    assert status["complete"] is True
-    assert status["requested"] is False
-
-
-def test_a_deleted_started_streamer_does_not_keep_the_request(analytics, tracked):
-    analytics.write("alice", [entry(T0 - 300 + i, 100 + i) for i in range(4)])
-    analytics.write("bob", [entry(T0 - 300, 10), entry(T0 - 200, 30)])
-    analytics.record("run_start")
-    tracked["names"] = ["alice", "bob"]
-    clock = {"mono": 0.0}
-    recorder = recorder_for(
-        analytics, tracked, automatic=False, batch_size=1, step_seconds=1.0, mono=clock
-    )
-    recorder.request_import()
-    real_step = recorder.backfill._step
-
-    def one_step(*args, **kwargs):
-        result = real_step(*args, **kwargs)
-        clock["mono"] += 1.0
-        return result
-
-    recorder.backfill._step = one_step
-    recorder.poll_once()
-    recorder.backfill._step = real_step
-    recorder.delete_streamer("alice")
-
-    tracked["names"] = ["bob"]
-    recorder.poll_once()
-    assert recorder.backfill.status()["requested"] is False
+    assert [row["ts"] for row in points(recorder.store)] == [
+        T0 - 300 + i for i in range(4)
+    ]
+    assert recorder.backfill.status()["complete"] is True
 
 
 def test_a_request_with_the_automatic_import_on_is_cleared(analytics, tracked):
