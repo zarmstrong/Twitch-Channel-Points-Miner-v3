@@ -2013,6 +2013,9 @@ def _write_notification(config_path, provider, values):
     )
 
 
+_EDITED_ASSIGNMENTS = ("MINER_CONFIG", "STREAMERS", "MINE_CONFIG", "ANALYTICS_CONFIG")
+
+
 def _imports_binding(tree, statement):
     """Whether config.py's top level already runs this import statement.
 
@@ -2021,7 +2024,23 @@ def _imports_binding(tree, statement):
     """
     wanted = ast.parse(statement).body[0]
     wanted_names = {(alias.name, alias.asname or alias.name) for alias in wanted.names}
+    # Edits write the name inside these assignments, so an import that runs
+    # only after the first of them binds it too late.
+    first_use = min(
+        (
+            node.lineno
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id in _EDITED_ASSIGNMENTS
+                for target in node.targets
+            )
+        ),
+        default=None,
+    )
     for node in tree.body:
+        if first_use is not None and node.lineno >= first_use:
+            break
         if type(node) is not type(wanted):
             continue
         if isinstance(node, ast.ImportFrom) and (
@@ -2297,8 +2316,9 @@ def _update_managed_web_config(config_path, payload):
                 member = source_names[name]
                 if enabled and member not in priority:
                     priority.append(member)
-                elif not enabled and member in priority:
-                    priority.remove(member)
+                elif not enabled:
+                    # Every copy: a repeated member would keep the source on.
+                    priority = [item for item in priority if item != member]
         _ensure_config_import(
             config_path,
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",

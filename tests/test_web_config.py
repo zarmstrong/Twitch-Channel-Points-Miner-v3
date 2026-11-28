@@ -4565,3 +4565,82 @@ def test_category_sort_save_adds_an_import_the_text_only_resembles(
     )
 
     assert _load_config(config).MINE_CONFIG["category_sort"].name == "VIEWERS_ASC"
+
+
+def test_logging_level_save_adds_an_import_a_later_one_would_bind_too_late(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n"
+        "import logging\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+def test_category_sort_save_adds_an_import_a_later_one_would_bind_too_late(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n"
+        "from TwitchChannelPointsMiner.classes.Settings import CategorySort\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}}
+    )
+
+    assert _load_config(config).MINE_CONFIG["category_sort"].name == "VIEWERS_ASC"
+
+
+_REPEATED_CATEGORIES = (
+    "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+    "[StreamerSource.CATEGORIES, StreamerSource.STREAMERS, "
+    "StreamerSource.CATEGORIES]",
+)
+
+
+def test_source_disable_removes_every_copy_of_a_repeated_source(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(config, _REPEATED_CATEGORIES)
+
+    result = update_managed_web_config(
+        config, {"action": "update_sources", "values": {"categories": False}}
+    )
+
+    assert result["sources"]["categories"] is False
+    assert '"streamer_source_priority": [StreamerSource.STREAMERS]' in config.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_source_migration_removes_every_copy_of_a_repeated_source(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(config, _REPEATED_CATEGORIES)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"sources": {"categories": False}}), encoding="utf-8"
+    )
+
+    migrate_web_config(config)
+
+    assert read_managed_web_config(config)["sources"]["categories"] is False
