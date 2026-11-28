@@ -34,6 +34,11 @@ class HistoryUnavailableError(RuntimeError):
     """History is starting and cannot delete anything yet."""
 
 
+class HistoryRefusedError(HistoryUnavailableError):
+    """History is off for this run: its database was written by a newer
+    version of the miner."""
+
+
 # Reentrant: a signal handler that ends the miner can call stop_history while
 # the same thread is already inside it.
 _lock = threading.RLock()
@@ -329,6 +334,7 @@ def get_store():
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
+    "HistoryRefusedError",
     "HistoryUnavailableError",
     "delete_streamer_history",
     "get_store",

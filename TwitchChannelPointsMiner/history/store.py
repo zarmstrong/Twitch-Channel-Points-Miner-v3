@@ -500,12 +500,16 @@ class HistoryStore(object):
         version = int.from_bytes(header[60:64], "big", signed=True)
         if version > HISTORY_SCHEMA_VERSION:
             return version
-        try:
-            wal_size = os.path.getsize(self.path + "-wal")
-        except OSError:
-            wal_size = 0
+        # SQLite may name the -wal after the file a symlink points to.
+        resolved = Path(self.path).resolve()
+        wal_size = 0
+        for wal in {self.path + "-wal", str(resolved) + "-wal"}:
+            try:
+                wal_size = max(wal_size, os.path.getsize(wal))
+            except OSError:
+                pass
         if wal_size > 0:
-            uri = Path(self.path).resolve().as_uri() + "?mode=ro"
+            uri = resolved.as_uri() + "?mode=ro"
             connection = sqlite3.connect(uri, uri=True, timeout=5.0)
             try:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]

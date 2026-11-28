@@ -50,6 +50,29 @@ def newer_database(path, journal_mode="wal"):
         connection.execute(f"PRAGMA user_version={NEWER}")
 
 
+def crashed_newer_database(tmp_path, name="history.sqlite3"):
+    """A newer build's database left by a crash: its -wal holds the version
+    change the file's header doesn't show yet.  Returns its folder."""
+
+    live = tmp_path / "live"
+    live.mkdir()
+    writer = sqlite3.connect(live / "history.sqlite3")
+    try:
+        writer.execute("PRAGMA journal_mode=wal")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE future (value TEXT)")
+        writer.commit()
+        writer.execute(f"PRAGMA user_version={NEWER}")
+        writer.commit()
+        crashed = tmp_path / "crashed"
+        crashed.mkdir()
+        for suffix in ("", "-wal"):
+            shutil.copy(live / f"history.sqlite3{suffix}", crashed / f"{name}{suffix}")
+    finally:
+        writer.close()
+    return crashed
+
+
 @pytest.mark.parametrize("journal_mode", ["wal", "delete"])
 def test_a_newer_database_is_left_unchanged(tmp_path, journal_mode):
     path = tmp_path / "history.sqlite3"
@@ -67,22 +90,7 @@ def test_a_newer_database_is_left_unchanged(tmp_path, journal_mode):
 def test_a_newer_database_left_by_a_crash_is_left_unchanged(tmp_path):
     # The newer build crashed: its -wal holds the version change the file's
     # header doesn't show yet.
-    live = tmp_path / "live"
-    live.mkdir()
-    writer = sqlite3.connect(live / "history.sqlite3")
-    try:
-        writer.execute("PRAGMA journal_mode=wal")
-        writer.execute("PRAGMA wal_autocheckpoint=0")
-        writer.execute("CREATE TABLE future (value TEXT)")
-        writer.commit()
-        writer.execute(f"PRAGMA user_version={NEWER}")
-        writer.commit()
-        crashed = tmp_path / "crashed"
-        crashed.mkdir()
-        for name in ("history.sqlite3", "history.sqlite3-wal"):
-            shutil.copy(live / name, crashed / name)
-    finally:
-        writer.close()
+    crashed = crashed_newer_database(tmp_path)
     with open(crashed / "history.sqlite3", "rb") as handle:
         assert int.from_bytes(handle.read(100)[60:64], "big") != NEWER
     before = files(crashed)
@@ -94,6 +102,37 @@ def test_a_newer_database_left_by_a_crash_is_left_unchanged(tmp_path):
     # unchanged, and nothing is moved aside.
     assert {name: after[name] for name in before} == before
     assert set(after) - set(before) <= {"history.sqlite3-shm"}
+
+
+def test_a_symlinked_newer_database_left_by_a_crash_is_left_unchanged(
+    tmp_path, monkeypatch
+):
+    # SQLite names the -wal after the file a symlink points to.
+    crashed = crashed_newer_database(tmp_path, name="target.sqlite3")
+    link = crashed / "history.sqlite3"
+    try:
+        os.symlink(crashed / "target.sqlite3", link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available")
+    with open(link, "rb") as handle:
+        assert int.from_bytes(handle.read(100)[60:64], "big") != NEWER
+    before = files(crashed)
+    real_connect = sqlite3.connect
+    writes = []
+
+    def connect(database, *args, **kwargs):
+        if not kwargs.get("uri"):
+            writes.append(database)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    store = HistoryStore(str(link))
+    with pytest.raises(HistorySchemaTooNewError):
+        store.initialize()
+    assert writes == []
+    after = files(crashed)
+    assert {name: after[name] for name in before} == before
+    assert set(after) - set(before) <= {"target.sqlite3-shm"}
 
 
 def test_a_database_upgraded_after_the_check_is_left_unchanged(tmp_path, monkeypatch):
@@ -122,22 +161,7 @@ def test_a_database_upgraded_after_the_check_is_left_unchanged(tmp_path, monkeyp
 def test_a_failed_check_opens_nothing_for_writing(tmp_path, monkeypatch):
     # The version may be in the -wal file, and the read-only connection that
     # would read it fails: nothing opens the file for writing.
-    live = tmp_path / "live"
-    live.mkdir()
-    writer = sqlite3.connect(live / "history.sqlite3")
-    try:
-        writer.execute("PRAGMA journal_mode=wal")
-        writer.execute("PRAGMA wal_autocheckpoint=0")
-        writer.execute("CREATE TABLE future (value TEXT)")
-        writer.commit()
-        writer.execute(f"PRAGMA user_version={NEWER}")
-        writer.commit()
-        crashed = tmp_path / "crashed"
-        crashed.mkdir()
-        for name in ("history.sqlite3", "history.sqlite3-wal"):
-            shutil.copy(live / name, crashed / name)
-    finally:
-        writer.close()
+    crashed = crashed_newer_database(tmp_path)
     before = files(crashed)
     real_connect = sqlite3.connect
     writes = []
@@ -393,3 +417,32 @@ def test_the_history_tab_says_why_history_is_off(monkeypatch):
     assert "newer version" in message
     # Not the "still starting" answer the tab retries every few seconds.
     assert "not available" not in message.lower()
+
+
+def test_deleting_a_streamers_analytics_says_why_without_a_traceback(
+    recorded, monkeypatch, caplog
+):
+    from TwitchChannelPointsMiner.classes import AnalyticsServer as server_module
+    from TwitchChannelPointsMiner.classes.Settings import Settings
+
+    recorder = HistoryRecorder(
+        HistoryStore(recorded.path), recorded.folder, journal=recorded.journal
+    )
+    monkeypatch.setattr(history, "_recorder", recorder)
+    monkeypatch.setattr(
+        Settings, "analytics_path", str(recorded.tmp_path), raising=False
+    )
+    (recorded.tmp_path / "alice.json").write_text("{}", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            response = server_module.delete_streamer_analytics("alice")
+            assert response.status_code == 503
+            assert "newer version" in response.get_json()["error"]
+    # History can't record the delete, so the file stays for a retry.
+    assert (recorded.tmp_path / "alice.json").exists()
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    # The recorder's one warning; no traceback per attempt.
+    assert len(warnings) == 1
+    assert all(record.exc_info is None for record in warnings)

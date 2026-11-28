@@ -9,6 +9,7 @@ from contextlib import contextmanager, nullcontext
 
 from TwitchChannelPointsMiner.history import (
     DEFAULT_RETENTION_DAYS,
+    HistoryRefusedError,
     HistoryUnavailableError,
 )
 from TwitchChannelPointsMiner.history import journal as journal_module
@@ -229,11 +230,11 @@ class HistoryRecorder(threading.Thread):
                 _remove_source(remove_source)
                 return {}
             if self.refused is not None:
-                raise HistoryUnavailableError(self.refused)
+                raise HistoryRefusedError(self.refused)
             if not self.store.ready and not self._initialize():
-                raise HistoryUnavailableError(
-                    self.refused or "History is still starting"
-                )
+                if self.refused is not None:
+                    raise HistoryRefusedError(self.refused)
+                raise HistoryUnavailableError("History is still starting")
             try:
                 self.importer.poll()
             except Exception:
