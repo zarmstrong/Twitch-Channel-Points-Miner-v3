@@ -13021,6 +13021,10 @@ class Twitch(object):
             # claim, not a retry of the accepted one.
             accepted_at = None
         if accepted_at is not None:
+            # Twitch accepted it in this process.  Writes nothing once
+            # History has the claim; a record that could not be written then
+            # is written now, whatever this pass does with the claim.
+            journal_claim(False)
             if (now - accepted_at) < ACCEPTED_CLAIM_RETRY_SECONDS:
                 # Repeats on every claim pass while the inventory lags.
                 self.__log_drop_check(
@@ -13029,9 +13033,6 @@ class Twitch(object):
                     level=logging.DEBUG,
                 )
                 self.__mark_drop_accepted(drop)
-                # Writes nothing once History has the claim; a record that
-                # could not be written when it was accepted is written now.
-                journal_claim(False)
                 return True
             # Stamp the retry before sending it, so a failed retry also waits
             # a full interval instead of repeating on every pass.
@@ -13090,8 +13091,6 @@ class Twitch(object):
                 }
                 self.__mark_drop_accepted(drop)
                 if accepted_at is not None:
-                    # As above: only if History lacks the claim.
-                    journal_claim(response.status == "DROP_INSTANCE_ALREADY_CLAIMED")
                     return True
                 if response.status == "DROP_INSTANCE_ALREADY_CLAIMED":
                     # Claimed earlier, for example before a restart: that

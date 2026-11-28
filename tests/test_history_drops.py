@@ -280,6 +280,38 @@ def test_points_earned_after_the_stream_went_offline_have_no_game(
     assert game_totals(store) == {("Game A", "alice"): (0, 17)}
 
 
+def test_points_earned_while_a_stream_was_offline_between_lives_have_no_game(
+    folder, importer, store
+):
+    folder.add("live", at=T0, streamer="alice", broadcast_id="b1", game="Game A")
+    folder.add("offline", at=T0 + 600, streamer="alice", broadcast_id="b1")
+    folder.add("live", at=T0 + 1800, streamer="alice", broadcast_id="b1", game="Game A")
+    # Late messages, sent once it was live again.
+    for earned, delta in ((T0 + 300, 1), (T0 + 1200, 10), (T0 + 2400, 100)):
+        folder.add(
+            "points",
+            at=T0 + 3000,
+            streamer="alice",
+            broadcast_id="b1",
+            delta=delta,
+            upstream_at=earned,
+        )
+    importer.poll()
+    assert game_totals(store) == {("Game A", "alice"): (0, 101)}
+
+
+def test_a_claim_recorded_without_its_game_learns_it(folder, importer, store):
+    folder.drop(at=T0, game=None)
+    importer.poll()
+    folder.drops_data([captured(T0 + 60)])
+    backfill_for(store, folder, importer).poll()
+    folder.drop(at=T0 + 600, run=2, already_claimed=True)
+    importer.poll()
+    assert [
+        (row["source"], row["game"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("journal", "Game A")]
+
+
 def test_a_journalled_claim_replaces_the_same_claim_from_the_drops_data(
     folder, importer, store
 ):
@@ -622,6 +654,24 @@ def test_a_claim_matched_to_a_deleted_one_stays_deleted_after_a_rebuild(folder, 
     assert rows(store, "SELECT * FROM drops") == []
 
 
+def test_a_deleted_claim_reported_with_its_game_later_stays_deleted(folder, store):
+    recorder = recorder_for(folder, store)
+    folder.drop(at=T0, streamer="alice", game=None)
+    recorder.poll_once()
+    recorder.delete_streamer("alice")
+    # The game is known when Twitch reports the claim again; the Drops data
+    # lists it under that game, also after a rebuild.
+    folder.drop(at=T0 + 600, run=2, already_claimed=True)
+    recorder.poll_once()
+    folder.drops_data([captured(T0 + 600)])
+    recorder.poll_once()
+    assert rows(store, "SELECT * FROM drops") == []
+    rebuild(store, folder)
+    for _ in range(3):
+        recorder.poll_once()
+    assert rows(store, "SELECT * FROM drops") == []
+
+
 def test_a_deleted_imported_claim_reported_again_stays_deleted(folder, importer, store):
     folder.drops_data([captured(T0, streamer="alice")])
     backfill_for(store, folder, importer).poll()
@@ -874,6 +924,35 @@ def test_a_claim_twitch_says_was_already_made_is_journalled(journal, monkeypatch
     (record,) = written(journal, "drop")
     assert record["already_claimed"] is True
     assert record["game"] == "Game A"
+
+
+@pytest.mark.parametrize("outcome", ["network", "errors", "refused"])
+def test_an_unwritten_claim_is_journalled_even_if_its_retry_fails(
+    journal, monkeypatch, outcome
+):
+    from TwitchChannelPointsMiner.classes import Twitch as twitch_module
+
+    twitch = claiming_twitch(monkeypatch)
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    assert twitch.claim_drop(claimed_drop(), category_name_override="Game A")
+    monkeypatch.setattr(journal, "append", real_append)
+    twitch.accepted_drop_claims["instance-1"] -= (
+        twitch_module.ACCEPTED_CLAIM_RETRY_SECONDS + 1
+    )
+
+    def claim(instance):
+        if outcome == "network":
+            raise twitch_module.RetryError("ClaimDrop", ["down"])
+        if outcome == "errors":
+            return SimpleNamespace(status=None, errors=["boom"])
+        return SimpleNamespace(status="DROP_INSTANCE_ALREADY_FULFILLED", errors=[])
+
+    twitch.gql = SimpleNamespace(claim_drop_rewards=claim)
+    twitch.claim_drop(claimed_drop(), category_name_override="Game A")
+    assert [record["claim_key"] for record in written(journal, "drop")] == [
+        "instance-1|drop-1"
+    ]
 
 
 @pytest.mark.parametrize("retry", [False, True])

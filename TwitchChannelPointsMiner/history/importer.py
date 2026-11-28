@@ -34,6 +34,7 @@ from TwitchChannelPointsMiner.history.journal import (
 from TwitchChannelPointsMiner.history.store import (
     META_DELETED_DROPS,
     SESSION_GAP_SECONDS,
+    STREAM_GAPS_KEPT,
     clean_streamer,
     earliest_held,
     utc_day,
@@ -98,6 +99,24 @@ def _text(value):
         return None
     value = str(value).strip()
     return value or None
+
+
+def _offline_gaps(raw):
+    """A stream's ``offline_gaps`` column as ``[(offline at, live at)]``."""
+
+    try:
+        gaps = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    found = []
+    for gap in gaps if isinstance(gaps, list) else ():
+        try:
+            offline_at, live_at = float(gap[0]), float(gap[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if math.isfinite(offline_at) and math.isfinite(live_at):
+            found.append((offline_at, live_at))
+    return found
 
 
 class _SaveFailed(Exception):
@@ -593,30 +612,35 @@ class JournalImporter(object):
         """The game the stream showed at the newest record imported so far:
         what the miner was watching when it recorded the next one.
 
-        With ``earned_at`` (when points were earned), none once the stream
-        had gone offline by then: a points message keeps the broadcast it
-        was sent after (``journal._earned_on``) even when the channel went
-        offline in between.  A late message for points earned while it was
-        live still counts."""
+        With ``earned_at`` (when points were earned), none when the stream
+        was offline by then: a points message keeps the broadcast it was
+        sent after (``journal._earned_on``) even when the channel went
+        offline in between, or went offline and came back.  A late message
+        for points earned while it was live still counts.  Both allow for
+        the two clocks."""
 
         if broadcast_id is None:
             return None
         row = connection.execute(
             """
-            SELECT game, ended_at, end_reason FROM streams
+            SELECT game, ended_at, end_reason, offline_gaps FROM streams
             WHERE streamer = ? AND broadcast_id = ?
             """,
             (streamer, broadcast_id),
         ).fetchone()
         if row is None:
             return None
-        if (
-            earned_at is not None
-            and row["ended_at"] is not None
-            and row["end_reason"] == "offline"
-            and earned_at > row["ended_at"] + WATCH_STREAK_CLOCK_SKEW_SECONDS
-        ):
-            return None
+        if earned_at is not None:
+            skew = WATCH_STREAK_CLOCK_SKEW_SECONDS
+            if (
+                row["ended_at"] is not None
+                and row["end_reason"] == "offline"
+                and earned_at > row["ended_at"] + skew
+            ):
+                return None
+            for offline_at, live_at in _offline_gaps(row["offline_gaps"]):
+                if offline_at + skew < earned_at < live_at - skew:
+                    return None
         return _text(row["game"])
 
     @staticmethod
@@ -825,6 +849,33 @@ class JournalImporter(object):
             return
         game = _text(record.get("game"))
         title = _text(record.get("title"))
+        previous = connection.execute(
+            """
+            SELECT ended_at, end_reason, offline_gaps FROM streams
+            WHERE streamer = ? AND broadcast_id = ?
+            """,
+            (streamer, broadcast_id),
+        ).fetchone()
+        if (
+            previous is not None
+            and previous["end_reason"] == "offline"
+            and previous["ended_at"] is not None
+            and at > previous["ended_at"]
+        ):
+            # Live again: the time it was offline is kept (_stream_game).
+            gaps = _offline_gaps(previous["offline_gaps"])
+            gaps.append((float(previous["ended_at"]), at))
+            connection.execute(
+                """
+                UPDATE streams SET offline_gaps = ?
+                WHERE streamer = ? AND broadcast_id = ?
+                """,
+                (
+                    json.dumps([list(gap) for gap in gaps[-STREAM_GAPS_KEPT:]]),
+                    streamer,
+                    broadcast_id,
+                ),
+            )
         # Its offline was missed.
         self._close_streams(
             connection,
@@ -942,11 +993,12 @@ class JournalImporter(object):
         ).fetchone():
             # Removed by a streamer delete (also when it was imported from
             # the Drops data: a drop is claimed once), reported again since.
-            # Kept under this claim's own key too, and saved: after a
-            # rebuild, the claim reported without its game must still match.
-            drop = (key, drop_id, game, at, "journal")
-            if self._tombstone(connection, drop):
-                self._save_deleted([drop], at)
+            # Kept under this claim's own key and game too, and saved: after
+            # a rebuild, the claim reported without its game, or the Drops
+            # data listing it under this one, must still match.
+            self._save_deleted(
+                self._tombstone_claim(connection, claim_key, drop_id, game, at), at
+            )
             return
         inserted = connection.execute(
             """
@@ -970,7 +1022,17 @@ class JournalImporter(object):
                 key,
             ),
         ).rowcount
-        if inserted > 0 and game is not None:
+        if game is None:
+            return
+        if inserted == 0:
+            # Recorded before without its game: now it is known.
+            connection.execute(
+                "UPDATE drops SET game = ? WHERE dedupe_key = ? AND game IS NULL",
+                (game, key),
+            )
+        if connection.execute(
+            "SELECT 1 FROM drops WHERE dedupe_key = ? AND game = ?", (key, game)
+        ).fetchone():
             # The same claim imported from the Drops data (backfill.py, which
             # skips it by the same rule, so the order of the two imports
             # doesn't matter): a drop is claimed once.
@@ -981,6 +1043,32 @@ class JournalImporter(object):
                 """,
                 (drop_id, game),
             )
+
+    def _tombstone_claim(self, connection, claim_key, drop_id, game, at):
+        """Record a journalled claim as deleted, under its key and, when it
+        names a game no deleted claim of the drop has, under that game too
+        (the claim was recorded without it before).  Returns what was not
+        recorded yet, for ``_save_deleted``."""
+
+        key = f"c:{claim_key}"
+        new = []
+        own = (key, drop_id, game, at, "journal")
+        if self._tombstone(connection, own):
+            new.append(own)
+        if (
+            game is not None
+            and not connection.execute(
+                """
+                SELECT 1 FROM deleted_drop_keys WHERE drop_id = ? AND game = ?
+                LIMIT 1
+                """,
+                (drop_id, game),
+            ).fetchone()
+        ):
+            alias = (f"{key}|{game}", drop_id, game, at, "journal")
+            if self._tombstone(connection, alias):
+                new.append(alias)
+        return new
 
     @staticmethod
     def _tombstone(connection, drop):
@@ -1011,10 +1099,9 @@ class JournalImporter(object):
         if drop_id is None or claim_key is None:
             return
         game = _text(record.get("game"))
-        own = (f"c:{claim_key}", drop_id, game, at, "journal")
         # Only what is not recorded yet is saved: what is was saved when it
         # was recorded (or restored from the file after a rebuild).
-        new = [own] if self._tombstone(connection, own) else []
+        new = self._tombstone_claim(connection, claim_key, drop_id, game, at)
         if game is not None:
             for row in connection.execute(
                 """

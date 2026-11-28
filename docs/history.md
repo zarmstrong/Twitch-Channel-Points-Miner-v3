@@ -72,9 +72,11 @@ channel and the drops credited to it.
 - **Games:** watch time and points go to the game the stream showed when the
   miner recorded them. A stream that changes game moves to the new game from
   the next minute-watched request. Watch time on a stream History hasn't seen
-  live, and points earned after the channel went offline (by Twitch's time
-  for the points, allowing two minutes for the clocks), have no game, so the
-  game totals can add up to less than the overall totals.
+  live, and points earned while the channel was offline (by Twitch's time
+  for the points, allowing two minutes for the clocks), also between going
+  offline and coming back live on the same broadcast, have no game, so the
+  game totals can add up to less than the overall totals. A claim first
+  recorded without its game gets the game when Twitch reports it with one.
 - **Older databases:** a database made by a build without game totals counts
   them from the upgrade. The tab says from when. Drops imported from the Drops
   data still show under their game.

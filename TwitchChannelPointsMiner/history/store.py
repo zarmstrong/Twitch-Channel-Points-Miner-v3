@@ -376,7 +376,14 @@ _SCHEMA_5 = (
     "CREATE INDEX idx_deleted_drop_keys_drop ON deleted_drop_keys (drop_id, game)",
     "CREATE INDEX idx_daily_game_stats_game ON daily_game_stats (game, day)",
     "CREATE INDEX idx_daily_game_stats_streamer " "ON daily_game_stats (streamer, day)",
+    # A broadcast seen live again after it went offline is one stream; the
+    # times it was offline in between, as a JSON list of [offline at, live
+    # again at] (the newest STREAM_GAPS_KEPT), so points earned then get no
+    # game (JournalImporter._stream_game).
+    "ALTER TABLE streams ADD COLUMN offline_gaps TEXT",
 )
+# How many offline gaps a stream keeps (see _SCHEMA_5).
+STREAM_GAPS_KEPT = 20
 
 # meta key: when a schema 4 database gained the game totals.  Watch time and
 # points before it have no game.
@@ -1113,6 +1120,8 @@ class HistoryStore(object):
         streams = []
         for row in stream_rows:
             item = dict(row)
+            # The importer's own record (see _SCHEMA_5).
+            item.pop("offline_gaps", None)
             item["active"] = live is not None and live["id"] == item["id"]
             # Measured on the server's clock, as in sessions().
             finished = item["ended_at"]
