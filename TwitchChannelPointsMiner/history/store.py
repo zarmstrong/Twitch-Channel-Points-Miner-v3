@@ -363,6 +363,14 @@ _SCHEMA_5 = (
         PRIMARY KEY (day, game, streamer)
     )
     """,
+    # The claims a streamer delete removed: Twitch can report a claim again
+    # (a stale inventory gets "already claimed"), which must not bring it
+    # back.
+    """
+    CREATE TABLE deleted_drop_keys (
+        dedupe_key TEXT PRIMARY KEY
+    )
+    """,
     "CREATE INDEX idx_daily_game_stats_game ON daily_game_stats (game, day)",
     "CREATE INDEX idx_daily_game_stats_streamer " "ON daily_game_stats (streamer, day)",
 )
@@ -640,6 +648,13 @@ class HistoryStore(object):
     @staticmethod
     def _delete_streamer_rows(connection, streamer, segment, offset, deleted_at):
         counts = {}
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key)
+            SELECT dedupe_key FROM drops WHERE streamer = ?
+            """,
+            (streamer,),
+        )
         for table in _STREAMER_TABLES:
             cursor = connection.execute(
                 f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
@@ -1386,6 +1401,8 @@ class HistoryStore(object):
         without a game (most quests) are one row with ``game`` None."""
 
         games = {}
+        # game -> the channels with watch time, points or drops for it.
+        channels = {}
 
         def game(name):
             if name not in games:
@@ -1404,9 +1421,7 @@ class HistoryStore(object):
             """
             SELECT game,
                    COALESCE(SUM(watch_seconds), 0) AS watch_seconds,
-                   COALESCE(SUM(points_gained), 0) AS points_gained,
-                   COUNT(DISTINCT CASE WHEN watch_seconds > 0 OR points_gained <> 0
-                                       THEN streamer END) AS streamers
+                   COALESCE(SUM(points_gained), 0) AS points_gained
             FROM daily_game_stats
             WHERE day >= ? AND day <= ? AND (? IS NULL OR streamer = ?)
             GROUP BY game
@@ -1416,7 +1431,19 @@ class HistoryStore(object):
             item = game(row["game"])
             item["watch_seconds"] = float(row["watch_seconds"] or 0.0)
             item["points_gained"] = int(row["points_gained"] or 0)
-            item["streamers"] = int(row["streamers"] or 0)
+        for row in connection.execute(
+            """
+            SELECT DISTINCT game, streamer FROM daily_game_stats
+            WHERE day >= ? AND day <= ? AND (? IS NULL OR streamer = ?)
+              AND (watch_seconds > 0 OR points_gained <> 0)
+            UNION
+            SELECT DISTINCT game, streamer FROM drops
+            WHERE ts >= ? AND ts < ? AND (? IS NULL OR streamer = ?)
+              AND streamer IS NOT NULL
+            """,
+            (first_day, last_day, streamer, streamer, start, end, streamer, streamer),
+        ):
+            channels.setdefault(row["game"], set()).add(row["streamer"])
         for row in connection.execute(
             """
             SELECT game, COUNT(*) AS drops, COALESCE(SUM(quest), 0) AS quests,
@@ -1431,6 +1458,9 @@ class HistoryStore(object):
             item["drops"] = int(row["drops"] or 0)
             item["quests"] = int(row["quests"] or 0)
             item["last_drop_at"] = row["last_drop_at"]
+        for name, names in channels.items():
+            if name in games:
+                games[name]["streamers"] = len(names)
         return sorted(
             (
                 item

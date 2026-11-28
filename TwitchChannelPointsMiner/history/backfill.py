@@ -625,6 +625,11 @@ class AnalyticsBackfill(object):
         ).fetchone():
             # The journal recorded this claim (see the module docstring).
             return 0
+        key = f"a:{drop_id}|{game}"
+        if connection.execute(
+            "SELECT 1 FROM deleted_drop_keys WHERE dedupe_key = ?", (key,)
+        ).fetchone():
+            return 0
         benefit = _text(entry.get("benefit"))
         minutes = _int(entry.get("minutes_required"))
         return max(
@@ -646,7 +651,7 @@ class AnalyticsBackfill(object):
                     game,
                     minutes if minutes is not None and minutes >= 0 else None,
                     _text(entry.get("item_art_url")),
-                    f"a:{drop_id}|{game}",
+                    key,
                 ),
             ).rowcount,
         )

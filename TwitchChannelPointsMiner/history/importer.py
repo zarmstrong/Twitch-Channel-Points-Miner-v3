@@ -853,6 +853,12 @@ class JournalImporter(object):
             if text is not None
         ]
         minutes = _int(record.get("minutes_required"))
+        key = f"c:{claim_key}"
+        if connection.execute(
+            "SELECT 1 FROM deleted_drop_keys WHERE dedupe_key = ?", (key,)
+        ).fetchone():
+            # Removed by a streamer delete; reported again since.
+            return
         inserted = connection.execute(
             """
             INSERT OR IGNORE INTO drops (ts, streamer, drop_id, name, benefits,
@@ -872,7 +878,7 @@ class JournalImporter(object):
                 1 if record.get("quest") is True else 0,
                 minutes if minutes is not None and minutes >= 0 else None,
                 _text(record.get("image")),
-                f"c:{claim_key}",
+                key,
             ),
         ).rowcount
         if inserted > 0 and game is not None:

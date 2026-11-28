@@ -11387,6 +11387,7 @@ class Twitch(object):
             drop,
             campaign_name_override=campaign.get("name"),
             category_name_override=categories[0].get("displayName") or "Unknown",
+            campaign_id_override=campaign.get("id"),
         )
 
     @staticmethod
@@ -12244,6 +12245,7 @@ class Twitch(object):
         campaign=None,
         campaign_name_override=None,
         category_name_override=None,
+        campaign_id=None,
         already_claimed=False,
     ):
         """Write a claim Twitch accepted to History's journal; never raises."""
@@ -12261,14 +12263,25 @@ class Twitch(object):
                     ),
                     None,
                 ) or getattr(drop, "item_art_url", None)
+            # Every reward the drop gives: the Drops tab shows a quest as one
+            # row (see __drop_variant_entries_from_drop), but it may give
+            # several.
+            benefits = [
+                (edge.get("benefit") or {}).get("name")
+                for edge in getattr(drop, "benefit_edges", None) or []
+                if isinstance(edge, dict) and isinstance(edge.get("benefit"), dict)
+            ]
+            if not any(benefits):
+                benefits = [variant.get("benefit") for variant in variants] or [
+                    getattr(drop, "benefit", None)
+                ]
             history_journal.JOURNAL.record_drop(
                 drop.id,
                 f"{drop.drop_instance_id}|{drop.id}",
                 name=getattr(drop, "name", None),
-                benefits=[variant.get("benefit") for variant in variants]
-                or [getattr(drop, "benefit", None)],
+                benefits=benefits,
                 campaign=campaign_name,
-                campaign_id=getattr(campaign, "id", None),
+                campaign_id=str(campaign_id) if campaign_id else None,
                 game=category_name,
                 quest=self.__is_watch_reward_drop(drop.id),
                 minutes_required=getattr(drop, "minutes_required", None),
@@ -12883,6 +12896,7 @@ class Twitch(object):
         campaign_name_override=None,
         category_name_override=None,
         campaign_link=None,
+        campaign_id_override=None,
     ):
         # Held across the request so a concurrent pass sees the accepted claim
         # instead of claiming and notifying a second time.
@@ -12894,6 +12908,7 @@ class Twitch(object):
                 campaign_name_override=campaign_name_override,
                 category_name_override=category_name_override,
                 campaign_link=campaign_link,
+                campaign_id_override=campaign_id_override,
             )
             if getattr(drop, "id", None):
                 self.__update_pending_drop_claim(
@@ -12909,6 +12924,7 @@ class Twitch(object):
         campaign_name_override=None,
         category_name_override=None,
         campaign_link=None,
+        campaign_id_override=None,
     ):
         if getattr(self, "accepted_drop_claims", None) is None:
             self.accepted_drop_claims = {}
@@ -13086,6 +13102,8 @@ class Twitch(object):
                     campaign=campaign,
                     campaign_name_override=campaign_name_override,
                     category_name_override=category_name_override,
+                    campaign_id=self.__link_campaign_id(campaign, campaign_link)
+                    or campaign_id_override,
                     already_claimed=response.status == "DROP_INSTANCE_ALREADY_CLAIMED",
                 )
                 for variant in variants:

@@ -359,6 +359,38 @@ def test_a_delete_removes_the_streamers_drops_and_game_totals(folder, importer, 
     assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d2"]
 
 
+def test_a_deleted_claim_reported_again_stays_deleted(folder, importer, store):
+    folder.drop(at=T0, streamer="alice")
+    importer.poll()
+    store.delete_streamer("alice", segment_name(1, 1), 10**6)
+    # A stale inventory: Twitch says the claim was already made, possibly in
+    # a later run that no longer knows the channel.
+    folder.drop(at=T0 + 600, streamer="alice", already_claimed=True)
+    folder.drop(at=T0 + 700, run=2, already_claimed=True)
+    # A new claim on the channel is recorded.
+    folder.drop(at=T0 + 800, run=2, claim_key="i-d1|d1#2", streamer="alice")
+    importer.poll()
+    assert [row["dedupe_key"] for row in rows(store, "SELECT * FROM drops")] == [
+        "c:i-d1|d1#2"
+    ]
+
+
+def test_a_channel_with_only_drops_counts_as_a_games_streamer(folder, importer, store):
+    folder.add("live", at=T0, streamer="alice", broadcast_id="b1", game="Game A")
+    folder.add("watch", at=T0 + 20, streamer="alice", broadcast_id="b1", seconds=60)
+    folder.drop(at=T0 + 30, streamer="alice")
+    folder.drop(at=T0 + 30, drop_id="d2", streamer="dropsonly")
+    folder.drop(at=T0 + 30, drop_id="d3", streamer="other", game="Game B")
+    importer.poll()
+    games = {
+        item["game"]: item["streamers"]
+        for item in store.games(days=1, now=T0 + 60)["games"]
+    }
+    assert games == {"Game A": 2, "Game B": 1}
+    (only,) = store.games(days=1, streamer="dropsonly", now=T0 + 60)["games"]
+    assert (only["game"], only["drops"], only["streamers"]) == ("Game A", 1, 1)
+
+
 def test_retention_keeps_drops_and_game_totals(folder, importer, store):
     folder.add("live", at=T0, streamer="alice", broadcast_id="b1", game="Game A")
     folder.add("watch", at=T0 + 20, streamer="alice", broadcast_id="b1", seconds=20)
@@ -428,6 +460,8 @@ def test_games_and_drops_cover_the_window(folder, importer, store):
     ]
     assert games[1]["points_gained"] == 10
     assert games[1]["streamers"] == 1
+    # The quest's channel is unknown: no streamer.
+    assert games[2]["streamers"] == 0
     assert [
         item["game"]
         for item in store.games(days=1, streamer="bob", now=T0 + 60)["games"]
@@ -544,6 +578,47 @@ def test_an_accepted_claim_is_journalled_before_the_drops_data(journal, monkeypa
     assert record["already_claimed"] is False
     assert order == [("analytics", 1)]
     assert Campaign  # the entity module imports
+
+
+def test_a_claim_without_a_campaign_keeps_the_campaign_id(journal, monkeypatch):
+    twitch = claiming_twitch(monkeypatch)
+    # The inventory pass: only the inventory's campaign link knows the id.
+    assert (
+        twitch.claim_drop(
+            claimed_drop(),
+            category_name_override="Game A",
+            campaign_link={"campaign_id": "campaign-9", "connected": True},
+        )
+        is True
+    )
+    drop = claimed_drop("drop-2")
+    drop.drop_instance_id = "instance-2"
+    # A quest: its campaign's id is passed on its own.
+    assert twitch.claim_drop(drop, campaign_id_override="quest-1") is True
+    assert [record["campaign_id"] for record in written(journal, "drop")] == [
+        "campaign-9",
+        "quest-1",
+    ]
+
+
+def test_a_quest_records_every_reward_it_gives(journal, monkeypatch):
+    from TwitchChannelPointsMiner.classes.Twitch import Twitch
+
+    twitch = claiming_twitch(monkeypatch)
+    # The Drops tab shows a quest as one row, named for its first reward.
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__drop_variant_entries_from_drop",
+        lambda self, drop: [{"name": "Quest", "benefit": "Badge"}],
+    )
+    drop = claimed_drop()
+    drop.benefit_edges = [
+        {"benefit": {"name": "Badge"}},
+        {"benefit": {"name": "Emote"}},
+    ]
+    assert twitch.claim_drop(drop) is True
+    (record,) = written(journal, "drop")
+    assert record["benefits"] == ["Badge", "Emote"]
 
 
 def test_a_claim_twitch_says_was_already_made_is_journalled(journal, monkeypatch):

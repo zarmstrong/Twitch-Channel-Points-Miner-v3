@@ -65,6 +65,8 @@ channel and the drops credited to it.
   progress on (Twitch counts a drop's progress on one channel at a time).
   The miner learns that while it watches, so a drop claimed before it saw any
   progress in this run, for example right after a restart, has no channel.
+  Selecting a channel in the drops list opens its drill-down, also for a
+  channel History has no other records of.
 - **Quests** (reward campaigns) usually have no game. They're listed as
   quests and grouped as **Quests (no game)** in the Games table.
 - **Games:** watch time and points go to the game the stream showed when the
@@ -218,7 +220,8 @@ There are two ways to delete a streamer's History from the dashboard:
 - **Delete history** in a streamer's drill-down on the History tab deletes only
   their History: points, spends, predictions, watch and live sessions, watch
   streaks, the drops credited to their channel, their game totals, and their
-  daily and all-time totals. Their analytics data and the
+  daily and all-time totals. A deleted drop stays deleted when Twitch reports
+  its claim again later. Their analytics data and the
   Points tab are not changed.
 - Deleting a streamer's analytics data on the Points tab also clears that
   streamer's History.

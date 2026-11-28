@@ -467,9 +467,10 @@
                 refreshHistory(true);
             });
         }
-        var streamers = byId('history-streamers');
-        if (streamers) {
-            streamers.addEventListener('click', function (event) {
+        ['history-streamers', 'history-drops'].forEach(function (id) {
+            var list = byId(id);
+            if (!list) return;
+            list.addEventListener('click', function (event) {
                 var link = event.target.closest('[data-history-streamer]');
                 if (!link) return;
                 event.preventDefault();
@@ -477,7 +478,7 @@
                     scroll: true
                 });
             });
-        }
+        });
         var detail = byId('history-detail');
         if (detail) {
             detail.addEventListener('click', function (event) {
@@ -951,7 +952,15 @@
                 (drop.quest ? ' <span class="tag is-info is-light">quest</span>' : '') + '</td>' +
                 '<td>' + escapeHtml(game) + '</td>' +
                 '<td>' + escapeHtml(drop.campaign || '—') + '</td>' +
-                (showChannel ? '<td>' + escapeHtml(drop.streamer || '—') + '</td>' : '') +
+                (showChannel
+                    ? '<td>' + (drop.streamer
+                        // Also a channel History has no other records of
+                        // (one the miner found only for Drops): its
+                        // drill-down shows its drops and can delete them.
+                        ? '<a href="#" data-history-streamer="' + escapeHtml(drop.streamer) + '">' +
+                            escapeHtml(drop.streamer) + '</a>'
+                        : '—') + '</td>'
+                    : '') +
                 '</tr>';
         }).join('');
     }
