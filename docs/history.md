@@ -64,8 +64,9 @@ channel and the drops credited to it.
 - **Channel:** a drop is credited to the channel Twitch last named for its
   progress (Twitch counts a drop's progress on one channel at a time, and can
   name a channel other than the one the miner asked about). The miner learns
-  that while it watches, so a drop claimed before it saw any
-  progress in this run, for example right after a restart, has no channel.
+  that while it watches, so a drop claimed before it saw any progress in this
+  run, for example right after a restart, has no channel until Twitch or the
+  Drops data names one.
   Selecting a channel in the drops list opens its drill-down, also for a
   channel History has no other records of.
 - **Quests** (reward campaigns) usually have no game. They're listed as

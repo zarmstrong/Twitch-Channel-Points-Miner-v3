@@ -631,9 +631,20 @@ class AnalyticsBackfill(object):
         if streamer is not None and streamer in deleted:
             return 0
         key = f"a:{drop_id}|{game}"
+        # The journal recorded this claim (see the module docstring): it
+        # gets what only this entry knows (its game, its channel).
+        connection.execute(
+            """
+            UPDATE drops SET game = COALESCE(game, ?),
+                streamer = COALESCE(streamer, ?)
+            WHERE source = 'journal' AND drop_id = ?
+                AND (game IS NULL OR streamer IS NULL)
+            """,
+            (game, streamer, drop_id),
+        )
         for table in ("drops", "deleted_drop_keys"):
-            # The journal recorded this claim (see the module docstring), or
-            # a streamer delete removed it.
+            # The journal recorded this claim, or a streamer delete removed
+            # it.
             if connection.execute(
                 f"""
                 SELECT 1 FROM {table}

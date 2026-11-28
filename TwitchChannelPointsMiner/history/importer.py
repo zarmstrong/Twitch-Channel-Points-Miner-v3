@@ -1048,7 +1048,25 @@ class JournalImporter(object):
             )
         # The same claim imported from the Drops data (backfill.py, which
         # skips it by the same rule, so the order of the two imports doesn't
-        # matter): a drop is claimed once.
+        # matter): a drop is claimed once.  What only that copy knows (its
+        # game, its channel) is kept.
+        connection.execute(
+            """
+            UPDATE drops SET
+                game = COALESCE(game, (
+                    SELECT game FROM drops AS copy
+                    WHERE copy.source = 'analytics' AND copy.drop_id = ?
+                        AND copy.game IS NOT NULL
+                    ORDER BY copy.id LIMIT 1)),
+                streamer = COALESCE(streamer, (
+                    SELECT streamer FROM drops AS copy
+                    WHERE copy.source = 'analytics' AND copy.drop_id = ?
+                        AND copy.streamer IS NOT NULL
+                    ORDER BY copy.id LIMIT 1))
+            WHERE dedupe_key = ?
+            """,
+            (drop_id, drop_id, existing["dedupe_key"] if existing else key),
+        )
         connection.execute(
             "DELETE FROM drops WHERE source = 'analytics' AND drop_id = ?",
             (drop_id,),

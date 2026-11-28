@@ -480,6 +480,10 @@ class Journal(object):
         self._claims_lock = threading.Lock()
         self._drop_claims = {}
         self._unwritten_claims = {}
+        # Claims written without a channel: drop id -> {claim key: the
+        # record written}, newest last, so a channel noted for the drop
+        # later is written to them (note_drop_channel).
+        self._channelless_claims = {}
 
     def _eligible(self, streamer):
         """``history_eligible`` and not removed from the miner."""
@@ -1224,6 +1228,13 @@ class Journal(object):
             self._drop_channels[drop_id] = username
             while len(self._drop_channels) > DROP_CHANNELS_KEPT:
                 del self._drop_channels[next(iter(self._drop_channels))]
+        # A claim of the drop written before its channel was known (for
+        # example claimed right after a restart, then named by a session
+        # still on it): written again with it.
+        with self._claims_lock:
+            pending = self._channelless_claims.get(drop_id)
+            for claim_key, record in list((pending or {}).items()):
+                self._write_claim(claim_key, record, username)
 
     def drop_channel(self, drop_id):
         """The channel last noted for ``drop_id``, or None."""
@@ -1288,31 +1299,46 @@ class Journal(object):
             if claim_key in self._unwritten_claims:
                 # Not written when Twitch accepted it: what Twitch said then.
                 already_claimed = self._unwritten_claims[claim_key]
-            written = self.append(
-                "drop",
-                streamer=streamer,
-                drop_id=drop_id,
-                claim_key=claim_key,
-                name=text_or_none(name),
-                benefits=names,
-                campaign=text_or_none(campaign),
-                campaign_id=text_or_none(campaign_id),
-                game=game,
-                quest=quest is True,
-                minutes_required=_int_or_none(minutes_required),
-                image=text_or_none(image),
-                already_claimed=already_claimed is True,
-            )
-            if not written:
+            record = {
+                "drop_id": drop_id,
+                "claim_key": claim_key,
+                "name": text_or_none(name),
+                "benefits": names,
+                "campaign": text_or_none(campaign),
+                "campaign_id": text_or_none(campaign_id),
+                "game": game,
+                "quest": quest is True,
+                "minutes_required": _int_or_none(minutes_required),
+                "image": text_or_none(image),
+                "already_claimed": already_claimed is True,
+            }
+            if not self._write_claim(claim_key, record, streamer):
                 self._unwritten_claims.setdefault(claim_key, already_claimed is True)
                 while len(self._unwritten_claims) > DROP_CLAIMS_KEPT:
                     del self._unwritten_claims[next(iter(self._unwritten_claims))]
-                return
-            self._unwritten_claims.pop(claim_key, None)
-            self._drop_claims.pop(claim_key, None)
-            self._drop_claims[claim_key] = (game, streamer)
-            while len(self._drop_claims) > DROP_CLAIMS_KEPT:
-                del self._drop_claims[next(iter(self._drop_claims))]
+
+    def _write_claim(self, claim_key, record, streamer):
+        """Write a claim's record credited to ``streamer`` (or None), and
+        remember what was written.  Called with ``_claims_lock`` held.
+        Returns whether it was written."""
+
+        drop_id = record["drop_id"]
+        if not self.append("drop", streamer=streamer, **record):
+            return False
+        self._unwritten_claims.pop(claim_key, None)
+        self._drop_claims.pop(claim_key, None)
+        self._drop_claims[claim_key] = (record["game"], streamer)
+        while len(self._drop_claims) > DROP_CLAIMS_KEPT:
+            del self._drop_claims[next(iter(self._drop_claims))]
+        pending = self._channelless_claims.pop(drop_id, {})
+        pending.pop(claim_key, None)
+        if streamer is None:
+            pending[claim_key] = record
+        if pending:
+            self._channelless_claims[drop_id] = pending
+            while len(self._channelless_claims) > DROP_CHANNELS_KEPT:
+                del self._channelless_claims[next(iter(self._channelless_claims))]
+        return True
 
 
 # The process-wide journal.  Inert until ``start()``; every call is a no-op

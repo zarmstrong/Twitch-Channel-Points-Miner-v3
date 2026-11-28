@@ -252,6 +252,42 @@ def test_a_claim_written_again_keeps_what_was_written_before(journal):
     ] == [("Game A", None), ("Game A", "alice")]
 
 
+def test_a_channel_noted_after_the_claim_is_written_to_it(journal, store):
+    # Claimed right after a restart, before any progress named a channel;
+    # a session still on the drop names it later.
+    journal.record_drop("d1", "i1|d1", name="Reward", game="Game A")
+    journal.record_drop("d2", "i2|d2", game="Game B")
+    journal.note_drop_channel("alice", "d1")
+    journal.note_drop_channel("bob", "d1")
+    journal.note_drop_channel("carol", "d3")
+    assert [
+        (record["drop_id"], record["streamer"], record["game"], record["name"])
+        for record in written(journal, "drop")
+    ] == [
+        ("d1", None, "Game A", "Reward"),
+        ("d2", None, "Game B", None),
+        ("d1", "alice", "Game A", "Reward"),
+    ]
+    importer = JournalImporter(store, journal.folder, monotonic=lambda: 0.0)
+    importer.poll()
+    assert sorted(
+        (row["drop_id"], row["streamer"] or "")
+        for row in rows(store, "SELECT * FROM drops")
+    ) == [("d1", "alice"), ("d2", "")]
+
+
+def test_a_channel_noted_while_the_rewrite_fails_is_written_later(journal, monkeypatch):
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.note_drop_channel("alice", "d1")
+    monkeypatch.undo()
+    journal.note_drop_channel("alice", "d1")
+    assert [record["streamer"] for record in written(journal, "drop")] == [
+        None,
+        "alice",
+    ]
+
+
 def test_an_unwritten_claim_keeps_what_twitch_said_first(journal, monkeypatch):
     real_append = journal.append
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
@@ -379,6 +415,25 @@ def test_a_claim_recorded_without_its_channel_learns_it(folder, importer, store)
     ] == [("alice", "Game A")]
     # So the channel's drill-down lists it.
     assert store.drops(days=7, streamer="alice", now=T0 + 60)["total"] == 1
+
+
+@pytest.mark.parametrize("journal_first", [False, True])
+def test_a_journalled_claim_keeps_what_the_drops_data_knew(
+    folder, importer, store, journal_first
+):
+    # The journalled claim knew neither its game nor its channel.
+    if journal_first:
+        folder.drop(at=T0, game=None)
+        importer.poll()
+    folder.drops_data([captured(T0 + 1, streamer="alice")])
+    backfill_for(store, folder, importer).poll()
+    if not journal_first:
+        folder.drop(at=T0, game=None)
+        importer.poll()
+    assert [
+        (row["source"], row["game"], row["streamer"])
+        for row in rows(store, "SELECT * FROM drops")
+    ] == [("journal", "Game A", "alice")]
 
 
 def test_a_journalled_claim_replaces_the_same_claim_from_the_drops_data(
