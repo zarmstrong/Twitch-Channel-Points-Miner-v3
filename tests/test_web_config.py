@@ -3566,6 +3566,7 @@ def test_managed_web_config_rejects_invalid_history_settings(tmp_path, values):
         "ANALYTICS",
         '{"history_retention_days": 30, **EXTRA}',
         "{**EXTRA}",
+        '{"history_retention_days": 30, "history_import_analytics": True, KEY: 1}',
     ],
 )
 def test_managed_web_config_shows_history_settings_it_cannot_evaluate_as_unknown(
@@ -3601,3 +3602,11 @@ def test_managed_web_config_reads_a_key_after_unpacking(tmp_path):
     config = tmp_path / "config.py"
     _write_history_config(config, '{**EXTRA, "history_retention_days": 30}')
     assert read_managed_web_config(config)["history"]["retention_days"] == 30
+
+
+def test_managed_web_config_reads_a_key_after_a_computed_key(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{KEY: 1, "history_retention_days": 30}')
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_days"] == 30
+    assert history["import_analytics"] is None

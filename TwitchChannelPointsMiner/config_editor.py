@@ -422,7 +422,8 @@ def _analytics_literal(analytics_node, key):
     """The ANALYTICS_CONFIG value the miner runs with, as a literal: None
     when the key is missing (or ANALYTICS_CONFIG is None), _UNREADABLE when
     the dashboard can't evaluate it (ANALYTICS_CONFIG or the value is a
-    variable or a call, or a later ``**`` entry may set the key)."""
+    variable or a call, or a later ``**`` entry or computed key may set
+    the key)."""
 
     if analytics_node is None or (
         isinstance(analytics_node, ast.Constant) and analytics_node.value is None
@@ -432,10 +433,11 @@ def _analytics_literal(analytics_node, key):
         return _UNREADABLE
     node = None
     for item_key, value in zip(analytics_node.keys, analytics_node.values):
-        if item_key is None:
-            # ``**mapping``: it may set the key, overriding what came before.
+        if item_key is None or not isinstance(item_key, ast.Constant):
+            # ``**mapping`` or a computed key: it may set the key,
+            # overriding what came before.
             node = _UNREADABLE
-        elif isinstance(item_key, ast.Constant) and item_key.value == key:
+        elif item_key.value == key:
             # The last entry wins, as in Python (and the editor writes it).
             node = value
     if node is None:

@@ -790,6 +790,77 @@ def test_a_streamer_added_after_a_requested_import_waits_for_the_next(
     assert recorder.backfill.status()["complete"] is True
 
 
+def test_a_request_waits_for_a_started_streamer_who_is_not_listed_now(
+    analytics, tracked
+):
+    analytics.write("alice", [entry(T0 - 300 + i, 100 + i) for i in range(4)])
+    analytics.write("bob", [entry(T0 - 300, 10), entry(T0 - 200, 30)])
+    analytics.record("run_start")
+    tracked["names"] = ["alice", "bob"]
+    clock = {"mono": 0.0}
+    recorder = recorder_for(
+        analytics, tracked, automatic=False, batch_size=1, step_seconds=1.0, mono=clock
+    )
+    recorder.request_import()
+    # One step of alice's import, then the poll's time is up.
+    real_step = recorder.backfill._step
+
+    def one_step(*args, **kwargs):
+        result = real_step(*args, **kwargs)
+        clock["mono"] += 1.0
+        return result
+
+    recorder.backfill._step = one_step
+    recorder.poll_once()
+    recorder.backfill._step = real_step
+    assert recorder.backfill.status()["streamers_waiting"] == 2
+
+    # The next start loads only bob (alice failed to load).
+    tracked["names"] = ["bob"]
+    recorder.poll_once()
+    assert totals(recorder.store, "bob")["gained"] == 20
+    assert recorder.backfill.status()["requested"] is True
+
+    # With nobody listed, the request stays too.
+    tracked["names"] = []
+    recorder.poll_once()
+    assert recorder.backfill.status()["requested"] is True
+
+    tracked["names"] = ["alice", "bob"]
+    recorder.poll_once()
+    assert totals(recorder.store)["gained"] == 3
+    status = recorder.backfill.status()
+    assert status["complete"] is True
+    assert status["requested"] is False
+
+
+def test_a_deleted_started_streamer_does_not_keep_the_request(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300 + i, 100 + i) for i in range(4)])
+    analytics.write("bob", [entry(T0 - 300, 10), entry(T0 - 200, 30)])
+    analytics.record("run_start")
+    tracked["names"] = ["alice", "bob"]
+    clock = {"mono": 0.0}
+    recorder = recorder_for(
+        analytics, tracked, automatic=False, batch_size=1, step_seconds=1.0, mono=clock
+    )
+    recorder.request_import()
+    real_step = recorder.backfill._step
+
+    def one_step(*args, **kwargs):
+        result = real_step(*args, **kwargs)
+        clock["mono"] += 1.0
+        return result
+
+    recorder.backfill._step = one_step
+    recorder.poll_once()
+    recorder.backfill._step = real_step
+    recorder.delete_streamer("alice")
+
+    tracked["names"] = ["bob"]
+    recorder.poll_once()
+    assert recorder.backfill.status()["requested"] is False
+
+
 def test_a_request_with_the_automatic_import_on_is_cleared(analytics, tracked):
     analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
     analytics.record("run_start")

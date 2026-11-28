@@ -300,7 +300,8 @@ class AnalyticsBackfill(object):
             return False
         if not names:
             if requested:
-                self._clear_request()
+                with self.store._read_connection() as connection:
+                    self._finish_request(self._states(connection), names)
             return False
         boundary = self._boundary()
         if boundary is None:
@@ -314,7 +315,7 @@ class AnalyticsBackfill(object):
         pending = [name for name in names if not states.get(name, {}).get("done")]
         if not pending:
             if requested:
-                self._clear_request()
+                self._finish_request(states, names)
             return False
         # Raises when the cutoffs cannot be read: importing without them
         # could bring a deleted streamer back.
@@ -349,10 +350,37 @@ class AnalyticsBackfill(object):
                 payloads.pop(name, None)
         finished = all(states[name]["done"] for name in pending)
         if finished and requested:
-            self._clear_request()
+            self._finish_request(states, names)
         # The poll that finishes runs retention, even if its own steps added
         # nothing (the rows came in earlier polls).
         return (imported or added > 0) and finished
+
+    def _finish_request(self, states, names):
+        """Clear the request once the streamers listed now are done, unless
+        one whose import began isn't listed now (it failed to load, say):
+        the request then stays, and its import resumes once it is listed.
+        A deleted streamer is never imported, so it doesn't keep it."""
+
+        listed = set(names)
+        unfinished = {
+            name
+            for name, state in states.items()
+            if not state["done"] and name not in listed
+        }
+        if unfinished:
+            try:
+                unfinished -= set(self.importer._load_deletes())
+            except OSError:
+                return
+            with self.store._read_connection() as connection:
+                unfinished -= {
+                    row["streamer"]
+                    for row in connection.execute(
+                        "SELECT streamer FROM deleted_streamers"
+                    )
+                }
+        if not unfinished:
+            self._clear_request()
 
     def _files(self):
         """``streamer -> file name`` of the analytics JSON files."""
