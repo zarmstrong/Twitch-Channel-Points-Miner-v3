@@ -132,7 +132,8 @@ def history_streamers():
     source = _streamer_source
     if source is None:
         return None
-    return list(source())
+    names = source()
+    return list(names) if names is not None else None
 
 
 def start_history(retention_days=None, import_analytics=True):

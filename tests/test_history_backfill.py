@@ -767,6 +767,21 @@ def test_the_miner_lists_the_streamers_history_records(monkeypatch):
     assert names() == ["alice"]
 
 
+def test_history_waits_quietly_until_the_miner_lists_its_streamers(monkeypatch):
+    import TwitchChannelPointsMiner.history as history
+
+    loaded = []
+    monkeypatch.setattr(
+        history, "_streamer_source", lambda: list(loaded) if loaded else None
+    )
+
+    # The miner's source returns None until the streamers load.
+    assert history.history_streamers() is None
+
+    loaded.append("alice")
+    assert history.history_streamers() == ["alice"]
+
+
 def test_entries_in_the_journals_first_second_are_left_to_the_journal(
     analytics, tracked
 ):
