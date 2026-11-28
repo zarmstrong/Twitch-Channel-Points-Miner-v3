@@ -301,37 +301,34 @@ def test_a_channel_noted_while_a_claim_is_written_reaches_it(journal):
     assert [record["streamer"] for record in written(journal, "drop")][-1] == ("alice")
 
 
-def test_a_claim_gets_the_newest_of_two_channels_noted_while_it_is_written(
-    journal, store
-):
+def test_a_channel_note_waits_for_a_claim_being_written(journal, store):
+    # alice is written to the claim; bob, noted meanwhile, waits until that
+    # is done, so the claim keeps the channel noted before it was written.
     journal.record_drop("d1", "i1|d1", game="Game A")
-    real = journal._claims_lock
-    entered = []
+    real_append = journal.append
+    during = []
 
-    class Lock:
-        # alice's note gets the lock first; by then bob's note (still
-        # waiting for it) has replaced her as the drop's channel.
-        def __enter__(self):
-            if not entered:
-                entered.append(True)
-                with journal._drop_lock:
-                    journal._drop_channels["d1"] = "bob"
-            return real.__enter__()
+    def append(kind, **fields):
+        if kind == "drop" and fields.get("streamer") == "alice" and not during:
+            thread = threading.Thread(
+                target=journal.note_drop_channel, args=("bob", "d1")
+            )
+            during.append(thread)
+            thread.start()
+            thread.join(0.2)
+            during.append(journal._drop_channels.get("d1"))
+        return real_append(kind, **fields)
 
-        def __exit__(self, *exc):
-            return real.__exit__(*exc)
-
-    journal._claims_lock = Lock()
+    journal.append = append
     journal.note_drop_channel("alice", "d1")
-    journal._claims_lock = real
-    journal.note_drop_channel("bob", "d1")
+    during[0].join(5)
+    assert not during[0].is_alive()
+    assert during[1] == "alice"
+    assert journal.drop_channel("d1") == "bob"
     assert [record["streamer"] for record in written(journal, "drop")] == [
         None,
-        "bob",
+        "alice",
     ]
-    importer = JournalImporter(store, journal.folder, monotonic=lambda: 0.0)
-    importer.poll()
-    assert [row["streamer"] for row in rows(store, "SELECT * FROM drops")] == ["bob"]
 
 
 def test_a_channel_noted_while_the_rewrite_fails_is_written_later(journal, monkeypatch):

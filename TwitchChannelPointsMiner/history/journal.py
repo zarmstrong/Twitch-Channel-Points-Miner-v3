@@ -475,8 +475,9 @@ class Journal(object):
         # Claim keys record_drop wrote in this process -> (game, channel) written,
         # newest last; and claims it could not write -> whether Twitch first
         # said "already claimed".  The lock is held across the append so a
-        # claim reported twice at once is written once; outer to the
-        # journal's own lock.
+        # claim reported twice at once is written once, and a drop's channel
+        # is noted under it too (note_drop_channel); outer to the drop lock
+        # and the journal's own lock.
         self._claims_lock = threading.Lock()
         self._drop_claims = {}
         self._unwritten_claims = {}
@@ -1223,22 +1224,22 @@ class Journal(object):
         drop_id = str(drop_id or "").strip()
         if not username or not drop_id:
             return
-        with self._drop_lock:
-            self._drop_channels.pop(drop_id, None)
-            self._drop_channels[drop_id] = username
-            while len(self._drop_channels) > DROP_CHANNELS_KEPT:
-                del self._drop_channels[next(iter(self._drop_channels))]
-        # A claim of the drop written before its channel was known (for
-        # example claimed right after a restart, then named by a session
-        # still on it): written again with it.
+        # Noted and written under the claims lock, so a claim written
+        # meanwhile is credited to the channel noted last before it, and a
+        # claim written without one gets this one.
         with self._claims_lock:
+            with self._drop_lock:
+                self._drop_channels.pop(drop_id, None)
+                self._drop_channels[drop_id] = username
+                while len(self._drop_channels) > DROP_CHANNELS_KEPT:
+                    del self._drop_channels[next(iter(self._drop_channels))]
+            # A claim of the drop written before its channel was known (for
+            # example claimed right after a restart, then named by a session
+            # still on it): written again with it.  A claim written with a
+            # channel keeps it.
             pending = self._channelless_claims.get(drop_id)
-            if pending:
-                # The channel noted last, which a note made while this one
-                # waited for the lock may have replaced.
-                current = self.drop_channel(drop_id) or username
-                for claim_key, record in list(pending.items()):
-                    self._write_claim(claim_key, record, current)
+            for claim_key, record in list((pending or {}).items()):
+                self._write_claim(claim_key, record, username)
 
     def drop_channel(self, drop_id):
         """The channel last noted for ``drop_id``, or None."""
@@ -1286,10 +1287,8 @@ class Journal(object):
         if game is not None and game.lower() == "unknown":
             game = None
         with self._claims_lock:
-            # Under the lock, so a channel noted meanwhile is either seen here
-            # or written to this claim by note_drop_channel once it is
-            # written (the drop lock is taken inside this one, never around
-            # it).
+            # Under the lock, which channel notes take too: the channel
+            # noted last before this claim is written.
             streamer = self.drop_channel(drop_id)
             written_game, written_streamer = self._drop_claims.get(
                 claim_key, (None, None)
