@@ -3,6 +3,7 @@
 """Source-preserving edits for dashboard-managed Python configuration."""
 
 import ast
+import codecs
 import errno
 import io
 import json
@@ -13,6 +14,12 @@ import tempfile
 import threading
 import tokenize
 from pathlib import Path
+
+from TwitchChannelPointsMiner.config_migration import (
+    import_binding,
+    module_header_end,
+    rebound_names,
+)
 
 CONFIG_FILE_MUTEX = threading.Lock()
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
@@ -956,11 +963,13 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
             encoded = _with_config_import(
                 encoded,
                 "from TwitchChannelPointsMiner.classes.Chat import ChatPresence",
+                ("STREAMERS",),
             )
         encoded = _with_config_import(
             encoded,
             "from TwitchChannelPointsMiner.classes.entities.Streamer import "
             "Streamer, StreamerSettings",
+            ("STREAMERS",),
         )
 
     if encoded != original:
@@ -1548,6 +1557,8 @@ def set_miner_username(config_path, username):
 
 
 def _write_logger_settings(config_path, values):
+    if {"console_level", "file_level"} & set(values):
+        _ensure_config_import(config_path, "import logging", ("MINER_CONFIG",))
     rendered = {
         name: (
             f"logging.{value}"
@@ -1618,6 +1629,7 @@ def _write_notification(config_path, provider, values):
             _ensure_config_import(
                 config_path,
                 f"from TwitchChannelPointsMiner.classes.{constructor} import {constructor}",
+                ("MINER_CONFIG",),
             )
             rendered = ast.unparse(_notification_expression(provider, values, None))
             _write_call_keywords(
@@ -1649,21 +1661,130 @@ def _write_notification(config_path, provider, values):
     )
 
 
-def _with_config_import(encoded, statement):
-    source = encoded.decode("utf-8")
-    if statement in source:
+def _import_bindings(node):
+    """(level, module, imported name, bound name) for each name node binds."""
+    if isinstance(node, ast.ImportFrom):
+        return {
+            (node.level, node.module, alias.name, alias.asname or alias.name)
+            for alias in node.names
+        }
+    if isinstance(node, ast.Import):
+        return {
+            (0, None, alias.name, alias.asname or alias.name.split(".")[0])
+            for alias in node.names
+        }
+    return set()
+
+
+def _assigns_to(node, names):
+    targets = node.targets if isinstance(node, ast.Assign) else []
+    if isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    return any(
+        isinstance(target, ast.Name) and target.id in names for target in targets
+    )
+
+
+def _first_use(tree, name, used_in):
+    """Index of the first top-level statement that reads name or that an edit
+    will write it into (an assignment to one of used_in)."""
+    for index, node in enumerate(tree.body):
+        if _assigns_to(node, used_in) or any(
+            isinstance(child, ast.Name) and child.id == name for child in ast.walk(node)
+        ):
+            return index
+    return len(tree.body)
+
+
+def _has_config_import(tree, statement, used_in=()):
+    """Whether every name statement binds is already imported in time.
+
+    Read from the parsed source, so a commented-out copy of the statement
+    doesn't count. An import counts only above the first statement that uses
+    the name; one further down runs too late.
+    """
+    for binding in _import_bindings(ast.parse(statement).body[0]):
+        level, module, _, bound = binding
+        above = tree.body[: _first_use(tree, bound, used_in)]
+        present = set()
+        for node in above:
+            present |= _import_bindings(node)
+        if binding not in present and (level, module, "*", "*") not in present:
+            return False
+    return True
+
+
+def _with_config_import(encoded, statement, used_in=()):
+    """Add statement to config.py unless its names are already imported.
+
+    used_in names the top-level assignments the caller's edit writes the
+    imported names into, when that edit isn't in encoded yet.
+    """
+    try:
+        tree = ast.parse(encoded)
+    except (SyntaxError, ValueError) as error:
+        raise ConfigEditError(
+            f"Refusing to edit a configuration that does not parse: {error}"
+        ) from error
+    # A name the module also binds another way (logging = ..., an alias, a
+    # def...) may not be the import where the edit writes it, and adding the
+    # import could replace the config's own value. Refuse the edit. The edit
+    # writes into a top-level assignment, so only module-level bindings up to
+    # that statement can shadow it; a function's own `import logging` or a
+    # parameter named logging can't.
+    requested = ast.parse(statement).body[0]
+    expected = {
+        binding[3]: binding
+        for binding in (import_binding(requested, alias) for alias in requested.names)
+    }
+    edited = next(
+        (index for index, node in enumerate(tree.body) if _assigns_to(node, used_in)),
+        len(tree.body),
+    )
+    rebound = rebound_names(
+        ast.Module(body=tree.body[: edited + 1], type_ignores=[]),
+        expected,
+        module_scope=True,
+    )
+    for bound in expected:
+        if bound in rebound:
+            raise ConfigEditError(
+                f"config.py may bind {bound} itself (an assignment, another "
+                f"import or a wildcard import), so the dashboard can't safely "
+                f"write a {bound} reference. Edit it in config.py instead."
+            )
+    if _has_config_import(tree, statement, used_in):
         return encoded
-    lines = source.splitlines(keepends=True)
-    insertion = 1 if lines and "coding" in lines[0] else 0
-    lines.insert(insertion, statement + _newline(encoded))
-    return "".join(lines).encode("utf-8")
+    # A BOM must stay the file's first bytes, and ast columns don't count it,
+    # so the import is placed in the file without it and the BOM put back.
+    bom = codecs.BOM_UTF8 if encoded.startswith(codecs.BOM_UTF8) else b""
+    encoded = encoded[len(bom) :]
+    # Below the shebang, encoding declaration, docstring and __future__
+    # imports, which must stay first, and above every other statement.
+    line, col_offset = module_header_end(encoded.decode("utf-8"), tree)
+    newline = _newline(encoded).encode("utf-8")
+    inserted = statement.encode("utf-8") + newline
+    # bytes.splitlines() breaks lines exactly where the tokenizer does, and
+    # ast columns are UTF-8 byte offsets.
+    lines = encoded.splitlines(keepends=True)
+    if col_offset:
+        # The first statement shares the header's last line, after a `;`.
+        lines[line] = lines[line][:col_offset] + inserted + lines[line][col_offset:]
+        return bom + b"".join(lines)
+    if line and not lines[line - 1].endswith((b"\n", b"\r")):
+        lines[line - 1] += newline
+    lines.insert(line, inserted)
+    return bom + b"".join(lines)
 
 
-def _ensure_config_import(config_path, statement):
+def _ensure_config_import(config_path, statement, used_in=()):
     path = Path(config_path)
     encoded = path.read_text(encoding="utf-8").encode("utf-8")
-    updated = _with_config_import(encoded, statement)
+    updated = _with_config_import(encoded, statement, used_in)
     if updated != encoded:
+        # The placement follows physical lines, so a header continued with a
+        # backslash can still get a misplaced import. Refuse it unsaved.
+        _require_parses(updated)
         _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
@@ -1854,6 +1975,7 @@ def _update_managed_web_config(config_path, payload):
             _ensure_config_import(
                 config_path,
                 "from TwitchChannelPointsMiner.classes.Settings import CategorySort",
+                ("MINE_CONFIG",),
             )
         _set_dict_items(config_path, "MINE_CONFIG", rendered)
     elif action == "update_sources":
@@ -1905,6 +2027,7 @@ def _update_managed_web_config(config_path, payload):
         _ensure_config_import(
             config_path,
             "from TwitchChannelPointsMiner.classes.Settings import StreamerSource",
+            ("MINER_CONFIG",),
         )
         _set_dict_items(
             config_path,
