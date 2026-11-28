@@ -5,6 +5,7 @@
 import ast
 import contextlib
 import errno
+import functools
 import io
 import json
 import os
@@ -15,7 +16,10 @@ import threading
 import tokenize
 from pathlib import Path
 
-CONFIG_FILE_MUTEX = threading.Lock()
+# Held by every public writer of config.py for its whole read-modify-write,
+# so one can't write over another's change with an older copy. Reentrant:
+# update_managed_web_config runs migrate_web_config while holding it.
+CONFIG_FILE_MUTEX = threading.RLock()
 # The config.py bytes of the edit this thread has open (see _config_edit).
 _STAGED_CONFIG = threading.local()
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
@@ -152,6 +156,15 @@ NOTIFICATION_POSITIONAL_FIELDS = {
         "timeout",
     ),
 }
+
+
+def _holding_config_mutex(function):
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        with CONFIG_FILE_MUTEX:
+            return function(*args, **kwargs)
+
+    return wrapper
 
 
 class ConfigEditError(ValueError):
@@ -444,6 +457,7 @@ def read_managed_web_config(config_path):
     return _base_web_config(config_path)
 
 
+@_holding_config_mutex
 def migrate_web_config(config_path):
     path = _overrides_path(config_path)
     if not path.is_file():
@@ -1688,6 +1702,7 @@ def _set_streamer_settings(encoded, key, changed):
     return encoded
 
 
+@_holding_config_mutex
 def enable_analytics_dashboard(
     config_path,
     password,
@@ -1719,6 +1734,17 @@ def enable_analytics_dashboard(
         analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
         if analytics_config_node is None:
             raise ConfigEditError("ANALYTICS_CONFIG assignment not found in config.py.")
+        if not isinstance(analytics_config_node, ast.Dict) and not (
+            isinstance(analytics_config_node, ast.Constant)
+            and analytics_config_node.value is None
+        ):
+            # Only an unset value gets the defaults: anything else, such as
+            # dict(port=...), holds settings the defaults would replace.
+            raise ConfigEditError(
+                "ANALYTICS_CONFIG in config.py isn't a literal dictionary or "
+                "None, so the dashboard can't turn it on without replacing "
+                "its settings. Turn it on in config.py instead."
+            )
         _set_dict_items(config_path, "MINER_CONFIG", {"enable_analytics": "True"})
         if isinstance(analytics_config_node, ast.Dict):
             return
@@ -1740,6 +1766,7 @@ def enable_analytics_dashboard(
         _replace_config_node(config_path, analytics_config_node, rendered)
 
 
+@_holding_config_mutex
 def set_miner_username(config_path, username):
     """Set MINER_CONFIG['username'] - the Twitch account the miner logs in
     as - on an existing configuration.
@@ -1756,6 +1783,32 @@ def set_miner_username(config_path, username):
         raise ConfigEditError("Enter a valid Twitch username.")
     _set_dict_items(config_path, "MINER_CONFIG", {"username": repr(username)})
     return username
+
+
+def _require_readable_source_priority(node):
+    """Refuse a partial source update that would start from a guessed order.
+
+    The update keeps the sources it isn't given in their current order, so
+    that order must be readable: no entry (or None, which the miner also
+    replaces with the default order), or a literal list of StreamerSource
+    members. Anything else, such as a variable, would be read as missing and
+    replaced with the default order.
+    """
+    if node is None or (isinstance(node, ast.Constant) and node.value is None):
+        return
+    if isinstance(node, (ast.List, ast.Tuple)) and all(
+        isinstance(item, ast.Attribute)
+        and isinstance(item.value, ast.Name)
+        and item.value.id == "StreamerSource"
+        for item in node.elts
+    ):
+        return
+    raise ConfigEditError(
+        "MINER_CONFIG['streamer_source_priority'] in config.py isn't a plain "
+        "list of StreamerSource values, so the dashboard can't change the "
+        "stream sources without changing their order. Edit it in config.py "
+        "instead."
+    )
 
 
 def _write_logger_settings(config_path, values):
@@ -1805,48 +1858,128 @@ def _notification_expression(provider, values, existing):
     return call
 
 
+def _call_argument(call, name, positional=()):
+    """The argument a call passes for name, by keyword or position, or None."""
+    keyword = _call_keyword(call, name)
+    if keyword is not None:
+        return keyword.value
+    given = tuple(positional)[: len(call.args)]
+    if name in given:
+        return call.args[given.index(name)]
+    return None
+
+
+def _call_may_supply(call, name):
+    """Whether * or ** arguments of the call may pass name."""
+    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        return True
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            unpacked = _unpacked_dict_keys(keyword.value)
+            if unpacked is None or name in unpacked:
+                return True
+    return False
+
+
+def _logger_settings_argument(tree, name):
+    logger_settings = _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings")
+    if not isinstance(logger_settings, ast.Call):
+        return None
+    return _call_argument(logger_settings, name, _logger_settings_positional_fields())
+
+
+def _is_constructor_call(node, constructor):
+    if not isinstance(node, ast.Call):
+        return False
+    function = node.func
+    return (isinstance(function, ast.Name) and function.id == constructor) or (
+        isinstance(function, ast.Attribute) and function.attr == constructor
+    )
+
+
+def _require_consistent_email_tls(existing, values):
+    """Refuse an Email save that would enable both SSL and STARTTLS.
+
+    Email() raises ValueError for that, which would stop config.py loading.
+    A setting the save doesn't change keeps its value in config.py, or the
+    constructor default when it isn't given.
+    """
+    if existing is not None and not {"use_ssl", "starttls"} & set(values):
+        return
+    final = {}
+    for name, default in (("use_ssl", False), ("starttls", True)):
+        if name in values:
+            final[name] = values[name]
+            continue
+        node = (
+            None
+            if existing is None
+            else _call_argument(existing, name, NOTIFICATION_POSITIONAL_FIELDS["email"])
+        )
+        if node is None and existing is not None and _call_may_supply(existing, name):
+            node = existing
+        if node is None:
+            final[name] = default
+        elif isinstance(node, ast.Constant):
+            final[name] = node.value
+        else:
+            raise ConfigEditError(
+                f"The email notification's {name} in config.py isn't a plain "
+                "value, so the dashboard can't tell whether SSL and STARTTLS "
+                "would both be on. Edit it in config.py instead."
+            )
+    if final["use_ssl"] and final["starttls"]:
+        raise ConfigEditError("Email SSL and STARTTLS cannot both be enabled.")
+
+
 def _write_notification(config_path, provider, values):
     # Check before reading the notifier: a LoggerSettings entry or argument
     # the miner doesn't use as written would make the read below, and the
     # decision that there's nothing to change, wrong.
     _require_logger_settings_editable(config_path, {provider})
-    source = _read_config_source(config_path)
-    tree = ast.parse(source)
+    tree = ast.parse(_read_config_source(config_path))
     logger_settings = _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings")
     if not isinstance(logger_settings, ast.Call):
         raise ConfigEditError(
             "MINER_CONFIG['logger_settings'] must be LoggerSettings(...)."
         )
-    keyword = _call_keyword(logger_settings, provider)
-    existing = keyword.value if keyword is not None else None
-    if not isinstance(existing, ast.Call) and values.get("enabled") is not True:
-        return
+    existing = _logger_settings_argument(tree, provider)
+    if isinstance(existing, ast.Constant) and existing.value is None:
+        existing = None
+    logger_settings_arguments = {
+        "find_call": lambda tree: _dict_item(
+            _assignment(tree, "MINER_CONFIG"), "logger_settings"
+        ),
+        "label": "MINER_CONFIG['logger_settings']",
+        "positional": _logger_settings_positional_fields(),
+    }
     if values.get("enabled") is False:
-        _write_call_keywords(
-            config_path,
-            lambda tree: _dict_item(
-                _assignment(tree, "MINER_CONFIG"), "logger_settings"
-            ),
-            {provider: "None"},
-            "MINER_CONFIG['logger_settings']",
-            _logger_settings_positional_fields(),
-        )
+        if existing is not None:
+            _write_call_keywords(
+                config_path, values={provider: "None"}, **logger_settings_arguments
+            )
         return
-    if not isinstance(existing, ast.Call):
-        constructor = provider.title()
+    constructor = provider.title()
+    if existing is not None and not _is_constructor_call(existing, constructor):
+        # A variable or helper call: the dashboard can't read its settings,
+        # and writing over it would lose them.
+        raise ConfigEditError(
+            f"The {provider} notification in config.py isn't written as "
+            f"{constructor}(...), so the dashboard can't change it. Edit it "
+            "in config.py instead."
+        )
+    if provider == "email":
+        _require_consistent_email_tls(existing, values)
+    if existing is None:
+        if values.get("enabled") is not True:
+            return
         _ensure_config_import(
             config_path,
             f"from TwitchChannelPointsMiner.classes.{constructor} import {constructor}",
         )
         rendered = ast.unparse(_notification_expression(provider, values, None))
         _write_call_keywords(
-            config_path,
-            lambda tree: _dict_item(
-                _assignment(tree, "MINER_CONFIG"), "logger_settings"
-            ),
-            {provider: rendered},
-            "MINER_CONFIG['logger_settings']",
-            _logger_settings_positional_fields(),
+            config_path, values={provider: rendered}, **logger_settings_arguments
         )
         return
     rendered_values = {}
@@ -1860,12 +1993,7 @@ def _write_notification(config_path, provider, values):
         )
     _write_call_keywords(
         config_path,
-        lambda tree: (
-            _call_keyword(
-                _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
-                provider,
-            ).value
-        ),
+        lambda tree: _logger_settings_argument(tree, provider),
         rendered_values,
         f"The {provider} notification settings",
         NOTIFICATION_POSITIONAL_FIELDS[provider],
@@ -2108,7 +2236,11 @@ def _update_managed_web_config(config_path, payload):
             raise ConfigEditError("Category Drops override must be true or false.")
         source_names = SOURCE_ENUM_BY_NAME
         source = _read_config_source(config_path)
-        miner = _simple_value(_assignment(ast.parse(source), "MINER_CONFIG")) or {}
+        miner_node = _assignment(ast.parse(source), "MINER_CONFIG")
+        _require_readable_source_priority(
+            _dict_item(miner_node, "streamer_source_priority")
+        )
+        miner = _simple_value(miner_node) or {}
         priority = list(
             miner.get("streamer_source_priority")
             or ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES", "WILDCARD_CATEGORIES")
