@@ -4721,7 +4721,7 @@ def test_logging_level_save_refuses_a_logging_name_changed_before_use(
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="changes or removes logging"):
+    with pytest.raises(ConfigEditError, match="binds or removes logging"):
         update_managed_web_config(
             config,
             {"action": "update_logging", "values": {"console_level": "WARNING"}},
@@ -4738,9 +4738,6 @@ def test_logging_level_save_accepts_an_import_aliased_to_its_own_name(tmp_path):
         f"CONFIG_VERSION = {CONFIG_VERSION}\n"
         "import logging as logging\n"
         "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
-        "def helper():\n"
-        "    logging = None\n"
-        "    return logging\n"
         'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
         "STREAMERS = []\n"
         'MINE_CONFIG = {"categories": []}\n'
@@ -4801,7 +4798,7 @@ def test_category_sort_save_refuses_a_name_rebound_between_settings(tmp_path, mi
     before = config.read_bytes()
     overrides = tmp_path / "web-config.json"
 
-    with pytest.raises(ConfigEditError, match="changes or removes CategorySort"):
+    with pytest.raises(ConfigEditError, match="binds or removes CategorySort"):
         if migrate:
             overrides.write_text(
                 json.dumps({"category": {"sort": "VIEWERS_ASC"}}), encoding="utf-8"
@@ -4836,7 +4833,7 @@ def test_logging_level_save_refuses_a_conflicting_alias_in_the_same_import(tmp_p
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="changes or removes logging"):
+    with pytest.raises(ConfigEditError, match="binds or removes logging"):
         update_managed_web_config(
             config,
             {"action": "update_logging", "values": {"console_level": "WARNING"}},
@@ -4850,11 +4847,23 @@ def test_logging_level_save_refuses_a_conflicting_alias_in_the_same_import(tmp_p
     [
         "from os.path import *",
         "if True:\n    from os.path import *",
+        "try:\n    raise RuntimeError()\nexcept RuntimeError as logging:\n    pass",
+        "match None:\n    case logging:\n        pass",
+        "class Helper:\n    global logging\n    logging = None",
         "def helper(value=(logging := None)):\n    pass",
         "class Helper(metaclass=(logging := type)):\n    pass",
         "@(logging := (lambda function: function))\ndef helper():\n    pass",
     ],
-    ids=["star", "nested-star", "default", "class-keyword", "decorator"],
+    ids=[
+        "star",
+        "nested-star",
+        "except",
+        "match",
+        "class-global",
+        "default",
+        "class-keyword",
+        "decorator",
+    ],
 )
 def test_logging_level_save_refuses_names_bound_at_definition_or_by_star(
     tmp_path, between
@@ -4878,7 +4887,7 @@ def test_logging_level_save_refuses_names_bound_at_definition_or_by_star(
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="changes or removes logging"):
+    with pytest.raises(ConfigEditError, match="binds or removes logging"):
         update_managed_web_config(
             config,
             {"action": "update_logging", "values": {"console_level": "WARNING"}},

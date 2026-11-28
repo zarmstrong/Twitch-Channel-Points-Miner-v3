@@ -2029,117 +2029,88 @@ def _is_wanted_alias(node, alias, wanted):
     }
 
 
-def _definition_time_parts(node):
-    """The parts of a def, class or lambda Python evaluates when defining it."""
-    arguments = node.args if not isinstance(node, ast.ClassDef) else None
-    parts = list(getattr(node, "decorator_list", ()))
-    if isinstance(node, ast.ClassDef):
-        parts += node.bases + [keyword.value for keyword in node.keywords]
-    if arguments is not None:
-        parts += arguments.defaults + [
-            default for default in arguments.kw_defaults if default is not None
-        ]
-        if not isinstance(node, ast.Lambda):
-            # Annotations are evaluated at definition time before 3.14.
-            parts += [
-                argument.annotation
-                for argument in (
-                    *arguments.posonlyargs,
-                    *arguments.args,
-                    *arguments.kwonlyargs,
-                    *(item for item in (arguments.vararg, arguments.kwarg) if item),
-                )
-                if argument.annotation is not None
-            ]
-            if node.returns is not None:
-                parts.append(node.returns)
-    return parts
+def _names_bound(node):
+    """Every name a node binds, deletes or declares, at any depth.
 
-
-def _module_level_names_changed(node):
-    """Names a top-level statement binds or deletes when config.py runs.
-
-    Function, class and lambda bodies are skipped, as they don't run at
-    import time, but their decorators, defaults, bases and annotations are
-    checked. Returns None for a star import, which may bind any name.
+    Bodies of functions and classes count too, as do parameters, exception
+    and pattern names, and global or nonlocal declarations. Returns None
+    for a star import, which may bind any name.
     """
-    changed = set()
-    pending = [node]
-    while pending:
-        current = pending.pop()
-        if isinstance(
-            current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-        ):
-            if not isinstance(current, ast.Lambda):
-                changed.add(current.name)
-            pending.extend(_definition_time_parts(current))
-            continue
-        if isinstance(current, ast.Name) and isinstance(
-            current.ctx, (ast.Store, ast.Del)
-        ):
-            changed.add(current.id)
-        elif isinstance(current, (ast.Import, ast.ImportFrom)):
-            for alias in current.names:
-                if alias.name == "*":
-                    return None
-                changed.add(alias.asname or alias.name.split(".")[0])
-        pending.extend(ast.iter_child_nodes(current))
-    return changed
+    names = set()
+    for current in ast.walk(node):
+        if isinstance(current, ast.Name) and not isinstance(current.ctx, ast.Load):
+            names.add(current.id)
+        elif isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(current.name)
+        elif isinstance(current, ast.arg):
+            names.add(current.arg)
+        elif isinstance(current, ast.ExceptHandler) and current.name:
+            names.add(current.name)
+        elif isinstance(current, (ast.MatchAs, ast.MatchStar)) and current.name:
+            names.add(current.name)
+        elif isinstance(current, ast.MatchMapping) and current.rest:
+            names.add(current.rest)
+        elif isinstance(current, (ast.Global, ast.Nonlocal)):
+            names.update(current.names)
+        elif isinstance(current, ast.alias):
+            if current.name == "*":
+                return None
+            names.add(current.asname or current.name.split(".")[0])
+    return names
 
 
 def _imports_binding(tree, statement):
     """Whether config.py already imports this before the settings use it.
 
     Matched on the parsed import, not the text: the same text with "as"
-    after it, or in a comment, doesn't bind the name the edit writes. Edits
-    write the name inside the config assignments, so the import must run
-    before the first of them, and nothing else may bind or delete the name
-    before the last of them: an import added at the top could otherwise be
-    undone before a setting uses it. That raises ConfigEditError.
+    after it, or in a comment, doesn't bind the name the edit writes. The
+    import must be a top-level statement before the first config
+    assignment, where edits write the name. Raises ConfigEditError when
+    anything else in config.py binds, deletes or declares the name, or a
+    star import may: an import added at the top could then be undone
+    before a setting uses it. This is checked over the whole file rather
+    than proven statement by statement, so a config that only reuses the
+    name somewhere else is refused too.
     """
     wanted = ast.parse(statement).body[0]
     names = {alias.asname or alias.name.split(".")[0] for alias in wanted.names}
-    uses = [
-        node.lineno
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id in _EDITED_ASSIGNMENTS
-            for target in node.targets
-        )
-    ]
-    first_use = min(uses, default=None)
-    last_use = max(uses, default=None)
+    first_use = min(
+        (
+            node.lineno
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id in _EDITED_ASSIGNMENTS
+                for target in node.targets
+            )
+        ),
+        default=None,
+    )
     imported = set()
     changed = set()
     for node in tree.body:
-        if last_use is not None and node.lineno > last_use:
-            break
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            # Aliases bind in order, so check each one.
             for alias in node.names:
                 if alias.name == "*":
-                    # It may bind any of the names.
                     changed |= names
                     continue
                 bound = alias.asname or alias.name.split(".")[0]
                 if bound not in names:
                     continue
-                if _is_wanted_alias(node, alias, wanted):
-                    if first_use is None or node.lineno < first_use:
-                        imported.add(bound)
-                else:
+                if not _is_wanted_alias(node, alias, wanted):
                     changed.add(bound)
-        else:
-            touched = _module_level_names_changed(node)
-            changed |= names if touched is None else names & touched
-        if changed:
-            name = ", ".join(sorted(changed))
-            raise ConfigEditError(
-                f"config.py changes or removes {name} before its settings, so "
-                f"the dashboard can't tell whether {name} is available there. "
-                "Make this change in config.py instead."
-            )
+                elif first_use is None or node.lineno < first_use:
+                    imported.add(bound)
+            continue
+        bound = _names_bound(node)
+        changed |= names if bound is None else names & bound
+    if changed:
+        name = ", ".join(sorted(changed))
+        raise ConfigEditError(
+            f"config.py also binds or removes {name} somewhere other than its "
+            f"import, so the dashboard can't tell whether {name} is available "
+            "to its settings. Make this change in config.py instead."
+        )
     return imported >= names
 
 
