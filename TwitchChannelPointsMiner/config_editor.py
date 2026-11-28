@@ -477,13 +477,33 @@ def _history_settings(analytics_node):
     import_analytics = (
         None if import_analytics is _UNREADABLE else import_analytics is not False
     )
-    override = os.environ.get(HISTORY_RETENTION_ENV_VAR, "").strip()
+    override, ignored = _history_retention_override()
     return {
         "retention_days": retention,
         "import_analytics": import_analytics,
-        # Set, the environment variable wins over the saved value.
-        "retention_env_override": override or None,
+        # A valid environment value wins over the saved one.
+        "retention_env_override": override,
+        # Set but invalid: History ignores it (and logs a warning).
+        "retention_env_ignored": ignored,
     }
+
+
+def _history_retention_override():
+    """``(days, ignored)`` for TCPM_HISTORY_RETENTION_DAYS, read the way
+    ``history._history_retention_days`` reads it: days is None unless it is
+    a whole number of days, 0 or more; ignored is True when it is set to
+    anything else."""
+
+    raw = os.environ.get(HISTORY_RETENTION_ENV_VAR)
+    if raw in (None, ""):
+        return None, False
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None, True
+    if days < 0:
+        return None, True
+    return days, False
 
 
 def _overrides_path(config_path):

@@ -3423,6 +3423,7 @@ def test_managed_web_config_reads_history_settings(tmp_path, monkeypatch):
         "retention_days": 730,
         "import_analytics": True,
         "retention_env_override": None,
+        "retention_env_ignored": False,
     }
 
     _write_history_config(
@@ -3434,8 +3435,37 @@ def test_managed_web_config_reads_history_settings(tmp_path, monkeypatch):
     assert read_managed_web_config(config)["history"] == {
         "retention_days": 90,
         "import_analytics": False,
-        "retention_env_override": "30",
+        "retention_env_override": 30,
+        "retention_env_ignored": False,
     }
+
+
+@pytest.mark.parametrize(
+    "raw, override, ignored",
+    [
+        ("0", 0, False),
+        (" 45 ", 45, False),
+        ("abc", None, True),
+        ("-1", None, True),
+        ("1.5", None, True),
+        ("   ", None, True),
+        ("", None, False),
+    ],
+)
+def test_managed_web_config_reads_the_retention_override_like_history(
+    tmp_path, monkeypatch, raw, override, ignored
+):
+    from TwitchChannelPointsMiner.history import _history_retention_days
+
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{"history_retention_days": 90}')
+    monkeypatch.setenv("TCPM_HISTORY_RETENTION_DAYS", raw)
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_env_override"] == override
+    assert history["retention_env_ignored"] is ignored
+    # History runs with the override when valid, else the saved value.
+    expected = override if override is not None else 90
+    assert _history_retention_days(90) == expected
 
 
 @pytest.mark.parametrize(

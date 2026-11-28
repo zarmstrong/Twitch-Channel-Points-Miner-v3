@@ -1828,11 +1828,15 @@ function renderHistorySettings(history) {
         // An unreadable value shows as neither; clicking it sets one.
         .prop('indeterminate', history.import_analytics === null);
     var override = history.retention_env_override;
-    $('#history-retention-override')
-        .text(override
-            ? 'TCPM_HISTORY_RETENTION_DAYS=' + override + ' is set, so History uses that value instead of this one.'
-            : '')
-        .toggle(Boolean(override));
+    var note = '';
+    if (override !== null && override !== undefined) {
+        note = 'TCPM_HISTORY_RETENTION_DAYS=' + override +
+            ' is set, so History uses that value instead of this one.';
+    } else if (history.retention_env_ignored) {
+        note = 'TCPM_HISTORY_RETENTION_DAYS is set but isn\'t a whole number of days, ' +
+            'so History ignores it and uses this value.';
+    }
+    $('#history-retention-override').text(note).toggle(Boolean(note));
 }
 
 function historySettingsChanges() {
