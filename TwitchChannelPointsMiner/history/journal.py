@@ -481,9 +481,11 @@ class Journal(object):
         self._claims_lock = threading.Lock()
         self._drop_claims = {}
         self._unwritten_claims = {}
-        # Claims written without a channel: drop id -> {claim key: the
-        # record written}, newest last, so a channel noted for the drop
-        # later is written to them (note_drop_channel).
+        # Claims written without a channel: drop id -> (claim key, the
+        # record written), newest last, so a channel noted for the drop
+        # later is written to the claim (note_drop_channel).  One per drop:
+        # a drop is claimed once, so the importer credits the claim from
+        # any of its records.
         self._channelless_claims = {}
 
     def _eligible(self, streamer):
@@ -1238,8 +1240,8 @@ class Journal(object):
             # still on it): written again with it.  A claim written with a
             # channel keeps it.
             pending = self._channelless_claims.get(drop_id)
-            for claim_key, record in list((pending or {}).items()):
-                self._write_claim(claim_key, record, username)
+            if pending is not None:
+                self._write_claim(pending[0], pending[1], username)
 
     def has_unwritten_claim(self, claim_key):
         """Whether a claim Twitch accepted could not be written to the journal
@@ -1344,12 +1346,9 @@ class Journal(object):
         self._drop_claims[claim_key] = (record["game"], streamer)
         while len(self._drop_claims) > DROP_CLAIMS_KEPT:
             del self._drop_claims[next(iter(self._drop_claims))]
-        pending = self._channelless_claims.pop(drop_id, {})
-        pending.pop(claim_key, None)
+        self._channelless_claims.pop(drop_id, None)
         if streamer is None:
-            pending[claim_key] = record
-        if pending:
-            self._channelless_claims[drop_id] = pending
+            self._channelless_claims[drop_id] = (claim_key, record)
             while len(self._channelless_claims) > DROP_CHANNELS_KEPT:
                 del self._channelless_claims[next(iter(self._channelless_claims))]
         return True

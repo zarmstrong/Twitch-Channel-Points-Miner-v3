@@ -331,6 +331,24 @@ def test_a_channel_note_waits_for_a_claim_being_written(journal, store):
     ]
 
 
+def test_claims_waiting_for_a_channel_are_bounded(journal):
+    # One drop reported under many keys is one claim: one record is written
+    # when its channel is noted.
+    for index in range(50):
+        journal.record_drop("d1", f"i{index}|d1", game="Game A")
+    before = len(written(journal, "drop"))
+    journal.note_drop_channel("alice", "d1")
+    assert [
+        (record["drop_id"], record["streamer"])
+        for record in written(journal, "drop")[before:]
+    ] == [("d1", "alice")]
+    # And only the newest drops wait.
+    for index in range(DROP_CHANNELS_KEPT + 1):
+        journal.record_drop(f"x{index}", f"i|x{index}")
+    assert len(journal._channelless_claims) == DROP_CHANNELS_KEPT
+    assert "x0" not in journal._channelless_claims
+
+
 def test_a_channel_noted_while_the_rewrite_fails_is_written_later(journal, monkeypatch):
     journal.record_drop("d1", "i1|d1", game="Game A")
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
