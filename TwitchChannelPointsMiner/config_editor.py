@@ -2016,16 +2016,61 @@ def _write_notification(config_path, provider, values):
 _EDITED_ASSIGNMENTS = ("MINER_CONFIG", "STREAMERS", "MINE_CONFIG", "ANALYTICS_CONFIG")
 
 
+def _names_imported_as_wanted(node, wanted):
+    """The names of wanted that this statement imports from the same place."""
+    if type(node) is not type(wanted):
+        return set()
+    if isinstance(node, ast.ImportFrom) and (
+        node.module != wanted.module or node.level != wanted.level
+    ):
+        return set()
+    pairs = {(alias.name, alias.asname or alias.name) for alias in wanted.names}
+    return {
+        alias.asname or alias.name.split(".")[0]
+        for alias in node.names
+        if (alias.name, alias.asname or alias.name) in pairs
+    }
+
+
+def _module_level_names_changed(node):
+    """Names a top-level statement binds or deletes when config.py runs.
+
+    Function and class bodies are skipped: they don't run at import time.
+    """
+    changed = set()
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            changed.add(current.name)
+            pending.extend(current.decorator_list)
+            continue
+        if isinstance(current, ast.Lambda):
+            continue
+        if isinstance(current, ast.Name) and isinstance(
+            current.ctx, (ast.Store, ast.Del)
+        ):
+            changed.add(current.id)
+        elif isinstance(current, (ast.Import, ast.ImportFrom)):
+            for alias in current.names:
+                if alias.name != "*":
+                    changed.add(alias.asname or alias.name.split(".")[0])
+        pending.extend(ast.iter_child_nodes(current))
+    return changed
+
+
 def _imports_binding(tree, statement):
-    """Whether config.py's top level already runs this import statement.
+    """Whether config.py already imports this before the settings use it.
 
     Matched on the parsed import, not the text: the same text with "as"
-    after it, or in a comment, doesn't bind the name the edit writes.
+    after it, or in a comment, doesn't bind the name the edit writes. The
+    edit writes the name inside the config assignments, so only statements
+    before the first of them count. Raises ConfigEditError when something
+    else there also binds or deletes the name, since an import added at the
+    top could then be undone before the settings run.
     """
     wanted = ast.parse(statement).body[0]
-    wanted_names = {(alias.name, alias.asname or alias.name) for alias in wanted.names}
-    # Edits write the name inside these assignments, so an import that runs
-    # only after the first of them binds it too late.
+    names = {alias.asname or alias.name.split(".")[0] for alias in wanted.names}
     first_use = min(
         (
             node.lineno
@@ -2038,19 +2083,21 @@ def _imports_binding(tree, statement):
         ),
         default=None,
     )
+    imported = set()
     for node in tree.body:
         if first_use is not None and node.lineno >= first_use:
             break
-        if type(node) is not type(wanted):
-            continue
-        if isinstance(node, ast.ImportFrom) and (
-            node.module != wanted.module or node.level != wanted.level
-        ):
-            continue
-        names = {(alias.name, alias.asname or alias.name) for alias in node.names}
-        if wanted_names <= names:
-            return True
-    return False
+        same = _names_imported_as_wanted(node, wanted)
+        imported |= same
+        changed = (names & _module_level_names_changed(node)) - same
+        if changed:
+            name = ", ".join(sorted(changed))
+            raise ConfigEditError(
+                f"config.py changes or removes {name} before its settings, so "
+                f"the dashboard can't tell whether {name} is available there. "
+                "Make this change in config.py instead."
+            )
+    return imported >= names
 
 
 def _with_config_import(encoded, statement):

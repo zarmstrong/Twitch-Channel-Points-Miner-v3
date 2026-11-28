@@ -4691,3 +4691,94 @@ def test_source_update_keeps_an_empty_priority_empty(tmp_path):
     assert '"streamer_source_priority": [StreamerSource.FOLLOWERS]' in (
         config.read_text(encoding="utf-8")
     )
+
+
+@pytest.mark.parametrize(
+    "between",
+    ["del logging", "logging = None", "from os import path as logging"],
+    ids=["deleted", "rebound", "other-import"],
+)
+def test_logging_level_save_refuses_a_logging_name_changed_before_use(
+    tmp_path, between
+):
+    # An import added at the top would be undone before MINER_CONFIG runs.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{between}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="changes or removes logging"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_logging_level_save_accepts_an_import_aliased_to_its_own_name(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging as logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "def helper():\n"
+        "    logging = None\n"
+        "    return logging\n"
+        'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert config.read_text(encoding="utf-8").count("import logging") == 1
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+def test_streamer_add_accepts_its_imports_split_across_statements(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+            "Streamer, StreamerSettings\n",
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer\n"
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+            "StreamerSettings\n",
+        ),
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "two",
+            "settings": {"favorite": True},
+        },
+    )
+
+    assert _load_config(config).STREAMERS[1].settings.favorite is True
