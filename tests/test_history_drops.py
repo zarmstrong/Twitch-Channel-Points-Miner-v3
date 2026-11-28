@@ -758,6 +758,19 @@ def test_a_claim_deleted_before_it_was_imported_removes_its_channelless_twin(
     ]
 
 
+def test_a_delete_leaves_a_claim_credited_to_another_channel(folder, importer, store):
+    folder.drop(at=T0, streamer="alice")
+    importer.poll()
+    # A later run reports the claim again on bob's channel, just before
+    # his delete: the claim stays alice's.
+    folder.drop(at=T0 + 600, run=2, streamer="bob", already_claimed=True)
+    store.record_delete("bob", segment_name(2, 1), 10**6)
+    importer.poll()
+    importer.poll()
+    assert [row["streamer"] for row in rows(store, "SELECT * FROM drops")] == ["alice"]
+    assert read_deleted_drops(folder.journal) == []
+
+
 def recorder_for(folder, store):
     recorder = HistoryRecorder(
         store, folder.journal, monotonic=lambda: 0.0, clock=lambda: T0 + 60

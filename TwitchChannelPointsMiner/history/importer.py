@@ -567,7 +567,7 @@ class JournalImporter(object):
             if record["kind"] == "drop":
                 # Deleted before it was imported: Twitch reporting the claim
                 # again later must not bring it back either.
-                self._delete_drop_claim(connection, record, at)
+                self._delete_drop_claim(connection, record, at, streamer)
             return
         handler = getattr(self, "_apply_" + record["kind"], None)
         if handler is None:
@@ -1113,17 +1113,29 @@ class JournalImporter(object):
             > 0
         )
 
-    def _delete_drop_claim(self, connection, record, at):
+    def _delete_drop_claim(self, connection, record, at, streamer):
         """A claim journalled before its channel's delete cutoff but imported
         after the delete: it is deleted too, with the same claim recorded
         without a channel (from the Drops data, or journalled before its
         channel was known: it was not credited to the channel, so the delete
         did not remove it).  Saved beside the journal like the delete's own
-        claims."""
+        claims.  A claim already credited to another channel keeps it (a
+        claim's channel, once known, is kept): this was only a report of it
+        again, and the delete leaves it."""
 
         drop_id = _text(record.get("drop_id"))
         claim_key = _text(record.get("claim_key"))
         if drop_id is None or claim_key is None:
+            return
+        if connection.execute(
+            """
+            SELECT 1 FROM drops
+            WHERE (dedupe_key = ? OR drop_id = ?)
+                AND streamer IS NOT NULL AND streamer != ?
+            LIMIT 1
+            """,
+            (f"c:{claim_key}", drop_id, streamer),
+        ).fetchone():
             return
         own = (f"c:{claim_key}", drop_id, _text(record.get("game")), at, "journal")
         # Only what is not recorded yet is saved: what is was saved when it
