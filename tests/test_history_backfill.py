@@ -838,6 +838,55 @@ def test_a_started_streamer_not_listed_now_shows_the_button_again(analytics, tra
     assert recorder.backfill.status()["complete"] is True
 
 
+def test_a_streamer_loaded_during_the_last_poll_keeps_the_request(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.write("bob", [entry(T0 - 300, 10), entry(T0 - 200, 30)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    recorder.request_import()
+    lists = iter([["alice"]])
+    # The poll lists alice; bob loads before the request is cleared.
+    recorder.backfill.streamers = lambda: next(lists, ["alice", "bob"])
+    recorder.poll_once()
+    assert totals(recorder.store)["gained"] == 5
+    assert recorder.backfill.status()["requested"] is True
+
+    recorder.poll_once()
+    assert totals(recorder.store, "bob")["gained"] == 20
+    status = recorder.backfill.status()
+    assert (status["complete"], status["requested"]) == (True, False)
+
+
+def test_a_request_with_the_automatic_import_on_is_not_saved(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.record("run_start")
+    tracked["names"] = None  # Not listed yet: the automatic import waits.
+    recorder = recorder_for(analytics, tracked)
+    status = recorder.request_import()
+    assert status["requested"] is False
+
+    # Restarted with the automatic import off: nothing was requested.
+    tracked["names"] = ["alice"]
+    manual = recorder_for(analytics, tracked, automatic=False)
+    manual.poll_once()
+    assert points(manual.store) == []
+    assert manual.backfill.status()["requested"] is False
+
+
+def test_a_saved_request_is_cleared_once_the_import_is_automatic(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.record("run_start")
+    tracked["names"] = None
+    manual = recorder_for(analytics, tracked, automatic=False)
+    manual.request_import()
+    assert manual.backfill.status()["requested"] is True
+
+    automatic = recorder_for(analytics, tracked)
+    automatic.poll_once()
+    manual = recorder_for(analytics, tracked, automatic=False)
+    assert manual.backfill.status()["requested"] is False
+
+
 def test_a_request_with_the_automatic_import_on_is_cleared(analytics, tracked):
     analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
     analytics.record("run_start")

@@ -217,8 +217,12 @@ class AnalyticsBackfill(object):
 
     def request(self):
         """Import now, even with the automatic import off; the recorder
-        calls this under its lock."""
+        calls this under its lock.  With the automatic import on, the
+        import runs anyway, so nothing is saved."""
 
+        if self.automatic:
+            self._requested()
+            return
         with self.store.transaction() as connection:
             self._set_meta(connection, META_REQUESTED, "1")
         self._active_request = True
@@ -230,10 +234,16 @@ class AnalyticsBackfill(object):
 
     def _requested(self):
         """Whether an import was requested and isn't finished; saves a
-        request this process knows of when the database lost it."""
+        request this process knows of when the database lost it.  With the
+        automatic import on, a saved request is cleared: it must not
+        outlive a switch to the manual import."""
 
         with self.store._read_connection() as connection:
             saved = self._meta(connection, META_REQUESTED) == "1"
+        if self.automatic:
+            if saved or self._active_request:
+                self._clear_request()
+            return False
         if saved:
             self._active_request = True
         elif self._active_request:
@@ -248,7 +258,7 @@ class AnalyticsBackfill(object):
             boundary = self._meta_time(connection, META_BOUNDARY)
             states = self._states(connection)
             imported = self._meta(connection, META_IMPORTED) == "1"
-            requested = (
+            requested = not self.automatic and (
                 self._meta(connection, META_REQUESTED) == "1" or self._active_request
             )
             deleted = {
@@ -301,7 +311,9 @@ class AnalyticsBackfill(object):
             return False
         if not names:
             if requested:
-                self._clear_request()
+                with self.store._read_connection() as connection:
+                    states = self._states(connection)
+                self._clear_request_if_done(states)
             return False
         boundary = self._boundary()
         if boundary is None:
@@ -315,7 +327,7 @@ class AnalyticsBackfill(object):
         pending = [name for name in names if not states.get(name, {}).get("done")]
         if not pending:
             if requested:
-                self._clear_request()
+                self._clear_request_if_done(states)
             return False
         # Raises when the cutoffs cannot be read: importing without them
         # could bring a deleted streamer back.
@@ -350,10 +362,21 @@ class AnalyticsBackfill(object):
                 payloads.pop(name, None)
         finished = all(states[name]["done"] for name in pending)
         if finished and requested:
-            self._clear_request()
+            self._clear_request_if_done(states)
         # The poll that finishes runs retention, even if its own steps added
         # nothing (the rows came in earlier polls).
         return (imported or added > 0) and finished
+
+    def _clear_request_if_done(self, states):
+        """Clear the request unless a streamer loaded since this poll listed
+        them is still to do: the next poll imports it."""
+
+        names = self._eligible()
+        if names is not None and any(
+            not states.get(name, {}).get("done") for name in names
+        ):
+            return
+        self._clear_request()
 
     def _files(self):
         """``streamer -> file name`` of the analytics JSON files."""
