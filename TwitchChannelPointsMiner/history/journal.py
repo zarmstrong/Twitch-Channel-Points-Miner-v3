@@ -1244,6 +1244,11 @@ class Journal(object):
             pending = self._channelless_claims.get(drop_id)
             if pending is not None:
                 self._write_claim(pending[0], pending[1], username)
+            # A claim not written yet keeps the channel noted last, also once
+            # the drop's channel is no longer remembered above.
+            for claim_key, (record, _) in list(self._unwritten_claims.items()):
+                if record["drop_id"] == drop_id:
+                    self._unwritten_claims[claim_key] = (record, username)
 
     def has_unwritten_claim(self, claim_key):
         """Whether a claim Twitch accepted could not be written to the journal
@@ -1361,10 +1366,12 @@ class Journal(object):
             saved, saved_streamer = pending
             record = {
                 **record,
-                **{key: value for key, value in saved.items() if value is not None},
+                **{
+                    key: value
+                    for key, value in saved.items()
+                    if value is not None and value != []
+                },
             }
-            if not record.get("benefits"):
-                record["benefits"] = saved.get("benefits") or []
             streamer = streamer or saved_streamer
         written = self._drop_claims.get(claim_key)
         if written is not None and written[1] is not None:

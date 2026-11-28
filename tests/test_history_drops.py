@@ -455,6 +455,33 @@ def test_an_unwritten_claim_keeps_the_time_twitch_accepted_it(
     assert [row["ts"] for row in rows(store, "SELECT * FROM drops")] == [T0]
 
 
+def test_an_unwritten_claim_gets_the_rewards_learned_later(journal, monkeypatch):
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1")
+    monkeypatch.setattr(journal, "append", real_append)
+    journal.record_drop("d1", "i1|d1", benefits=["Badge", "Emote"])
+    (record,) = written(journal, "drop")
+    assert record["benefits"] == ["Badge", "Emote"]
+
+
+def test_an_unwritten_claim_keeps_its_channel_after_the_drop_is_forgotten(
+    journal, monkeypatch
+):
+    journal.note_drop_channel("bob", "d1")
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1")
+    journal.note_drop_channel("alice", "d1")
+    # Notes for other drops push d1 out of the drops' channels.
+    for index in range(DROP_CHANNELS_KEPT):
+        journal.note_drop_channel("carol", f"x{index}")
+    assert journal.drop_channel("d1") is None
+    monkeypatch.setattr(journal, "append", real_append)
+    journal.retry_unwritten_claims()
+    assert [record["streamer"] for record in written(journal, "drop")] == ["alice"]
+
+
 def test_a_claim_without_an_id_or_a_running_journal_is_not_written(journal):
     journal.record_drop("", "key")
     journal.record_drop("d1", "")
