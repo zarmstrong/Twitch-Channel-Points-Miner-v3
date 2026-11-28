@@ -1,6 +1,7 @@
 import ast
 import errno
 import json
+import logging
 import math
 import os
 import stat
@@ -2530,6 +2531,230 @@ def test_settings_insertion_indents_from_the_right_line_after_a_form_feed(tmp_pa
     assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
 
 
+@pytest.mark.parametrize("marker", ["\u2028", "\x0c", "\x1c"])
+def test_replaced_value_keeps_its_offsets_after_a_non_line_break(tmp_path, marker):
+    # str.splitlines() treats these as line breaks while Python's tokenizer
+    # does not, so the old offset arithmetic spliced the value in the wrong
+    # place and left config.py unparseable.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"# a {marker} note\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "update_check": True,\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_updates", "values": {"enabled": False}}
+    )
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["username"] == "x"
+    assert loaded.MINER_CONFIG["update_check"] is False
+
+
+def test_replaced_call_keyword_keeps_its_offsets_after_a_non_line_break(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_text("# a\u2028note and a \x0c form feed\n" + source, encoding="utf-8")
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "DEBUG"}}
+    )
+
+    assert _load_config(config).MINER_CONFIG["logger_settings"].console_level == (
+        logging.DEBUG
+    )
+
+
+def test_analytics_enable_keeps_its_offsets_after_a_non_line_break(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "# a\u2028note and a \x0c form feed\n"
+        'MINER_CONFIG = {\n    "username": "x",\n}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    config_editor.enable_analytics_dashboard(config, "secret")
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["enable_analytics"] is True
+    assert loaded.ANALYTICS_CONFIG["port"] == 54455
+
+
+def test_replace_config_node_refuses_to_write_unparseable_config(tmp_path):
+    config = tmp_path / "config.py"
+    original = 'VALUES = {"a": 1}\n'
+    config.write_text(original, encoding="utf-8")
+    node = config_editor._assignment(ast.parse(original), "VALUES").values[0]
+
+    with pytest.raises(ConfigEditError, match="would not parse"):
+        config_editor._replace_config_node(config, node, "(")
+
+    assert config.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "categories", "value": "gamma"},
+        {"action": "remove", "kind": "categories", "value": "alpha"},
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    ],
+    ids=["add", "remove", "reorder"],
+)
+@pytest.mark.parametrize("marker", ["\u2028", "\x0c"])
+def test_category_save_keeps_its_offsets_after_a_non_line_break(
+    tmp_path, marker, payload
+):
+    # The category list is rewritten whole rather than node by node, but its
+    # offsets were computed the same broken way.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"# a {marker} note\n"
+        'MINER_CONFIG = {\n    "username": "x",\n}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {\n    "categories": ["alpha", "beta"],\n}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(config, payload)
+
+    categories = _load_config(config).MINE_CONFIG["categories"]
+    if payload["action"] == "add":
+        assert categories == ["alpha", "beta", "gamma"]
+    elif payload["action"] == "remove":
+        assert categories == ["beta"]
+    else:
+        assert categories == ["beta", "alpha"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_updates", "values": {"enabled": False}},
+        {"action": "update_login", "values": {"android": True}},
+    ],
+    ids=["replace", "insert"],
+)
+def test_dict_edits_keep_crlf_line_breaks(tmp_path, payload):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    update_managed_web_config(config, payload)
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "categories", "value": "gamma"},
+        {"action": "remove", "kind": "categories", "value": "alpha"},
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    ],
+    ids=["add", "remove", "reorder"],
+)
+def test_category_save_keeps_crlf_line_breaks(tmp_path, payload):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    update_managed_web_config(config, payload)
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
+
+
+def test_analytics_enable_keeps_crlf_line_breaks(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    config_editor.enable_analytics_dashboard(config, "secret")
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
+
+
+def test_import_insertion_goes_after_a_future_import(tmp_path):
+    # An import above a __future__ import parses but does not compile.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        "from __future__ import annotations\n"
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"streamers": True}}
+    )
+
+    assert config.read_text(encoding="utf-8").startswith(
+        "from __future__ import annotations\n"
+        "from TwitchChannelPointsMiner.classes.Settings import StreamerSource\n"
+    )
+    assert StreamerSource.STREAMERS in (
+        _load_config(config).MINER_CONFIG["streamer_source_priority"]
+    )
+
+
+def test_import_insertion_after_a_non_line_break_in_the_first_line(tmp_path):
+    # The first line is treated as a coding declaration when it mentions
+    # "coding". Splitting it on U+2028 put the import inside the comment.
+    config = tmp_path / "config.py"
+    config.write_text(
+        "# coding: utf-8 \u2028 pointer\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"streamers": True}}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert config.read_bytes().splitlines()[1] == (
+        b"from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+    )
+    namespace = {}
+    exec(compile(source, str(config), "exec"), namespace)
+    assert (
+        StreamerSource.STREAMERS
+        in namespace["MINER_CONFIG"]["streamer_source_priority"]
+    )
+
+
 def test_entry_with_a_comment_after_its_redundant_parenthesis_can_be_removed(
     tmp_path,
 ):
@@ -2792,6 +3017,146 @@ def test_update_is_written_when_unpacking_may_supply_the_defaults(tmp_path, mine
 
     assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in (
         config.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    "assignment_name", ["MINER_CONFIG", "MINE_CONFIG", "ANALYTICS_CONFIG"]
+)
+def test_dict_edit_refuses_an_unpacking_that_would_override_the_value(
+    tmp_path, assignment_name
+):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'{assignment_name} = {{\n    "value": 1,\n    **{{"value": 2}},\n}}\n',
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'value' in config.py"):
+        config_editor._set_dict_items(config, assignment_name, {"value": "3"})
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_update_refuses_an_unreadable_unpacking_that_may_supply_the_key(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "BASE = {}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        "    **BASE,\n"
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'update_check' in config.py"):
+        update_managed_web_config(
+            config, {"action": "update_updates", "values": {"enabled": False}}
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "miner_body",
+    [
+        # A literal unpacking after the value that doesn't name it is safe.
+        '    "update_check": True,\n    **{"other": 1},\n',
+        # The value comes after the unpacking, so it wins at runtime.
+        '    **BASE,\n    "update_check": True,\n',
+        # The new entry is inserted after the unpacking, so it wins too.
+        '    **{"username": "y"},\n',
+    ],
+)
+def test_update_edits_when_unpacking_cannot_override_the_value(tmp_path, miner_body):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'BASE = {"update_check": True}\n'
+        "MINER_CONFIG = {\n"
+        f"{miner_body}"
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_updates", "values": {"enabled": False}}
+    )
+
+    assert _load_config(config).MINER_CONFIG["update_check"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_logging", "values": {"console_level": "DEBUG"}},
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {
+                "enabled": True,
+                "webhook_api": "https://example/hook",
+                "events": [],
+            },
+        },
+    ],
+    ids=["logging", "notification"],
+)
+def test_nested_logger_settings_edits_refuse_an_override(tmp_path, payload):
+    # logger_settings is edited through _write_call_keywords, not
+    # _set_dict_items, but a later unpacking overrides it the same way.
+    config = tmp_path / "config.py"
+    config.write_text(
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "BASE = {}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=logging.INFO),\n'
+        "    **BASE,\n"
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'logger_settings' in config.py"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_nested_logger_settings_edits_when_unpacking_cannot_override(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=logging.INFO),\n'
+        '    **{"other": 1},\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "DEBUG"}}
+    )
+
+    assert _load_config(config).MINER_CONFIG["logger_settings"].console_level == (
+        logging.DEBUG
     )
 
 
@@ -3282,26 +3647,32 @@ def test_removal_is_refused_when_the_file_cant_be_tokenized(tmp_path, monkeypatc
     assert config.read_bytes() == before
 
 
-def test_import_is_not_added_above_a_future_import(tmp_path):
+def test_import_is_added_below_a_future_import(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
     source = config.read_text(encoding="utf-8").replace(
         "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n", ""
     )
     config.write_text("from __future__ import annotations\n" + source, encoding="utf-8")
-    before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="would not parse"):
-        update_managed_web_config(
-            config,
-            {
-                "action": "update_streamer",
-                "username": "one",
-                "settings": {"chat": "NEVER"},
-            },
-        )
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    )
 
-    assert config.read_bytes() == before
+    written = config.read_text(encoding="utf-8")
+    assert written.startswith(
+        "from __future__ import annotations\n"
+        "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n"
+    )
+    assert "chat=ChatPresence.NEVER" in written
+    # Loading it would run the schema migration, which puts CONFIG_VERSION
+    # above the __future__ import (a separate bug), so only compile it.
+    compile(written, "config.py", "exec", dont_inherit=True)
 
 
 @pytest.mark.parametrize(
@@ -3403,3 +3774,1343 @@ def test_streamer_edits_keep_crlf_line_breaks(tmp_path, payload):
     assert b"\n" in written
     assert written.count(b"\n") == written.count(b"\r\n")
     assert b"\r\r" not in written
+
+
+def _edited_config(path, *replacements):
+    write_config(path)
+    source = path.read_text(encoding="utf-8")
+    for old, new in replacements:
+        assert old in source
+        source = source.replace(old, new)
+    path.write_text(source, encoding="utf-8")
+    return path.read_bytes()
+
+
+def test_refused_source_update_leaves_the_earlier_part_unwritten(tmp_path):
+    # update_sources writes MINER_CONFIG's priority before MINE_CONFIG's
+    # followers. A refusal of the second part must not keep the first.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('"followers": False,', '"followers": True,\n    **{"followers": True},'),
+        (
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+            "[StreamerSource.STREAMERS, StreamerSource.FOLLOWERS, "
+            "StreamerSource.CATEGORIES]",
+        ),
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'followers' in config.py"):
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": False}}
+        )
+
+    assert config.read_bytes() == before
+    assert StreamerSource.FOLLOWERS in (
+        _load_config(config).MINER_CONFIG["streamer_source_priority"]
+    )
+
+
+def test_refused_category_setting_leaves_the_import_unwritten(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            "from TwitchChannelPointsMiner.classes.Settings import "
+            "CategorySort, StreamerSource\n",
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource\n",
+        ),
+        (
+            '    "category_sort": CategorySort.VIEWERS_DESC,\n',
+            "    **BASE,\n",
+        ),
+        ("MINER_CONFIG = {", "BASE = {}\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'category_sort' in config.py"):
+        update_managed_web_config(
+            config, {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}}
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "categories", "value": "gamma"},
+        {"action": "remove", "kind": "categories", "value": "alpha"},
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    ],
+    ids=["add", "remove", "reorder"],
+)
+@pytest.mark.parametrize(
+    "unpacking",
+    ['**{"categories": ["zeta"]}', "**BASE", "KEY: []"],
+    ids=["overriding", "unreadable", "computed-key"],
+)
+def test_category_edits_refuse_a_later_override(tmp_path, payload, unpacking):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('    "category_limit": 5,\n', f'    "category_limit": 5,\n    {unpacking},\n'),
+        ("MINER_CONFIG = {", "BASE = {}\nKEY = 'categories'\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)categories"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_category_migration_refuses_a_later_override_and_keeps_both_files(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            '    "category_limit": 5,\n',
+            '    "category_limit": 5,\n    **{"categories": ["zeta"]},\n',
+        ),
+    )
+    overrides = tmp_path / "web-config.json"
+    overrides.write_text(json.dumps({"categories": ["gamma"]}), encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'categories' in config.py"):
+        migrate_web_config(config)
+
+    assert config.read_bytes() == before
+    assert overrides.is_file()
+
+
+def test_failed_migration_step_leaves_earlier_steps_unwritten(tmp_path):
+    # Categories move first, then sources; a refused source change must not
+    # leave the categories moved while web-config.json still holds them.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('"followers": False,', '"followers": True,\n    **{"followers": True},'),
+    )
+    overrides = tmp_path / "web-config.json"
+    overrides.write_text(
+        json.dumps({"categories": ["gamma"], "sources": {"followers": False}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'followers' in config.py"):
+        migrate_web_config(config)
+
+    assert config.read_bytes() == before
+    assert overrides.is_file()
+
+
+@pytest.mark.parametrize(
+    "categories",
+    ['["alpha", *MORE]', '["alpha", NAME]'],
+    ids=["starred", "variable"],
+)
+def test_category_edits_refuse_entries_they_would_drop(tmp_path, categories):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('"categories": ["alpha", "beta"]', f'"categories": {categories}'),
+        ("MINER_CONFIG = {", "MORE = ['beta']\nNAME = 'beta'\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="aren't plain strings"):
+        update_managed_web_config(
+            config, {"action": "add", "kind": "categories", "value": "gamma"}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_category_edit_changes_the_entry_the_miner_uses(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "categories": ["alpha", "beta"],\n',
+            '    "categories": ["old"],\n'
+            "    **BASE,\n"
+            '    "categories": ["alpha", "beta"],\n',
+        ),
+        ("MINER_CONFIG = {", "BASE = {}\nMINER_CONFIG = {"),
+    )
+
+    result = update_managed_web_config(
+        config, {"action": "add", "kind": "categories", "value": "gamma"}
+    )
+
+    assert result["categories"] == ["alpha", "beta", "gamma"]
+    assert _load_config(config).MINE_CONFIG["categories"] == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
+
+
+_DISCORD_LINE = (
+    '        discord=Discord(webhook_api="https://secret.example/hook", events=[]),\n'
+)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_notification_save_refuses_a_notifier_set_by_a_later_unpacking(
+    tmp_path, enabled
+):
+    # The literal LoggerSettings has no Discord, so turning it off looked
+    # like a no-op, while the unpacked one the miner uses keeps it on.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (_DISCORD_LINE, ""),
+        (
+            "    ),\n}\nSTREAMERS",
+            "    ),\n"
+            '    **{"logger_settings": LoggerSettings(discord=Discord('
+            'webhook_api="https://secret.example/hook", events=[]))},\n'
+            "}\nSTREAMERS",
+        ),
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'logger_settings' in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "discord",
+                "values": {
+                    "enabled": enabled,
+                    "webhook_api": "https://other.example/hook",
+                    "events": [],
+                },
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['**{"discord": None}', "**OPTIONS"],
+    ids=["names-it", "unreadable"],
+)
+def test_notification_save_refuses_logger_settings_unpacking(tmp_path, arguments):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (_DISCORD_LINE, f"        {arguments},\n"),
+        ("MINER_CONFIG = {", "OPTIONS = {}\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match=r"\*\* arguments that may set 'discord'"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "discord",
+                "values": {"enabled": False},
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['**{"console_level": logging.INFO}', "**OPTIONS", "*ARGS"],
+    ids=["names-it", "unreadable", "starred"],
+)
+def test_logging_save_refuses_logger_settings_arguments_it_may_repeat(
+    tmp_path, arguments
+):
+    # Adding console_level= next to one passed through ** makes LoggerSettings
+    # raise TypeError when config.py runs.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ("        console_level=logging.INFO,\n", f"        {arguments},\n"),
+        ("MINER_CONFIG = {", "OPTIONS = {}\nARGS = ()\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)arguments"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_logging_save_keeps_logger_settings_unpacking_it_cannot_repeat(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            "        console_level=logging.INFO,\n",
+            "        console_level=logging.INFO,\n"
+            '        **{"file_level": logging.INFO},\n',
+        ),
+        ("        file_level=logging.DEBUG,\n", ""),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    logger_settings = _load_config(config).MINER_CONFIG["logger_settings"]
+    assert logger_settings.console_level == logging.WARNING
+    assert logger_settings.file_level == logging.INFO
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"enabled": False},
+        },
+    ],
+    ids=["logging", "notification"],
+)
+def test_logger_settings_edit_changes_the_entry_the_miner_uses(tmp_path, payload):
+    # Python keeps the last logger_settings; editing the first one would be
+    # saved without any effect.
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "logger_settings": LoggerSettings(\n',
+            '    "logger_settings": LoggerSettings(),\n'
+            "    **BASE,\n"
+            '    "logger_settings": LoggerSettings(\n',
+        ),
+        ("MINER_CONFIG = {", "BASE = {}\nMINER_CONFIG = {"),
+    )
+
+    update_managed_web_config(config, payload)
+
+    assert "LoggerSettings()," in config.read_text(encoding="utf-8")
+    logger_settings = _load_config(config).MINER_CONFIG["logger_settings"]
+    if payload["action"] == "update_logging":
+        assert logger_settings.console_level == logging.WARNING
+    else:
+        assert logger_settings.discord is None
+
+
+def test_source_update_refuses_a_priority_set_only_by_unpacking(tmp_path):
+    # Starting from the default order would change which source comes first.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            '    "streamer_source_priority": '
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES],\n",
+            '    **{"streamer_source_priority": '
+            "[StreamerSource.CATEGORIES, StreamerSource.STREAMERS]},\n",
+        ),
+    )
+
+    with pytest.raises(
+        ConfigEditError, match="sets 'streamer_source_priority' by unpacking"
+    ):
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": True}}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_dict_edit_refuses_a_later_computed_key(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            '    "username": "example",\n',
+            '    "username": "example",\n    KEY: True,\n',
+        ),
+        ("MINER_CONFIG = {", "KEY = 'update_check'\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="key that isn't a plain string"):
+        update_managed_web_config(
+            config, {"action": "update_updates", "values": {"enabled": False}}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_notification_edit_replaces_positional_arguments(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            'Discord(webhook_api="https://secret.example/hook", events=[])',
+            'Discord("https://secret.example/hook", [])',
+        ),
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {
+                "enabled": True,
+                "webhook_api": "https://other.example/hook",
+                "events": ["DROP_CLAIM"],
+            },
+        },
+    )
+
+    discord = _load_config(config).MINER_CONFIG["logger_settings"].discord
+    assert discord.webhook_api == "https://other.example/hook"
+    assert [str(event) for event in discord.events] == ["DROP_CLAIM"]
+
+
+def test_logging_edit_replaces_positional_arguments(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "logger_settings": LoggerSettings(\n'
+            "        console_level=logging.INFO,\n",
+            '    "logger_settings": LoggerSettings(\n'
+            "        True,\n"
+            "        False,\n"
+            "        logging.INFO,\n",
+        ),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+_EMAIL_CONFIG = (
+    "from TwitchChannelPointsMiner.classes.Email import Email\n"
+    "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+    "MINER_CONFIG = {\n"
+    '    "username": "x",\n'
+    '    "logger_settings": LoggerSettings(\n'
+    '        email=Email("smtp.example", 465, "a@example.com", [], [], {tls}),\n'
+    "    ),\n"
+    "}\n"
+    "STREAMERS = []\n"
+    'MINE_CONFIG = {"categories": []}\n'
+    "ANALYTICS_CONFIG = None\n"
+)
+
+
+@pytest.mark.parametrize(
+    "tls",
+    [
+        "use_ssl=True, starttls=False",
+        'starttls=False, **{"use_ssl": True}',
+        "None, None, True, False",
+    ],
+    ids=["keyword", "unpacked", "positional"],
+)
+def test_email_save_refuses_turning_on_starttls_next_to_ssl(tmp_path, tls):
+    # Email() raises ValueError for both, so config.py would stop loading.
+    config = tmp_path / "config.py"
+    config.write_text(_EMAIL_CONFIG.replace("{tls}", tls), encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="(?i)SSL and STARTTLS|starttls"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "email",
+                "values": {"starttls": True},
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_new_email_notifier_refuses_ssl_with_the_starttls_default(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(config)
+
+    with pytest.raises(ConfigEditError, match="SSL and STARTTLS"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "email",
+                "values": {
+                    "enabled": True,
+                    "host": "smtp.example",
+                    "port": 465,
+                    "sender": "a@example.com",
+                    "recipients": ["b@example.com"],
+                    "events": [],
+                    "use_ssl": True,
+                },
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+_POSITIONAL_DISCORD = (
+    '    "logger_settings": LoggerSettings(\n'
+    "        True, False, logging.INFO, False, None, 'dd/mm/yy', logging.DEBUG,\n"
+    "        False, False, ColorPalette(), True, 7, None,\n"
+    '        Discord("https://secret.example/hook", []),\n'
+    "    ),\n"
+)
+
+
+def _positional_discord_config(path):
+    write_config(path)
+    source = path.read_text(encoding="utf-8")
+    start = source.index('    "logger_settings": LoggerSettings(\n')
+    end = source.index("    ),\n", start) + len("    ),\n")
+    source = source[:start] + _POSITIONAL_DISCORD + source[end:]
+    source = source.replace(
+        "from TwitchChannelPointsMiner.logger import LoggerSettings",
+        "from TwitchChannelPointsMiner.logger import ColorPalette, LoggerSettings",
+    )
+    path.write_text(source, encoding="utf-8")
+
+
+def test_notification_disable_reaches_a_notifier_passed_positionally(tmp_path):
+    config = tmp_path / "config.py"
+    _positional_discord_config(config)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"enabled": False},
+        },
+    )
+
+    assert _load_config(config).MINER_CONFIG["logger_settings"].discord is None
+
+
+def test_notification_update_reaches_a_notifier_passed_positionally(tmp_path):
+    config = tmp_path / "config.py"
+    _positional_discord_config(config)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"events": ["DROP_CLAIM"]},
+        },
+    )
+
+    discord = _load_config(config).MINER_CONFIG["logger_settings"].discord
+    assert [str(event) for event in discord.events] == ["DROP_CLAIM"]
+
+
+def _variable_discord_config(path):
+    return _edited_config(
+        path,
+        (
+            'discord=Discord(webhook_api="https://secret.example/hook", events=[])',
+            "discord=SAVED_DISCORD",
+        ),
+        (
+            "MINER_CONFIG = {",
+            'SAVED_DISCORD = Discord(webhook_api="https://secret.example/hook", '
+            "events=[])\nMINER_CONFIG = {",
+        ),
+    )
+
+
+def test_notification_disable_replaces_a_notifier_variable(tmp_path):
+    config = tmp_path / "config.py"
+    _variable_discord_config(config)
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"enabled": False},
+        },
+    )
+
+    assert _load_config(config).MINER_CONFIG["logger_settings"].discord is None
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"events": ["DROP_CLAIM"]},
+        {
+            "enabled": True,
+            "webhook_api": "https://other.example/hook",
+            "events": [],
+        },
+    ],
+    ids=["update", "enable"],
+)
+def test_notification_update_refuses_a_notifier_variable(tmp_path, values):
+    # Its settings can't be read, and writing a new Discord(...) over it
+    # would lose them.
+    config = tmp_path / "config.py"
+    before = _variable_discord_config(config)
+
+    with pytest.raises(ConfigEditError, match=r"isn't written as Discord\(\.\.\.\)"):
+        update_managed_web_config(
+            config,
+            {"action": "update_notification", "provider": "discord", "values": values},
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "priority", ["PRIORITY", "list(PRIORITY)", '["STREAMERS"]'], ids=str
+)
+def test_source_update_refuses_a_priority_it_cannot_read(tmp_path, priority):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+            priority,
+        ),
+        (
+            "MINER_CONFIG = {",
+            "PRIORITY = [StreamerSource.CATEGORIES, StreamerSource.STREAMERS]\n"
+            "MINER_CONFIG = {",
+        ),
+    )
+
+    with pytest.raises(ConfigEditError, match="streamer_source_priority"):
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": True}}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_source_update_starts_from_the_default_for_a_none_priority(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        ("[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]", "None"),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"badges": False}}
+    )
+
+    # Loading config.py would migrate it, so check what was written.
+    assert (
+        '"streamer_source_priority": [StreamerSource.STREAMERS, '
+        "StreamerSource.FOLLOWERS, StreamerSource.CATEGORIES, "
+        "StreamerSource.WILDCARD_CATEGORIES]"
+    ) in config.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda config: migrate_web_config(config),
+        lambda config: enable_analytics_dashboard(config, password="secret"),
+        lambda config: set_miner_username(config, "someone"),
+        lambda config: update_managed_web_config(
+            config, {"action": "update_updates", "values": {"enabled": False}}
+        ),
+    ],
+    ids=["migrate", "enable-dashboard", "username", "update"],
+)
+def test_public_config_writers_hold_the_config_mutex_while_writing(
+    tmp_path, monkeypatch, call
+):
+    # Without it, a migration started by the runner could write its older
+    # copy of config.py over a Config tab save that finished in between.
+    config = tmp_path / "config.py"
+    write_config(config)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"categories": ["gamma"]}), encoding="utf-8"
+    )
+    original = config_editor._replace_config_bytes
+    held = []
+
+    def record(path, updated, mode):
+        result = []
+        probe = threading.Thread(
+            target=lambda: result.append(
+                config_editor.CONFIG_FILE_MUTEX.acquire(blocking=False)
+            )
+        )
+        probe.start()
+        probe.join(timeout=5)
+        if result[0]:
+            config_editor.CONFIG_FILE_MUTEX.release()
+        held.append(not result[0])
+        return original(path, updated, mode)
+
+    monkeypatch.setattr(config_editor, "_replace_config_bytes", record)
+
+    call(config)
+
+    assert held and all(held)
+
+
+@pytest.mark.parametrize(
+    "analytics",
+    ["dict(port=9000, password='existing')", "SAVED_ANALYTICS", "False"],
+    ids=["dict-call", "variable", "false"],
+)
+def test_enable_dashboard_refuses_analytics_settings_it_would_replace(
+    tmp_path, analytics
+):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ("ANALYTICS_CONFIG = None", f"ANALYTICS_CONFIG = {analytics}"),
+        ("MINER_CONFIG = {", "SAVED_ANALYTICS = {}\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="ANALYTICS_CONFIG"):
+        enable_analytics_dashboard(config, password="secret")
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_logging", "values": {"daily_report": True}},
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {
+                "enabled": True,
+                "webhook_api": "https://other.example/hook",
+                "events": [],
+            },
+        },
+    ],
+    ids=["logging", "notification"],
+)
+def test_logger_settings_edits_refuse_a_helper_call(tmp_path, payload):
+    # make_logger(daily_report=True) would raise TypeError when config.py runs.
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    start = source.index('    "logger_settings": LoggerSettings(\n')
+    end = source.index("    ),\n", start) + len("    ),\n")
+    source = (
+        source[:start] + '    "logger_settings": make_logger(),\n' + source[end:]
+    ).replace(
+        "MINER_CONFIG = {",
+        "def make_logger():\n    return LoggerSettings()\n\n\nMINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match=r"isn't written as LoggerSettings"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_logging_level_save_adds_the_logging_import(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    # Current schema, so loading it doesn't migrate (and add imports to) it.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+@pytest.mark.parametrize(
+    "import_line",
+    [
+        "from TwitchChannelPointsMiner.classes.Settings import CategorySort as Sort",
+        "# from TwitchChannelPointsMiner.classes.Settings import CategorySort",
+    ],
+    ids=["aliased", "commented"],
+)
+def test_category_sort_save_adds_an_import_the_text_only_resembles(
+    tmp_path, import_line
+):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            "from TwitchChannelPointsMiner.classes.Settings import "
+            "CategorySort, StreamerSource\n",
+            f"{import_line}\n"
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource\n",
+        ),
+        ('    "category_sort": CategorySort.VIEWERS_DESC,\n', ""),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}}
+    )
+
+    assert _load_config(config).MINE_CONFIG["category_sort"].name == "VIEWERS_ASC"
+
+
+def test_logging_level_save_adds_an_import_a_later_one_would_bind_too_late(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n"
+        "import logging\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+def test_category_sort_save_adds_an_import_a_later_one_would_bind_too_late(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n"
+        "from TwitchChannelPointsMiner.classes.Settings import CategorySort\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}}
+    )
+
+    assert _load_config(config).MINE_CONFIG["category_sort"].name == "VIEWERS_ASC"
+
+
+_REPEATED_CATEGORIES = (
+    "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+    "[StreamerSource.CATEGORIES, StreamerSource.STREAMERS, "
+    "StreamerSource.CATEGORIES]",
+)
+
+
+def test_source_disable_removes_every_copy_of_a_repeated_source(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(config, _REPEATED_CATEGORIES)
+
+    result = update_managed_web_config(
+        config, {"action": "update_sources", "values": {"categories": False}}
+    )
+
+    assert result["sources"]["categories"] is False
+    assert '"streamer_source_priority": [StreamerSource.STREAMERS]' in config.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_source_migration_removes_every_copy_of_a_repeated_source(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(config, _REPEATED_CATEGORIES)
+    (tmp_path / "web-config.json").write_text(
+        json.dumps({"sources": {"categories": False}}), encoding="utf-8"
+    )
+
+    migrate_web_config(config)
+
+    assert read_managed_web_config(config)["sources"]["categories"] is False
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_source_update_keeps_the_order_after_an_unreadable_key(tmp_path, migrate):
+    # str("x") as a key makes the whole MINER_CONFIG unreadable to the
+    # reader, which must not make the save start from the default order.
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "username": "example",\n',
+            '    str("other"): 1,\n    "username": "example",\n',
+        ),
+        (
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+            "[StreamerSource.CATEGORIES, StreamerSource.STREAMERS]",
+        ),
+    )
+    if migrate:
+        (tmp_path / "web-config.json").write_text(
+            json.dumps({"sources": {"followers": True}}), encoding="utf-8"
+        )
+        migrate_web_config(config)
+    else:
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": True}}
+        )
+
+    assert (
+        '"streamer_source_priority": [StreamerSource.CATEGORIES, '
+        "StreamerSource.STREAMERS, StreamerSource.FOLLOWERS]"
+    ) in config.read_text(encoding="utf-8")
+
+
+def test_source_update_keeps_an_empty_priority_empty(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config, ("[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]", "[]")
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"followers": True}}
+    )
+
+    assert '"streamer_source_priority": [StreamerSource.FOLLOWERS]' in (
+        config.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    "between",
+    ["del logging", "logging = None", "from os import path as logging"],
+    ids=["deleted", "rebound", "other-import"],
+)
+def test_logging_level_save_refuses_a_logging_name_changed_before_use(
+    tmp_path, between
+):
+    # An import added at the top would be undone before MINER_CONFIG runs.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{between}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="binds or removes logging"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_logging_level_save_accepts_an_import_aliased_to_its_own_name(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging as logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert config.read_text(encoding="utf-8").count("import logging") == 1
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+def test_streamer_add_accepts_its_imports_split_across_statements(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+            "Streamer, StreamerSettings\n",
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer\n"
+            "from TwitchChannelPointsMiner.classes.entities.Streamer import "
+            "StreamerSettings\n",
+        ),
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "two",
+            "settings": {"favorite": True},
+        },
+    )
+
+    assert _load_config(config).STREAMERS[1].settings.favorite is True
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_category_sort_save_refuses_a_name_rebound_between_settings(tmp_path, migrate):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "CategorySort = None\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+    overrides = tmp_path / "web-config.json"
+
+    with pytest.raises(ConfigEditError, match="binds or removes CategorySort"):
+        if migrate:
+            overrides.write_text(
+                json.dumps({"category": {"sort": "VIEWERS_ASC"}}), encoding="utf-8"
+            )
+            migrate_web_config(config)
+        else:
+            update_managed_web_config(
+                config,
+                {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}},
+            )
+
+    assert config.read_bytes() == before
+    assert overrides.is_file() is migrate
+
+
+def test_logging_level_save_refuses_a_conflicting_alias_in_the_same_import(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging, math as logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="binds or removes logging"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "from os.path import *",
+        "if True:\n    from os.path import *",
+        "try:\n    raise RuntimeError()\nexcept RuntimeError as logging:\n    pass",
+        "match None:\n    case logging:\n        pass",
+        "class Helper:\n    global logging\n    logging = None",
+        "def helper(value=(logging := None)):\n    pass",
+        "class Helper(metaclass=(logging := type)):\n    pass",
+        "@(logging := (lambda function: function))\ndef helper():\n    pass",
+    ],
+    ids=[
+        "star",
+        "nested-star",
+        "except",
+        "match",
+        "class-global",
+        "default",
+        "class-keyword",
+        "decorator",
+    ],
+)
+def test_logging_level_save_refuses_names_bound_at_definition_or_by_star(
+    tmp_path, between
+):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{between}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(
+        ConfigEditError, match="binds or removes (logging|LoggerSettings)"
+    ):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_logging_import_is_not_added_inside_a_leading_docstring(tmp_path, migrate):
+    # The first line mentions "coding", which used to put the import on the
+    # second line: inside the docstring.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        '"""My coding configuration.\n'
+        "\n"
+        'More notes."""\n'
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    if migrate:
+        (tmp_path / "web-config.json").write_text(
+            json.dumps({"logging": {"console_level": "WARNING"}}), encoding="utf-8"
+        )
+        migrate_web_config(config)
+    else:
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    loaded = _load_config(config)
+    assert loaded.__doc__.startswith("My coding configuration.")
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"events": ["DROP_CLAIM"]},
+        },
+        {"action": "update_logging", "values": {"daily_report": True}},
+    ],
+    ids=["notifier", "logger-settings"],
+)
+def test_edits_refuse_a_qualified_helper_named_like_the_constructor(tmp_path, payload):
+    # Factory.Discord() may take no arguments at all.
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    if payload["action"] == "update_notification":
+        source = source.replace(
+            'discord=Discord(webhook_api="https://secret.example/hook", events=[])',
+            "discord=Factory.Discord()",
+        )
+    else:
+        start = source.index('    "logger_settings": LoggerSettings(\n')
+        end = source.index("    ),\n", start) + len("    ),\n")
+        source = (
+            source[:start]
+            + '    "logger_settings": Factory.LoggerSettings(),\n'
+            + source[end:]
+        )
+    source = source.replace(
+        "MINER_CONFIG = {",
+        "import types\n"
+        "Factory = types.SimpleNamespace(\n"
+        '    Discord=lambda: Discord(webhook_api="https://x.example/h", events=[]),\n'
+        "    LoggerSettings=lambda: LoggerSettings(),\n"
+        ")\n"
+        "MINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="isn't written as"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_import_insertion_refuses_a_statement_sharing_the_docstring_line(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        '"""example"""; from TwitchChannelPointsMiner.logger import LoggerSettings\n'
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": __doc__,\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="couldn't add the import"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_startup_only_update_check_refuses_a_shadowed_float(tmp_path, migrate):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config, ("MINER_CONFIG = {", "float = None\nMINER_CONFIG = {")
+    )
+    overrides = tmp_path / "web-config.json"
+
+    with pytest.raises(ConfigEditError, match="binds float"):
+        if migrate:
+            overrides.write_text(
+                json.dumps({"updates": {"startup_only": True}}), encoding="utf-8"
+            )
+            migrate_web_config(config)
+        else:
+            update_managed_web_config(
+                config,
+                {"action": "update_updates", "values": {"startup_only": True}},
+            )
+
+    assert config.read_bytes() == before
+    assert overrides.is_file() is migrate
+
+
+@pytest.mark.parametrize(
+    "payload, replacement",
+    [
+        (
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+            (
+                "        console_level=logging.INFO,\n",
+                "        console_level=(LEVEL := logging.INFO),\n",
+            ),
+        ),
+        (
+            {"action": "update_updates", "values": {"enabled": False}},
+            (
+                '    "username": "example",\n',
+                '    "update_check": (LEVEL := True),\n    "username": "example",\n',
+            ),
+        ),
+    ],
+    ids=["call-keyword", "dict-value"],
+)
+def test_edits_refuse_replacing_a_walrus_other_settings_use(
+    tmp_path, payload, replacement
+):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        replacement,
+        ('    "category_limit": 5,\n', '    "category_limit": LEVEL and 5,\n'),
+        # Another LEVEL := in a function must not hide the removed one.
+        (
+            "MINER_CONFIG = {",
+            "def unused():\n    return (LEVEL := 0)\n\n\nMINER_CONFIG = {",
+        ),
+    )
+
+    with pytest.raises(ConfigEditError, match="assigns LEVEL with :="):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.skipif(
+    not hasattr(ast, "TypeVar"), reason="type parameters need Python 3.12+"
+)
+@pytest.mark.parametrize(
+    "payload, name",
+    [
+        ({"action": "update_updates", "values": {"startup_only": True}}, "float"),
+        (
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+            "logging",
+        ),
+    ],
+    ids=["builtin", "import"],
+)
+def test_name_checks_include_type_parameters(tmp_path, payload, name):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ("MINER_CONFIG = {", f"def helper[{name}]():\n    pass\n\n\nMINER_CONFIG = {{"),
+    )
+
+    with pytest.raises(ConfigEditError, match=f"binds (or removes )?{name}"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
