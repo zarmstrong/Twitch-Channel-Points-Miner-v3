@@ -301,6 +301,39 @@ def test_a_channel_noted_while_a_claim_is_written_reaches_it(journal):
     assert [record["streamer"] for record in written(journal, "drop")][-1] == ("alice")
 
 
+def test_a_claim_gets_the_newest_of_two_channels_noted_while_it_is_written(
+    journal, store
+):
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    real = journal._claims_lock
+    entered = []
+
+    class Lock:
+        # alice's note gets the lock first; by then bob's note (still
+        # waiting for it) has replaced her as the drop's channel.
+        def __enter__(self):
+            if not entered:
+                entered.append(True)
+                with journal._drop_lock:
+                    journal._drop_channels["d1"] = "bob"
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    journal._claims_lock = Lock()
+    journal.note_drop_channel("alice", "d1")
+    journal._claims_lock = real
+    journal.note_drop_channel("bob", "d1")
+    assert [record["streamer"] for record in written(journal, "drop")] == [
+        None,
+        "bob",
+    ]
+    importer = JournalImporter(store, journal.folder, monotonic=lambda: 0.0)
+    importer.poll()
+    assert [row["streamer"] for row in rows(store, "SELECT * FROM drops")] == ["bob"]
+
+
 def test_a_channel_noted_while_the_rewrite_fails_is_written_later(journal, monkeypatch):
     journal.record_drop("d1", "i1|d1", game="Game A")
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)

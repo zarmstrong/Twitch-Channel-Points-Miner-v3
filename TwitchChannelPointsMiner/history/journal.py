@@ -1233,8 +1233,12 @@ class Journal(object):
         # still on it): written again with it.
         with self._claims_lock:
             pending = self._channelless_claims.get(drop_id)
-            for claim_key, record in list((pending or {}).items()):
-                self._write_claim(claim_key, record, username)
+            if pending:
+                # The channel noted last, which a note made while this one
+                # waited for the lock may have replaced.
+                current = self.drop_channel(drop_id) or username
+                for claim_key, record in list(pending.items()):
+                    self._write_claim(claim_key, record, current)
 
     def drop_channel(self, drop_id):
         """The channel last noted for ``drop_id``, or None."""
