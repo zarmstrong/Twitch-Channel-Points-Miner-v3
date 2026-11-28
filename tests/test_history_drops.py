@@ -23,7 +23,6 @@ from TwitchChannelPointsMiner.history.journal import (
 from TwitchChannelPointsMiner.history.recorder import HistoryRecorder
 from TwitchChannelPointsMiner.history.store import (
     _SCHEMA,
-    DROP_MATCH_SECONDS,
     HISTORY_SCHEMA_VERSION,
     SECONDS_PER_DAY,
     HistoryStore,
@@ -195,7 +194,9 @@ def test_a_claim_without_an_id_or_a_running_journal_is_not_written(journal):
 def test_a_claim_counts_once_however_often_it_is_reported(folder, importer, store):
     folder.drop(at=T0)
     folder.drop(at=T0 + 600, run=2, already_claimed=True)
-    folder.drop(at=T0 + 700, run=2, claim_key="i-d1|d1#2", quest=True, game=None)
+    folder.drop(
+        at=T0 + 700, run=2, drop_id="d1#2", claim_key="i-d1|d1#2", quest=True, game=None
+    )
     importer.poll()
     drops = rows(store, "SELECT * FROM drops ORDER BY ts")
     assert [(row["ts"], row["quest"], row["game"]) for row in drops] == [
@@ -274,11 +275,14 @@ def test_the_drops_data_import_and_the_journal_agree_in_either_order(
 
 
 @pytest.mark.parametrize("journal_first", [True, False])
-def test_a_later_claim_of_the_drop_keeps_the_earlier_one(
-    folder, importer, store, journal_first
+@pytest.mark.parametrize("entry_at", [T0 - 3 * 86400, T0 + 3 * 86400])
+def test_a_drop_is_one_claim_whenever_its_entry_was_written(
+    folder, importer, store, journal_first, entry_at
 ):
-    # The entry is older than the journalled claim: a claim of its own.
-    folder.drops_data([captured(T0 - 3 * 86400)])
+    # A drop is claimed once.  Its entry can be older than the claim (the
+    # minutes completed days before the claim went through) or newer (the
+    # drop was seen again since), and it is still the same claim.
+    folder.drops_data([captured(entry_at)])
     folder.drop(at=T0)
     backfill = backfill_for(store, folder, importer)
     if journal_first:
@@ -287,25 +291,32 @@ def test_a_later_claim_of_the_drop_keeps_the_earlier_one(
     else:
         backfill.poll()
         importer.poll()
-    assert sorted(row["source"] for row in rows(store, "SELECT * FROM drops")) == [
-        "analytics",
-        "journal",
-    ]
+    assert [
+        (row["source"], row["ts"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("journal", T0)]
 
 
-def test_the_match_allows_for_the_entry_being_written_after_the_claim(
-    folder, importer, store
-):
-    folder.drops_data(
-        [captured(T0 - DROP_MATCH_SECONDS), captured(T0 - 2 * 86400, drop_id="d2")]
-    )
-    folder.drop(at=T0)
-    folder.drop(at=T0, drop_id="d2")
+def test_the_startup_scrape_and_a_later_claim_count_once(folder, importer, store):
+    # The miner's startup scrape writes a "captured" entry for a drop whose
+    # minutes are complete; the claim goes through minutes later.
+    folder.drops_data([captured(T0)])
+    backfill_for(store, folder, importer).poll()
+    folder.drop(at=T0 + 600)
+    importer.poll()
+    assert [
+        (row["source"], row["ts"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("journal", T0 + 600)]
+
+
+def test_each_repeat_of_a_quest_is_a_claim_of_its_own(folder, importer, store):
+    # A repeating reward group's repeats are drops of their own.
+    folder.drops_data([captured(T0 - 86400, drop_id="g1", category="Quests")])
+    folder.drop(at=T0, drop_id="g1#2", claim_key="i-g1|g1#2", game="Quests", quest=True)
     importer.poll()
     backfill_for(store, folder, importer).poll()
     assert sorted(
         (row["drop_id"], row["source"]) for row in rows(store, "SELECT * FROM drops")
-    ) == [("d1", "journal"), ("d2", "analytics"), ("d2", "journal")]
+    ) == [("g1", "analytics"), ("g1#2", "journal")]
 
 
 def test_the_drops_data_is_imported_once(folder, importer, store):
@@ -348,6 +359,29 @@ def test_a_missing_or_invalid_drops_file_is_skipped(
     assert backfill.status()["drops"]["skipped"] == reason
 
 
+def test_the_drops_data_is_read_under_the_lock_the_miner_replaces_it_under(
+    folder, importer, store, monkeypatch
+):
+    # On Windows the miner's replace of the file fails while it is open.
+    from TwitchChannelPointsMiner.classes.Settings import DROPS_FILE_MUTEX
+    from TwitchChannelPointsMiner.history import backfill as backfill_module
+
+    folder.drops_data([captured(T0)])
+    held = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        if str(path).endswith("drops_by_category.json"):
+            held.append(DROPS_FILE_MUTEX.locked())
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(backfill_module, "open", tracking_open, raising=False)
+    backfill_for(store, folder, importer).poll()
+    assert held == [True]
+    assert not DROPS_FILE_MUTEX.locked()
+    assert len(rows(store, "SELECT * FROM drops")) == 1
+
+
 def test_a_delete_removes_the_streamers_drops_and_game_totals(folder, importer, store):
     folder.add("live", at=T0, streamer="alice", broadcast_id="b1", game="Game A")
     folder.add("watch", at=T0 + 20, streamer="alice", broadcast_id="b1", seconds=20)
@@ -368,7 +402,9 @@ def test_a_deleted_claim_reported_again_stays_deleted(folder, importer, store):
     folder.drop(at=T0 + 600, streamer="alice", already_claimed=True)
     folder.drop(at=T0 + 700, run=2, already_claimed=True)
     # A new claim on the channel is recorded.
-    folder.drop(at=T0 + 800, run=2, claim_key="i-d1|d1#2", streamer="alice")
+    folder.drop(
+        at=T0 + 800, run=2, drop_id="d1#2", claim_key="i-d1|d1#2", streamer="alice"
+    )
     importer.poll()
     assert [row["dedupe_key"] for row in rows(store, "SELECT * FROM drops")] == [
         "c:i-d1|d1#2"
@@ -393,18 +429,17 @@ def test_a_channel_with_only_drops_counts_as_a_games_streamer(folder, importer, 
 
 def test_the_drops_data_does_not_bring_back_a_deleted_claim(folder, importer, store):
     # Imported later (the import was off at the delete): the entry names no
-    # channel, but it is the deleted claim.  An older entry is a claim of
-    # its own.
+    # channel, but it is the deleted claim, however much later it was
+    # written.  Another drop's entry is imported.
     folder.drop(at=T0, streamer="alice")
     importer.poll()
     store.delete_streamer("alice", segment_name(1, 1), 10**6)
-    folder.drops_data([captured(T0 + 5), captured(T0 - 3 * 86400, drop_id="d2")])
-    folder.drop(at=T0 - 3 * 86400 + 10, drop_id="d2", run=2)
+    folder.drops_data([captured(T0 + 3 * 86400), captured(T0, drop_id="d2")])
     backfill_for(store, folder, importer).poll()
     importer.poll()
     assert [
         (row["drop_id"], row["source"]) for row in rows(store, "SELECT * FROM drops")
-    ] == [("d2", "journal")]
+    ] == [("d2", "analytics")]
 
 
 def test_a_claim_deleted_before_it_was_imported_stays_deleted(folder, importer, store):
@@ -422,11 +457,16 @@ def test_a_deleted_imported_claim_reported_again_stays_deleted(folder, importer,
     folder.drops_data([captured(T0, streamer="alice")])
     backfill_for(store, folder, importer).poll()
     store.delete_streamer("alice", "", 0)
-    # The same claim (by the matching rule), and a later repeat.
+    # The same claim (the drop and category match), and the next repeat.
     folder.drop(at=T0 + 30, already_claimed=True)
-    folder.drop(at=T0 + 3 * 86400, claim_key="i-d1|d1#2")
+    folder.drop(at=T0 + 3 * 86400, drop_id="d1#2", claim_key="i-d1|d1#2")
     importer.poll()
-    assert [row["ts"] for row in rows(store, "SELECT * FROM drops")] == [T0 + 3 * 86400]
+    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d1#2"]
+    # Its own key is kept as deleted: the same claim reported again much
+    # later, by a fresh importer, stays deleted.
+    folder.drop(at=T0 + 9 * 86400, run=2, already_claimed=True)
+    JournalImporter(store, folder.journal, monotonic=lambda: 0.0).poll()
+    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d1#2"]
 
 
 def test_retention_keeps_drops_and_game_totals(folder, importer, store):

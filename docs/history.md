@@ -115,11 +115,13 @@ account that has mined for months doesn't start with an empty History tab.
   their category as the game. That file keeps one entry per drop and
   category, and moves its time on whenever the miner sees the drop again, so
   an imported drop's time can be later than its claim. A drop the journal
-  recorded a claim of (the same drop and category, no more than a minute
-  later than the entry) isn't imported again, whichever of the two History
-  reads first. Quests, entries without a category and drops not claimed are
-  not imported. An entry credited to a streamer whose History was deleted is
-  skipped.
+  recorded a claim of (the same drop and category) isn't imported again,
+  whichever of the two History reads first. The Drops data marks a drop as
+  captured once its minutes are complete, so an imported drop whose claim
+  never went through (for example, because the game account isn't linked)
+  is counted too, as the Drops tab counts it. Imported quests aren't marked
+  as quests. Entries without a category, drops not completed, and entries
+  credited to a streamer whose History was deleted are not imported.
 
 To turn it off, set `ANALYTICS_CONFIG["history_import_analytics"]` to `False`.
 `GET /history/health` reports its progress under `analytics_import`.

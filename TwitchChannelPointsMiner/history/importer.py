@@ -29,7 +29,6 @@ from TwitchChannelPointsMiner.history.journal import (
     write_atomic,
 )
 from TwitchChannelPointsMiner.history.store import (
-    DROP_MATCH_SECONDS,
     SESSION_GAP_SECONDS,
     clean_streamer,
     earliest_held,
@@ -861,15 +860,15 @@ class JournalImporter(object):
         if connection.execute(
             """
             SELECT 1 FROM deleted_drop_keys
-            WHERE dedupe_key = ?
-               OR (source = 'analytics' AND drop_id = ? AND game = ?
-                   AND ? <= ts + ?)
+            WHERE dedupe_key = ? OR (drop_id = ? AND game = ?)
             LIMIT 1
             """,
-            (key, drop_id, game, at, DROP_MATCH_SECONDS),
+            (key, drop_id, game),
         ).fetchone():
-            # Removed by a streamer delete (imported from the Drops data,
-            # when it matches that by the rule below), reported again since.
+            # Removed by a streamer delete (also when it was imported from
+            # the Drops data: a drop is claimed once), reported again since.
+            # Kept under this claim's own key too.
+            self._delete_drop_claim(connection, record, at)
             return
         inserted = connection.execute(
             """
@@ -894,16 +893,15 @@ class JournalImporter(object):
             ),
         ).rowcount
         if inserted > 0 and game is not None:
-            # The same claim imported from the Drops data (backfill.py): its
-            # entry was written after the claim.  The same rule decides it
-            # there, so the order of the two imports doesn't matter.
+            # The same claim imported from the Drops data (backfill.py, which
+            # skips it by the same rule, so the order of the two imports
+            # doesn't matter): a drop is claimed once.
             connection.execute(
                 """
                 DELETE FROM drops
                 WHERE source = 'analytics' AND drop_id = ? AND game = ?
-                  AND ts >= ?
                 """,
-                (drop_id, game, at - DROP_MATCH_SECONDS),
+                (drop_id, game),
             )
 
     @staticmethod

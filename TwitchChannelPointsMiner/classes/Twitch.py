@@ -79,6 +79,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
 )
 from TwitchChannelPointsMiner.classes.gql.Integration import GQLFactory
 from TwitchChannelPointsMiner.classes.Settings import (
+    DROPS_FILE_MUTEX,
     Events,
     FollowersOrder,
     Priority,
@@ -4283,9 +4284,11 @@ class Twitch(object):
             return []
 
         try:
-            with open(analytics_file, "r", encoding="utf-8") as current:
-                data = json.load(current)
-        except (OSError, json.JSONDecodeError):
+            with DROPS_FILE_MUTEX:
+                with open(analytics_file, "rb") as current:
+                    raw = current.read()
+            data = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return []
 
         drops = data.get("drops") if isinstance(data, dict) else None
@@ -10490,7 +10493,8 @@ class Twitch(object):
         temp_file = analytics_file + ".temp"
         with open(temp_file, "w", encoding="utf-8") as temp_handle:
             json.dump(data, temp_handle, indent=4)
-        os.replace(temp_file, analytics_file)
+        with DROPS_FILE_MUTEX:
+            os.replace(temp_file, analytics_file)
 
     @staticmethod
     def __counted_repeat_waits_for_its_claim(drop, was) -> bool:
@@ -12403,7 +12407,8 @@ class Twitch(object):
 
                 json.dump(data, temp_handle, indent=4)
 
-            os.replace(temp_file, analytics_file)
+            with DROPS_FILE_MUTEX:
+                os.replace(temp_file, analytics_file)
 
     def drop_report_snapshot(self):
         """Return the latest structured drop state tracked by this session."""
@@ -12536,7 +12541,8 @@ class Twitch(object):
             with open(temp_file, "w", encoding="utf-8") as temp_handle:
                 json.dump(data, temp_handle, indent=4)
 
-            os.replace(temp_file, analytics_file)
+            with DROPS_FILE_MUTEX:
+                os.replace(temp_file, analytics_file)
 
         if updated > 0:
             self.__log_drop_check(

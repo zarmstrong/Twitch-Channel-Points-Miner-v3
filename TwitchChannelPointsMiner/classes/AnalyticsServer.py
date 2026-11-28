@@ -14,7 +14,11 @@ from urllib.parse import unquote, urlsplit
 from flask import Flask, Response, cli, g, render_template, request
 
 from TwitchChannelPointsMiner import __version__
-from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
+from TwitchChannelPointsMiner.classes.Settings import (
+    ANALYTICS_FILE_MUTEX,
+    DROPS_FILE_MUTEX,
+    Settings,
+)
 from TwitchChannelPointsMiner.config_editor import (
     NOTIFICATION_SCHEMAS,
     ConfigEditError,
@@ -562,9 +566,13 @@ def drops_by_category():
         )
 
     try:
-        with open(drops_file, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except (json.JSONDecodeError, OSError) as error:
+        # Read under the lock the miner replaces the file under (Windows
+        # can't replace a file that is open here); parsed after.
+        with DROPS_FILE_MUTEX:
+            with open(drops_file, "rb") as file:
+                raw = file.read()
+        data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as error:
         logger.error("Unable to read analytics Drops file '%s': %s", drops_file, error)
         return Response(
             json.dumps({"categories": {}, "drops": []}),

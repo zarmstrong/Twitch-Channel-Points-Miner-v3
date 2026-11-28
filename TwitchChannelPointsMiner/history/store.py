@@ -40,13 +40,10 @@ SECONDS_PER_DAY = 24 * 60 * 60
 # its newest record.
 SESSION_GAP_SECONDS = 180
 
-# A claim imported from the dashboard's Drops data and a journalled claim of
-# the same drop (and category) are one claim when the journal's is at most
-# this much later than the Drops entry: the miner writes the journal record
-# first, and the entry's time only moves later (it is refreshed whenever the
-# drop is seen again).  A journalled claim later than that is a new one,
-# such as the next repeat of a quest.
-DROP_MATCH_SECONDS = 60
+# A drop (by its id, under one category) is claimed at most once: each
+# repeat of a quest's reward group is a drop of its own ("<group>#<n>").  So a
+# claim imported from the dashboard's Drops data and a journalled claim of
+# the same drop and category are the same claim, whenever each was written.
 
 # Tables holding per-streamer rows, cleared by a delete.
 _STREAMER_TABLES = (

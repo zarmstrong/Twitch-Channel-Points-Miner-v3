@@ -21,10 +21,13 @@ the database:
 The claimed drops in the dashboard's Drops data (``drops_by_category.json``)
 are imported once too.  That file keeps one entry per drop and category, and
 moves its time on whenever the miner sees the drop again, so a time boundary
-can't tell an old claim from one the journal recorded.  A claim is skipped
-instead when the journal holds a claim of the same drop and category that is
-no later than the entry (plus ``DROP_MATCH_SECONDS``), and the importer
-removes an imported claim by the same rule when the journal's arrives later.
+can't tell an old claim from one the journal recorded.  A drop is claimed at
+once at most (see store.py), so an entry is skipped when the journal holds a
+claim of the same drop and category, and the importer removes an imported
+entry when the journal's claim of it arrives later.  An entry is "captured"
+once the drop's minutes are complete, before its claim is accepted: one whose
+claim never went through (an unlinked game account, say) is counted too, as
+it is in the Drops tab.
 """
 
 import json
@@ -32,6 +35,7 @@ import logging
 import math
 import os
 import time
+from contextlib import nullcontext
 
 from TwitchChannelPointsMiner.history.importer import (
     JournalImporter,
@@ -40,7 +44,6 @@ from TwitchChannelPointsMiner.history.importer import (
     _text,
 )
 from TwitchChannelPointsMiner.history.store import (
-    DROP_MATCH_SECONDS,
     _float_or_none,
     clean_streamer,
     earliest_held,
@@ -80,6 +83,16 @@ def reason_code(label):
     if text is None:
         return None
     return "_".join(text.upper().split())
+
+
+def drops_file_lock():
+    """The lock the miner replaces the Drops data under (Settings)."""
+
+    try:
+        from TwitchChannelPointsMiner.classes.Settings import DROPS_FILE_MUTEX
+    except Exception:
+        return nullcontext()
+    return DROPS_FILE_MUTEX
 
 
 class _Retry(Exception):
@@ -555,11 +568,11 @@ class AnalyticsBackfill(object):
                 return 0
         path = os.path.join(self.analytics_path, DROPS_FILE)
         try:
-            # The miner replaces this file under its own lock, which History
-            # can't reach (the dashboard's Drops tab reads it without one
-            # too); the read is short, and a failed one is tried again.
-            with open(path, "rb") as handle:
-                data = handle.read()
+            # Read under the lock the miner replaces the file under: on
+            # Windows the replace fails while the file is open here.
+            with drops_file_lock():
+                with open(path, "rb") as handle:
+                    data = handle.read()
             payload = json.loads(data.decode("utf-8"))
         except FileNotFoundError:
             payload = None
@@ -622,12 +635,10 @@ class AnalyticsBackfill(object):
             if connection.execute(
                 f"""
                 SELECT 1 FROM {table}
-                WHERE (source = 'journal' AND drop_id = ? AND game = ?
-                       AND ts <= ?)
-                   OR (? = 'deleted_drop_keys' AND dedupe_key = ?)
+                WHERE (drop_id = ? AND game = ?) OR dedupe_key = ?
                 LIMIT 1
                 """,
-                (drop_id, game, ts + DROP_MATCH_SECONDS, table, key),
+                (drop_id, game, key),
             ).fetchone():
                 return 0
         benefit = _text(entry.get("benefit"))
