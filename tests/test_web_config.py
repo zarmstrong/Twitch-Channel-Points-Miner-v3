@@ -3557,3 +3557,47 @@ def test_managed_web_config_rejects_invalid_history_settings(tmp_path, values):
         )
 
     assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "analytics",
+    [
+        "build_analytics_config()",
+        "ANALYTICS",
+        '{"history_retention_days": 30, **EXTRA}',
+        "{**EXTRA}",
+    ],
+)
+def test_managed_web_config_shows_history_settings_it_cannot_evaluate_as_unknown(
+    tmp_path, analytics
+):
+    config = tmp_path / "config.py"
+    _write_history_config(config, analytics)
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_days"] is None
+    assert history["import_analytics"] is None
+
+
+def test_managed_web_config_reads_and_edits_the_last_duplicate_history_key(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(
+        config,
+        '{"history_retention_days": 730, "history_retention_days": 30, '
+        '"history_import_analytics": True, "history_import_analytics": False}',
+    )
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_days"] == 30
+    assert history["import_analytics"] is False
+
+    result = update_managed_web_config(
+        config, {"action": "update_history", "values": {"retention_days": 90}}
+    )
+
+    assert result["history"]["retention_days"] == 90
+    assert _load_config(config).ANALYTICS_CONFIG["history_retention_days"] == 90
+
+
+def test_managed_web_config_reads_a_key_after_unpacking(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{**EXTRA, "history_retention_days": 30}')
+    assert read_managed_web_config(config)["history"]["retention_days"] == 30

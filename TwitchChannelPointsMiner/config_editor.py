@@ -419,13 +419,29 @@ _UNREADABLE = object()
 
 
 def _analytics_literal(analytics_node, key):
-    """A literal ANALYTICS_CONFIG value; None when the key is missing (or
-    ANALYTICS_CONFIG isn't a literal dict), _UNREADABLE for an expression
-    the dashboard can't evaluate (a variable, a call)."""
+    """The ANALYTICS_CONFIG value the miner runs with, as a literal: None
+    when the key is missing (or ANALYTICS_CONFIG is None), _UNREADABLE when
+    the dashboard can't evaluate it (ANALYTICS_CONFIG or the value is a
+    variable or a call, or a later ``**`` entry may set the key)."""
 
-    node = _dict_item(analytics_node, key)
+    if analytics_node is None or (
+        isinstance(analytics_node, ast.Constant) and analytics_node.value is None
+    ):
+        return None
+    if not isinstance(analytics_node, ast.Dict):
+        return _UNREADABLE
+    node = None
+    for item_key, value in zip(analytics_node.keys, analytics_node.values):
+        if item_key is None:
+            # ``**mapping``: it may set the key, overriding what came before.
+            node = _UNREADABLE
+        elif isinstance(item_key, ast.Constant) and item_key.value == key:
+            # The last entry wins, as in Python (and the editor writes it).
+            node = value
     if node is None:
         return None
+    if node is _UNREADABLE:
+        return _UNREADABLE
     try:
         return ast.literal_eval(node)
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
