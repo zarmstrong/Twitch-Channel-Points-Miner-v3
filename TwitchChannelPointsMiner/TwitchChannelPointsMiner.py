@@ -490,6 +490,7 @@ class TwitchChannelPointsMiner:
         "daily_report_state_dirty",
         "daily_report_save_failing",
         "daily_report_balances_loaded",
+        "history_streamers_loaded",
         "daily_report_in_progress",
         "daily_report_state_path",
         "update_check_enabled",
@@ -723,6 +724,8 @@ class TwitchChannelPointsMiner:
         # Streamers hold 0 points until run() loads them; an exit before then
         # must not record those as their final balances.
         self.daily_report_balances_loaded = False
+        # The streamers have loaded: History may import their analytics JSON.
+        self.history_streamers_loaded = False
         # The thread sending a report, if any.
         self.daily_report_in_progress = None
         # Drop progress lives in memory, so put back what was recorded since
@@ -773,13 +776,17 @@ class TwitchChannelPointsMiner:
         trust_proxy_auth: bool = False,
         allowed_hosts: list = None,
         history_retention_days: int = 730,
+        history_import_analytics: bool = True,
     ):
         # Analytics switch
         if Settings.enable_analytics is True:
             try:
                 from TwitchChannelPointsMiner.history import start_history
 
-                start_history(retention_days=history_retention_days)
+                start_history(
+                    retention_days=history_retention_days,
+                    import_analytics=history_import_analytics,
+                )
             except Exception:
                 logger.warning(
                     "Unable to start the optional History tab", exc_info=True
@@ -975,6 +982,7 @@ class TwitchChannelPointsMiner:
             # Before the streamers load: checking them online already writes
             # History records.
             self.__start_history_journal()
+            self.__list_history_streamers()
             self.twitch.track_drop_item_art = drop_item_art
             self.twitch.scrape_drop_progress_on_load = scrape_drop_progress_on_load
             self.twitch.log_drop_checks = log_drop_checks
@@ -1366,6 +1374,8 @@ class TwitchChannelPointsMiner:
             self.original_streamers[:] = [
                 streamer.channel_points for streamer in self.streamers
             ]
+            # History may now import these streamers' analytics JSON.
+            self.history_streamers_loaded = True
             if Settings.logger.daily_report is True and self.daily_report_date is None:
                 self.daily_report_streamers = {
                     streamer.username: streamer.channel_points
@@ -3381,6 +3391,29 @@ class TwitchChannelPointsMiner:
             start_journal()
         except Exception:
             logger.warning("Unable to start the History journal", exc_info=True)
+
+    def __list_history_streamers(self):
+        """Tell History which streamers it records, for its import of the
+        analytics JSON."""
+
+        try:
+            from TwitchChannelPointsMiner.history import set_history_streamers
+
+            set_history_streamers(self.__history_streamer_names)
+        except Exception:
+            logger.warning("Unable to list the streamers for History", exc_info=True)
+
+    def __history_streamer_names(self):
+        """The usernames History records; called from the History thread.
+        None until the streamers have loaded."""
+
+        if not getattr(self, "history_streamers_loaded", False):
+            return None
+        return [
+            streamer.username
+            for streamer in list(self.streamers)
+            if history_journal.JOURNAL.eligible(streamer)
+        ]
 
     @staticmethod
     def __stop_history_journal():

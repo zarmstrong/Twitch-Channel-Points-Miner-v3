@@ -59,6 +59,7 @@ ANALYTICS_CONFIG = {
     "days_ago": 7,
     "log_poll_interval": 5,
     "history_retention_days": 730,
+    "history_import_analytics": True,
 }
 ```
 

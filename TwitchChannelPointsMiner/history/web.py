@@ -15,6 +15,7 @@ from TwitchChannelPointsMiner.history import (
     HistoryUnavailableError,
     delete_streamer_history,
     get_store,
+    import_status,
     is_recording,
 )
 
@@ -167,6 +168,7 @@ def health():
             "recording": is_recording(),
             "database": store.path,
             "journal": store.journal_status(),
+            "analytics_import": import_status(),
         }
     )
 
