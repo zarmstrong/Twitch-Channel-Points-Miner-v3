@@ -10,18 +10,22 @@
     'use strict';
 
     var REFRESH_MS = 60000;
+    // How often the Config tab re-reads the analytics import while it runs.
+    var IMPORT_POLL_MS = 5000;
     var REQUEST_TIMEOUT_MS = 30000;
     var DAY_OPTIONS = [7, 30, 90, 365];
     var numberFormat = new Intl.NumberFormat();
 
-    // Node loads this file only for the delete flow's decisions and the
-    // import note (tested in tests/js/); the tab itself needs a browser.
+    // Node loads this file only for the delete flow's decisions, the
+    // import note and the Import button (tested in tests/js/); the tab
+    // itself needs a browser.
     if (typeof window === 'undefined') {
         if (typeof module === 'object' && module.exports) {
             module.exports = {
                 REQUEST_TIMEOUT_MS: REQUEST_TIMEOUT_MS,
                 deleteButtonState: deleteButtonState,
                 detailMessageFor: detailMessageFor,
+                importControlState: importControlState,
                 importNoteText: importNoteText,
                 runDelete: runDelete
             };
@@ -136,6 +140,47 @@
         return 'History before ' + formatDate(before) + ' was imported from ' +
             'the analytics data: it has points and predictions only, without ' +
             'watch time or live sessions.';
+    }
+
+    // What the Config tab's History box shows for the analytics import:
+    // status is GET /history/import's body, or null when History can't be
+    // asked.  showButton is false once the import has been done, and while
+    // it runs; polling is true while it runs.
+    function importControlState(status) {
+        if (!status) {
+            return {
+                text: 'History is not running, so the analytics data cannot be imported now.',
+                showButton: false,
+                polling: false
+            };
+        }
+        if (status.complete === true) {
+            return {
+                text: 'The existing analytics data has been imported.',
+                showButton: false,
+                polling: false
+            };
+        }
+        var waiting = Number(status.streamers_waiting);
+        var known = status.streamers_waiting !== null &&
+            status.streamers_waiting !== undefined && Number.isFinite(waiting);
+        var left = known
+            ? ' ' + numberFormat.format(waiting) + (waiting === 1 ? ' streamer' : ' streamers') + ' left.'
+            : '';
+        if (status.requested === true || status.automatic === true) {
+            var text = status.boundary === null || status.boundary === undefined
+                ? 'The analytics data will be imported once History has recorded its first entry.'
+                : 'Importing the existing analytics data…' + left;
+            return { text: text, showButton: false, polling: true };
+        }
+        return {
+            text: known
+                ? 'The analytics data of ' + numberFormat.format(waiting) +
+                    (waiting === 1 ? ' streamer has' : ' streamers have') + ' not been imported.'
+                : 'The existing analytics data has not been imported.',
+            showButton: true,
+            polling: false
+        };
     }
 
     function formatDay(day) {
@@ -359,9 +404,55 @@
             } else {
                 hideHistory();
             }
+            importControl.visible = tabName === 'config';
+            if (importControl.visible) loadImportStatus();
         };
         wrapped.__historyWrapped = true;
         window.switchDashboardTab = wrapped;
+    }
+
+    // -- the Config tab's Import button ---------------------------------------
+    var importControl = { visible: false, timer: null, request: 0 };
+
+    function renderImportControl(status) {
+        var text = byId('history-import-status');
+        var button = byId('history-import-button');
+        if (!text || !button) return;
+        var view = importControlState(status);
+        text.textContent = view.text;
+        button.style.display = view.showButton ? '' : 'none';
+        button.disabled = false;
+        if (importControl.timer) clearTimeout(importControl.timer);
+        importControl.timer = null;
+        if (view.polling && importControl.visible) {
+            importControl.timer = setTimeout(loadImportStatus, IMPORT_POLL_MS);
+        }
+    }
+
+    function loadImportStatus() {
+        if (!byId('history-import-status')) return;
+        var request = ++importControl.request;
+        fetchJson('import').then(function (status) {
+            if (request === importControl.request) renderImportControl(status);
+        }).catch(function () {
+            if (request === importControl.request) renderImportControl(null);
+        });
+    }
+
+    function startImport() {
+        var button = byId('history-import-button');
+        if (button) button.disabled = true;
+        var request = ++importControl.request;
+        fetchJson('import', null, null, 'POST').then(function (status) {
+            if (request === importControl.request) renderImportControl(status);
+        }).catch(function (error) {
+            if (request !== importControl.request) return;
+            // The button stays, so the import can be tried again.
+            var text = byId('history-import-status');
+            if (text) text.textContent = 'Unable to start the import: ' +
+                (error && error.message ? error.message : String(error));
+            if (button) button.disabled = false;
+        });
     }
 
     // -- controls ----------------------------------------------------------
@@ -385,6 +476,8 @@
     }
 
     function bindControls() {
+        var importButton = byId('history-import-button');
+        if (importButton) importButton.addEventListener('click', startImport);
         var refresh = byId('history-refresh');
         if (refresh) {
             refresh.addEventListener('click', function () {
@@ -1268,6 +1361,12 @@
             bindControls();
             renderWindows();
             applyHistoryTheme();
+            var configPanel = byId('config-panel');
+            if (configPanel && configPanel.style.display !== 'none') {
+                // Opened on the Config tab, before the switcher was wrapped.
+                importControl.visible = true;
+                loadImportStatus();
+            }
             try {
                 if (window.location.hash === '#history') {
                     switchDashboardTab('history');

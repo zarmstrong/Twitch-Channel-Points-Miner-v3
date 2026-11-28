@@ -70,9 +70,11 @@ class HistoryRecorder(threading.Thread):
         # Serializes imports with deletes.
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
+        # Set to poll before the interval is up (an import was requested).
+        self._wake = threading.Event()
         self._last_retention = None
         self._last_warning = {}
-        # The analytics JSON import (see backfill.py), when enabled.
+        # The analytics JSON import (see backfill.py), if any.
         self.backfill = None
 
     # -- thread ----------------------------------------------------------------
@@ -83,12 +85,14 @@ class HistoryRecorder(threading.Thread):
             self._stop_event.wait(_RETRY_SECONDS)
         while not self._stop_event.is_set():
             self.poll_once()
-            self._stop_event.wait(self.interval)
+            self._wake.wait(self.interval)
+            self._wake.clear()
         # The miner wrote run_end before stopping History: take it in.
         self.poll_once()
 
     def stop(self):
         self._stop_event.set()
+        self._wake.set()
 
     def _warn(self, message):
         """Log the current exception; a repeat within the interval logs one
@@ -168,6 +172,19 @@ class HistoryRecorder(threading.Thread):
                 self._warn("Unable to rebuild the History database; retrying")
                 return
             self._warn("Unable to import the analytics data into History; retrying")
+
+    def request_import(self):
+        """Import the analytics data now (the dashboard's button); returns
+        the import's status."""
+
+        if self.backfill is None:
+            raise HistoryUnavailableError("History cannot import analytics data")
+        with self._lock:
+            if not self.store.ready and not self._initialize():
+                raise HistoryUnavailableError("History is still starting")
+            self.backfill.request()
+        self._wake.set()
+        return self.backfill.status()
 
     def drain(self):
         """One last import (the miner stopped)."""
@@ -276,9 +293,9 @@ def build_recorder(
     import_analytics=False,
     streamers=None,
 ):
-    """The account's recorder; with ``import_analytics``, it also imports
-    the analytics JSON of the streamers ``streamers()`` lists (see
-    ``backfill.py``)."""
+    """The account's recorder.  It imports the analytics JSON of the
+    streamers ``streamers()`` lists (see ``backfill.py``): by itself with
+    ``import_analytics``, otherwise when the dashboard asks."""
 
     store = HistoryStore(os.path.join(analytics_path, "history.sqlite3"))
     recorder = HistoryRecorder(
@@ -286,13 +303,13 @@ def build_recorder(
         os.path.join(analytics_path, "history"),
         retention_days=retention_days,
     )
-    if import_analytics:
-        recorder.backfill = AnalyticsBackfill(
-            store,
-            analytics_path,
-            recorder.importer,
-            streamers,
-            monotonic=recorder.monotonic,
-            file_mutex=analytics_file_mutex(),
-        )
+    recorder.backfill = AnalyticsBackfill(
+        store,
+        analytics_path,
+        recorder.importer,
+        streamers,
+        monotonic=recorder.monotonic,
+        file_mutex=analytics_file_mutex(),
+        automatic=import_analytics is True,
+    )
     return recorder

@@ -306,6 +306,16 @@ def import_status():
     return backfill.status()
 
 
+def request_import():
+    """Import the analytics data now (the dashboard's Import button), even
+    with ``history_import_analytics`` off; returns the import's status."""
+
+    recorder = _recorder
+    if recorder is None or not recorder.store.ready:
+        raise HistoryUnavailableError("History is still starting")
+    return recorder.request_import()
+
+
 def get_store():
     """Return the initialized store, or None while History is unavailable."""
 
@@ -323,6 +333,7 @@ __all__ = [
     "history_streamers",
     "import_status",
     "is_recording",
+    "request_import",
     "set_history_streamers",
     "start_history",
     "start_journal",

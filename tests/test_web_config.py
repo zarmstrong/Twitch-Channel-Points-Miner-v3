@@ -3403,3 +3403,103 @@ def test_streamer_edits_keep_crlf_line_breaks(tmp_path, payload):
     assert b"\n" in written
     assert written.count(b"\n") == written.count(b"\r\n")
     assert b"\r\r" not in written
+
+
+def _write_history_config(path, analytics):
+    write_config(path)
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace("ANALYTICS_CONFIG = None", f"ANALYTICS_CONFIG = {analytics}"),
+        encoding="utf-8",
+    )
+
+
+def test_managed_web_config_reads_history_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv("TCPM_HISTORY_RETENTION_DAYS", raising=False)
+    config = tmp_path / "config.py"
+    write_config(config)
+    # No ANALYTICS_CONFIG dict: History's defaults.
+    assert read_managed_web_config(config)["history"] == {
+        "retention_days": 730,
+        "import_analytics": True,
+        "retention_env_override": None,
+    }
+
+    _write_history_config(
+        config,
+        '{"port": 5000, "history_retention_days": 90, '
+        '"history_import_analytics": False}',
+    )
+    monkeypatch.setenv("TCPM_HISTORY_RETENTION_DAYS", "30")
+    assert read_managed_web_config(config)["history"] == {
+        "retention_days": 90,
+        "import_analytics": False,
+        "retention_env_override": "30",
+    }
+
+
+def test_managed_web_config_shows_the_default_for_an_unreadable_retention(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{"history_retention_days": DAYS}')
+    assert read_managed_web_config(config)["history"]["retention_days"] == 730
+
+
+def test_managed_web_config_updates_history_settings(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(
+        config,
+        '{\n    "port": 5000,  # my port\n    "history_retention_days": 730,\n}',
+    )
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_history",
+            "values": {"retention_days": 0, "import_analytics": False},
+        },
+    )
+
+    assert result["history"]["retention_days"] == 0
+    assert result["history"]["import_analytics"] is False
+    source = config.read_text(encoding="utf-8")
+    assert '"port": 5000,  # my port' in source
+    loaded = _load_config(config)
+    assert loaded.ANALYTICS_CONFIG["history_retention_days"] == 0
+    assert loaded.ANALYTICS_CONFIG["history_import_analytics"] is False
+    assert loaded.ANALYTICS_CONFIG["port"] == 5000
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"retention_days": -1},
+        {"retention_days": 36501},
+        {"retention_days": 1.5},
+        {"retention_days": "30"},
+        {"retention_days": True},
+        {"import_analytics": "yes"},
+        {"retention": 30},
+        ["retention_days"],
+    ],
+    ids=[
+        "negative",
+        "too-large",
+        "float",
+        "string",
+        "bool",
+        "import-string",
+        "unknown-key",
+        "not-a-dict",
+    ],
+)
+def test_managed_web_config_rejects_invalid_history_settings(tmp_path, values):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{"history_retention_days": 730}')
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(
+            config, {"action": "update_history", "values": values}
+        )
+
+    assert config.read_text(encoding="utf-8") == before

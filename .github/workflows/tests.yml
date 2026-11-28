@@ -84,6 +84,7 @@ jobs:
         run: |
           node tests/js/history-delete.test.js
           node tests/js/history-import-note.test.js
+          node tests/js/history-import-button.test.js
 
   black:
     name: Black

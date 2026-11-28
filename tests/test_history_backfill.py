@@ -75,7 +75,9 @@ def tracked():
     return {"names": ["alice"]}
 
 
-def recorder_for(analytics, tracked, batch_size=2000, step_seconds=1.0, mono=None):
+def recorder_for(
+    analytics, tracked, batch_size=2000, step_seconds=1.0, mono=None, automatic=True
+):
     store = HistoryStore(os.path.join(analytics.root, "history.sqlite3"))
     clock = mono if mono is not None else {"mono": 0.0}
     recorder = HistoryRecorder(
@@ -92,6 +94,7 @@ def recorder_for(analytics, tracked, batch_size=2000, step_seconds=1.0, mono=Non
         monotonic=lambda: clock["mono"],
         batch_size=batch_size,
         step_seconds=step_seconds,
+        automatic=automatic,
     )
     assert recorder._initialize()
     return recorder
@@ -686,14 +689,136 @@ def test_retention_runs_once_the_import_finishes(analytics, tracked):
     assert totals(recorder.store)["gained"] == 70
 
 
-def test_the_import_can_be_turned_off(tmp_path):
+def test_the_automatic_import_can_be_turned_off(tmp_path):
     recorder = build_recorder(str(tmp_path), import_analytics=False)
-    assert recorder.backfill is None
+    assert isinstance(recorder.backfill, AnalyticsBackfill)
+    assert recorder.backfill.automatic is False
 
     recorder = build_recorder(
         str(tmp_path), import_analytics=True, streamers=lambda: ["alice"]
     )
-    assert isinstance(recorder.backfill, AnalyticsBackfill)
+    assert recorder.backfill.automatic is True
+
+
+def test_with_the_automatic_import_off_only_a_request_imports(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked, automatic=False)
+
+    recorder.poll_once()
+    assert points(recorder.store) == []
+    status = recorder.backfill.status()
+    assert status["complete"] is False
+    assert status["requested"] is False
+    assert status["streamers_waiting"] == 1
+
+    status = recorder.request_import()
+    assert status["requested"] is True
+    assert status["complete"] is False
+
+    recorder.poll_once()
+    assert totals(recorder.store)["gained"] == 5
+    status = recorder.backfill.status()
+    # Done: the request is cleared and the button hides.
+    assert status["complete"] is True
+    assert status["requested"] is False
+
+
+def test_a_request_survives_a_restart_until_the_import_is_done(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    tracked["names"] = None  # The miner hasn't listed its streamers yet.
+    recorder.request_import()
+    recorder.poll_once()
+    assert recorder.backfill.status()["requested"] is True
+
+    tracked["names"] = ["alice"]
+    restarted = recorder_for(analytics, tracked, automatic=False)
+    restarted.poll_once()
+    assert totals(restarted.store)["gained"] == 5
+    assert restarted.backfill.status()["requested"] is False
+
+
+def test_a_streamer_added_after_a_requested_import_waits_for_the_next(
+    analytics, tracked
+):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.write("bob", [entry(T0 - 300, 10), entry(T0 - 200, 30)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    recorder.request_import()
+    recorder.poll_once()
+    assert recorder.backfill.status()["complete"] is True
+
+    tracked["names"] = ["alice", "bob"]
+    recorder.poll_once()
+    assert totals(recorder.store, "bob")["gained"] == 0
+    status = recorder.backfill.status()
+    assert status["complete"] is False
+    assert status["streamers_waiting"] == 1
+
+    recorder.request_import()
+    recorder.poll_once()
+    assert totals(recorder.store, "bob")["gained"] == 20
+    assert recorder.backfill.status()["complete"] is True
+
+
+def test_a_request_with_the_automatic_import_on_is_cleared(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked)
+    recorder.request_import()
+    recorder.poll_once()
+    status = recorder.backfill.status()
+    assert status["complete"] is True
+    assert status["requested"] is False
+
+
+def test_a_request_wakes_the_history_thread(analytics, tracked):
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    assert not recorder._wake.is_set()
+    recorder.request_import()
+    assert recorder._wake.is_set()
+
+
+def test_the_import_routes(analytics, tracked):
+    from flask import Flask
+
+    from TwitchChannelPointsMiner.history import web as history_web
+
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 105)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    recorder.poll_once()
+    app = Flask(__name__)
+    history_web.register_history(app)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(history_web, "get_store", lambda: recorder.store)
+        patch.setattr(history_web, "import_status", recorder.backfill.status)
+        patch.setattr(history_web, "request_import", recorder.request_import)
+        client = app.test_client()
+        before = client.get("/history/import").get_json()
+        started = client.post("/history/import").get_json()
+        recorder.poll_once()
+        after = client.get("/history/import").get_json()
+
+    assert (before["complete"], before["requested"]) == (False, False)
+    assert (started["complete"], started["requested"]) == (False, True)
+    assert (after["complete"], after["requested"]) == (True, False)
+
+
+def test_the_import_routes_return_503_without_history(monkeypatch):
+    from flask import Flask
+
+    from TwitchChannelPointsMiner.history import web as history_web
+
+    monkeypatch.setattr(history_web, "get_store", lambda: None)
+    app = Flask(__name__)
+    history_web.register_history(app)
+    client = app.test_client()
+    assert client.get("/history/import").status_code == 503
+    assert client.post("/history/import").status_code == 503
 
 
 def test_the_overview_says_when_imported_history_ends(analytics, tracked):
@@ -730,6 +855,9 @@ def test_health_reports_the_import(analytics, tracked):
         "imported": True,
         "streamers_done": 1,
         "streamers_waiting": 0,
+        "automatic": True,
+        "requested": False,
+        "complete": True,
     }
 
 

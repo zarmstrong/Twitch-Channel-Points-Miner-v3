@@ -15,6 +15,10 @@ import tokenize
 from pathlib import Path
 
 CONFIG_FILE_MUTEX = threading.Lock()
+# History's raw-row retention: 0 keeps them forever; the cap catches typos.
+HISTORY_RETENTION_DEFAULT = 730
+HISTORY_RETENTION_MAX_DAYS = 36500
+HISTORY_RETENTION_ENV_VAR = "TCPM_HISTORY_RETENTION_DAYS"
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 WEB_CONFIG_FILENAME = "web-config.json"
 STREAMER_SETTING_DEFAULTS = {
@@ -268,6 +272,9 @@ def _base_web_config(config_path):
     tree, streamer_nodes, category_nodes = _config_lists(source)
     miner = _simple_value(_assignment(tree, "MINER_CONFIG")) or {}
     mine = _simple_value(_assignment(tree, "MINE_CONFIG")) or {}
+    analytics = _simple_value(_assignment(tree, "ANALYTICS_CONFIG"))
+    if not isinstance(analytics, dict):
+        analytics = {}
     global_streamer_settings = miner.get("streamer_settings") or {}
     effective_streamer_defaults = dict(STREAMER_SETTING_DEFAULTS)
     effective_streamer_defaults.update(
@@ -400,12 +407,32 @@ def _base_web_config(config_path):
             "startup_only": startup_only,
         },
         "login": {"android": miner.get("android_login", False) is True},
+        "history": _history_settings(analytics),
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
         # WATCH_STATUS is never sent to notifiers, so it isn't offered.
         "notification_event_options": [
             event.name for event in Events if event is not Events.WATCH_STATUS
         ],
+    }
+
+
+def _history_settings(analytics):
+    retention = analytics.get("history_retention_days", HISTORY_RETENTION_DEFAULT)
+    if (
+        not isinstance(retention, int)
+        or isinstance(retention, bool)
+        or not 0 <= retention <= HISTORY_RETENTION_MAX_DAYS
+    ):
+        # A variable or invalid value: History uses its default for it.
+        retention = HISTORY_RETENTION_DEFAULT
+    override = os.environ.get(HISTORY_RETENTION_ENV_VAR, "").strip()
+    return {
+        "retention_days": retention,
+        "import_analytics": analytics.get("history_import_analytics", True)
+        is not False,
+        # Set, the environment variable wins over the saved value.
+        "retention_env_override": override or None,
     }
 
 
@@ -1966,6 +1993,31 @@ def _update_managed_web_config(config_path, payload):
                 "MINER_CONFIG",
                 {"android_login": repr(values["android"])},
             )
+    elif action == "update_history":
+        values = payload.get("values") or {}
+        if not isinstance(values, dict) or set(values) - {
+            "retention_days",
+            "import_analytics",
+        }:
+            raise ConfigEditError("Unsupported History setting.")
+        rendered = {}
+        if "retention_days" in values:
+            days = values["retention_days"]
+            if (
+                not isinstance(days, int)
+                or isinstance(days, bool)
+                or not 0 <= days <= HISTORY_RETENTION_MAX_DAYS
+            ):
+                raise ConfigEditError(
+                    "History retention must be a whole number of days from 0 "
+                    f"to {HISTORY_RETENTION_MAX_DAYS}."
+                )
+            rendered["history_retention_days"] = repr(days)
+        if "import_analytics" in values:
+            if not isinstance(values["import_analytics"], bool):
+                raise ConfigEditError("import_analytics must be true or false.")
+            rendered["history_import_analytics"] = repr(values["import_analytics"])
+        _set_dict_items(config_path, "ANALYTICS_CONFIG", rendered)
     elif action == "update_notification":
         provider = payload.get("provider")
         schema = NOTIFICATION_SCHEMAS.get(provider)

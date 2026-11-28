@@ -1,7 +1,8 @@
 """Flask blueprint for the optional History dashboard tab.
 
-All endpoints are read-only JSON behind the analytics server's existing
-authentication (``DELETE /history/streamer/<name>`` is the one write).  They
+All endpoints are JSON behind the analytics server's existing
+authentication.  They only read, except ``DELETE /history/streamer/<name>``
+and ``POST /history/import``.  They
 return ``503`` until History has initialized its database, which also keeps
 the endpoints safe in tests or when History failed to start.
 """
@@ -17,6 +18,7 @@ from TwitchChannelPointsMiner.history import (
     get_store,
     import_status,
     is_recording,
+    request_import,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,6 +173,23 @@ def health():
             "analytics_import": import_status(),
         }
     )
+
+
+@bp.route("/import", methods=["GET"])
+def analytics_import():
+    """Whether the analytics data has been imported (the Import button)."""
+
+    _store()
+    status = import_status()
+    if status is None:
+        raise HistoryApiError("History cannot import analytics data.", status=503)
+    return jsonify(status)
+
+
+@bp.route("/import", methods=["POST"])
+def start_analytics_import():
+    _store()
+    return jsonify(request_import())
 
 
 def register_history(app):

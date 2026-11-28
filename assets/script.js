@@ -388,6 +388,7 @@ $(document).ready(function () {
     $('#logging-settings-form').submit(saveLoggingSettings);
     $('#update-settings-form').submit(saveUpdateSettings);
     $('#login-settings-form').submit(saveLoginSettings);
+    $('#history-settings-form').submit(saveHistorySettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
     $('#restart-miner').on('click', restartMiner);
     $('#dismiss-update-banner').click(dismissUpdateBanner);
@@ -1351,6 +1352,7 @@ function renderWebConfig(config) {
     $('#update-check-interval').val(config.updates.interval_hours);
     $('#update-check-startup-only').prop('checked', config.updates.startup_only);
     $('#android-login-enabled').prop('checked', Boolean(config.login && config.login.android));
+    renderHistorySettings(config.history || {});
     toggleUpdateInterval();
     renderNotificationSettings(config);
 }
@@ -1807,6 +1809,29 @@ function saveLoginSettings(event) {
         action: 'update_login',
         values: { android: $('#android-login-enabled').prop('checked') }
     }, 'Login settings were saved. Restart the miner to apply them.', button);
+}
+
+function renderHistorySettings(history) {
+    $('#history-retention-days').val(history.retention_days);
+    $('#history-import-analytics').prop('checked', history.import_analytics !== false);
+    var override = history.retention_env_override;
+    $('#history-retention-override')
+        .text(override
+            ? 'TCPM_HISTORY_RETENTION_DAYS=' + override + ' is set, so History uses that value instead of this one.'
+            : '')
+        .toggle(Boolean(override));
+}
+
+function saveHistorySettings(event) {
+    event.preventDefault();
+    var button = $(this).find('button[type="submit"]');
+    updateWebConfig({
+        action: 'update_history',
+        values: {
+            retention_days: Number($('#history-retention-days').val()),
+            import_analytics: $('#history-import-analytics').prop('checked')
+        }
+    }, 'History settings were saved. Restart the miner to apply them.', button);
 }
 
 function renderNotificationSettings(config) {
