@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.24.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.23.0...3.24.0) (2026-11-28)
+
+
+### Features
+
+* **analytics:** add History dashboard tab ([#366](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/366)) ([582b86c](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/582b86cced8f2bbfe5f510a33c79890d6b720df3))
+* **analytics:** record History from a journal the miner writes ([#394](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/394)) ([cac8576](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cac857678292ee869b49b830ece0176cde20f268))
+* **history:** add a Delete history action to the streamer drill-down ([#396](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/396)) ([5b291cf](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/5b291cf0dd80d60bf033b94c6161b8da448aa92a))
+* **history:** import existing analytics data into History once ([#408](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/408)) ([4def138](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/4def138424fcb3c752cf98a4f388ee51ae143320))
+
+
+### Bug Fixes
+
+* **analytics:** History tab follow-ups for [#366](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/366) ([#395](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/395)) ([dfc4a91](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/dfc4a91becfcac1de93018a49ad1f566df36404c))
+* **deps:** bump apprise from 2.2.0 to 2.3.0 ([#400](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/400)) ([df12f0e](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/df12f0e233c3154fdd6441656032fe81590539b9))
+
+
+### Documentation
+
+* **analytics:** document History's journal, storage, limits and API ([cac8576](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/cac857678292ee869b49b830ece0176cde20f268))
+
 ## [3.23.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.22.0...3.23.0) (2026-11-24)
 
 
