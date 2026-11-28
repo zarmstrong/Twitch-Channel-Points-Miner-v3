@@ -3317,6 +3317,10 @@ class TwitchChannelPointsMiner:
 
         self.running = self.twitch.running = False
         self.drop_badge_catalog_stop_event.set()
+        # Drop claim threads start no new claim and stop waiting to claim.
+        stop_claims = getattr(self.twitch, "stop_drop_claim_workers", None)
+        if stop_claims is not None:
+            stop_claims()
         if self.ws_pool is not None:
             self.ws_pool.end()
 
@@ -3350,6 +3354,19 @@ class TwitchChannelPointsMiner:
             if reward_claim_thread.is_alive():
                 logger.warning(
                     "Reward campaign claim thread did not stop in time, continuing shutdown anyway"
+                )
+
+        # Claims started by a PubSub drop-claim event or a drop that reached
+        # 100% (the threads above can start them, so waited for after them).
+        # A claim Twitch is still answering is finished and recorded before
+        # the History journal stops below.
+        join_claims = getattr(self.twitch, "join_drop_claim_workers", None)
+        if join_claims is not None:
+            still_running = join_claims(timeout=60)
+            if still_running:
+                logger.warning(
+                    "Drop claim threads did not stop in time, continuing shutdown "
+                    f"anyway: {', '.join(still_running)}"
                 )
 
         if (
