@@ -3,6 +3,7 @@
 """Source-preserving edits for dashboard-managed Python configuration."""
 
 import ast
+import collections
 import contextlib
 import errno
 import functools
@@ -711,11 +712,13 @@ def _config_edit(config_path):
 
 
 def _walrus_targets(encoded):
-    return {
+    # Counted, not a set: another (name := ...) elsewhere, such as in a
+    # function, doesn't make up for the one an edit removed.
+    return collections.Counter(
         node.target.id
         for node in ast.walk(ast.parse(encoded))
         if isinstance(node, ast.NamedExpr)
-    }
+    )
 
 
 def _require_walrus_bindings_kept(original, updated):

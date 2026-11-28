@@ -5075,6 +5075,11 @@ def test_edits_refuse_replacing_a_walrus_other_settings_use(
         config,
         replacement,
         ('    "category_limit": 5,\n', '    "category_limit": LEVEL and 5,\n'),
+        # Another LEVEL := in a function must not hide the removed one.
+        (
+            "MINER_CONFIG = {",
+            "def unused():\n    return (LEVEL := 0)\n\n\nMINER_CONFIG = {",
+        ),
     )
 
     with pytest.raises(ConfigEditError, match="assigns LEVEL with :="):
