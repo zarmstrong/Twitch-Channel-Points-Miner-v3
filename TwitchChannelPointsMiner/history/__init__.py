@@ -34,6 +34,11 @@ class HistoryUnavailableError(RuntimeError):
     """History is starting and cannot delete anything yet."""
 
 
+class HistoryRefusedError(HistoryUnavailableError):
+    """History is off for this run: its database was written by a newer
+    version of the miner."""
+
+
 # Reentrant: a signal handler that ends the miner can call stop_history while
 # the same thread is already inside it.
 _lock = threading.RLock()
@@ -149,7 +154,11 @@ def start_history(retention_days=None, import_analytics=True):
     global _recorder, _atexit_registered
 
     with _lock:
-        if _recorder is not None and _recorder.is_alive():
+        if _recorder is not None and (
+            _recorder.is_alive() or getattr(_recorder, "refused", None)
+        ):
+            # A recorder that refused a database written by a newer version
+            # of the miner keeps History off for the rest of this process.
             return _recorder
         try:
             from TwitchChannelPointsMiner.history.recorder import build_recorder
@@ -306,6 +315,14 @@ def import_status():
     return backfill.status()
 
 
+def unavailable_reason():
+    """Why History is off for this run (its database was written by a newer
+    version of the miner), or None."""
+
+    recorder = _recorder
+    return getattr(recorder, "refused", None) if recorder is not None else None
+
+
 def get_store():
     """Return the initialized store, or None while History is unavailable."""
 
@@ -317,6 +334,7 @@ def get_store():
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
+    "HistoryRefusedError",
     "HistoryUnavailableError",
     "delete_streamer_history",
     "get_store",
@@ -328,4 +346,5 @@ __all__ = [
     "start_journal",
     "stop_history",
     "stop_journal",
+    "unavailable_reason",
 ]

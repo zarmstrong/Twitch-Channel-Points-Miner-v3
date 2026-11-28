@@ -9,12 +9,17 @@ from contextlib import contextmanager, nullcontext
 
 from TwitchChannelPointsMiner.history import (
     DEFAULT_RETENTION_DAYS,
+    HistoryRefusedError,
     HistoryUnavailableError,
 )
 from TwitchChannelPointsMiner.history import journal as journal_module
 from TwitchChannelPointsMiner.history.backfill import AnalyticsBackfill
 from TwitchChannelPointsMiner.history.importer import JournalImporter
-from TwitchChannelPointsMiner.history.store import HistoryStore, clean_streamer
+from TwitchChannelPointsMiner.history.store import (
+    HistorySchemaTooNewError,
+    HistoryStore,
+    clean_streamer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +79,19 @@ class HistoryRecorder(threading.Thread):
         self._last_warning = {}
         # The analytics JSON import (see backfill.py), when enabled.
         self.backfill = None
+        # Why History is off for this run (the database was written by a
+        # newer build), or None.
+        self.refused = None
 
     # -- thread ----------------------------------------------------------------
     def run(self):
         while not self._stop_event.is_set():
             if self._initialize():
                 break
+            if self.refused is not None:
+                # Off for this run: nothing to import into, and nothing to
+                # retry.  The journal keeps what it can't import.
+                return
             self._stop_event.wait(_RETRY_SECONDS)
         while not self._stop_event.is_set():
             self.poll_once()
@@ -103,12 +115,21 @@ class HistoryRecorder(threading.Thread):
             logger.debug("%s (repeated)", message)
 
     def _initialize(self):
-        try:
-            self.store.initialize()
-            return True
-        except Exception:
-            self._warn("Unable to open the History database")
-            return False
+        # Under the lock deletes and imports hold, so a refusal is decided
+        # once, and nothing opens the database after it.
+        with self._lock:
+            if self.refused is not None:
+                return False
+            try:
+                self.store.initialize()
+                return True
+            except HistorySchemaTooNewError as error:
+                self.refused = str(error)
+                logger.warning("%s", error)
+                return False
+            except Exception:
+                self._warn("Unable to open the History database")
+                return False
 
     @property
     def journal(self):
@@ -131,6 +152,8 @@ class HistoryRecorder(threading.Thread):
         """Import what is pending; returns False when it failed."""
 
         with self._lock:
+            if self.refused is not None:
+                return False
             if not self.store.ready and not self._initialize():
                 return False
             self._sync_active_run()
@@ -206,7 +229,11 @@ class HistoryRecorder(threading.Thread):
             if not streamer:
                 _remove_source(remove_source)
                 return {}
+            if self.refused is not None:
+                raise HistoryRefusedError(self.refused)
             if not self.store.ready and not self._initialize():
+                if self.refused is not None:
+                    raise HistoryRefusedError(self.refused)
                 raise HistoryUnavailableError("History is still starting")
             try:
                 self.importer.poll()

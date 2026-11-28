@@ -801,7 +801,10 @@ def delete_streamer_analytics(streamer):
         mimetype="application/json",
     )
     try:
-        from TwitchChannelPointsMiner.history import delete_streamer_history
+        from TwitchChannelPointsMiner.history import (
+            HistoryRefusedError,
+            delete_streamer_history,
+        )
     except Exception:
         logger.warning("Unable to load the optional History module", exc_info=True)
         delete_streamer_history = None
@@ -816,6 +819,19 @@ def delete_streamer_analytics(streamer):
                 filename[: -len(".json")],
                 database_path=os.path.join(Settings.analytics_path, "history.sqlite3"),
                 remove_source=remove_file,
+            )
+        except HistoryRefusedError:
+            # Off for the run, which History has already warned about once.
+            return Response(
+                json.dumps(
+                    {
+                        "error": "Unable to delete streamer history: its database "
+                        "was written by a newer version of the miner. Update "
+                        "the miner to delete this streamer."
+                    }
+                ),
+                status=503,
+                mimetype="application/json",
             )
         except Exception:
             logger.warning("Unable to delete optional streamer history", exc_info=True)
