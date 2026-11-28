@@ -531,13 +531,20 @@ class TwitchLogin(object):
 
         if response.status_code == 200:
             json_response = response.json()
-            if (
-                "data" in json_response
-                and "user" in json_response["data"]
-                and json_response["data"]["user"]["id"] is not None
-            ):
-                self.user_id = json_response["data"]["user"]["id"]
+            # Twitch answers {"data": {"user": null}} when no account has
+            # this login name, so every level may be missing or null.
+            data = json_response.get("data") or {}
+            user = data.get("user") or {}
+            user_id = user.get("id")
+            if user_id is not None:
+                self.user_id = user_id
                 return True
+            if "user" in data and data["user"] is None:
+                logger.error(
+                    f"Twitch has no account with the username {self.username!r}. "
+                    "Set username to your Twitch login name (the one in your "
+                    "channel's URL, not your display name) and try again."
+                )
         return False
 
     def get_auth_token(self):
