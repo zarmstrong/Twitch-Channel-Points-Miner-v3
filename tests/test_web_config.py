@@ -3403,3 +3403,240 @@ def test_streamer_edits_keep_crlf_line_breaks(tmp_path, payload):
     assert b"\n" in written
     assert written.count(b"\n") == written.count(b"\r\n")
     assert b"\r\r" not in written
+
+
+def _write_history_config(path, analytics):
+    write_config(path)
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace("ANALYTICS_CONFIG = None", f"ANALYTICS_CONFIG = {analytics}"),
+        encoding="utf-8",
+    )
+
+
+def test_managed_web_config_reads_history_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv("TCPM_HISTORY_RETENTION_DAYS", raising=False)
+    config = tmp_path / "config.py"
+    write_config(config)
+    # No ANALYTICS_CONFIG dict: History's defaults.
+    assert read_managed_web_config(config)["history"] == {
+        "retention_days": 730,
+        "import_analytics": True,
+        "retention_env_override": None,
+        "retention_env_ignored": False,
+    }
+
+    _write_history_config(
+        config,
+        '{"port": 5000, "history_retention_days": 90, '
+        '"history_import_analytics": False}',
+    )
+    monkeypatch.setenv("TCPM_HISTORY_RETENTION_DAYS", "30")
+    assert read_managed_web_config(config)["history"] == {
+        "retention_days": 90,
+        "import_analytics": False,
+        "retention_env_override": 30,
+        "retention_env_ignored": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "raw, override, ignored",
+    [
+        ("0", 0, False),
+        (" 45 ", 45, False),
+        ("abc", None, True),
+        ("-1", None, True),
+        ("1.5", None, True),
+        ("   ", None, True),
+        ("", None, False),
+    ],
+)
+def test_managed_web_config_reads_the_retention_override_like_history(
+    tmp_path, monkeypatch, raw, override, ignored
+):
+    from TwitchChannelPointsMiner.history import _history_retention_days
+
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{"history_retention_days": 90}')
+    monkeypatch.setenv("TCPM_HISTORY_RETENTION_DAYS", raw)
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_env_override"] == override
+    assert history["retention_env_ignored"] is ignored
+    # History runs with the override when valid, else the saved value.
+    expected = override if override is not None else 90
+    assert _history_retention_days(90) == expected
+
+
+@pytest.mark.parametrize(
+    "configured, shown",
+    [
+        ('"0"', 0),
+        ("0.0", 0),
+        ('"45"', 45),
+        ("90.7", 90),
+        ("100000", 100000),
+        ("-5", 730),
+        ("True", 730),
+        ("None", 730),
+        ('"abc"', 730),
+        ("DAYS", None),
+    ],
+)
+def test_managed_web_config_shows_the_retention_history_runs_with(
+    tmp_path, configured, shown
+):
+    from TwitchChannelPointsMiner.history import _history_retention_days
+
+    config = tmp_path / "config.py"
+    _write_history_config(config, f'{{"history_retention_days": {configured}}}')
+    assert read_managed_web_config(config)["history"]["retention_days"] == shown
+    if shown is not None:
+        # The same value History's own reader uses.
+        value = ast.literal_eval(configured)
+        assert _history_retention_days(value) == shown
+
+
+@pytest.mark.parametrize(
+    "configured, shown",
+    [("False", False), ("True", True), ('"no"', True), ("0", True), ("FLAG", None)],
+)
+def test_managed_web_config_shows_the_import_setting_history_runs_with(
+    tmp_path, configured, shown
+):
+    config = tmp_path / "config.py"
+    _write_history_config(config, f'{{"history_import_analytics": {configured}}}')
+    assert read_managed_web_config(config)["history"]["import_analytics"] is shown
+
+
+def test_saving_one_history_setting_leaves_an_unreadable_other_alone(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(
+        config,
+        '{"history_retention_days": DAYS, "history_import_analytics": True}',
+    )
+    config.write_text(
+        "DAYS = 30\n" + config.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_history", "values": {"import_analytics": False}}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert '"history_retention_days": DAYS' in source
+    assert _load_config(config).ANALYTICS_CONFIG["history_import_analytics"] is False
+
+
+def test_managed_web_config_updates_history_settings(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(
+        config,
+        '{\n    "port": 5000,  # my port\n    "history_retention_days": 730,\n}',
+    )
+
+    result = update_managed_web_config(
+        config,
+        {
+            "action": "update_history",
+            "values": {"retention_days": 0, "import_analytics": False},
+        },
+    )
+
+    assert result["history"]["retention_days"] == 0
+    assert result["history"]["import_analytics"] is False
+    source = config.read_text(encoding="utf-8")
+    assert '"port": 5000,  # my port' in source
+    loaded = _load_config(config)
+    assert loaded.ANALYTICS_CONFIG["history_retention_days"] == 0
+    assert loaded.ANALYTICS_CONFIG["history_import_analytics"] is False
+    assert loaded.ANALYTICS_CONFIG["port"] == 5000
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"retention_days": -1},
+        {"retention_days": 36501},
+        {"retention_days": 1.5},
+        {"retention_days": "30"},
+        {"retention_days": True},
+        {"import_analytics": "yes"},
+        {"retention": 30},
+        ["retention_days"],
+    ],
+    ids=[
+        "negative",
+        "too-large",
+        "float",
+        "string",
+        "bool",
+        "import-string",
+        "unknown-key",
+        "not-a-dict",
+    ],
+)
+def test_managed_web_config_rejects_invalid_history_settings(tmp_path, values):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{"history_retention_days": 730}')
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError):
+        update_managed_web_config(
+            config, {"action": "update_history", "values": values}
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "analytics",
+    [
+        "build_analytics_config()",
+        "ANALYTICS",
+        '{"history_retention_days": 30, **EXTRA}',
+        "{**EXTRA}",
+        '{"history_retention_days": 30, "history_import_analytics": True, KEY: 1}',
+    ],
+)
+def test_managed_web_config_shows_history_settings_it_cannot_evaluate_as_unknown(
+    tmp_path, analytics
+):
+    config = tmp_path / "config.py"
+    _write_history_config(config, analytics)
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_days"] is None
+    assert history["import_analytics"] is None
+
+
+def test_managed_web_config_reads_and_edits_the_last_duplicate_history_key(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(
+        config,
+        '{"history_retention_days": 730, "history_retention_days": 30, '
+        '"history_import_analytics": True, "history_import_analytics": False}',
+    )
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_days"] == 30
+    assert history["import_analytics"] is False
+
+    result = update_managed_web_config(
+        config, {"action": "update_history", "values": {"retention_days": 90}}
+    )
+
+    assert result["history"]["retention_days"] == 90
+    assert _load_config(config).ANALYTICS_CONFIG["history_retention_days"] == 90
+
+
+def test_managed_web_config_reads_a_key_after_unpacking(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{**EXTRA, "history_retention_days": 30}')
+    assert read_managed_web_config(config)["history"]["retention_days"] == 30
+
+
+def test_managed_web_config_reads_a_key_after_a_computed_key(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(config, '{KEY: 1, "history_retention_days": 30}')
+    history = read_managed_web_config(config)["history"]
+    assert history["retention_days"] == 30
+    assert history["import_analytics"] is None

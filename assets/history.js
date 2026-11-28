@@ -10,18 +10,28 @@
     'use strict';
 
     var REFRESH_MS = 60000;
+    // How often the Config tab re-reads the analytics import: while it
+    // runs, otherwise (a streamer added later shows the button again), and
+    // after a failed read.
+    var IMPORT_POLL_MS = 5000;
+    var IMPORT_IDLE_MS = 30000;
+    var IMPORT_RETRY_MS = 15000;
     var REQUEST_TIMEOUT_MS = 30000;
     var DAY_OPTIONS = [7, 30, 90, 365];
     var numberFormat = new Intl.NumberFormat();
 
-    // Node loads this file only for the delete flow's decisions and the
-    // import note (tested in tests/js/); the tab itself needs a browser.
+    // Node loads this file only for the delete flow's decisions, the
+    // import note and the Import button (tested in tests/js/); the tab
+    // itself needs a browser.
     if (typeof window === 'undefined') {
         if (typeof module === 'object' && module.exports) {
             module.exports = {
                 REQUEST_TIMEOUT_MS: REQUEST_TIMEOUT_MS,
                 deleteButtonState: deleteButtonState,
                 detailMessageFor: detailMessageFor,
+                createImportControl: createImportControl,
+                importControlState: importControlState,
+                importPollDelay: importPollDelay,
                 importNoteText: importNoteText,
                 runDelete: runDelete
             };
@@ -136,6 +146,180 @@
         return 'History before ' + formatDate(before) + ' was imported from ' +
             'the analytics data: it has points and predictions only, without ' +
             'watch time or live sessions.';
+    }
+
+    // What the Config tab's History box shows for the analytics import:
+    // status is GET /history/import's body, or null when History can't be
+    // asked.  showButton is false once the import has been done, and while
+    // it runs; polling is true while it runs.
+    function importControlState(status) {
+        if (!status) {
+            return {
+                text: 'History is not running, so the analytics data cannot be imported now.',
+                showButton: false,
+                polling: false
+            };
+        }
+        if (status.complete === true) {
+            return {
+                text: 'The existing analytics data has been imported.',
+                showButton: false,
+                polling: false
+            };
+        }
+        var waiting = Number(status.streamers_waiting);
+        var known = status.streamers_waiting !== null &&
+            status.streamers_waiting !== undefined && Number.isFinite(waiting);
+        var left = known
+            ? ' ' + numberFormat.format(waiting) + (waiting === 1 ? ' streamer' : ' streamers') + ' left.'
+            : '';
+        if (status.requested === true || status.automatic === true) {
+            return {
+                text: 'Importing the existing analytics data…' + left,
+                showButton: false,
+                polling: true
+            };
+        }
+        return {
+            text: known
+                ? 'The analytics data of ' + numberFormat.format(waiting) +
+                    (waiting === 1 ? ' streamer has' : ' streamers have') + ' not been imported.'
+                : 'The existing analytics data has not been imported.',
+            showButton: true,
+            polling: false
+        };
+    }
+
+    // Milliseconds until the Config tab reads the import status again.
+    function importPollDelay(view, failed) {
+        if (failed) return IMPORT_RETRY_MS;
+        return view && view.polling ? IMPORT_POLL_MS : IMPORT_IDLE_MS;
+    }
+
+    // The Config tab's import box, while the tab is visible.  deps:
+    //   fetchStatus()       GET /history/import; a Promise of its body,
+    //                       optionally with abort() to stop the request
+    //   postImport()        POST /history/import; the same
+    //   render(view)        shows importControlState()'s view
+    //   setTimer(fn, ms) / clearTimer(id)
+    // Only the newest read or start may render.  A request that hasn't
+    // answered within REQUEST_TIMEOUT_MS counts as failed.
+    function createImportControl(deps) {
+        // starting: the id of the start waiting for its answer, or 0.
+        var control = { visible: false, timer: null, request: 0, starting: 0 };
+
+        // Settles once: with the answer, or with a timeout error.
+        function bounded(promise) {
+            return new Promise(function (resolve, reject) {
+                var settled = false;
+                var timeout = deps.setTimer(function () {
+                    if (settled) return;
+                    settled = true;
+                    if (typeof promise.abort === 'function') {
+                        try { promise.abort(); } catch (error) { /* ignore */ }
+                    }
+                    reject(new Error('History did not respond in time.'));
+                }, REQUEST_TIMEOUT_MS);
+                promise.then(function (value) {
+                    if (settled) return;
+                    settled = true;
+                    deps.clearTimer(timeout);
+                    resolve(value);
+                }, function (error) {
+                    if (settled) return;
+                    settled = true;
+                    deps.clearTimer(timeout);
+                    reject(error);
+                });
+            });
+        }
+
+        // Replaces the pending read with one after ms (none for null).
+        function schedule(ms) {
+            if (control.timer !== null) deps.clearTimer(control.timer);
+            control.timer = null;
+            if (!control.visible || ms === null) return;
+            control.timer = deps.setTimer(function () {
+                control.timer = null;
+                control.load();
+            }, ms);
+        }
+
+        function errorText(error) {
+            return error && error.message ? error.message : String(error);
+        }
+
+        control.show = function () {
+            control.visible = true;
+            return control.load();
+        };
+
+        control.hide = function () {
+            control.visible = false;
+            control.request += 1;
+            schedule(null);
+        };
+
+        // Read again after ms (a change the miner hasn't loaded yet).
+        control.later = function (ms) {
+            if (!control.starting) schedule(ms);
+        };
+
+        control.load = function () {
+            // A read sent before a start's answer could show the import as
+            // not requested yet; the start's answer is read instead.
+            if (control.starting) return Promise.resolve();
+            var id = ++control.request;
+            return bounded(deps.fetchStatus()).then(function (status) {
+                if (id !== control.request) return;
+                var view = importControlState(status);
+                deps.render(view);
+                schedule(importPollDelay(view, false));
+            }, function (error) {
+                if (id !== control.request) return;
+                var view = importControlState(null);
+                if (error) view.text = errorText(error);
+                deps.render(view);
+                schedule(importPollDelay(view, true));
+            });
+        };
+
+        control.start = function () {
+            // The button is on the Config tab, so it is visible.
+            control.visible = true;
+            var id = ++control.request;
+            control.starting = id;
+            schedule(null);
+            deps.render({ text: 'Starting the import…', showButton: false, polling: false });
+
+            function finished() {
+                if (control.starting === id) control.starting = 0;
+                if (id === control.request) return true;
+                // Superseded (the tab was left and opened again): read the
+                // status now that the start has its answer.
+                if (control.visible) control.load();
+                return false;
+            }
+
+            return bounded(deps.postImport()).then(function (status) {
+                if (!finished()) return;
+                var view = importControlState(status);
+                deps.render(view);
+                schedule(importPollDelay(view, false));
+            }, function (error) {
+                if (!finished()) return;
+                // Whether History can still import is unknown: the next
+                // read decides whether the button comes back.
+                deps.render({
+                    text: 'Unable to start the import: ' + errorText(error),
+                    showButton: false,
+                    polling: false
+                });
+                schedule(IMPORT_POLL_MS);
+            });
+        };
+
+        return control;
     }
 
     function formatDay(day) {
@@ -359,9 +543,47 @@
             } else {
                 hideHistory();
             }
+            if (tabName === 'config') {
+                if (byId('history-import-status')) importControl.show();
+            } else {
+                importControl.hide();
+            }
         };
         wrapped.__historyWrapped = true;
         window.switchDashboardTab = wrapped;
+    }
+
+    // -- the Config tab's Import button ---------------------------------------
+    var importControl = createImportControl({
+        fetchStatus: function () { return abortableImportFetch('GET'); },
+        postImport: function () { return abortableImportFetch('POST'); },
+        render: function (view) {
+            var text = byId('history-import-status');
+            var button = byId('history-import-button');
+            if (!text || !button) return;
+            text.textContent = view.text;
+            button.style.display = view.showButton ? '' : 'none';
+            button.disabled = false;
+        },
+        setTimer: function (fn, ms) { return setTimeout(fn, ms); },
+        clearTimer: function (id) { clearTimeout(id); }
+    });
+
+    function abortableImportFetch(method) {
+        var request = {
+            controller: typeof AbortController === 'function' ? new AbortController() : null
+        };
+        var promise = fetchJson('import', null, request, method);
+        promise.abort = function () {
+            if (request.controller) request.controller.abort();
+        };
+        return promise;
+    }
+
+    function startImport() {
+        var button = byId('history-import-button');
+        if (button) button.disabled = true;
+        importControl.start();
     }
 
     // -- controls ----------------------------------------------------------
@@ -385,6 +607,8 @@
     }
 
     function bindControls() {
+        var importButton = byId('history-import-button');
+        if (importButton) importButton.addEventListener('click', startImport);
         var refresh = byId('history-refresh');
         if (refresh) {
             refresh.addEventListener('click', function () {
@@ -1251,6 +1475,12 @@
     buildTabButton();
     wrapTabSwitcher();
 
+    // A Config tab change may add a streamer to import; the miner loads it
+    // within seconds (script.js dispatches this after a save).
+    window.addEventListener('web-config-updated', function () {
+        importControl.later(IMPORT_POLL_MS * 2);
+    });
+
     // Deleting a streamer's analytics on the Points tab also deletes their
     // History (script.js dispatches this after a successful delete).
     window.addEventListener('analytics-streamers-deleted', function (event) {
@@ -1268,6 +1498,12 @@
             bindControls();
             renderWindows();
             applyHistoryTheme();
+            var configPanel = byId('config-panel');
+            if (configPanel && configPanel.style.display !== 'none' &&
+                    byId('history-import-status')) {
+                // Opened on the Config tab, before the switcher was wrapped.
+                importControl.show();
+            }
             try {
                 if (window.location.hash === '#history') {
                     switchDashboardTab('history');

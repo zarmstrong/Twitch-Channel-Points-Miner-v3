@@ -75,8 +75,26 @@ account that has mined for months doesn't start with an empty History tab.
   ones. Rows older than it are pruned as soon as the import finishes, and
   their daily totals are kept.
 
-To turn it off, set `ANALYTICS_CONFIG["history_import_analytics"]` to `False`.
-`GET /history/health` reports its progress under `analytics_import`.
+To turn the automatic import off, set
+`ANALYTICS_CONFIG["history_import_analytics"]` to `False`, or clear **Import
+existing analytics data automatically** in the Config tab's **History** box.
+
+With it off, the same box shows **Import existing analytics data** while some
+streamer's analytics data hasn't been imported. The button runs the import
+once, with the same rules as above. The request is saved in the database, so
+a restart finishes it. The import covers the streamers the miner has loaded
+while it runs. One loaded only later (added to the configuration, or one that
+failed to load at a start) shows the button again, and the next import
+resumes where it stopped. Once every streamer History records has been imported,
+the button is hidden and the box says so. A streamer added to the
+configuration later shows the button again; it isn't imported until it is
+clicked. With the automatic import on, the box shows the import's progress
+instead of the button. While the miner is stopped (the Windows app can keep
+the dashboard open), History takes no import request, and the box says so.
+
+`GET /history/import` reports whether the import is done (`complete`), and
+`POST /history/import` starts it. `GET /history/health` reports the same under
+`analytics_import`.
 
 ## Storage
 
@@ -95,10 +113,14 @@ analytics files:
 
 The database uses SQLite WAL mode, indexed range queries and small daily
 rollups. Raw rows are kept for 730 days by default. Set
-`ANALYTICS_CONFIG["history_retention_days"]` to change the window; `0` keeps raw
-rows forever. The `TCPM_HISTORY_RETENTION_DAYS` environment variable overrides
-the configured value. Daily rollups are kept forever, so lifetime totals remain
-available after raw rows are pruned.
+`ANALYTICS_CONFIG["history_retention_days"]`, or **Keep raw rows** in the
+Config tab's **History** box, to change the window; `0` keeps raw rows
+forever. A change takes effect after a restart. The box saves only the
+settings you change; a value it can't read (a variable, for example) shows
+as "Set in config.py" and is left alone. The
+`TCPM_HISTORY_RETENTION_DAYS` environment variable overrides the configured
+value, and the Config tab says so when it is set. Daily rollups are kept
+forever, so lifetime totals remain available after raw rows are pruned.
 
 Deleting the database while the miner is stopped makes History rebuild it
 from the journal files still on disk at the next start. Those are usually only
@@ -247,8 +269,11 @@ stream, matching Twitch's watch-streak rules.
 ## API
 
 The endpoints use the analytics server's existing authentication. All of them
-are read-only except `DELETE /history/streamer/<name>`. They return `503` until
-History has opened its database. `days=N` covers today and the `N - 1` UTC days
+are read-only except `DELETE /history/streamer/<name>` and
+`POST /history/import`. They return `503` until History has opened its
+database; the two `/history/import` endpoints also return `503` once History
+has stopped (the Windows app can keep the dashboard open after the miner
+stops). `days=N` covers today and the `N - 1` UTC days
 before it, so `days=1` is today only.
 
 | Endpoint | Purpose |
@@ -261,4 +286,6 @@ before it, so `days=1` is today only.
 | `GET /history/events?type=<type>` | Recent events |
 | `GET /history/activity?days=30` | Activity heatmap data |
 | `GET /history/health` | Database readiness, the journal import status and the analytics data import's progress (`analytics_import`); `recording` is `false` while History is not running |
+| `GET /history/import` | Whether the analytics data has been imported: `complete` once every streamer History records is done; also `automatic`, `requested`, `streamers_waiting`, `streamers_done`, `imported` and `boundary` |
+| `POST /history/import` | Start the analytics data import, as described in [Importing existing analytics data](#importing-existing-analytics-data); returns the same status |
 | `DELETE /history/streamer/<name>` | Delete one streamer's History, as described in [Deleting a streamer](#deleting-a-streamer) |

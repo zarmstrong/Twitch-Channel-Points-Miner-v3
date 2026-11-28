@@ -17,6 +17,11 @@ the database:
   read again.  A rebuilt database starts over against its own boundary.
 - Work is done in small steps from the History thread, so a large
   analytics folder never holds up startup, the journal import or a delete.
+- With ``history_import_analytics`` off it runs only when the dashboard asks
+  (``request()``).  The request covers the streamers listed while it is
+  saved in ``meta``: a restart finishes it, and it is cleared once they are
+  all done.  A streamer listed only later (added, or not loaded at a start)
+  waits for the next request, which resumes from its saved progress.
 """
 
 import json
@@ -31,6 +36,7 @@ from TwitchChannelPointsMiner.history.importer import (
     _number,
     _text,
 )
+from TwitchChannelPointsMiner.history.journal import read_delete_cutoffs
 from TwitchChannelPointsMiner.history.store import (
     _float_or_none,
     clean_streamer,
@@ -47,6 +53,7 @@ STEP_SECONDS = 1.0
 META_JOURNAL_FIRST_AT = "journal_first_at"
 META_BOUNDARY = "backfill_boundary"
 META_IMPORTED = "backfill_imported"
+META_REQUESTED = "backfill_requested"
 META_STATE_PREFIX = "backfill:"
 
 # Annotation colours (Streamer.persistent_annotations) -> event type.
@@ -85,9 +92,11 @@ class AnalyticsBackfill(object):
         batch_size=BACKFILL_BATCH,
         step_seconds=STEP_SECONDS,
         file_mutex=None,
+        automatic=True,
     ):
         """``streamers`` returns the usernames History records, or None
-        while the miner has not listed them yet."""
+        while the miner has not listed them yet.  With ``automatic`` off,
+        nothing is imported until ``request()``."""
 
         self.store = store
         self.analytics_path = analytics_path
@@ -105,6 +114,11 @@ class AnalyticsBackfill(object):
         self._snapshots = {}
         self._snapshot_boundary = None
         self._logged = set()
+        self.automatic = automatic is True
+        # A request seen in this process and not finished yet.  A database
+        # rebuilt after corruption starts with an empty meta table: the
+        # next poll saves the request in it again.
+        self._active_request = False
 
     # -- state ---------------------------------------------------------------
     @staticmethod
@@ -201,24 +215,86 @@ class AnalyticsBackfill(object):
             return None
         return sorted({clean_streamer(name) for name in names} - {""})
 
+    def request(self):
+        """Import now, even with the automatic import off; the recorder
+        calls this under its lock.  With the automatic import on, the
+        import runs anyway, so nothing is saved."""
+
+        if self.automatic:
+            self._requested()
+            return
+        with self.store.transaction() as connection:
+            self._set_meta(connection, META_REQUESTED, "1")
+        self._active_request = True
+
+    def _clear_request(self):
+        with self.store.transaction() as connection:
+            connection.execute("DELETE FROM meta WHERE key = ?", (META_REQUESTED,))
+        self._active_request = False
+
+    def _requested(self):
+        """Whether an import was requested and isn't finished; saves a
+        request this process knows of when the database lost it.  With the
+        automatic import on, a saved request is cleared: it must not
+        outlive a switch to the manual import."""
+
+        with self.store._read_connection() as connection:
+            saved = self._meta(connection, META_REQUESTED) == "1"
+        if self.automatic:
+            if saved or self._active_request:
+                self._clear_request()
+            return False
+        if saved:
+            self._active_request = True
+        elif self._active_request:
+            with self.store.transaction() as connection:
+                self._set_meta(connection, META_REQUESTED, "1")
+        return self._active_request
+
     def status(self):
-        """For /history/health."""
+        """For /history/health and /history/import."""
 
         with self.store._read_connection() as connection:
             boundary = self._meta_time(connection, META_BOUNDARY)
             states = self._states(connection)
             imported = self._meta(connection, META_IMPORTED) == "1"
+            requested = not self.automatic and (
+                self._meta(connection, META_REQUESTED) == "1" or self._active_request
+            )
+            deleted = {
+                row["streamer"]
+                for row in connection.execute("SELECT streamer FROM deleted_streamers")
+            }
         eligible = self._eligible()
+        waiting = None
+        if eligible is not None:
+            pending = [
+                name for name in eligible if not states.get(name, {}).get("done")
+            ]
+            if pending:
+                # A deleted streamer is never imported, so it isn't waiting.
+                # Read here, not from the importer's cache, which the History
+                # thread updates.
+                try:
+                    deleted.update(
+                        read_delete_cutoffs(getattr(self.importer, "folder", None))
+                    )
+                except (OSError, TypeError):
+                    logger.debug(
+                        "Unable to read the History delete cutoffs", exc_info=True
+                    )
+            waiting = sum(1 for name in pending if name not in deleted)
         return {
             "boundary": boundary,
             "imported": imported,
             "streamers_done": sum(1 for state in states.values() if state["done"]),
             # None until the miner has listed its streamers.
-            "streamers_waiting": (
-                None
-                if eligible is None
-                else sum(1 for name in eligible if not states.get(name, {}).get("done"))
-            ),
+            "streamers_waiting": waiting,
+            "automatic": self.automatic,
+            "requested": requested,
+            # Every streamer History records has been imported (or had
+            # nothing to import); False while that is unknown.
+            "complete": waiting == 0,
         }
 
     # -- importing -------------------------------------------------------------
@@ -227,8 +303,17 @@ class AnalyticsBackfill(object):
         finished the import for the streamers it knows of and rows were
         imported (retention should then run)."""
 
+        requested = self._requested()
+        if not (self.automatic or requested):
+            return False
         names = self._eligible()
+        if names is None:
+            return False
         if not names:
+            if requested:
+                with self.store._read_connection() as connection:
+                    states = self._states(connection)
+                self._clear_request_if_done(states)
             return False
         boundary = self._boundary()
         if boundary is None:
@@ -241,6 +326,8 @@ class AnalyticsBackfill(object):
             imported = self._meta(connection, META_IMPORTED) == "1"
         pending = [name for name in names if not states.get(name, {}).get("done")]
         if not pending:
+            if requested:
+                self._clear_request_if_done(states)
             return False
         # Raises when the cutoffs cannot be read: importing without them
         # could bring a deleted streamer back.
@@ -273,9 +360,23 @@ class AnalyticsBackfill(object):
             states[name] = state
             if state["done"]:
                 payloads.pop(name, None)
+        finished = all(states[name]["done"] for name in pending)
+        if finished and requested:
+            self._clear_request_if_done(states)
         # The poll that finishes runs retention, even if its own steps added
         # nothing (the rows came in earlier polls).
-        return (imported or added > 0) and all(states[name]["done"] for name in pending)
+        return (imported or added > 0) and finished
+
+    def _clear_request_if_done(self, states):
+        """Clear the request unless a streamer loaded since this poll listed
+        them is still to do: the next poll imports it."""
+
+        names = self._eligible()
+        if names is not None and any(
+            not states.get(name, {}).get("done") for name in names
+        ):
+            return
+        self._clear_request()
 
     def _files(self):
         """``streamer -> file name`` of the analytics JSON files."""

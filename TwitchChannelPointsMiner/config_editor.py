@@ -15,6 +15,10 @@ import tokenize
 from pathlib import Path
 
 CONFIG_FILE_MUTEX = threading.Lock()
+# History's raw-row retention: 0 keeps them forever; the cap catches typos.
+HISTORY_RETENTION_DEFAULT = 730
+HISTORY_RETENTION_MAX_DAYS = 36500
+HISTORY_RETENTION_ENV_VAR = "TCPM_HISTORY_RETENTION_DAYS"
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 WEB_CONFIG_FILENAME = "web-config.json"
 STREAMER_SETTING_DEFAULTS = {
@@ -268,6 +272,7 @@ def _base_web_config(config_path):
     tree, streamer_nodes, category_nodes = _config_lists(source)
     miner = _simple_value(_assignment(tree, "MINER_CONFIG")) or {}
     mine = _simple_value(_assignment(tree, "MINE_CONFIG")) or {}
+    analytics_node = _assignment(tree, "ANALYTICS_CONFIG")
     global_streamer_settings = miner.get("streamer_settings") or {}
     effective_streamer_defaults = dict(STREAMER_SETTING_DEFAULTS)
     effective_streamer_defaults.update(
@@ -400,6 +405,7 @@ def _base_web_config(config_path):
             "startup_only": startup_only,
         },
         "login": {"android": miner.get("android_login", False) is True},
+        "history": _history_settings(analytics_node),
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
         # WATCH_STATUS is never sent to notifiers, so it isn't offered.
@@ -407,6 +413,97 @@ def _base_web_config(config_path):
             event.name for event in Events if event is not Events.WATCH_STATUS
         ],
     }
+
+
+_UNREADABLE = object()
+
+
+def _analytics_literal(analytics_node, key):
+    """The ANALYTICS_CONFIG value the miner runs with, as a literal: None
+    when the key is missing (or ANALYTICS_CONFIG is None), _UNREADABLE when
+    the dashboard can't evaluate it (ANALYTICS_CONFIG or the value is a
+    variable or a call, or a later ``**`` entry or computed key may set
+    the key)."""
+
+    if analytics_node is None or (
+        isinstance(analytics_node, ast.Constant) and analytics_node.value is None
+    ):
+        return None
+    if not isinstance(analytics_node, ast.Dict):
+        return _UNREADABLE
+    node = None
+    for item_key, value in zip(analytics_node.keys, analytics_node.values):
+        if item_key is None or not isinstance(item_key, ast.Constant):
+            # ``**mapping`` or a computed key: it may set the key,
+            # overriding what came before.
+            node = _UNREADABLE
+        elif item_key.value == key:
+            # The last entry wins, as in Python (and the editor writes it).
+            node = value
+    if node is None:
+        return None
+    if node is _UNREADABLE:
+        return _UNREADABLE
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return _UNREADABLE
+
+
+def _history_retention_value(value):
+    """The retention History runs with for a configured value, read the way
+    ``history._history_retention_days`` reads it."""
+
+    if value is None:
+        return HISTORY_RETENTION_DEFAULT
+    try:
+        if isinstance(value, bool):
+            raise ValueError(value)
+        days = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return HISTORY_RETENTION_DEFAULT
+    return days if days >= 0 else HISTORY_RETENTION_DEFAULT
+
+
+def _history_settings(analytics_node):
+    """History's settings as the miner reads them.  A value the dashboard
+    can't evaluate is None: the form leaves it alone unless changed."""
+
+    retention = _analytics_literal(analytics_node, "history_retention_days")
+    retention = (
+        None if retention is _UNREADABLE else _history_retention_value(retention)
+    )
+    import_analytics = _analytics_literal(analytics_node, "history_import_analytics")
+    import_analytics = (
+        None if import_analytics is _UNREADABLE else import_analytics is not False
+    )
+    override, ignored = _history_retention_override()
+    return {
+        "retention_days": retention,
+        "import_analytics": import_analytics,
+        # A valid environment value wins over the saved one.
+        "retention_env_override": override,
+        # Set but invalid: History ignores it (and logs a warning).
+        "retention_env_ignored": ignored,
+    }
+
+
+def _history_retention_override():
+    """``(days, ignored)`` for TCPM_HISTORY_RETENTION_DAYS, read the way
+    ``history._history_retention_days`` reads it: days is None unless it is
+    a whole number of days, 0 or more; ignored is True when it is set to
+    anything else."""
+
+    raw = os.environ.get(HISTORY_RETENTION_ENV_VAR)
+    if raw in (None, ""):
+        return None, False
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None, True
+    if days < 0:
+        return None, True
+    return days, False
 
 
 def _overrides_path(config_path):
@@ -1966,6 +2063,31 @@ def _update_managed_web_config(config_path, payload):
                 "MINER_CONFIG",
                 {"android_login": repr(values["android"])},
             )
+    elif action == "update_history":
+        values = payload.get("values") or {}
+        if not isinstance(values, dict) or set(values) - {
+            "retention_days",
+            "import_analytics",
+        }:
+            raise ConfigEditError("Unsupported History setting.")
+        rendered = {}
+        if "retention_days" in values:
+            days = values["retention_days"]
+            if (
+                not isinstance(days, int)
+                or isinstance(days, bool)
+                or not 0 <= days <= HISTORY_RETENTION_MAX_DAYS
+            ):
+                raise ConfigEditError(
+                    "History retention must be a whole number of days from 0 "
+                    f"to {HISTORY_RETENTION_MAX_DAYS}."
+                )
+            rendered["history_retention_days"] = repr(days)
+        if "import_analytics" in values:
+            if not isinstance(values["import_analytics"], bool):
+                raise ConfigEditError("import_analytics must be true or false.")
+            rendered["history_import_analytics"] = repr(values["import_analytics"])
+        _set_dict_items(config_path, "ANALYTICS_CONFIG", rendered)
     elif action == "update_notification":
         provider = payload.get("provider")
         schema = NOTIFICATION_SCHEMAS.get(provider)

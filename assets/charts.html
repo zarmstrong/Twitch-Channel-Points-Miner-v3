@@ -430,6 +430,22 @@
                 </form>
             </div>
             <div class="box config-box">
+                <h3 class="title is-5">History</h3>
+                <p class="config-help">How long the History tab keeps raw rows, and whether it imports the points and predictions in the analytics data from before History existed. Daily totals are always kept. Changes take effect after a restart.</p>
+                <form id="history-settings-form" class="config-settings-grid">
+                    <label class="label">Keep raw rows (days, 0 = forever)
+                        <input id="history-retention-days" class="input" type="number" min="0" step="1">
+                    </label>
+                    <label class="checkbox config-checkbox"><input id="history-import-analytics" type="checkbox"> Import existing analytics data automatically</label>
+                    <button class="button is-link" type="submit">Save History settings</button>
+                </form>
+                <p id="history-retention-override" class="config-help" style="display: none;"></p>
+                <div class="history-import-control">
+                    <p id="history-import-status" class="config-help"></p>
+                    <button id="history-import-button" class="button is-info" type="button" style="display: none;">Import existing analytics data</button>
+                </div>
+            </div>
+            <div class="box config-box">
                 <h3 class="title is-5">Notifications</h3>
                 <p class="config-help">Credentials are write-only. Saved credentials are shown only as “configured” and are never sent to the browser. Notification changes require a restart.</p>
                 <div id="notification-settings" class="notification-settings"></div>

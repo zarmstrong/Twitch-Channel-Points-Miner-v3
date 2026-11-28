@@ -367,3 +367,12 @@
         text-align: left;
     }
 }
+
+/* The Config tab's History box: the analytics import's status and button. */
+.history-import-control {
+    margin-top: 0.75rem;
+}
+
+.history-import-control .config-help {
+    margin-bottom: 0.5rem;
+}

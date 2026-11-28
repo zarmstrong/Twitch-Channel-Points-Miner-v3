@@ -388,6 +388,7 @@ $(document).ready(function () {
     $('#logging-settings-form').submit(saveLoggingSettings);
     $('#update-settings-form').submit(saveUpdateSettings);
     $('#login-settings-form').submit(saveLoginSettings);
+    $('#history-settings-form').submit(saveHistorySettings);
     $('#update-check-startup-only').change(toggleUpdateInterval);
     $('#restart-miner').on('click', restartMiner);
     $('#dismiss-update-banner').click(dismissUpdateBanner);
@@ -1351,6 +1352,7 @@ function renderWebConfig(config) {
     $('#update-check-interval').val(config.updates.interval_hours);
     $('#update-check-startup-only').prop('checked', config.updates.startup_only);
     $('#android-login-enabled').prop('checked', Boolean(config.login && config.login.android));
+    renderHistorySettings(config.history || {});
     toggleUpdateInterval();
     renderNotificationSettings(config);
 }
@@ -1578,6 +1580,7 @@ function addWebConfigValue(kind, input) {
         data: JSON.stringify({ action: 'add', kind: kind, value: value })
     }).done(function (config) {
         renderWebConfig(config);
+        window.dispatchEvent(new CustomEvent('web-config-updated'));
         input.val('');
         showConfigMessage(`${value} was added. The miner will reload it shortly.`, false);
     }).fail(function (xhr) {
@@ -1597,6 +1600,7 @@ function updateWebConfig(payload, successMessage, button) {
         data: JSON.stringify(payload)
     }).done(function (config) {
         renderWebConfig(config);
+        window.dispatchEvent(new CustomEvent('web-config-updated'));
         showConfigMessage(successMessage, false);
     }).fail(function (xhr) {
         showConfigMessage(xhr.responseJSON && xhr.responseJSON.error
@@ -1807,6 +1811,60 @@ function saveLoginSettings(event) {
         action: 'update_login',
         values: { android: $('#android-login-enabled').prop('checked') }
     }, 'Login settings were saved. Restart the miner to apply them.', button);
+}
+
+// The History settings as loaded; only the fields changed from these are
+// saved, so a value the dashboard can't read (null) is left alone.
+var loadedHistorySettings = {};
+
+function renderHistorySettings(history) {
+    loadedHistorySettings = history;
+    var retention = history.retention_days;
+    $('#history-retention-days')
+        .val(retention === null || retention === undefined ? '' : retention)
+        .attr('placeholder', retention === null ? 'Set in config.py' : '');
+    $('#history-import-analytics')
+        .prop('checked', history.import_analytics === true)
+        // An unreadable value shows as neither; clicking it sets one.
+        .prop('indeterminate', history.import_analytics === null);
+    var override = history.retention_env_override;
+    var note = '';
+    if (override !== null && override !== undefined) {
+        note = 'TCPM_HISTORY_RETENTION_DAYS=' + override +
+            ' is set, so History uses that value instead of this one.';
+    } else if (history.retention_env_ignored) {
+        note = 'TCPM_HISTORY_RETENTION_DAYS is set but isn\'t a whole number of days, ' +
+            'so History ignores it and uses this value.';
+    }
+    $('#history-retention-override').text(note).toggle(Boolean(note));
+}
+
+function historySettingsChanges() {
+    var values = {};
+    var retention = $('#history-retention-days').val().trim();
+    if (retention !== '' && Number(retention) !== loadedHistorySettings.retention_days) {
+        values.retention_days = Number(retention);
+    }
+    var importBox = $('#history-import-analytics');
+    if (!importBox.prop('indeterminate') &&
+            importBox.prop('checked') !== loadedHistorySettings.import_analytics) {
+        values.import_analytics = importBox.prop('checked');
+    }
+    return values;
+}
+
+function saveHistorySettings(event) {
+    event.preventDefault();
+    var button = $(this).find('button[type="submit"]');
+    var values = historySettingsChanges();
+    if (!Object.keys(values).length) {
+        showConfigMessage('No History settings were changed.', false);
+        return;
+    }
+    updateWebConfig({
+        action: 'update_history',
+        values: values
+    }, 'History settings were saved. Restart the miner to apply them.', button);
 }
 
 function renderNotificationSettings(config) {
