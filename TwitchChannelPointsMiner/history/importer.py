@@ -982,6 +982,11 @@ class JournalImporter(object):
             if text is not None
         ]
         minutes = _int(record.get("minutes_required"))
+        # When Twitch accepted it: a record the journal could not write then
+        # is written later.
+        claimed_at = _number(record.get("claimed_at"))
+        if claimed_at is None or not 0 < claimed_at <= at:
+            claimed_at = at
         key = f"c:{claim_key}"
         if connection.execute(
             """
@@ -1032,7 +1037,7 @@ class JournalImporter(object):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'journal', ?)
                 """,
                 (
-                    at,
+                    claimed_at,
                     streamer or None,
                     drop_id,
                     _text(record.get("name")),

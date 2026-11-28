@@ -1314,11 +1314,6 @@ class Journal(object):
                 # Written again with what was known already, too.
                 game = written_game or game
                 streamer = written_streamer or streamer
-            if claim_key in self._unwritten_claims:
-                # Not written when Twitch accepted it: what Twitch said then.
-                already_claimed = self._unwritten_claims[claim_key][0][
-                    "already_claimed"
-                ]
             record = {
                 "drop_id": drop_id,
                 "claim_key": claim_key,
@@ -1331,14 +1326,10 @@ class Journal(object):
                 "minutes_required": _int_or_none(minutes_required),
                 "image": text_or_none(image),
                 "already_claimed": already_claimed is True,
+                # When Twitch accepted it, also if it is written later.
+                "claimed_at": float(self.clock()),
             }
-            if not self._write_claim(claim_key, record, streamer):
-                # Written by retry_unwritten_claims once the journal can be
-                # written, also if Twitch never reports the claim again.
-                self._unwritten_claims.pop(claim_key, None)
-                self._unwritten_claims[claim_key] = (record, streamer)
-                while len(self._unwritten_claims) > UNWRITTEN_CLAIMS_KEPT:
-                    del self._unwritten_claims[next(iter(self._unwritten_claims))]
+            self._write_claim(claim_key, record, streamer)
 
     def retry_unwritten_claims(self):
         """Write the claims Twitch accepted that could not be written to the
@@ -1346,18 +1337,45 @@ class Journal(object):
         the first that still can't be written."""
 
         with self._claims_lock:
-            for claim_key, (record, streamer) in list(self._unwritten_claims.items()):
-                streamer = streamer or self.drop_channel(record["drop_id"])
-                if not self._write_claim(claim_key, record, streamer):
+            for claim_key, (record, _) in list(self._unwritten_claims.items()):
+                if not self._write_claim(
+                    claim_key, record, self.drop_channel(record["drop_id"])
+                ):
                     return
 
     def _write_claim(self, claim_key, record, streamer):
         """Write a claim's record credited to ``streamer`` (or None), and
         remember what was written.  Called with ``_claims_lock`` held.
-        Returns whether it was written."""
+        Returns whether it was written.
+
+        A claim not written before (the journal could not be written) is
+        written with everything known of it: the saved record's values win
+        (what Twitch said first, when it accepted it), this one fills what
+        it lacked, and the channel is the newest noted, else the saved one.
+        A claim written with a channel keeps it.  Saved again when it can't
+        be written."""
 
         drop_id = record["drop_id"]
+        pending = self._unwritten_claims.get(claim_key)
+        if pending is not None:
+            saved, saved_streamer = pending
+            record = {
+                **record,
+                **{key: value for key, value in saved.items() if value is not None},
+            }
+            if not record.get("benefits"):
+                record["benefits"] = saved.get("benefits") or []
+            streamer = streamer or saved_streamer
+        written = self._drop_claims.get(claim_key)
+        if written is not None and written[1] is not None:
+            streamer = written[1]
         if not self.append("drop", streamer=streamer, **record):
+            # Written by retry_unwritten_claims once the journal can be
+            # written, also if Twitch never reports the claim again.
+            self._unwritten_claims.pop(claim_key, None)
+            self._unwritten_claims[claim_key] = (record, streamer)
+            while len(self._unwritten_claims) > UNWRITTEN_CLAIMS_KEPT:
+                del self._unwritten_claims[next(iter(self._unwritten_claims))]
             return False
         self._unwritten_claims.pop(claim_key, None)
         self._drop_claims.pop(claim_key, None)

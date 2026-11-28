@@ -400,6 +400,61 @@ def test_an_unwritten_claim_is_written_by_historys_next_poll(
     assert len(written(journal, "drop")) == 1
 
 
+def test_an_unwritten_claim_keeps_what_was_known_of_it(journal, monkeypatch):
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop(
+        "d1", "i1|d1", game="Game A", campaign_id="c1", already_claimed=True
+    )
+    monkeypatch.setattr(journal, "append", real_append)
+    # Reported again with less.
+    journal.record_drop("d1", "i1|d1")
+    (record,) = written(journal, "drop")
+    assert (record["game"], record["campaign_id"], record["already_claimed"]) == (
+        "Game A",
+        "c1",
+        True,
+    )
+
+
+def test_a_channel_note_writes_what_an_unwritten_rewrite_learned(journal, monkeypatch):
+    journal.record_drop("d1", "i1|d1")
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    monkeypatch.setattr(journal, "append", real_append)
+    journal.note_drop_channel("alice", "d1")
+    assert [
+        (record["game"], record["streamer"]) for record in written(journal, "drop")
+    ] == [(None, None), ("Game A", "alice")]
+    assert journal.has_unwritten_claim("i1|d1") is False
+
+
+def test_an_unwritten_claim_gets_the_channel_noted_last(journal, monkeypatch):
+    journal.note_drop_channel("alice", "d1")
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    journal.note_drop_channel("bob", "d1")
+    monkeypatch.setattr(journal, "append", real_append)
+    journal.retry_unwritten_claims()
+    assert [record["streamer"] for record in written(journal, "drop")] == ["bob"]
+
+
+def test_an_unwritten_claim_keeps_the_time_twitch_accepted_it(
+    journal, store, monkeypatch
+):
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    monkeypatch.setattr(journal, "append", real_append)
+    journal.clock = lambda: T0 + 86400
+    journal.retry_unwritten_claims()
+    importer = JournalImporter(store, journal.folder, monotonic=lambda: 0.0)
+    importer.poll()
+    assert [row["ts"] for row in rows(store, "SELECT * FROM drops")] == [T0]
+
+
 def test_a_claim_without_an_id_or_a_running_journal_is_not_written(journal):
     journal.record_drop("", "key")
     journal.record_drop("d1", "")
