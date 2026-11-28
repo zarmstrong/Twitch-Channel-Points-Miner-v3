@@ -94,3 +94,10 @@ Here's a concrete example. Let's suppose we have a bet that is opened with a tim
 - **FROM_START** with `delay=20`: The bet will be placed 20s after the bet is opened
 - **FROM_END** with `delay=20`: The bet will be placed 20s before the end of the bet (so 9mins 40s after the bet is opened)
 - **PERCENTAGE** with `delay=0.2`: The bet will be placed when the timer went down by 20% (so 2mins after the bet is opened)
+
+## Results of bets placed by hand
+
+The miner still bets when its timer fires even if you've already bet on that prediction in the browser. Twitch accepts the miner's bet only when it's on the outcome you picked, and then adds it to yours. The result line, the prediction annotations on the Points tab and the session report use the bet Twitch reports: its outcome and the points on it.
+
+- The points come from the totals Twitch reports. If those don't say how many points are on the bet, for example because points were added without a new total, the result shows the amount as unknown and leaves that prediction out of the session report. When neither the bet nor the payout is known, the points Twitch credited for the result are not counted as a gain or a refund either. The miner finds that credit by the time Twitch sent it, which is when it sent the result; a credit without a send time stays counted.
+- A result uses the total Twitch sends with it. Without one, the amount is also unknown when Twitch's earlier reports can't be put in order, arrived while the miner's own bet was being placed or after Twitch accepted it, or when the miner's bet failed without an answer from Twitch. Twitch can deliver a report late, so one that arrives after the miner's bet may or may not include it.

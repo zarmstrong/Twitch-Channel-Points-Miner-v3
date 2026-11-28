@@ -1,6 +1,7 @@
 """Where the miner writes History journal records (design section 5.3)."""
 
 import json
+from datetime import datetime, timezone
 import os
 import threading
 from types import SimpleNamespace
@@ -13,6 +14,8 @@ from test_streamer import streamer_settings
 from test_streams_watched import _run_one_watch_iteration, _watch_streamer
 from test_websockets_pool_on_message import FakeStreamer, _pubsub, _websocket
 
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings
+from TwitchChannelPointsMiner.classes.entities.EventPrediction import EventPrediction
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
@@ -329,6 +332,10 @@ def _prediction_twitch(response=None, error=None):
         status="ACTIVE",
         event_id="event-1",
         title="Who wins?",
+        begin_miner_bet=lambda: None,
+        miner_bet_indeterminate=lambda: None,
+        miner_bet_accepted=lambda before, amount: None,
+        miner_bet_settled=lambda: None,
         bet=SimpleNamespace(
             calculate=lambda balance: {"amount": 250, "id": "outcome", "choice": "A"},
             skip=lambda: (False, 0),
@@ -709,27 +716,25 @@ def test_a_connection_failure_moves_the_boundary_before_the_recovery_wait(
     assert [w["seconds"] for w in written(journal, "watch")] == [60.0]
 
 
-def _no_decision(result):
-    raise KeyError("amount")
-
-
 def _prediction(decision):
-    return SimpleNamespace(
-        title="Will it work?",
-        bet_confirmed=False,
-        confirmed_points=None,
-        result={"string": "", "type": None, "gained": 0},
-        # The miner's own bookkeeping needs its decision ({} if it made
-        # none); History must not depend on it.
-        parse_result=_no_decision,
-        bet=SimpleNamespace(
-            decision=decision,
-            outcomes=[
-                {"id": "outcome-yes", "title": "Yes", "color": "BLUE"},
-                {"id": "outcome-no", "title": "No", "color": "PINK"},
-            ],
-        ),
+    bet_settings = BetSettings()
+    bet_settings.default()
+    event = EventPrediction(
+        SimpleNamespace(settings=SimpleNamespace(bet=bet_settings)),
+        "event-1",
+        "Will it work?",
+        datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc),
+        120,
+        "ACTIVE",
+        [
+            {"id": "outcome-yes", "title": "Yes", "color": "BLUE"},
+            {"id": "outcome-no", "title": "No", "color": "PINK"},
+        ],
     )
+    # The miner's own decision ({} if it made none): the bet may have been
+    # placed by hand instead.
+    event.bet.decision = decision
+    return event
 
 
 def _prediction_made(streamer, event, outcome_id, points=None):

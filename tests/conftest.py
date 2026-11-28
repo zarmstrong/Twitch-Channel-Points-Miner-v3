@@ -25,3 +25,14 @@ def isolated_history_journal(monkeypatch):
     monkeypatch.setattr(journal_module, "JOURNAL", fresh)
     yield
     fresh.stop()
+
+
+@pytest.fixture(autouse=True)
+def isolated_prediction_credits():
+    """Prediction payout credits waiting for their result are kept per
+    streamer name, process-wide: none may carry over to another test."""
+    from TwitchChannelPointsMiner.classes import WebSocketsPool
+
+    WebSocketsPool._prediction_credits.clear()
+    yield
+    WebSocketsPool._prediction_credits.clear()

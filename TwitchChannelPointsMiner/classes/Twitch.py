@@ -8711,11 +8711,16 @@ class Twitch(object):
                                 },
                             )
                             return
+                        # Before the request: Twitch's report of this bet,
+                        # even its result, can arrive before its answer.
+                        before = event.begin_miner_bet()
                         try:
                             response = self.gql.make_prediction(
                                 event.event_id, decision["id"], amount
                             )
                         except RetryError as error:
+                            # Twitch may have placed it all the same.
+                            event.miner_bet_indeterminate()
                             logger.error(
                                 f"Failed to place bet: {error}",
                                 extra={
@@ -8733,6 +8738,7 @@ class Twitch(object):
                                     },
                                 )
                             else:
+                                event.miner_bet_accepted(before, amount)
                                 # Only the miner's own accepted bet: a bet placed
                                 # by hand also confirms the event, and the
                                 # decision is calculated before filters skip it.
@@ -8743,6 +8749,8 @@ class Twitch(object):
                                     f"prediction:{event.event_id}",
                                     title=getattr(event, "title", None),
                                 )
+                        finally:
+                            event.miner_bet_settled()
                 else:
                     logger.info(
                         f"Bet won't be placed as the amount {_millify(decision['amount'])} is less than the minimum required 10",

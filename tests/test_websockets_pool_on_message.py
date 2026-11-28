@@ -390,6 +390,9 @@ def test_on_message_records_a_prediction_result_for_its_streamer_after_the_list_
     }
     event_prediction.bet.get_decision.return_value = {"title": "A", "color": "BLUE"}
     event_prediction.bet.decision = {"choice": "A"}
+    # Reported on this thread: no bet request of the miner's is waiting.
+    event_prediction.miner_bet_pending.return_value = False
+    event_prediction.placed_choice.return_value = None
     target = FakeStreamer("target", "1")
     other = FakeStreamer("other", "2")
     streamers = ReorderedAfterLookup([target, other])

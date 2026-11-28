@@ -1,7 +1,17 @@
+import threading
+
 from TwitchChannelPointsMiner.classes.entities.Bet import Bet
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.classes.Settings import Settings
 from TwitchChannelPointsMiner.utils import float_round, millify
+
+
+def _points(value):
+    """A points amount from a PubSub message, or None when it isn't one."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 class EventPrediction(object):
@@ -17,7 +27,16 @@ class EventPrediction(object):
         "bet_confirmed",
         "bet_placed",
         "bet",
+        "confirmed_outcome_id",
         "confirmed_points",
+        "miner_bet_requested",
+        "miner_bet_in_flight",
+        "wager_unknown",
+        "state_lock",
+        "confirmations",
+        "points_floor",
+        "totals_seen",
+        "final_points",
     ]
 
     def __init__(
@@ -43,9 +62,33 @@ class EventPrediction(object):
         self.bet_confirmed = False
         self.bet_placed = False
         self.bet = Bet(outcomes, streamer.settings.bet)
-        # The wager Twitch confirmed (prediction-made), whoever placed it;
-        # None until then.
+        # What Twitch says the account bet, from predictions-user-v1. The bet
+        # may have been placed by hand, before the miner decided anything or
+        # on another outcome than the miner's decision.
+        self.confirmed_outcome_id = None
         self.confirmed_points = None
+        # The miner sent its own bet (set before the request), and
+        # bet_placed: Twitch accepted it.
+        self.miner_bet_requested = False
+        # The miner's bet request is waiting for Twitch's answer.
+        self.miner_bet_in_flight = False
+        # What the bet holds can't be told from Twitch's reports: points were
+        # added without a total, a report can't be placed in order, or it
+        # may or may not include the miner's points.  Only the result's own
+        # total says what was bet then.
+        self.wager_unknown = False
+        # The websocket thread confirms bets while the miner's timer thread
+        # places its own.
+        self.state_lock = threading.Lock()
+        # predictions-user-v1 messages about the bet so far.
+        self.confirmations = 0
+        # The bet is at least this many points.
+        self.points_floor = 0
+        # Every total Twitch reported: one seen again is an older message
+        # delivered late (a total only grows).
+        self.totals_seen = set()
+        # The total on the prediction-result: the bet's final one.
+        self.final_points = None
 
     def __repr__(self):
         return f"EventPrediction(event_id={self.event_id}, streamer={self.streamer}, title={self.title})"
@@ -66,20 +109,187 @@ class EventPrediction(object):
     def print_recap(self) -> str:
         return f"{self}\n\t\t{self.bet}\n\t\tResult: {self.result['string']}"
 
+    def confirm_bet(self, prediction, addition=False, final=False):
+        """Record the bet a predictions-user-v1 ``prediction`` reports.
+
+        ``addition``: the message reports points added to the bet
+        (prediction-updated). ``final``: it is the prediction-result."""
+
+        if not isinstance(prediction, dict):
+            prediction = {}
+        outcome_id = prediction.get("outcome_id")
+        points = _points(prediction.get("points"))
+        with self.state_lock:
+            self.bet_confirmed = True
+            self.confirmations += 1
+            if isinstance(outcome_id, str) and outcome_id:
+                self.confirmed_outcome_id = outcome_id
+            if final:
+                if points is not None:
+                    # The bet's final total.
+                    self.final_points = points
+                elif self.miner_bet_in_flight:
+                    # Whether the bet includes the miner's points, still
+                    # being placed, can't be told.
+                    self.wager_unknown = True
+                return
+            if self.miner_bet_in_flight or self.bet_placed:
+                # Reported while the miner's bet request waits for its
+                # answer, or after Twitch accepted it: whether it includes
+                # the miner's points can't be told.
+                self.wager_unknown = True
+            if points is None:
+                if addition:
+                    # Points were added, but how many isn't known.
+                    self.wager_unknown = True
+            elif self.wager_unknown or points in self.totals_seen:
+                # Can't be placed against what is unknown, or reported
+                # before: nothing newer.
+                self.totals_seen.add(points)
+            elif points >= self.points_floor:
+                # The bet's total so far.
+                self.totals_seen.add(points)
+                self.confirmed_points = points
+                self.points_floor = points
+            else:
+                # Less than the bet is known to hold, and never reported: a
+                # part of the bet (placed by hand) the miner didn't know of.
+                self.totals_seen.add(points)
+                self.wager_unknown = True
+
+    def _known_points(self):
+        return None if self.wager_unknown else self.confirmed_points
+
+    def begin_miner_bet(self):
+        """The miner is about to send its own bet. Returns what was known of
+        the bet before it, for miner_bet_accepted."""
+
+        with self.state_lock:
+            self.miner_bet_requested = True
+            self.miner_bet_in_flight = True
+            return (self.bet_confirmed, self._known_points(), self.confirmations)
+
+    def miner_bet_accepted(self, before, amount):
+        """Twitch accepted the miner's bet of ``amount`` points; ``before``
+        is what begin_miner_bet returned."""
+
+        confirmed_before, points_before, confirmations_before = before
+        amount = _points(amount)
+        with self.state_lock:
+            self.bet_placed = True
+            if self.confirmations != confirmations_before:
+                # Reported while the request was made (confirm_bet).
+                self.wager_unknown = True
+            elif not confirmed_before:
+                # Nothing was reported before the miner's points: a later
+                # report may be the miner's bet, a bet by hand from before
+                # it, or both together, and none of them says which.
+                self.wager_unknown = True
+            else:
+                # The miner added to a bet Twitch had confirmed, and nothing
+                # was reported since.
+                if points_before is None or amount is None:
+                    self.wager_unknown = True
+                else:
+                    self.confirmed_points = points_before + amount
+                    # As if Twitch had reported it: its own report of this
+                    # total, delivered later, adds nothing.
+                    self.totals_seen.add(self.confirmed_points)
+            if amount is not None:
+                self.points_floor = max(
+                    self.points_floor, (points_before or 0) + amount
+                )
+
+    def miner_bet_indeterminate(self):
+        """The miner's bet request failed without an answer: Twitch may
+        have accepted it."""
+
+        with self.state_lock:
+            self.wager_unknown = True
+
+    def miner_bet_settled(self):
+        """Twitch answered the miner's bet request, or it failed."""
+
+        with self.state_lock:
+            self.miner_bet_in_flight = False
+
+    def _miner_choice(self):
+        """The miner's decision, if Twitch accepted the bet it placed."""
+
+        choice = self.bet.decision.get("choice")
+        if (
+            self.bet_placed
+            and isinstance(choice, int)
+            and not isinstance(choice, bool)
+            and 0 <= choice < len(self.bet.outcomes)
+        ):
+            return choice
+        return None
+
+    def placed_choice(self):
+        """The index in ``bet.outcomes`` of the outcome the account bet on,
+        or None when it isn't known."""
+
+        if self.confirmed_outcome_id is not None:
+            for index, outcome in enumerate(self.bet.outcomes):
+                if (
+                    isinstance(outcome, dict)
+                    and outcome.get("id") == self.confirmed_outcome_id
+                ):
+                    return index
+            # Twitch named an outcome this event doesn't list: the miner's
+            # decision may be another one.
+            return None
+        return self._miner_choice()
+
+    def placed_points(self):
+        """The points the account bet, or None when they aren't known."""
+
+        with self.state_lock:
+            if self.final_points is not None:
+                return self.final_points
+            if self.wager_unknown:
+                return None
+            # Only a total Twitch reported says what the bet holds: even the
+            # miner's own amount may share the bet with points placed by
+            # hand that Twitch hasn't reported yet.
+            return self.confirmed_points
+
     def parse_result(self, result) -> dict:
+        """The points of a prediction-result ``result``: ``placed`` (the
+        wager), ``won`` (the payout, or for a refund the points returned) and
+        ``gained`` (the net change), each None when it isn't known."""
+
         result_type = result["type"]
+        payout = _points(result.get("points_won"))
+        placed = self.placed_points()
 
         points = {}
-        points["placed"] = self.bet.decision["amount"] if result_type != "REFUND" else 0
-        points["won"] = (
-            result["points_won"]
-            if result["points_won"] or result_type == "REFUND"
-            else 0
+        if result_type == "REFUND":
+            # A refund returns the wager.  Without it, a points_won of 0
+            # says nothing about what came back.
+            if placed is not None:
+                refunded = placed
+            elif payout:
+                refunded = payout
+            else:
+                refunded = None
+            points["placed"] = refunded
+            points["won"] = refunded
+            points["gained"] = 0
+        elif result_type == "LOSE":
+            points["placed"] = placed
+            points["won"] = 0
+            points["gained"] = None if placed is None else -placed
+        else:
+            points["placed"] = placed
+            points["won"] = payout
+            points["gained"] = (
+                None if placed is None or payout is None else payout - placed
+            )
+        points["prefix"] = (
+            "+" if points["gained"] is not None and points["gained"] >= 0 else ""
         )
-        points["gained"] = (
-            points["won"] - points["placed"] if result_type != "REFUND" else 0
-        )
-        points["prefix"] = "+" if points["gained"] >= 0 else ""
 
         action = (
             "Lost"
@@ -87,8 +297,13 @@ class EventPrediction(object):
             else ("Refunded" if result_type == "REFUND" else "Gained")
         )
 
+        amount = (
+            f"{points['prefix']}{millify(points['gained'])}"
+            if points["gained"] is not None
+            else "unknown (the amounts aren't known)"
+        )
         self.result = {
-            "string": f"{result_type}, {action}: {points['prefix']}{millify(points['gained'])}",
+            "string": f"{result_type}, {action}: {amount}",
             "type": result_type,
             "gained": points["gained"],
         }
