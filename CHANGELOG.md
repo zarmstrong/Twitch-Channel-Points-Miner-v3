@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.24.1](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.24.0...3.24.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **config:** insert imports and CONFIG_VERSION where the config can use them ([#327](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/327)) ([#339](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/339)) ([d68e069](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d68e06974fafff183650fc998da3b7d58850959e))
+* **config:** never restore a stale backup over a valid config.py when migration output is invalid ([d68e069](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/d68e06974fafff183650fc998da3b7d58850959e))
+* **predictions:** report a bet placed by hand from what Twitch says was bet ([#407](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/407)) ([79c8f7f](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/commit/79c8f7fda3a953147851212013968b33f2a9d735)), closes [#404](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues/404)
+
 ## [3.24.0](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/compare/3.23.0...3.24.0) (2026-11-28)
 
 
