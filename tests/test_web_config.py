@@ -4644,3 +4644,50 @@ def test_source_migration_removes_every_copy_of_a_repeated_source(tmp_path):
     migrate_web_config(config)
 
     assert read_managed_web_config(config)["sources"]["categories"] is False
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_source_update_keeps_the_order_after_an_unreadable_key(tmp_path, migrate):
+    # str("x") as a key makes the whole MINER_CONFIG unreadable to the
+    # reader, which must not make the save start from the default order.
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "username": "example",\n',
+            '    str("other"): 1,\n    "username": "example",\n',
+        ),
+        (
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+            "[StreamerSource.CATEGORIES, StreamerSource.STREAMERS]",
+        ),
+    )
+    if migrate:
+        (tmp_path / "web-config.json").write_text(
+            json.dumps({"sources": {"followers": True}}), encoding="utf-8"
+        )
+        migrate_web_config(config)
+    else:
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": True}}
+        )
+
+    assert (
+        '"streamer_source_priority": [StreamerSource.CATEGORIES, '
+        "StreamerSource.STREAMERS, StreamerSource.FOLLOWERS]"
+    ) in config.read_text(encoding="utf-8")
+
+
+def test_source_update_keeps_an_empty_priority_empty(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config, ("[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]", "[]")
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"followers": True}}
+    )
+
+    assert '"streamer_source_priority": [StreamerSource.FOLLOWERS]' in (
+        config.read_text(encoding="utf-8")
+    )

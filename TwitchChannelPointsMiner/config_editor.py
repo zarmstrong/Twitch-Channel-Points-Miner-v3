@@ -2288,14 +2288,25 @@ def _update_managed_web_config(config_path, payload):
             raise ConfigEditError("Category Drops override must be true or false.")
         source_names = SOURCE_ENUM_BY_NAME
         source = _read_config_source(config_path)
-        miner_node = _assignment(ast.parse(source), "MINER_CONFIG")
-        _require_readable_source_priority(
-            _dict_item(miner_node, "streamer_source_priority")
+        priority_node = _dict_item(
+            _assignment(ast.parse(source), "MINER_CONFIG"), "streamer_source_priority"
         )
-        miner = _simple_value(miner_node) or {}
-        priority = list(
-            miner.get("streamer_source_priority")
-            or ("STREAMERS", "FOLLOWERS", "CATEGORIES", "BADGES", "WILDCARD_CATEGORIES")
+        _require_readable_source_priority(priority_node)
+        # Read the entry itself, not all of MINER_CONFIG: an unrelated key the
+        # reader can't represent would make the whole dict unreadable. Only a
+        # missing or None priority gets the default order; [] stays empty.
+        priority = (
+            [item.attr for item in priority_node.elts]
+            if isinstance(priority_node, (ast.List, ast.Tuple))
+            else list(
+                (
+                    "STREAMERS",
+                    "FOLLOWERS",
+                    "CATEGORIES",
+                    "BADGES",
+                    "WILDCARD_CATEGORIES",
+                )
+            )
         )
         if order is not None:
             # A single payload carries both enablement and position: rebuild
