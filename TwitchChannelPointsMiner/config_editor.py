@@ -839,15 +839,14 @@ def _require_logger_settings_editable(config_path, names=()):
     MINER_CONFIG's logger_settings entry must be the one the miner uses, and
     the LoggerSettings(...) call must not take names through * or **.
     """
-    dictionary = _assignment(
-        ast.parse(_read_config_source(config_path)), "MINER_CONFIG"
-    )
+    tree = ast.parse(_read_config_source(config_path))
+    dictionary = _assignment(tree, "MINER_CONFIG")
     if not isinstance(dictionary, ast.Dict):
         raise ConfigEditError("MINER_CONFIG must be a literal dictionary.")
     _require_dict_edit_allowed(dictionary, "MINER_CONFIG", "logger_settings")
     logger_settings = _dict_item(dictionary, "logger_settings")
     if isinstance(logger_settings, ast.Call) and not _is_constructor_call(
-        logger_settings, "LoggerSettings"
+        logger_settings, "LoggerSettings", tree, "TwitchChannelPointsMiner.logger"
     ):
         # A helper such as make_logger() doesn't take LoggerSettings'
         # arguments, so adding one would raise TypeError when config.py runs.
@@ -1901,12 +1900,19 @@ def _logger_settings_argument(tree, name):
     return _call_argument(logger_settings, name, _logger_settings_positional_fields())
 
 
-def _is_constructor_call(node, constructor):
-    if not isinstance(node, ast.Call):
-        return False
-    function = node.func
-    return (isinstance(function, ast.Name) and function.id == constructor) or (
-        isinstance(function, ast.Attribute) and function.attr == constructor
+def _is_constructor_call(node, constructor, tree, module):
+    """Whether node calls the real constructor, so its signature applies.
+
+    Only the plain name imported from the project module counts: a helper
+    with the same name, a qualified name or a name bound some other way may
+    take different arguments. Raises ConfigEditError when config.py also
+    rebinds the name.
+    """
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == constructor
+        and _imports_binding(tree, f"from {module} import {constructor}")
     )
 
 
@@ -1973,7 +1979,9 @@ def _write_notification(config_path, provider, values):
             )
         return
     constructor = provider.title()
-    if existing is not None and not _is_constructor_call(existing, constructor):
+    if existing is not None and not _is_constructor_call(
+        existing, constructor, tree, f"TwitchChannelPointsMiner.classes.{constructor}"
+    ):
         # A variable or helper call: the dashboard can't read its settings,
         # and writing over it would lose them.
         raise ConfigEditError(
@@ -2144,13 +2152,24 @@ def _with_config_import(encoded, statement):
     # Split bytes, so a U+2028 or form feed doesn't look like a line break.
     lines = encoded.splitlines(keepends=True)
     newline = _newline(encoded).encode("utf-8")
+    if index < len(body) and body[index].col_offset != 0:
+        # It shares a line with the docstring or a __future__ import, e.g.
+        # '"""doc"""; import x': a line of its own would go before them.
+        raise ConfigEditError(
+            "The dashboard couldn't add the import this change needs to "
+            f"config.py. Add `{statement}` near the top of config.py, then "
+            "try again."
+        )
     line = body[index].lineno - 1 if index < len(body) else len(lines)
     head = b"".join(lines[:line])
     if head and not head.endswith((b"\n", b"\r")):
         head += newline
     updated = head + statement.encode("utf-8") + newline + b"".join(lines[line:])
     try:
-        added = _imports_binding(ast.parse(updated), statement)
+        updated_tree = ast.parse(updated)
+        added = _imports_binding(updated_tree, statement) and ast.get_docstring(
+            updated_tree, clean=False
+        ) == ast.get_docstring(tree, clean=False)
     except SyntaxError:
         added = False
     if not added:

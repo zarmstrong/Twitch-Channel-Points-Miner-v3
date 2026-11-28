@@ -4899,7 +4899,9 @@ def test_logging_level_save_refuses_names_bound_at_definition_or_by_star(
     )
     before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="binds or removes logging"):
+    with pytest.raises(
+        ConfigEditError, match="binds or removes (logging|LoggerSettings)"
+    ):
         update_managed_web_config(
             config,
             {"action": "update_logging", "values": {"console_level": "WARNING"}},
@@ -4944,3 +4946,78 @@ def test_logging_import_is_not_added_inside_a_leading_docstring(tmp_path, migrat
     loaded = _load_config(config)
     assert loaded.__doc__.startswith("My coding configuration.")
     assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"events": ["DROP_CLAIM"]},
+        },
+        {"action": "update_logging", "values": {"daily_report": True}},
+    ],
+    ids=["notifier", "logger-settings"],
+)
+def test_edits_refuse_a_qualified_helper_named_like_the_constructor(tmp_path, payload):
+    # Factory.Discord() may take no arguments at all.
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    if payload["action"] == "update_notification":
+        source = source.replace(
+            'discord=Discord(webhook_api="https://secret.example/hook", events=[])',
+            "discord=Factory.Discord()",
+        )
+    else:
+        start = source.index('    "logger_settings": LoggerSettings(\n')
+        end = source.index("    ),\n", start) + len("    ),\n")
+        source = (
+            source[:start]
+            + '    "logger_settings": Factory.LoggerSettings(),\n'
+            + source[end:]
+        )
+    source = source.replace(
+        "MINER_CONFIG = {",
+        "import types\n"
+        "Factory = types.SimpleNamespace(\n"
+        '    Discord=lambda: Discord(webhook_api="https://x.example/h", events=[]),\n'
+        "    LoggerSettings=lambda: LoggerSettings(),\n"
+        ")\n"
+        "MINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="isn't written as"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_import_insertion_refuses_a_statement_sharing_the_docstring_line(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        '"""example"""; from TwitchChannelPointsMiner.logger import LoggerSettings\n'
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": __doc__,\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="couldn't add the import"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
