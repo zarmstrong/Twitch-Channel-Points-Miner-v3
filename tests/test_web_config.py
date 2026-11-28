@@ -5045,3 +5045,66 @@ def test_startup_only_update_check_refuses_a_shadowed_float(tmp_path, migrate):
 
     assert config.read_bytes() == before
     assert overrides.is_file() is migrate
+
+
+@pytest.mark.parametrize(
+    "payload, replacement",
+    [
+        (
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+            (
+                "        console_level=logging.INFO,\n",
+                "        console_level=(LEVEL := logging.INFO),\n",
+            ),
+        ),
+        (
+            {"action": "update_updates", "values": {"enabled": False}},
+            (
+                '    "username": "example",\n',
+                '    "update_check": (LEVEL := True),\n    "username": "example",\n',
+            ),
+        ),
+    ],
+    ids=["call-keyword", "dict-value"],
+)
+def test_edits_refuse_replacing_a_walrus_other_settings_use(
+    tmp_path, payload, replacement
+):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        replacement,
+        ('    "category_limit": 5,\n', '    "category_limit": LEVEL and 5,\n'),
+    )
+
+    with pytest.raises(ConfigEditError, match="assigns LEVEL with :="):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.skipif(
+    not hasattr(ast, "TypeVar"), reason="type parameters need Python 3.12+"
+)
+@pytest.mark.parametrize(
+    "payload, name",
+    [
+        ({"action": "update_updates", "values": {"startup_only": True}}, "float"),
+        (
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+            "logging",
+        ),
+    ],
+    ids=["builtin", "import"],
+)
+def test_name_checks_include_type_parameters(tmp_path, payload, name):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ("MINER_CONFIG = {", f"def helper[{name}]():\n    pass\n\n\nMINER_CONFIG = {{"),
+    )
+
+    with pytest.raises(ConfigEditError, match=f"binds (or removes )?{name}"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before

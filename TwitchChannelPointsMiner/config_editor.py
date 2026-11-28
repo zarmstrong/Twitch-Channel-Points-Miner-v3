@@ -676,6 +676,7 @@ def _store_config_bytes(path, updated):
         staged[key] = updated
         return
     path = Path(path)
+    _require_walrus_bindings_kept(path.read_bytes(), updated)
     _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
@@ -705,7 +706,32 @@ def _config_edit(config_path):
     finally:
         _STAGED_CONFIG.files = outer
     if updated != original:
+        _require_walrus_bindings_kept(original, updated)
         _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+
+
+def _walrus_targets(encoded):
+    return {
+        node.target.id
+        for node in ast.walk(ast.parse(encoded))
+        if isinstance(node, ast.NamedExpr)
+    }
+
+
+def _require_walrus_bindings_kept(original, updated):
+    """Refuse an edit that replaced or removed a (name := ...) expression.
+
+    Other code in config.py may use the name it binds, so dropping it could
+    leave config.py raising NameError when it runs.
+    """
+    lost = _walrus_targets(original) - _walrus_targets(updated)
+    if lost:
+        names = ", ".join(sorted(lost))
+        raise ConfigEditError(
+            f"This change would replace the expression that assigns {names} "
+            "with :=, which other settings in config.py may use. Make this "
+            "change in config.py instead."
+        )
 
 
 def _replace_config_bytes(path, updated, mode):
@@ -1790,7 +1816,8 @@ def set_miner_username(config_path, username):
     username = username.strip()
     if not STREAMER_RE.fullmatch(username):
         raise ConfigEditError("Enter a valid Twitch username.")
-    _set_dict_items(config_path, "MINER_CONFIG", {"username": repr(username)})
+    with _config_edit(config_path):
+        _set_dict_items(config_path, "MINER_CONFIG", {"username": repr(username)})
     return username
 
 
@@ -2037,6 +2064,13 @@ def _is_wanted_alias(node, alias, wanted):
     }
 
 
+_TYPE_PARAMETERS = tuple(
+    getattr(ast, name)
+    for name in ("TypeVar", "ParamSpec", "TypeVarTuple")
+    if hasattr(ast, name)
+)
+
+
 def _names_bound(node):
     """Every name a node binds, deletes or declares, at any depth.
 
@@ -2060,6 +2094,9 @@ def _names_bound(node):
             names.add(current.rest)
         elif isinstance(current, (ast.Global, ast.Nonlocal)):
             names.update(current.names)
+        elif _TYPE_PARAMETERS and isinstance(current, _TYPE_PARAMETERS):
+            # def f[T](), class C[T], type X[T] = ... (Python 3.12+)
+            names.add(current.name)
         elif isinstance(current, ast.alias):
             if current.name == "*":
                 return None
