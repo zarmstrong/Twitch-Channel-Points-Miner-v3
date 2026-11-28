@@ -1813,9 +1813,20 @@ function saveLoginSettings(event) {
     }, 'Login settings were saved. Restart the miner to apply them.', button);
 }
 
+// The History settings as loaded; only the fields changed from these are
+// saved, so a value the dashboard can't read (null) is left alone.
+var loadedHistorySettings = {};
+
 function renderHistorySettings(history) {
-    $('#history-retention-days').val(history.retention_days);
-    $('#history-import-analytics').prop('checked', history.import_analytics !== false);
+    loadedHistorySettings = history;
+    var retention = history.retention_days;
+    $('#history-retention-days')
+        .val(retention === null || retention === undefined ? '' : retention)
+        .attr('placeholder', retention === null ? 'Set in config.py' : '');
+    $('#history-import-analytics')
+        .prop('checked', history.import_analytics === true)
+        // An unreadable value shows as neither; clicking it sets one.
+        .prop('indeterminate', history.import_analytics === null);
     var override = history.retention_env_override;
     $('#history-retention-override')
         .text(override
@@ -1824,15 +1835,31 @@ function renderHistorySettings(history) {
         .toggle(Boolean(override));
 }
 
+function historySettingsChanges() {
+    var values = {};
+    var retention = $('#history-retention-days').val().trim();
+    if (retention !== '' && Number(retention) !== loadedHistorySettings.retention_days) {
+        values.retention_days = Number(retention);
+    }
+    var importBox = $('#history-import-analytics');
+    if (!importBox.prop('indeterminate') &&
+            importBox.prop('checked') !== loadedHistorySettings.import_analytics) {
+        values.import_analytics = importBox.prop('checked');
+    }
+    return values;
+}
+
 function saveHistorySettings(event) {
     event.preventDefault();
     var button = $(this).find('button[type="submit"]');
+    var values = historySettingsChanges();
+    if (!Object.keys(values).length) {
+        showConfigMessage('No History settings were changed.', false);
+        return;
+    }
     updateWebConfig({
         action: 'update_history',
-        values: {
-            retention_days: Number($('#history-retention-days').val()),
-            import_analytics: $('#history-import-analytics').prop('checked')
-        }
+        values: values
     }, 'History settings were saved. Restart the miner to apply them.', button);
 }
 

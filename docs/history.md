@@ -112,7 +112,9 @@ The database uses SQLite WAL mode, indexed range queries and small daily
 rollups. Raw rows are kept for 730 days by default. Set
 `ANALYTICS_CONFIG["history_retention_days"]`, or **Keep raw rows** in the
 Config tab's **History** box, to change the window; `0` keeps raw rows
-forever. A change takes effect after a restart. The
+forever. A change takes effect after a restart. The box saves only the
+settings you change; a value it can't read (a variable, for example) shows
+as "Set in config.py" and is left alone. The
 `TCPM_HISTORY_RETENTION_DAYS` environment variable overrides the configured
 value, and the Config tab says so when it is set. Daily rollups are kept
 forever, so lifetime totals remain available after raw rows are pruned.

@@ -114,6 +114,10 @@ class AnalyticsBackfill(object):
         self._snapshot_boundary = None
         self._logged = set()
         self.automatic = automatic is True
+        # A request seen in this process and not finished yet.  A database
+        # rebuilt after corruption starts with an empty meta table: the
+        # next poll saves the request in it again.
+        self._active_request = False
 
     # -- state ---------------------------------------------------------------
     @staticmethod
@@ -216,10 +220,25 @@ class AnalyticsBackfill(object):
 
         with self.store.transaction() as connection:
             self._set_meta(connection, META_REQUESTED, "1")
+        self._active_request = True
 
     def _clear_request(self):
         with self.store.transaction() as connection:
             connection.execute("DELETE FROM meta WHERE key = ?", (META_REQUESTED,))
+        self._active_request = False
+
+    def _requested(self):
+        """Whether an import was requested and isn't finished; saves a
+        request this process knows of when the database lost it."""
+
+        with self.store._read_connection() as connection:
+            saved = self._meta(connection, META_REQUESTED) == "1"
+        if saved:
+            self._active_request = True
+        elif self._active_request:
+            with self.store.transaction() as connection:
+                self._set_meta(connection, META_REQUESTED, "1")
+        return self._active_request
 
     def status(self):
         """For /history/health and /history/import."""
@@ -228,7 +247,9 @@ class AnalyticsBackfill(object):
             boundary = self._meta_time(connection, META_BOUNDARY)
             states = self._states(connection)
             imported = self._meta(connection, META_IMPORTED) == "1"
-            requested = self._meta(connection, META_REQUESTED) == "1"
+            requested = (
+                self._meta(connection, META_REQUESTED) == "1" or self._active_request
+            )
             deleted = {
                 row["streamer"]
                 for row in connection.execute("SELECT streamer FROM deleted_streamers")
@@ -271,8 +292,7 @@ class AnalyticsBackfill(object):
         finished the import for the streamers it knows of and rows were
         imported (retention should then run)."""
 
-        with self.store._read_connection() as connection:
-            requested = self._meta(connection, META_REQUESTED) == "1"
+        requested = self._requested()
         if not (self.automatic or requested):
             return False
         names = self._eligible()

@@ -525,6 +525,31 @@ def test_a_rebuilt_database_imports_again_but_not_a_deleted_streamer(
     assert points(recorder.store, "bob") == []
 
 
+def test_a_requested_import_survives_a_rebuild(analytics, tracked):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 110)])
+    analytics.write("bob", [entry(T0 - 300, 100), entry(T0 - 200, 130)])
+    analytics.record("run_start")
+    tracked["names"] = ["alice", "bob"]
+    recorder = recorder_for(analytics, tracked, automatic=False, batch_size=1)
+    recorder.poll_once()
+    recorder.delete_streamer("bob")
+    recorder.request_import()
+
+    # Corruption before the import finished: the rebuilt database's meta
+    # table no longer holds the request.
+    assert recorder.store.recover_if_corrupt(
+        sqlite3.DatabaseError("database disk image is malformed")
+    )
+    assert recorder.backfill.status()["requested"] is True
+    recorder.poll_once()
+
+    assert totals(recorder.store)["gained"] == 10
+    assert points(recorder.store, "bob") == []
+    status = recorder.backfill.status()
+    assert status["complete"] is True
+    assert status["requested"] is False
+
+
 # -- files -------------------------------------------------------------------------
 def test_an_unreadable_file_is_retried(analytics, tracked, monkeypatch, caplog):
     analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 110)])

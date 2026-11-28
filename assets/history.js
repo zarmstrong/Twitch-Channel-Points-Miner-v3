@@ -205,7 +205,8 @@
     // Only the newest read or start may render.  A request that hasn't
     // answered within REQUEST_TIMEOUT_MS counts as failed.
     function createImportControl(deps) {
-        var control = { visible: false, timer: null, request: 0 };
+        // starting: the id of the start waiting for its answer, or 0.
+        var control = { visible: false, timer: null, request: 0, starting: 0 };
 
         // Settles once: with the answer, or with a timeout error.
         function bounded(promise) {
@@ -233,10 +234,11 @@
             });
         }
 
+        // Replaces the pending read with one after ms (none for null).
         function schedule(ms) {
             if (control.timer !== null) deps.clearTimer(control.timer);
             control.timer = null;
-            if (!control.visible) return;
+            if (!control.visible || ms === null) return;
             control.timer = deps.setTimer(function () {
                 control.timer = null;
                 control.load();
@@ -255,15 +257,18 @@
         control.hide = function () {
             control.visible = false;
             control.request += 1;
-            schedule(0);
+            schedule(null);
         };
 
         // Read again after ms (a change the miner hasn't loaded yet).
         control.later = function (ms) {
-            schedule(ms);
+            if (!control.starting) schedule(ms);
         };
 
         control.load = function () {
+            // A read sent before a start's answer could show the import as
+            // not requested yet; the start's answer is read instead.
+            if (control.starting) return Promise.resolve();
             var id = ++control.request;
             return bounded(deps.fetchStatus()).then(function (status) {
                 if (id !== control.request) return;
@@ -283,13 +288,26 @@
             // The button is on the Config tab, so it is visible.
             control.visible = true;
             var id = ++control.request;
+            control.starting = id;
+            schedule(null);
+            deps.render({ text: 'Starting the import…', showButton: false, polling: false });
+
+            function finished() {
+                if (control.starting === id) control.starting = 0;
+                if (id === control.request) return true;
+                // Superseded (the tab was left and opened again): read the
+                // status now that the start has its answer.
+                if (control.visible) control.load();
+                return false;
+            }
+
             return bounded(deps.postImport()).then(function (status) {
-                if (id !== control.request) return;
+                if (!finished()) return;
                 var view = importControlState(status);
                 deps.render(view);
                 schedule(importPollDelay(view, false));
             }, function (error) {
-                if (id !== control.request) return;
+                if (!finished()) return;
                 // Whether History can still import is unknown: the next
                 // read decides whether the button comes back.
                 deps.render({

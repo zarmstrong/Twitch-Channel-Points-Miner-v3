@@ -272,9 +272,7 @@ def _base_web_config(config_path):
     tree, streamer_nodes, category_nodes = _config_lists(source)
     miner = _simple_value(_assignment(tree, "MINER_CONFIG")) or {}
     mine = _simple_value(_assignment(tree, "MINE_CONFIG")) or {}
-    analytics = _simple_value(_assignment(tree, "ANALYTICS_CONFIG"))
-    if not isinstance(analytics, dict):
-        analytics = {}
+    analytics_node = _assignment(tree, "ANALYTICS_CONFIG")
     global_streamer_settings = miner.get("streamer_settings") or {}
     effective_streamer_defaults = dict(STREAMER_SETTING_DEFAULTS)
     effective_streamer_defaults.update(
@@ -407,7 +405,7 @@ def _base_web_config(config_path):
             "startup_only": startup_only,
         },
         "login": {"android": miner.get("android_login", False) is True},
-        "history": _history_settings(analytics),
+        "history": _history_settings(analytics_node),
         "notifications": notifications,
         "notification_schemas": NOTIFICATION_SCHEMAS,
         # WATCH_STATUS is never sent to notifiers, so it isn't offered.
@@ -417,20 +415,54 @@ def _base_web_config(config_path):
     }
 
 
-def _history_settings(analytics):
-    retention = analytics.get("history_retention_days", HISTORY_RETENTION_DEFAULT)
-    if (
-        not isinstance(retention, int)
-        or isinstance(retention, bool)
-        or not 0 <= retention <= HISTORY_RETENTION_MAX_DAYS
-    ):
-        # A variable or invalid value: History uses its default for it.
-        retention = HISTORY_RETENTION_DEFAULT
+_UNREADABLE = object()
+
+
+def _analytics_literal(analytics_node, key):
+    """A literal ANALYTICS_CONFIG value; None when the key is missing (or
+    ANALYTICS_CONFIG isn't a literal dict), _UNREADABLE for an expression
+    the dashboard can't evaluate (a variable, a call)."""
+
+    node = _dict_item(analytics_node, key)
+    if node is None:
+        return None
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return _UNREADABLE
+
+
+def _history_retention_value(value):
+    """The retention History runs with for a configured value, read the way
+    ``history._history_retention_days`` reads it."""
+
+    if value is None:
+        return HISTORY_RETENTION_DEFAULT
+    try:
+        if isinstance(value, bool):
+            raise ValueError(value)
+        days = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return HISTORY_RETENTION_DEFAULT
+    return days if days >= 0 else HISTORY_RETENTION_DEFAULT
+
+
+def _history_settings(analytics_node):
+    """History's settings as the miner reads them.  A value the dashboard
+    can't evaluate is None: the form leaves it alone unless changed."""
+
+    retention = _analytics_literal(analytics_node, "history_retention_days")
+    retention = (
+        None if retention is _UNREADABLE else _history_retention_value(retention)
+    )
+    import_analytics = _analytics_literal(analytics_node, "history_import_analytics")
+    import_analytics = (
+        None if import_analytics is _UNREADABLE else import_analytics is not False
+    )
     override = os.environ.get(HISTORY_RETENTION_ENV_VAR, "").strip()
     return {
         "retention_days": retention,
-        "import_analytics": analytics.get("history_import_analytics", True)
-        is not False,
+        "import_analytics": import_analytics,
         # Set, the environment variable wins over the saved value.
         "retention_env_override": override or None,
     }

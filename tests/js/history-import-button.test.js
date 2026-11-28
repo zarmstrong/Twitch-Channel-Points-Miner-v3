@@ -225,3 +225,38 @@ test('a config change reads again later while visible', async () => {
   h.control.later(10000);
   assert.equal(h.timer().ms, 10000);
 });
+
+test('no read runs while a start waits for its answer', async () => {
+  const h = harness();
+  const shown = h.control.show();
+  h.calls.fetch[0].resolve(status());
+  await shown;
+  assert.equal(h.timer().ms, 30000);
+
+  const started = h.control.start();
+  // The scheduled read is gone; only the start's timeout is left.
+  assert.equal(h.timer().ms, 30000);
+  assert.equal(h.last().showButton, false);
+  assert.match(h.last().text, /^Starting the import/);
+  h.control.later(10000);
+  await h.control.load();
+  assert.equal(h.calls.fetch.length, 1);
+  assert.equal(h.timer().ms, 30000);
+
+  h.calls.post[0].resolve(status({ requested: true }));
+  await started;
+  assert.equal(h.last().showButton, false);
+  assert.match(h.last().text, /^Importing/);
+  assert.equal(h.timer().ms, 5000);
+});
+
+test('a start whose tab was left and opened again reads the status after it', async () => {
+  const h = harness();
+  const started = h.control.start();
+  h.control.hide();
+  h.control.show();
+  assert.equal(h.calls.fetch.length, 0);
+  h.calls.post[0].resolve(status({ requested: true }));
+  await started;
+  assert.equal(h.calls.fetch.length, 1);
+});

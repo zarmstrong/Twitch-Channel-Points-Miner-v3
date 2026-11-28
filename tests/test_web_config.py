@@ -3438,10 +3438,64 @@ def test_managed_web_config_reads_history_settings(tmp_path, monkeypatch):
     }
 
 
-def test_managed_web_config_shows_the_default_for_an_unreadable_retention(tmp_path):
+@pytest.mark.parametrize(
+    "configured, shown",
+    [
+        ('"0"', 0),
+        ("0.0", 0),
+        ('"45"', 45),
+        ("90.7", 90),
+        ("100000", 100000),
+        ("-5", 730),
+        ("True", 730),
+        ("None", 730),
+        ('"abc"', 730),
+        ("DAYS", None),
+    ],
+)
+def test_managed_web_config_shows_the_retention_history_runs_with(
+    tmp_path, configured, shown
+):
+    from TwitchChannelPointsMiner.history import _history_retention_days
+
     config = tmp_path / "config.py"
-    _write_history_config(config, '{"history_retention_days": DAYS}')
-    assert read_managed_web_config(config)["history"]["retention_days"] == 730
+    _write_history_config(config, f'{{"history_retention_days": {configured}}}')
+    assert read_managed_web_config(config)["history"]["retention_days"] == shown
+    if shown is not None:
+        # The same value History's own reader uses.
+        value = ast.literal_eval(configured)
+        assert _history_retention_days(value) == shown
+
+
+@pytest.mark.parametrize(
+    "configured, shown",
+    [("False", False), ("True", True), ('"no"', True), ("0", True), ("FLAG", None)],
+)
+def test_managed_web_config_shows_the_import_setting_history_runs_with(
+    tmp_path, configured, shown
+):
+    config = tmp_path / "config.py"
+    _write_history_config(config, f'{{"history_import_analytics": {configured}}}')
+    assert read_managed_web_config(config)["history"]["import_analytics"] is shown
+
+
+def test_saving_one_history_setting_leaves_an_unreadable_other_alone(tmp_path):
+    config = tmp_path / "config.py"
+    _write_history_config(
+        config,
+        '{"history_retention_days": DAYS, "history_import_analytics": True}',
+    )
+    config.write_text(
+        "DAYS = 30\n" + config.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_history", "values": {"import_analytics": False}}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert '"history_retention_days": DAYS' in source
+    assert _load_config(config).ANALYTICS_CONFIG["history_import_analytics"] is False
 
 
 def test_managed_web_config_updates_history_settings(tmp_path):
