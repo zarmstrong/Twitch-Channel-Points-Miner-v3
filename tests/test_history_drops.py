@@ -206,6 +206,31 @@ def test_a_claim_is_written_once_per_process(journal, monkeypatch):
     assert [record["claim_key"] for record in written(journal, "drop")][-1] == "i2|d2"
 
 
+def test_a_claim_written_without_its_game_is_written_again_with_it(
+    journal, folder, store, monkeypatch
+):
+    journal.record_drop("d1", "i1|d1", game="Unknown")
+    journal.record_drop("d1", "i1|d1", game="Game A", already_claimed=True)
+    journal.record_drop("d1", "i1|d1", game="Game B", already_claimed=True)
+    journal.record_drop("d1", "i1|d1", already_claimed=True)
+    assert [record["game"] for record in written(journal, "drop")] == [None, "Game A"]
+    # Imported, the claim counts once, under its game.
+    importer = JournalImporter(store, journal.folder, monotonic=lambda: 0.0)
+    importer.poll()
+    assert [
+        (row["drop_id"], row["game"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("d1", "Game A")]
+
+
+def test_an_unwritten_claim_keeps_what_twitch_said_first(journal, monkeypatch):
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1", already_claimed=True)
+    monkeypatch.setattr(journal, "append", real_append)
+    journal.record_drop("d1", "i1|d1")
+    assert [record["already_claimed"] for record in written(journal, "drop")] == [True]
+
+
 def test_a_claim_without_an_id_or_a_running_journal_is_not_written(journal):
     journal.record_drop("", "key")
     journal.record_drop("d1", "")
@@ -319,13 +344,16 @@ def test_a_journalled_claim_replaces_the_same_claim_from_the_drops_data(
         [
             # Written right after the claim below: the same claim.
             captured(T0 + 1),
-            # Another drop, and the same drop in another category.
+            # Another drop, and the same drop in another category: still
+            # the same claim.
             captured(T0 + 1, drop_id="d2"),
             captured(T0 + 1, category="Game B"),
         ]
     )
     backfill_for(store, folder, importer).poll()
-    assert len(rows(store, "SELECT * FROM drops")) == 3
+    assert sorted(
+        (row["drop_id"], row["game"]) for row in rows(store, "SELECT * FROM drops")
+    ) == [("d1", "Game A"), ("d2", "Game A")]
     folder.drop(at=T0)
     importer.poll()
     assert sorted(
@@ -333,7 +361,6 @@ def test_a_journalled_claim_replaces_the_same_claim_from_the_drops_data(
         for row in rows(store, "SELECT * FROM drops")
     ) == [
         ("d1", "Game A", "journal"),
-        ("d1", "Game B", "analytics"),
         ("d2", "Game A", "analytics"),
     ]
 
@@ -670,6 +697,30 @@ def test_a_deleted_claim_reported_with_its_game_later_stays_deleted(folder, stor
     for _ in range(3):
         recorder.poll_once()
     assert rows(store, "SELECT * FROM drops") == []
+
+
+def test_a_drops_data_copy_imported_after_a_delete_goes_with_the_claim(folder, store):
+    recorder = recorder_for(folder, store)
+    backfill, recorder.backfill = recorder.backfill, None
+    folder.drop(at=T0, streamer="alice", game=None)
+    recorder.poll_once()
+    recorder.delete_streamer("alice")
+    # The import, turned on later, lists the drop under its game; then the
+    # claim is reported again with it.
+    folder.drops_data([captured(T0 + 600)])
+    recorder.backfill = backfill
+    recorder.poll_once()
+    assert backfill.status()["drops"]["done"]
+    folder.drop(at=T0 + 900, run=2, already_claimed=True)
+    recorder.poll_once()
+    assert rows(store, "SELECT * FROM drops") == []
+
+
+def test_a_claim_under_a_second_key_is_the_same_claim(folder, importer, store):
+    folder.drop(at=T0)
+    folder.drop(at=T0 + 600, run=2, claim_key="other-instance|d1")
+    importer.poll()
+    assert len(rows(store, "SELECT * FROM drops")) == 1
 
 
 def test_a_deleted_imported_claim_reported_again_stays_deleted(folder, importer, store):

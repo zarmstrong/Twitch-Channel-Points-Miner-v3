@@ -472,11 +472,14 @@ class Journal(object):
         # process; lost at a restart.
         self._drop_lock = threading.Lock()
         self._drop_channels = {}
-        # Claim keys record_drop wrote in this process, newest last; held
-        # across the append so a claim reported twice at once is written
-        # once.  Outer to the journal's own lock.
+        # Claim keys record_drop wrote in this process -> the game written,
+        # newest last; and claims it could not write -> whether Twitch first
+        # said "already claimed".  The lock is held across the append so a
+        # claim reported twice at once is written once; outer to the
+        # journal's own lock.
         self._claims_lock = threading.Lock()
         self._drop_claims = {}
+        self._unwritten_claims = {}
 
     def _eligible(self, streamer):
         """``history_eligible`` and not removed from the miner."""
@@ -1269,8 +1272,15 @@ class Journal(object):
             game = None
         streamer = self.drop_channel(drop_id)
         with self._claims_lock:
-            if claim_key in self._drop_claims:
+            if claim_key in self._drop_claims and (
+                game is None or self._drop_claims[claim_key] is not None
+            ):
+                # Written, and this adds nothing (a claim written without its
+                # game is written again once it is known).
                 return
+            if claim_key in self._unwritten_claims:
+                # Not written when Twitch accepted it: what Twitch said then.
+                already_claimed = self._unwritten_claims[claim_key]
             written = self.append(
                 "drop",
                 streamer=streamer,
@@ -1286,10 +1296,16 @@ class Journal(object):
                 image=text_or_none(image),
                 already_claimed=already_claimed is True,
             )
-            if written:
-                self._drop_claims[claim_key] = True
-                while len(self._drop_claims) > DROP_CLAIMS_KEPT:
-                    del self._drop_claims[next(iter(self._drop_claims))]
+            if not written:
+                self._unwritten_claims.setdefault(claim_key, already_claimed is True)
+                while len(self._unwritten_claims) > DROP_CLAIMS_KEPT:
+                    del self._unwritten_claims[next(iter(self._unwritten_claims))]
+                return
+            self._unwritten_claims.pop(claim_key, None)
+            self._drop_claims.pop(claim_key, None)
+            self._drop_claims[claim_key] = game
+            while len(self._drop_claims) > DROP_CLAIMS_KEPT:
+                del self._drop_claims[next(iter(self._drop_claims))]
 
 
 # The process-wide journal.  Inert until ``start()``; every call is a no-op

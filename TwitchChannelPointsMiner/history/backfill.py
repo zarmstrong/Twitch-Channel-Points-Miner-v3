@@ -22,9 +22,9 @@ The claimed drops in the dashboard's Drops data (``drops_by_category.json``)
 are imported once too.  That file keeps one entry per drop and category, and
 moves its time on whenever the miner sees the drop again, so a time boundary
 can't tell an old claim from one the journal recorded.  A drop is claimed at
-once at most (see store.py), so an entry is skipped when the journal holds a
-claim of the same drop and category, and the importer removes an imported
-entry when the journal's claim of it arrives later.  An entry is "captured"
+most once (see store.py), so an entry is skipped when History holds a claim
+of the same drop (or recorded one as deleted), and the importer removes an
+imported entry when the journal's claim of it arrives later.  An entry is "captured"
 once the drop's minutes are complete, before its claim is accepted: one whose
 claim never went through (an unlinked game account, say) is counted too, as
 it is in the Drops tab.
@@ -637,10 +637,10 @@ class AnalyticsBackfill(object):
             if connection.execute(
                 f"""
                 SELECT 1 FROM {table}
-                WHERE (drop_id = ? AND game = ?) OR dedupe_key = ?
+                WHERE drop_id = ? OR dedupe_key = ?
                 LIMIT 1
                 """,
-                (drop_id, game, key),
+                (drop_id, key),
             ).fetchone():
                 return 0
         benefit = _text(entry.get("benefit"))

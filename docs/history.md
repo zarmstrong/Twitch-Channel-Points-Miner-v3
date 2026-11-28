@@ -117,9 +117,10 @@ account that has mined for months doesn't start with an empty History tab.
   (`analytics/<username>/drops_by_category.json`) are imported once, with
   their category as the game. That file keeps one entry per drop and
   category, and moves its time on whenever the miner sees the drop again, so
-  an imported drop's time can be later than its claim. A drop the journal
-  recorded a claim of (the same drop and category) isn't imported again,
-  whichever of the two History reads first. The Drops data marks a drop as
+  an imported drop's time can be later than its claim. A drop counts once:
+  one the journal recorded a claim of isn't imported again, whichever of the
+  two History reads first, and a drop listed under more than one category is
+  imported once. The Drops data marks a drop as
   captured once its minutes are complete, so an imported drop whose claim
   never went through (for example, because the game account isn't linked)
   is counted too, as the Drops tab counts it. Imported quests aren't marked

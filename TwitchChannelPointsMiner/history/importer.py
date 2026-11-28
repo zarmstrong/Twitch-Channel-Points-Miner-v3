@@ -985,89 +985,93 @@ class JournalImporter(object):
         key = f"c:{claim_key}"
         if connection.execute(
             """
-            SELECT 1 FROM deleted_drop_keys
-            WHERE dedupe_key = ? OR (drop_id = ? AND game = ?)
+            SELECT 1 FROM deleted_drop_keys WHERE dedupe_key = ? OR drop_id = ?
             LIMIT 1
             """,
-            (key, drop_id, game),
+            (key, drop_id),
         ).fetchone():
             # Removed by a streamer delete (also when it was imported from
             # the Drops data: a drop is claimed once), reported again since.
-            # Kept under this claim's own key and game too, and saved: after
-            # a rebuild, the claim reported without its game, or the Drops
-            # data listing it under this one, must still match.
-            self._save_deleted(
-                self._tombstone_claim(connection, claim_key, drop_id, game, at), at
-            )
+            # Kept under this claim's own key too, and saved, with any copy
+            # the Drops data import added since.
+            new = []
+            own = (key, drop_id, game, at, "journal")
+            if self._tombstone(connection, own):
+                new.append(own)
+            new += self._remove_drops_data_copies(connection, drop_id)
+            self._save_deleted(new, at)
             return
-        inserted = connection.execute(
+        existing = connection.execute(
             """
-            INSERT OR IGNORE INTO drops (ts, streamer, drop_id, name, benefits,
-                campaign, campaign_id, game, quest, minutes_required, image,
-                source, dedupe_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'journal', ?)
+            SELECT dedupe_key, game FROM drops
+            WHERE source = 'journal' AND (dedupe_key = ? OR drop_id = ?)
+            LIMIT 1
             """,
-            (
-                at,
-                streamer or None,
-                drop_id,
-                _text(record.get("name")),
-                json.dumps(benefits, ensure_ascii=False),
-                _text(record.get("campaign")),
-                _text(record.get("campaign_id")),
-                game,
-                1 if record.get("quest") is True else 0,
-                minutes if minutes is not None and minutes >= 0 else None,
-                _text(record.get("image")),
-                key,
-            ),
-        ).rowcount
-        if game is None:
-            return
-        if inserted == 0:
-            # Recorded before without its game: now it is known.
-            connection.execute(
-                "UPDATE drops SET game = ? WHERE dedupe_key = ? AND game IS NULL",
-                (game, key),
-            )
-        if connection.execute(
-            "SELECT 1 FROM drops WHERE dedupe_key = ? AND game = ?", (key, game)
-        ).fetchone():
-            # The same claim imported from the Drops data (backfill.py, which
-            # skips it by the same rule, so the order of the two imports
-            # doesn't matter): a drop is claimed once.
+            (key, drop_id),
+        ).fetchone()
+        if existing is not None:
+            # Reported again.  Recorded without its game before, perhaps:
+            # now it is known.
+            if game is not None and existing["game"] is None:
+                connection.execute(
+                    "UPDATE drops SET game = ? WHERE dedupe_key = ?",
+                    (game, existing["dedupe_key"]),
+                )
+        else:
             connection.execute(
                 """
-                DELETE FROM drops
-                WHERE source = 'analytics' AND drop_id = ? AND game = ?
+                INSERT INTO drops (ts, streamer, drop_id, name, benefits,
+                    campaign, campaign_id, game, quest, minutes_required, image,
+                    source, dedupe_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'journal', ?)
                 """,
-                (drop_id, game),
+                (
+                    at,
+                    streamer or None,
+                    drop_id,
+                    _text(record.get("name")),
+                    json.dumps(benefits, ensure_ascii=False),
+                    _text(record.get("campaign")),
+                    _text(record.get("campaign_id")),
+                    game,
+                    1 if record.get("quest") is True else 0,
+                    minutes if minutes is not None and minutes >= 0 else None,
+                    _text(record.get("image")),
+                    key,
+                ),
             )
+        # The same claim imported from the Drops data (backfill.py, which
+        # skips it by the same rule, so the order of the two imports doesn't
+        # matter): a drop is claimed once.
+        connection.execute(
+            "DELETE FROM drops WHERE source = 'analytics' AND drop_id = ?",
+            (drop_id,),
+        )
 
-    def _tombstone_claim(self, connection, claim_key, drop_id, game, at):
-        """Record a journalled claim as deleted, under its key and, when it
-        names a game no deleted claim of the drop has, under that game too
-        (the claim was recorded without it before).  Returns what was not
-        recorded yet, for ``_save_deleted``."""
+    def _remove_drops_data_copies(self, connection, drop_id):
+        """Remove the claims of ``drop_id`` the Drops data import added
+        without a channel (a delete removes only the channel's own), recorded
+        as deleted.  Returns the ones not recorded as deleted yet, for
+        ``_save_deleted``."""
 
-        key = f"c:{claim_key}"
         new = []
-        own = (key, drop_id, game, at, "journal")
-        if self._tombstone(connection, own):
-            new.append(own)
-        if (
-            game is not None
-            and not connection.execute(
-                """
-                SELECT 1 FROM deleted_drop_keys WHERE drop_id = ? AND game = ?
-                LIMIT 1
-                """,
-                (drop_id, game),
-            ).fetchone()
-        ):
-            alias = (f"{key}|{game}", drop_id, game, at, "journal")
-            if self._tombstone(connection, alias):
-                new.append(alias)
+        for row in connection.execute(
+            """
+            SELECT dedupe_key, game, ts FROM drops
+            WHERE source = 'analytics' AND streamer IS NULL AND drop_id = ?
+            """,
+            (drop_id,),
+        ).fetchall():
+            drop = (row["dedupe_key"], drop_id, row["game"], row["ts"], "analytics")
+            if self._tombstone(connection, drop):
+                new.append(drop)
+        connection.execute(
+            """
+            DELETE FROM drops
+            WHERE source = 'analytics' AND streamer IS NULL AND drop_id = ?
+            """,
+            (drop_id,),
+        )
         return new
 
     @staticmethod
@@ -1098,30 +1102,11 @@ class JournalImporter(object):
         claim_key = _text(record.get("claim_key"))
         if drop_id is None or claim_key is None:
             return
-        game = _text(record.get("game"))
+        own = (f"c:{claim_key}", drop_id, _text(record.get("game")), at, "journal")
         # Only what is not recorded yet is saved: what is was saved when it
         # was recorded (or restored from the file after a rebuild).
-        new = self._tombstone_claim(connection, claim_key, drop_id, game, at)
-        if game is not None:
-            for row in connection.execute(
-                """
-                SELECT dedupe_key, ts FROM drops
-                WHERE source = 'analytics' AND streamer IS NULL
-                  AND drop_id = ? AND game = ?
-                """,
-                (drop_id, game),
-            ).fetchall():
-                drop = (row["dedupe_key"], drop_id, game, row["ts"], "analytics")
-                if self._tombstone(connection, drop):
-                    new.append(drop)
-            connection.execute(
-                """
-                DELETE FROM drops
-                WHERE source = 'analytics' AND streamer IS NULL
-                  AND drop_id = ? AND game = ?
-                """,
-                (drop_id, game),
-            )
+        new = [own] if self._tombstone(connection, own) else []
+        new += self._remove_drops_data_copies(connection, drop_id)
         self._save_deleted(new, at)
 
     def _save_deleted(self, drops, at):

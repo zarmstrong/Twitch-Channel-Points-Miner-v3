@@ -40,10 +40,12 @@ SECONDS_PER_DAY = 24 * 60 * 60
 # its newest record.
 SESSION_GAP_SECONDS = 180
 
-# A drop (by its id, under one category) is claimed at most once: each
-# repeat of a quest's reward group is a drop of its own ("<group>#<n>").  So a
-# claim imported from the dashboard's Drops data and a journalled claim of
-# the same drop and category are the same claim, whenever each was written.
+# A drop (by its id) is claimed at most once by an account: drop ids are
+# unique, and each repeat of a quest's reward group is a drop of its own
+# ("<group>#<n>").  So claims of the same drop are the same claim, whenever
+# each was written and whatever category (game) each names: one imported
+# from the dashboard's Drops data (which can list a drop under more than
+# one), a journalled one, and one recorded as deleted.
 
 # Tables holding per-streamer rows, cleared by a delete.
 _STREAMER_TABLES = (
