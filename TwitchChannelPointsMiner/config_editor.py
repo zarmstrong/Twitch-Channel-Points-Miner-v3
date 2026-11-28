@@ -2016,19 +2016,16 @@ def _write_notification(config_path, provider, values):
 _EDITED_ASSIGNMENTS = ("MINER_CONFIG", "STREAMERS", "MINE_CONFIG", "ANALYTICS_CONFIG")
 
 
-def _names_imported_as_wanted(node, wanted):
-    """The names of wanted that this statement imports from the same place."""
+def _is_wanted_alias(node, alias, wanted):
+    """Whether this alias of an import statement is the wanted import."""
     if type(node) is not type(wanted):
-        return set()
+        return False
     if isinstance(node, ast.ImportFrom) and (
         node.module != wanted.module or node.level != wanted.level
     ):
-        return set()
-    pairs = {(alias.name, alias.asname or alias.name) for alias in wanted.names}
-    return {
-        alias.asname or alias.name.split(".")[0]
-        for alias in node.names
-        if (alias.name, alias.asname or alias.name) in pairs
+        return False
+    return (alias.name, alias.asname or alias.name) in {
+        (item.name, item.asname or item.name) for item in wanted.names
     }
 
 
@@ -2063,33 +2060,43 @@ def _imports_binding(tree, statement):
     """Whether config.py already imports this before the settings use it.
 
     Matched on the parsed import, not the text: the same text with "as"
-    after it, or in a comment, doesn't bind the name the edit writes. The
-    edit writes the name inside the config assignments, so only statements
-    before the first of them count. Raises ConfigEditError when something
-    else there also binds or deletes the name, since an import added at the
-    top could then be undone before the settings run.
+    after it, or in a comment, doesn't bind the name the edit writes. Edits
+    write the name inside the config assignments, so the import must run
+    before the first of them, and nothing else may bind or delete the name
+    before the last of them: an import added at the top could otherwise be
+    undone before a setting uses it. That raises ConfigEditError.
     """
     wanted = ast.parse(statement).body[0]
     names = {alias.asname or alias.name.split(".")[0] for alias in wanted.names}
-    first_use = min(
-        (
-            node.lineno
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id in _EDITED_ASSIGNMENTS
-                for target in node.targets
-            )
-        ),
-        default=None,
-    )
+    uses = [
+        node.lineno
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id in _EDITED_ASSIGNMENTS
+            for target in node.targets
+        )
+    ]
+    first_use = min(uses, default=None)
+    last_use = max(uses, default=None)
     imported = set()
+    changed = set()
     for node in tree.body:
-        if first_use is not None and node.lineno >= first_use:
+        if last_use is not None and node.lineno > last_use:
             break
-        same = _names_imported_as_wanted(node, wanted)
-        imported |= same
-        changed = (names & _module_level_names_changed(node)) - same
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            # Aliases bind in order, so check each one.
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or bound not in names:
+                    continue
+                if _is_wanted_alias(node, alias, wanted):
+                    if first_use is None or node.lineno < first_use:
+                        imported.add(bound)
+                else:
+                    changed.add(bound)
+        else:
+            changed |= names & _module_level_names_changed(node)
         if changed:
             name = ", ".join(sorted(changed))
             raise ConfigEditError(

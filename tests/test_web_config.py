@@ -4782,3 +4782,64 @@ def test_streamer_add_accepts_its_imports_split_across_statements(tmp_path):
     )
 
     assert _load_config(config).STREAMERS[1].settings.favorite is True
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_category_sort_save_refuses_a_name_rebound_between_settings(tmp_path, migrate):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "CategorySort = None\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+    overrides = tmp_path / "web-config.json"
+
+    with pytest.raises(ConfigEditError, match="changes or removes CategorySort"):
+        if migrate:
+            overrides.write_text(
+                json.dumps({"category": {"sort": "VIEWERS_ASC"}}), encoding="utf-8"
+            )
+            migrate_web_config(config)
+        else:
+            update_managed_web_config(
+                config,
+                {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}},
+            )
+
+    assert config.read_bytes() == before
+    assert overrides.is_file() is migrate
+
+
+def test_logging_level_save_refuses_a_conflicting_alias_in_the_same_import(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging, math as logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="changes or removes logging"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
