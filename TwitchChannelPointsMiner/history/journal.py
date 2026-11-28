@@ -1272,14 +1272,19 @@ class Journal(object):
             game = None
         streamer = self.drop_channel(drop_id)
         with self._claims_lock:
+            written_game, written_streamer = self._drop_claims.get(
+                claim_key, (None, None)
+            )
             if claim_key in self._drop_claims:
-                written_game, written_streamer = self._drop_claims[claim_key]
                 if (game is None or written_game is not None) and (
                     streamer is None or written_streamer is not None
                 ):
                     # Written, and this adds nothing (a claim written without
                     # its game or channel is written again once it is known).
                     return
+                # Written again with what was known already, too.
+                game = written_game or game
+                streamer = written_streamer or streamer
             if claim_key in self._unwritten_claims:
                 # Not written when Twitch accepted it: what Twitch said then.
                 already_claimed = self._unwritten_claims[claim_key]

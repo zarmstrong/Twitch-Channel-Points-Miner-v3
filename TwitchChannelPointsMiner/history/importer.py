@@ -993,12 +993,12 @@ class JournalImporter(object):
             # Removed by a streamer delete (also when it was imported from
             # the Drops data: a drop is claimed once), reported again since.
             # Kept under this claim's own key too, and saved, with any copy
-            # the Drops data import added since.
+            # recorded without a channel since.
             new = []
             own = (key, drop_id, game, at, "journal")
             if self._tombstone(connection, own):
                 new.append(own)
-            new += self._remove_drops_data_copies(connection, drop_id)
+            new += self._remove_channelless_copies(connection, drop_id)
             self._save_deleted(new, at)
             return
         existing = connection.execute(
@@ -1054,28 +1054,26 @@ class JournalImporter(object):
             (drop_id,),
         )
 
-    def _remove_drops_data_copies(self, connection, drop_id):
-        """Remove the claims of ``drop_id`` the Drops data import added
-        without a channel (a delete removes only the channel's own), recorded
-        as deleted.  Returns the ones not recorded as deleted yet, for
-        ``_save_deleted``."""
+    def _remove_channelless_copies(self, connection, drop_id):
+        """Remove the claims of ``drop_id`` recorded without a channel (the
+        Drops data import's, or a journalled claim whose channel was not
+        known yet; a delete removes only the channel's own), recorded as
+        deleted under their own keys.  Returns the ones not recorded as
+        deleted yet, for ``_save_deleted``."""
 
         new = []
         for row in connection.execute(
             """
-            SELECT dedupe_key, game, ts FROM drops
-            WHERE source = 'analytics' AND streamer IS NULL AND drop_id = ?
+            SELECT dedupe_key, game, ts, source FROM drops
+            WHERE streamer IS NULL AND drop_id = ?
             """,
             (drop_id,),
         ).fetchall():
-            drop = (row["dedupe_key"], drop_id, row["game"], row["ts"], "analytics")
+            drop = (row["dedupe_key"], drop_id, row["game"], row["ts"], row["source"])
             if self._tombstone(connection, drop):
                 new.append(drop)
         connection.execute(
-            """
-            DELETE FROM drops
-            WHERE source = 'analytics' AND streamer IS NULL AND drop_id = ?
-            """,
+            "DELETE FROM drops WHERE streamer IS NULL AND drop_id = ?",
             (drop_id,),
         )
         return new
@@ -1099,10 +1097,11 @@ class JournalImporter(object):
 
     def _delete_drop_claim(self, connection, record, at):
         """A claim journalled before its channel's delete cutoff but imported
-        after the delete: it is deleted too, with the same claim imported
-        from the Drops data without a channel (it was not credited to the
-        channel, so the delete did not remove it).  Saved beside the
-        journal like the delete's own claims."""
+        after the delete: it is deleted too, with the same claim recorded
+        without a channel (from the Drops data, or journalled before its
+        channel was known: it was not credited to the channel, so the delete
+        did not remove it).  Saved beside the journal like the delete's own
+        claims."""
 
         drop_id = _text(record.get("drop_id"))
         claim_key = _text(record.get("claim_key"))
@@ -1112,7 +1111,7 @@ class JournalImporter(object):
         # Only what is not recorded yet is saved: what is was saved when it
         # was recorded (or restored from the file after a rebuild).
         new = [own] if self._tombstone(connection, own) else []
-        new += self._remove_drops_data_copies(connection, drop_id)
+        new += self._remove_channelless_copies(connection, drop_id)
         self._save_deleted(new, at)
 
     def _save_deleted(self, drops, at):

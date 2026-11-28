@@ -241,6 +241,17 @@ def test_a_claim_written_without_its_channel_is_written_again_with_it(journal, s
     ] == [("d1", "alice", "Game A")]
 
 
+def test_a_claim_written_again_keeps_what_was_written_before(journal):
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    journal.note_drop_channel("alice", "d1")
+    # Learns the channel, reported without the game this time.
+    journal.record_drop("d1", "i1|d1", game="Unknown", already_claimed=True)
+    journal.record_drop("d1", "i1|d1", game="Game A", already_claimed=True)
+    assert [
+        (record["game"], record["streamer"]) for record in written(journal, "drop")
+    ] == [("Game A", None), ("Game A", "alice")]
+
+
 def test_an_unwritten_claim_keeps_what_twitch_said_first(journal, monkeypatch):
     real_append = journal.append
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
@@ -613,6 +624,24 @@ def test_a_claim_deleted_before_it_was_imported_removes_its_drops_data_twin(
     assert sorted(drop[0] for drop in read_deleted_drops(folder.journal)) == [
         "a:d1|Game A",
         "c:i-d1|d1",
+    ]
+
+
+def test_a_claim_deleted_before_it_was_imported_removes_its_channelless_twin(
+    folder, importer, store
+):
+    # Journalled before its channel was known; reported again, on alice's
+    # channel, just before her delete, which ran before the importer saw
+    # it.
+    folder.drop(at=T0, claim_key="k1")
+    importer.poll()
+    folder.drop(at=T0 + 5, run=2, claim_key="k2", streamer="alice")
+    store.record_delete("alice", segment_name(2, 1), 10**6)
+    importer.poll()
+    assert rows(store, "SELECT * FROM drops") == []
+    assert sorted(drop[0] for drop in read_deleted_drops(folder.journal)) == [
+        "c:k1",
+        "c:k2",
     ]
 
 
