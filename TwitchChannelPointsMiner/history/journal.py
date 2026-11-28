@@ -164,7 +164,10 @@ def read_delete_cutoffs(folder, finishable=False):
             continue
         if finishable and version < CUTOFF_VERSION:
             continue
-        if streamer and position > cutoffs.get(streamer, ("", 0)):
+        # A delete before anything was journalled, ("", 0), is kept too: it
+        # removes no journal line, but the analytics data import
+        # (backfill.py) must skip the streamer.
+        if streamer and (streamer not in cutoffs or position > cutoffs[streamer]):
             cutoffs[streamer] = position
     return cutoffs
 
@@ -404,6 +407,11 @@ class Journal(object):
         if self._retired.get(id(streamer)) is streamer:
             return False
         return history_eligible(streamer)
+
+    def eligible(self, streamer):
+        """Whether History records ``streamer`` now."""
+
+        return self._eligible(streamer)
 
     # -- run lifecycle ---------------------------------------------------
     @property

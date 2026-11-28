@@ -39,6 +39,9 @@ class HistoryUnavailableError(RuntimeError):
 _lock = threading.RLock()
 _recorder = None
 _atexit_registered = False
+# Lists the usernames History records (set by the miner once it has them);
+# the analytics JSON import (backfill.py) waits for it.
+_streamer_source = None
 
 
 def _retention_days(value, source):
@@ -115,12 +118,32 @@ def stop_journal():
         logger.warning("Unable to stop the History journal", exc_info=True)
 
 
-def start_history(retention_days=None):
+def set_history_streamers(source):
+    """Tell History which streamers it records: ``source()`` returns their
+    usernames.  The analytics JSON import imports only those."""
+
+    global _streamer_source
+    _streamer_source = source
+
+
+def history_streamers():
+    """The usernames History records, or None until the miner listed them."""
+
+    source = _streamer_source
+    if source is None:
+        return None
+    names = source()
+    return list(names) if names is not None else None
+
+
+def start_history(retention_days=None, import_analytics=True):
     """Start the History importer once for this process.
 
     ``retention_days`` is the configured raw-row retention window; the
     ``TCPM_HISTORY_RETENTION_DAYS`` environment variable overrides it.
-    Returns the recorder, or ``None`` when History is unavailable.
+    ``import_analytics`` imports the analytics JSON from before the journal
+    once (``backfill.py``).  Returns the recorder, or ``None`` when History
+    is unavailable.
     """
 
     global _recorder, _atexit_registered
@@ -137,6 +160,8 @@ def start_history(retention_days=None):
             recorder = build_recorder(
                 analytics_path,
                 retention_days=_history_retention_days(retention_days),
+                import_analytics=import_analytics is not False,
+                streamers=history_streamers,
             )
             recorder.start()
             _recorder = recorder
@@ -271,6 +296,16 @@ def is_recording():
     return bool(recorder is not None and recorder.is_alive() and recorder.store.ready)
 
 
+def import_status():
+    """The analytics JSON import's state for /history/health, or None."""
+
+    recorder = _recorder
+    backfill = getattr(recorder, "backfill", None)
+    if backfill is None:
+        return None
+    return backfill.status()
+
+
 def get_store():
     """Return the initialized store, or None while History is unavailable."""
 
@@ -285,7 +320,10 @@ __all__ = [
     "HistoryUnavailableError",
     "delete_streamer_history",
     "get_store",
+    "history_streamers",
+    "import_status",
     "is_recording",
+    "set_history_streamers",
     "start_history",
     "start_journal",
     "stop_history",

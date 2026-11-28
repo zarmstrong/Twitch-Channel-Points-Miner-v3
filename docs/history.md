@@ -39,8 +39,44 @@ configure is recorded as usual. Removing a channel from the configuration, or
 the miner keeping it only for Drops, ends its History from then on; what was
 recorded stays.
 
-History starts empty: it does not import the existing per-streamer analytics
-JSON.
+History also imports, once, what the existing per-streamer analytics data
+holds from before it started recording: see
+[Importing existing analytics data](#importing-existing-analytics-data).
+
+## Importing existing analytics data
+
+The analytics data the miner already keeps for the Points tab
+(`analytics/<username>/<streamer>.json`) holds the channel-points balance after
+each points message, plus watch streaks and predictions. When History starts
+recording, it adds what that data holds from before the journal began, so an
+account that has mined for months doesn't start with an empty History tab.
+
+- **What is imported:** points gained (from the change between two balances),
+  spends recorded as `Spent`, watch streaks, and placed and finished
+  predictions. Watch time and live sessions are not in the analytics data, so
+  the imported days have none. The History tab says which days were imported.
+- **Only before History:** only entries from before the second of the first
+  journal record History holds are imported. Everything after it comes from
+  the journal, so nothing is counted twice.
+- **Which streamers:** only the streamers History records, as the miner lists
+  them once it has loaded its streamers. Channels it tracks only for Drops,
+  and streamers no longer in the configuration, are not imported. A streamer
+  added to the configuration later is imported then.
+- **Once:** each streamer is imported once per database, in small steps in
+  History's own thread, so a large analytics folder doesn't slow down startup
+  or mining. A file that can't be read is tried again later. One that isn't
+  valid JSON is skipped, with a warning.
+- **Deletes:** a streamer whose History was deleted is never imported, also
+  not after the database is rebuilt.
+- **Rebuilds:** a rebuilt database imports the analytics data again, up to the
+  first journal record it was rebuilt from. That fills in what the rebuild
+  lost, as far as the analytics data reaches.
+- **Retention:** imported rows follow the same retention window as recorded
+  ones. Rows older than it are pruned as soon as the import finishes, and
+  their daily totals are kept.
+
+To turn it off, set `ANALYTICS_CONFIG["history_import_analytics"]` to `False`.
+`GET /history/health` reports its progress under `analytics_import`.
 
 ## Storage
 
@@ -66,7 +102,10 @@ available after raw rows are pruned.
 
 Deleting the database while the miner is stopped makes History rebuild it
 from the journal files still on disk at the next start. Those are usually only
-the most recent ones, so a rebuild does not bring back older History.
+the most recent ones, so a rebuild doesn't bring back older watch time or live
+sessions. Older points, spends, watch streaks and predictions come back from
+the analytics data, if it still holds them: see
+[Importing existing analytics data](#importing-existing-analytics-data).
 
 ### Docker
 
@@ -194,6 +233,16 @@ stream, matching Twitch's watch-streak rules.
   seen in eight days of logs.
 - For a run that crashed, the "active" and "live" badges stop once its newest
   journal line is three minutes old.
+- Imported points are worked out from the balances in the analytics data. A
+  change made while the miner was not recording it, such as points earned or
+  spent in the browser between two entries, is counted with the next entry
+  when it fits that entry (a gain on an earning entry, a loss on a `Spent`
+  one). Otherwise only the balance is kept. A bet on a prediction is counted
+  only if the analytics data recorded it as `Spent`.
+- The analytics data keeps whole seconds, so entries in the same second as
+  History's first journal record can't be told apart from what the journal
+  recorded, and aren't imported. That's at most one second of points per
+  streamer.
 
 ## API
 
@@ -204,12 +253,12 @@ before it, so `days=1` is today only.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /history/overview?days=30` | Window and lifetime totals |
+| `GET /history/overview?days=30` | Window and lifetime totals; `imported_before` is when the imported analytics data ends, if any was imported |
 | `GET /history/streamers?days=30` | Streamer list and live streak state |
 | `GET /history/streamer/<name>?days=90` | Per-streamer drill-down: daily totals for the window, and the newest 100 watch sessions, streams, events and points messages in it |
 | `GET /history/daily?days=30&streamer=<name>` | Daily chart series |
 | `GET /history/sessions?kind=watch\|stream\|run` | Recent sessions |
 | `GET /history/events?type=<type>` | Recent events |
 | `GET /history/activity?days=30` | Activity heatmap data |
-| `GET /history/health` | Database readiness and the journal import status; `recording` is `false` while History is not running |
+| `GET /history/health` | Database readiness, the journal import status and the analytics data import's progress (`analytics_import`); `recording` is `false` while History is not running |
 | `DELETE /history/streamer/<name>` | Delete one streamer's History, as described in [Deleting a streamer](#deleting-a-streamer) |

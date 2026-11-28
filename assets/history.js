@@ -14,14 +14,15 @@
     var DAY_OPTIONS = [7, 30, 90, 365];
     var numberFormat = new Intl.NumberFormat();
 
-    // Node loads this file only for the delete flow's decisions (tested in
-    // tests/js/history-delete.test.js); the tab itself needs a browser.
+    // Node loads this file only for the delete flow's decisions and the
+    // import note (tested in tests/js/); the tab itself needs a browser.
     if (typeof window === 'undefined') {
         if (typeof module === 'object' && module.exports) {
             module.exports = {
                 REQUEST_TIMEOUT_MS: REQUEST_TIMEOUT_MS,
                 deleteButtonState: deleteButtonState,
                 detailMessageFor: detailMessageFor,
+                importNoteText: importNoteText,
                 runDelete: runDelete
             };
         }
@@ -125,6 +126,16 @@
         var value = Number(timestamp);
         if (!Number.isFinite(value) || value <= 0) return '—';
         return new Date(value * 1000).toLocaleString();
+    }
+
+    // What the tab says about days imported from the analytics data
+    // (overview.imported_before, a Unix time), or '' when nothing was.
+    function importNoteText(overview, formatDate) {
+        var before = Number(overview && overview.imported_before);
+        if (!Number.isFinite(before) || before <= 0) return '';
+        return 'History before ' + formatDate(before) + ' was imported from ' +
+            'the analytics data: it has points and predictions only, without ' +
+            'watch time or live sessions.';
     }
 
     function formatDay(day) {
@@ -273,6 +284,7 @@
             '    </div>',
             '  </div>',
             '  <div id="history-status" class="history-status"></div>',
+            '  <p id="history-imported" class="history-imported" style="display:none"></p>',
             '  <div id="history-error" class="notification is-danger" role="alert" style="display:none"></div>',
             '</div>',
             '<div id="history-cards" class="history-cards"></div>',
@@ -515,6 +527,7 @@
             fetchJson('activity', filtered, request)
         ]).then(function (results) {
             if (state.request !== request) return;
+            renderImportNote(results[0]);
             renderCards(results[0]);
             renderStreamerOptions(results[1], selection.streamer);
             renderStreamers(results[1], selection.streamer);
@@ -550,6 +563,16 @@
     }
 
     // -- rendering ---------------------------------------------------------
+    function renderImportNote(overview) {
+        var note = byId('history-imported');
+        if (!note) return;
+        var text = importNoteText(overview, function (timestamp) {
+            return new Date(timestamp * 1000).toLocaleDateString();
+        });
+        note.textContent = text;
+        note.style.display = text ? '' : 'none';
+    }
+
     function renderCards(overview) {
         var container = byId('history-cards');
         if (!container) return;

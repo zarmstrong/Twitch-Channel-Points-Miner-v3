@@ -67,6 +67,12 @@
     text-align: right;
 }
 
+.history-imported {
+    margin-top: 0.4rem;
+    font-size: 0.8rem;
+    color: var(--history-muted);
+}
+
 .history-cards {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

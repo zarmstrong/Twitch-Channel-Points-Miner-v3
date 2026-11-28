@@ -63,6 +63,34 @@ def day_start(day):
     return datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
 
 
+def _float_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def earliest_held(connection):
+    """The earliest time of a journal record the database holds, or None
+    when it holds none.  Only times recorded as they happened count: a
+    watch session or a stream starts before the record that reports it.
+    The daily totals count too: retention keeps them after it prunes the
+    rows they were added from."""
+
+    earliest = None
+    for statement in (
+        "SELECT MIN(started_at) FROM runs",
+        "SELECT MIN(ts) FROM points",
+        "SELECT MIN(ts) FROM events",
+        "SELECT MIN(first_seen) FROM daily_stats",
+    ):
+        value = connection.execute(statement).fetchone()[0]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if earliest is None or value < earliest:
+                earliest = float(value)
+    return earliest
+
+
 def clean_streamer(streamer):
     return str(streamer or "").strip().lower()
 
@@ -669,6 +697,11 @@ class HistoryStore(object):
             last_watch = connection.execute(
                 "SELECT MAX(last_seen_at) FROM watch_sessions"
             ).fetchone()[0]
+            imported_before = connection.execute("""
+                SELECT boundary.value FROM meta AS boundary
+                JOIN meta AS imported ON imported.key = 'backfill_imported'
+                WHERE boundary.key = 'backfill_boundary' AND imported.value = '1'
+                """).fetchone()
             live_runs = self._live_runs(connection, now)
             current_run = None
             if live_runs:
@@ -693,6 +726,13 @@ class HistoryStore(object):
             "last_point_at": last_point,
             "last_watch_at": last_watch,
             "current_run": dict(current_run) if current_run is not None else None,
+            # Days before this were imported from the analytics JSON:
+            # points and predictions only.
+            "imported_before": (
+                _float_or_none(imported_before[0])
+                if imported_before is not None
+                else None
+            ),
         }
 
     def streamers(self, days=30, now=None, connection=None):
