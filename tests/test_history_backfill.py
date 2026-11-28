@@ -804,6 +804,28 @@ def test_a_stopped_history_takes_no_import_request(analytics, tracked):
     assert recorder.backfill.status()["requested"] is False
 
 
+def test_a_stop_while_a_request_waits_for_the_lock_refuses_it(analytics, tracked):
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    lock = recorder._lock
+
+    class StopsWhileWaiting(object):
+        """History stops (and its last poll waits) while the request
+        waits for the recorder's lock."""
+
+        def __enter__(self):
+            recorder.stop()
+            return lock.__enter__()
+
+        def __exit__(self, *exc):
+            return lock.__exit__(*exc)
+
+    recorder._lock = StopsWhileWaiting()
+    with pytest.raises(HistoryUnavailableError):
+        recorder.request_import()
+    recorder._lock = lock
+    assert recorder.backfill.status()["requested"] is False
+
+
 def test_a_finished_history_thread_takes_no_import_request(analytics, tracked):
     recorder = recorder_for(analytics, tracked, automatic=False)
     recorder.start()

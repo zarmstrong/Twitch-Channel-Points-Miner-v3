@@ -197,13 +197,41 @@
     }
 
     // The Config tab's import box, while the tab is visible.  deps:
-    //   fetchStatus()       GET /history/import; a Promise of its body
-    //   postImport()        POST /history/import; a Promise of its body
+    //   fetchStatus()       GET /history/import; a Promise of its body,
+    //                       optionally with abort() to stop the request
+    //   postImport()        POST /history/import; the same
     //   render(view)        shows importControlState()'s view
     //   setTimer(fn, ms) / clearTimer(id)
-    // Only the newest read or start may render.
+    // Only the newest read or start may render.  A request that hasn't
+    // answered within REQUEST_TIMEOUT_MS counts as failed.
     function createImportControl(deps) {
         var control = { visible: false, timer: null, request: 0 };
+
+        // Settles once: with the answer, or with a timeout error.
+        function bounded(promise) {
+            return new Promise(function (resolve, reject) {
+                var settled = false;
+                var timeout = deps.setTimer(function () {
+                    if (settled) return;
+                    settled = true;
+                    if (typeof promise.abort === 'function') {
+                        try { promise.abort(); } catch (error) { /* ignore */ }
+                    }
+                    reject(new Error('History did not respond in time.'));
+                }, REQUEST_TIMEOUT_MS);
+                promise.then(function (value) {
+                    if (settled) return;
+                    settled = true;
+                    deps.clearTimer(timeout);
+                    resolve(value);
+                }, function (error) {
+                    if (settled) return;
+                    settled = true;
+                    deps.clearTimer(timeout);
+                    reject(error);
+                });
+            });
+        }
 
         function schedule(ms) {
             if (control.timer !== null) deps.clearTimer(control.timer);
@@ -237,7 +265,7 @@
 
         control.load = function () {
             var id = ++control.request;
-            return deps.fetchStatus().then(function (status) {
+            return bounded(deps.fetchStatus()).then(function (status) {
                 if (id !== control.request) return;
                 var view = importControlState(status);
                 deps.render(view);
@@ -255,21 +283,21 @@
             // The button is on the Config tab, so it is visible.
             control.visible = true;
             var id = ++control.request;
-            schedule(importPollDelay(null, true));
-            return deps.postImport().then(function (status) {
+            return bounded(deps.postImport()).then(function (status) {
                 if (id !== control.request) return;
                 var view = importControlState(status);
                 deps.render(view);
                 schedule(importPollDelay(view, false));
             }, function (error) {
                 if (id !== control.request) return;
-                // The button stays, so the import can be tried again.
+                // Whether History can still import is unknown: the next
+                // read decides whether the button comes back.
                 deps.render({
                     text: 'Unable to start the import: ' + errorText(error),
-                    showButton: true,
+                    showButton: false,
                     polling: false
                 });
-                schedule(importPollDelay(null, true));
+                schedule(IMPORT_POLL_MS);
             });
         };
 
@@ -509,8 +537,8 @@
 
     // -- the Config tab's Import button ---------------------------------------
     var importControl = createImportControl({
-        fetchStatus: function () { return fetchJson('import'); },
-        postImport: function () { return fetchJson('import', null, null, 'POST'); },
+        fetchStatus: function () { return abortableImportFetch('GET'); },
+        postImport: function () { return abortableImportFetch('POST'); },
         render: function (view) {
             var text = byId('history-import-status');
             var button = byId('history-import-button');
@@ -522,6 +550,17 @@
         setTimer: function (fn, ms) { return setTimeout(fn, ms); },
         clearTimer: function (id) { clearTimeout(id); }
     });
+
+    function abortableImportFetch(method) {
+        var request = {
+            controller: typeof AbortController === 'function' ? new AbortController() : null
+        };
+        var promise = fetchJson('import', null, request, method);
+        promise.abort = function () {
+            if (request.controller) request.controller.abort();
+        };
+        return promise;
+    }
 
     function startImport() {
         var button = byId('history-import-button');

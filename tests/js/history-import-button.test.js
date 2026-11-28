@@ -77,7 +77,13 @@ test('the status is read again: soon while importing, slowly otherwise', () => {
 // A control whose requests and timers the test settles by hand.
 function harness() {
   const calls = { fetch: [], post: [], renders: [], timers: new Map(), nextTimer: 1 };
-  const pending = (list) => () => new Promise((resolve, reject) => list.push({ resolve, reject }));
+  const pending = (list) => () => {
+    let settle;
+    const promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    list.push(settle);
+    promise.abort = () => calls.abortNext && calls.abortNext();
+    return promise;
+  };
   const control = createImportControl({
     fetchStatus: pending(calls.fetch),
     postImport: pending(calls.post),
@@ -142,13 +148,49 @@ test('starting the import shows its progress', async () => {
   assert.equal(h.timer().ms, 5000);
 });
 
-test('a failed start keeps the button to try again', async () => {
+test('a failed start hides the button until the status is read again', async () => {
   const h = harness();
   const started = h.control.start();
-  h.calls.post[0].reject(new Error('History is still starting'));
+  h.calls.post[0].reject(new Error('History is not running'));
   await started;
+  assert.equal(h.last().showButton, false);
+  assert.match(h.last().text, /Unable to start the import: History is not running/);
+  assert.equal(h.timer().ms, 5000);
+
+  h.fire();
+  h.calls.fetch[0].resolve(status());
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   assert.equal(h.last().showButton, true);
-  assert.match(h.last().text, /Unable to start the import: History is still starting/);
+});
+
+test('a read that never answers times out, is aborted and tried again', async () => {
+  const h = harness();
+  let aborted = false;
+  h.calls.abortNext = () => { aborted = true; };
+  const shown = h.control.show();
+  const timeout = h.timer();
+  assert.equal(timeout.ms, 30000);
+  h.fire();
+  await shown;
+  assert.equal(aborted, true);
+  assert.equal(h.last().text, 'History did not respond in time.');
+  assert.equal(h.timer().ms, 15000);
+
+  // The late answer is ignored.
+  h.calls.fetch[0].resolve(status({ complete: true, streamers_waiting: 0 }));
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(h.calls.renders.length, 1);
+});
+
+test('a start that never answers times out without offering the button', async () => {
+  const h = harness();
+  const started = h.control.start();
+  assert.equal(h.timer().ms, 30000);
+  h.fire();
+  await started;
+  assert.equal(h.last().showButton, false);
+  assert.match(h.last().text, /did not respond in time/);
+  assert.equal(h.timer().ms, 5000);
 });
 
 test('only the newest read renders', async () => {

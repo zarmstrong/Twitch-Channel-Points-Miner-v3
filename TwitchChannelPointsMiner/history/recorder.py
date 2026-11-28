@@ -177,9 +177,13 @@ class HistoryRecorder(threading.Thread):
         """Import the analytics data now (the dashboard's button); returns
         the import's status."""
 
-        if self.backfill is None or not self.accepts_imports():
+        if self.backfill is None:
             raise HistoryUnavailableError("History cannot import analytics data")
         with self._lock:
+            # Checked under the lock the last poll takes after stop(): a
+            # request saved here is seen by that poll at the latest.
+            if not self.accepts_imports():
+                raise HistoryUnavailableError("History is not running")
             if not self.store.ready and not self._initialize():
                 raise HistoryUnavailableError("History is still starting")
             self.backfill.request()
