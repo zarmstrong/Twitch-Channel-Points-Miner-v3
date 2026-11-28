@@ -5021,3 +5021,27 @@ def test_import_insertion_refuses_a_statement_sharing_the_docstring_line(tmp_pat
         )
 
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_startup_only_update_check_refuses_a_shadowed_float(tmp_path, migrate):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config, ("MINER_CONFIG = {", "float = None\nMINER_CONFIG = {")
+    )
+    overrides = tmp_path / "web-config.json"
+
+    with pytest.raises(ConfigEditError, match="binds float"):
+        if migrate:
+            overrides.write_text(
+                json.dumps({"updates": {"startup_only": True}}), encoding="utf-8"
+            )
+            migrate_web_config(config)
+        else:
+            update_managed_web_config(
+                config,
+                {"action": "update_updates", "values": {"startup_only": True}},
+            )
+
+    assert config.read_bytes() == before
+    assert overrides.is_file() is migrate

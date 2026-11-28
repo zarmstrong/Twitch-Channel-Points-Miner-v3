@@ -2067,6 +2067,18 @@ def _names_bound(node):
     return names
 
 
+def _require_builtin_unshadowed(config_path, name):
+    """Refuse writing a builtin's name that config.py may bind to something else."""
+    for node in ast.parse(_read_config_source(config_path)).body:
+        bound = _names_bound(node)
+        if bound is None or name in bound:
+            raise ConfigEditError(
+                f"config.py binds {name} (or may, through a star import), so the "
+                f"dashboard can't write {name}(...) safely. Make this change in "
+                "config.py instead."
+            )
+
+
 def _imports_binding(tree, statement):
     """Whether config.py already imports this before the settings use it.
 
@@ -2493,6 +2505,7 @@ def _update_managed_web_config(config_path, payload):
         if "enabled" in values:
             miner_values["update_check"] = repr(values["enabled"])
         if values.get("startup_only") is True:
+            _require_builtin_unshadowed(config_path, "float")
             miner_values["update_check_interval_hours"] = 'float("inf")'
         elif "interval_hours" in values:
             miner_values["update_check_interval_hours"] = repr(values["interval_hours"])
