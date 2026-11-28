@@ -2029,20 +2029,50 @@ def _is_wanted_alias(node, alias, wanted):
     }
 
 
+def _definition_time_parts(node):
+    """The parts of a def, class or lambda Python evaluates when defining it."""
+    arguments = node.args if not isinstance(node, ast.ClassDef) else None
+    parts = list(getattr(node, "decorator_list", ()))
+    if isinstance(node, ast.ClassDef):
+        parts += node.bases + [keyword.value for keyword in node.keywords]
+    if arguments is not None:
+        parts += arguments.defaults + [
+            default for default in arguments.kw_defaults if default is not None
+        ]
+        if not isinstance(node, ast.Lambda):
+            # Annotations are evaluated at definition time before 3.14.
+            parts += [
+                argument.annotation
+                for argument in (
+                    *arguments.posonlyargs,
+                    *arguments.args,
+                    *arguments.kwonlyargs,
+                    *(item for item in (arguments.vararg, arguments.kwarg) if item),
+                )
+                if argument.annotation is not None
+            ]
+            if node.returns is not None:
+                parts.append(node.returns)
+    return parts
+
+
 def _module_level_names_changed(node):
     """Names a top-level statement binds or deletes when config.py runs.
 
-    Function and class bodies are skipped: they don't run at import time.
+    Function, class and lambda bodies are skipped, as they don't run at
+    import time, but their decorators, defaults, bases and annotations are
+    checked. Returns None for a star import, which may bind any name.
     """
     changed = set()
     pending = [node]
     while pending:
         current = pending.pop()
-        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            changed.add(current.name)
-            pending.extend(current.decorator_list)
-            continue
-        if isinstance(current, ast.Lambda):
+        if isinstance(
+            current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        ):
+            if not isinstance(current, ast.Lambda):
+                changed.add(current.name)
+            pending.extend(_definition_time_parts(current))
             continue
         if isinstance(current, ast.Name) and isinstance(
             current.ctx, (ast.Store, ast.Del)
@@ -2050,8 +2080,9 @@ def _module_level_names_changed(node):
             changed.add(current.id)
         elif isinstance(current, (ast.Import, ast.ImportFrom)):
             for alias in current.names:
-                if alias.name != "*":
-                    changed.add(alias.asname or alias.name.split(".")[0])
+                if alias.name == "*":
+                    return None
+                changed.add(alias.asname or alias.name.split(".")[0])
         pending.extend(ast.iter_child_nodes(current))
     return changed
 
@@ -2087,8 +2118,12 @@ def _imports_binding(tree, statement):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             # Aliases bind in order, so check each one.
             for alias in node.names:
+                if alias.name == "*":
+                    # It may bind any of the names.
+                    changed |= names
+                    continue
                 bound = alias.asname or alias.name.split(".")[0]
-                if alias.name == "*" or bound not in names:
+                if bound not in names:
                     continue
                 if _is_wanted_alias(node, alias, wanted):
                     if first_use is None or node.lineno < first_use:
@@ -2096,7 +2131,8 @@ def _imports_binding(tree, statement):
                 else:
                     changed.add(bound)
         else:
-            changed |= names & _module_level_names_changed(node)
+            touched = _module_level_names_changed(node)
+            changed |= names if touched is None else names & touched
         if changed:
             name = ", ".join(sorted(changed))
             raise ConfigEditError(

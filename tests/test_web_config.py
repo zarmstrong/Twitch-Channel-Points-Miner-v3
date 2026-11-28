@@ -4843,3 +4843,45 @@ def test_logging_level_save_refuses_a_conflicting_alias_in_the_same_import(tmp_p
         )
 
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "from os.path import *",
+        "if True:\n    from os.path import *",
+        "def helper(value=(logging := None)):\n    pass",
+        "class Helper(metaclass=(logging := type)):\n    pass",
+        "@(logging := (lambda function: function))\ndef helper():\n    pass",
+    ],
+    ids=["star", "nested-star", "default", "class-keyword", "decorator"],
+)
+def test_logging_level_save_refuses_names_bound_at_definition_or_by_star(
+    tmp_path, between
+):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        f"{between}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="changes or removes logging"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
