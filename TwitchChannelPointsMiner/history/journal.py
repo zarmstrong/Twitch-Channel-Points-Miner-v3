@@ -1281,8 +1281,12 @@ class Journal(object):
         game = text_or_none(game)
         if game is not None and game.lower() == "unknown":
             game = None
-        streamer = self.drop_channel(drop_id)
         with self._claims_lock:
+            # Under the lock, so a channel noted meanwhile is either seen here
+            # or written to this claim by note_drop_channel once it is
+            # written (the drop lock is taken inside this one, never around
+            # it).
+            streamer = self.drop_channel(drop_id)
             written_game, written_streamer = self._drop_claims.get(
                 claim_key, (None, None)
             )

@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import sqlite3
+import threading
 from contextlib import closing
 from types import SimpleNamespace
 
@@ -276,6 +277,30 @@ def test_a_channel_noted_after_the_claim_is_written_to_it(journal, store):
     ) == [("d1", "alice"), ("d2", "")]
 
 
+def test_a_channel_noted_while_a_claim_is_written_reaches_it(journal):
+    # The PubSub thread notes the channel just as a claim worker looks it
+    # up: either the claim sees it, or it is written to the claim after.
+    real = journal.drop_channel
+    noted = []
+
+    def drop_channel(drop_id):
+        found = real(drop_id)
+        if not noted:
+            thread = threading.Thread(
+                target=journal.note_drop_channel, args=("alice", drop_id)
+            )
+            noted.append(thread)
+            thread.start()
+            thread.join(0.5)
+        return found
+
+    journal.drop_channel = drop_channel
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    noted[0].join(5)
+    assert not noted[0].is_alive()
+    assert [record["streamer"] for record in written(journal, "drop")][-1] == ("alice")
+
+
 def test_a_channel_noted_while_the_rewrite_fails_is_written_later(journal, monkeypatch):
     journal.record_drop("d1", "i1|d1", game="Game A")
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
@@ -425,7 +450,10 @@ def test_a_journalled_claim_keeps_what_the_drops_data_knew(
     if journal_first:
         folder.drop(at=T0, game=None)
         importer.poll()
-    folder.drops_data([captured(T0 + 1, streamer="alice")])
+    # Two entries of the drop (under two categories), each knowing part.
+    folder.drops_data(
+        [captured(T0 + 1), captured(T0 + 2, category="Game B", streamer="alice")]
+    )
     backfill_for(store, folder, importer).poll()
     if not journal_first:
         folder.drop(at=T0, game=None)
