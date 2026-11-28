@@ -13042,6 +13042,13 @@ class Twitch(object):
                 "unclaimed after Twitch accepted it",
                 extra={"emoji": ":package:"},
             )
+        elif getattr(drop, "id", None) and history_journal.JOURNAL.has_unwritten_claim(
+            f"{drop.drop_instance_id}|{drop.id}"
+        ):
+            # Twitch accepted it before, but History's record could not be
+            # written then, and the accepted claim is no longer remembered
+            # here: written now, whatever this request does.
+            journal_claim(False)
 
         self.claim_requests_sent = getattr(self, "claim_requests_sent", 0) + 1
         try:

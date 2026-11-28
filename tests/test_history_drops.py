@@ -1166,8 +1166,9 @@ def test_a_claim_twitch_says_was_already_made_is_journalled(journal, monkeypatch
 
 
 @pytest.mark.parametrize("outcome", ["network", "errors", "refused"])
+@pytest.mark.parametrize("forgotten", [False, True])
 def test_an_unwritten_claim_is_journalled_even_if_its_retry_fails(
-    journal, monkeypatch, outcome
+    journal, monkeypatch, outcome, forgotten
 ):
     from TwitchChannelPointsMiner.classes import Twitch as twitch_module
 
@@ -1176,9 +1177,13 @@ def test_an_unwritten_claim_is_journalled_even_if_its_retry_fails(
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
     assert twitch.claim_drop(claimed_drop(), category_name_override="Game A")
     monkeypatch.setattr(journal, "append", real_append)
-    twitch.accepted_drop_claims["instance-1"] -= (
-        twitch_module.ACCEPTED_CLAIM_RETRY_SECONDS + 1
-    )
+    if forgotten:
+        # Another claim later pruned this one from the accepted claims.
+        twitch.accepted_drop_claims.clear()
+    else:
+        twitch.accepted_drop_claims["instance-1"] -= (
+            twitch_module.ACCEPTED_CLAIM_RETRY_SECONDS + 1
+        )
 
     def claim(instance):
         if outcome == "network":

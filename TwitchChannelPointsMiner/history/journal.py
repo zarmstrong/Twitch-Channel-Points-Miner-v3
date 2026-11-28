@@ -1241,6 +1241,13 @@ class Journal(object):
             for claim_key, record in list((pending or {}).items()):
                 self._write_claim(claim_key, record, username)
 
+    def has_unwritten_claim(self, claim_key):
+        """Whether a claim Twitch accepted could not be written to the journal
+        yet (``record_drop`` writes it when it is reported again)."""
+
+        with self._claims_lock:
+            return str(claim_key or "").strip() in self._unwritten_claims
+
     def drop_channel(self, drop_id):
         """The channel last noted for ``drop_id``, or None."""
 
