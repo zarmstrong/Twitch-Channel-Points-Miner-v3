@@ -149,7 +149,11 @@ def start_history(retention_days=None, import_analytics=True):
     global _recorder, _atexit_registered
 
     with _lock:
-        if _recorder is not None and _recorder.is_alive():
+        if _recorder is not None and (
+            _recorder.is_alive() or getattr(_recorder, "refused", None)
+        ):
+            # A recorder that refused a database written by a newer version
+            # of the miner keeps History off for the rest of this process.
             return _recorder
         try:
             from TwitchChannelPointsMiner.history.recorder import build_recorder

@@ -332,6 +332,20 @@ class HistorySchemaTooNewError(RuntimeError):
         self.version = version
 
 
+def _no_checkpoint_on_close(connection):
+    """Close ``connection`` without copying its database's -wal file into
+    the database (Python 3.12+; older ones may still checkpoint)."""
+
+    flag = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
+    setconfig = getattr(connection, "setconfig", None)
+    if flag is None or setconfig is None:
+        return
+    try:
+        setconfig(flag, True)
+    except sqlite3.Error:
+        pass
+
+
 # A session listed for a window started in it or was still going in it, so a
 # watch or broadcast that began before midnight is listed for today too.  Takes
 # the window end (see _window_end) and then the window start twice.
@@ -368,14 +382,20 @@ class HistoryStore(object):
 
     # -- connections -------------------------------------------------------
     @contextmanager
-    def _write_connection(self):
+    def _write_connection(self, wal=True):
+        # ``wal=False``: the schema check, which must change nothing before
+        # it has read the version (switching to WAL rewrites the header).
         with self._write_lock:
             connection = sqlite3.connect(self.path, timeout=5.0)
             connection.row_factory = sqlite3.Row
             try:
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA synchronous=NORMAL")
-                mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+                mode = (
+                    connection.execute("PRAGMA journal_mode=WAL").fetchone()
+                    if wal
+                    else None
+                )
                 if (
                     mode is not None
                     and str(mode[0]).lower() != "wal"
@@ -466,8 +486,9 @@ class HistoryStore(object):
         """The database's schema version, read without changing anything:
         from the file's header, or, while a ``-wal`` file holds changes the
         header may not show yet, through a read-only connection (which only
-        touches SQLite's ``-shm`` index).  None when there is no readable
-        SQLite file."""
+        touches SQLite's ``-shm`` index).  None when there is no SQLite file
+        to read; raises ``sqlite3.Error`` when that connection fails, so
+        nothing opens the file for writing until the version is known."""
 
         try:
             with open(self.path, "rb") as handle:
@@ -477,20 +498,19 @@ class HistoryStore(object):
         if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
             return None
         version = int.from_bytes(header[60:64], "big", signed=True)
+        if version > HISTORY_SCHEMA_VERSION:
+            return version
         try:
             wal_size = os.path.getsize(self.path + "-wal")
         except OSError:
             wal_size = 0
         if wal_size > 0:
+            uri = Path(self.path).resolve().as_uri() + "?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=5.0)
             try:
-                uri = Path(self.path).resolve().as_uri() + "?mode=ro"
-                connection = sqlite3.connect(uri, uri=True, timeout=5.0)
-                try:
-                    version = connection.execute("PRAGMA user_version").fetchone()[0]
-                finally:
-                    connection.close()
-            except sqlite3.Error:
-                return None
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                connection.close()
         return version
 
     def _initialize_schema(self):
@@ -499,13 +519,16 @@ class HistoryStore(object):
             # Checked before a write connection opens: opening one could
             # switch the file to WAL mode or checkpoint its -wal file.
             raise HistorySchemaTooNewError(self.path, version)
-        with self._write_connection() as connection:
+        with self._write_connection(wal=False) as connection:
             # One transaction, so an interrupted creation leaves nothing
             # half-made behind (sqlite3 does not open one for DDL itself).
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > HISTORY_SCHEMA_VERSION:
-                # Became newer since the check above: nothing is changed.
+                # Became newer since the check above (another process): the
+                # write lock held since BEGIN kept it as it is, and closing
+                # leaves its -wal alone where SQLite allows.
+                _no_checkpoint_on_close(connection)
                 raise HistorySchemaTooNewError(self.path, version)
             if version == HISTORY_SCHEMA_VERSION:
                 return
@@ -539,7 +562,13 @@ class HistoryStore(object):
                 )
                 self._backup_database()
                 self._initialize_schema()
+            self._use_wal()
             self.ready = True
+
+    def _use_wal(self):
+        # The schema check opened its connection without switching to WAL.
+        with self._write_connection():
+            pass
 
     def recover_if_corrupt(self, error):
         """Rebuild the database after a corruption error seen while running.
@@ -561,6 +590,7 @@ class HistoryStore(object):
             self.ready = False
             self._backup_database()
             self._initialize_schema()
+            self._use_wal()
             self.ready = True
         return True
 

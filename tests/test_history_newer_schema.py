@@ -95,6 +95,67 @@ def test_a_newer_database_left_by_a_crash_is_left_unchanged(tmp_path):
     assert set(after) - set(before) <= {"history.sqlite3-shm"}
 
 
+def test_a_database_upgraded_after_the_check_is_left_unchanged(tmp_path, monkeypatch):
+    # Another process upgrades it between the header check and the write
+    # connection.
+    path = tmp_path / "history.sqlite3"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("PRAGMA journal_mode=delete")
+        connection.execute(f"PRAGMA user_version={HISTORY_SCHEMA_VERSION}")
+    snapshot = {}
+
+    def upgraded_meanwhile(self):
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute(f"PRAGMA user_version={NEWER}")
+        snapshot.update(files(tmp_path))
+        return HISTORY_SCHEMA_VERSION
+
+    monkeypatch.setattr(HistoryStore, "_stored_version", upgraded_meanwhile)
+    store = HistoryStore(str(path))
+    with pytest.raises(HistorySchemaTooNewError):
+        store.initialize()
+    # Still in rollback-journal mode, byte for byte.
+    assert files(tmp_path) == snapshot
+
+
+def test_a_failed_check_opens_nothing_for_writing(tmp_path, monkeypatch):
+    # The version may be in the -wal file, and the read-only connection that
+    # would read it fails: nothing opens the file for writing.
+    live = tmp_path / "live"
+    live.mkdir()
+    writer = sqlite3.connect(live / "history.sqlite3")
+    try:
+        writer.execute("PRAGMA journal_mode=wal")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE future (value TEXT)")
+        writer.commit()
+        writer.execute(f"PRAGMA user_version={NEWER}")
+        writer.commit()
+        crashed = tmp_path / "crashed"
+        crashed.mkdir()
+        for name in ("history.sqlite3", "history.sqlite3-wal"):
+            shutil.copy(live / name, crashed / name)
+    finally:
+        writer.close()
+    before = files(crashed)
+    real_connect = sqlite3.connect
+    writes = []
+
+    def connect(database, *args, **kwargs):
+        if kwargs.get("uri"):
+            raise sqlite3.OperationalError("database is locked")
+        writes.append(database)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    store = HistoryStore(str(crashed / "history.sqlite3"))
+    with pytest.raises(sqlite3.OperationalError):
+        store.initialize()
+    assert writes == []
+    assert store.ready is False
+    assert files(crashed) == before
+
+
 def test_an_older_database_is_still_rebuilt(tmp_path):
     path = tmp_path / "history.sqlite3"
     with closing(sqlite3.connect(path)) as connection, connection:
@@ -212,6 +273,41 @@ def test_history_stays_off_for_the_run_with_one_warning(recorded, caplog):
         if name.startswith("history.sqlite3")
     } == database
     assert files(recorded.folder) == segments
+
+
+def test_starting_history_again_keeps_it_off(recorded, monkeypatch, caplog):
+    built = []
+
+    def build_recorder(analytics_path, **kwargs):
+        recorder = HistoryRecorder(
+            HistoryStore(recorded.path), recorded.folder, journal=recorded.journal
+        )
+        built.append(recorder)
+        return recorder
+
+    import TwitchChannelPointsMiner.history.recorder as recorder_module
+
+    monkeypatch.setattr(recorder_module, "build_recorder", build_recorder)
+    monkeypatch.setattr(history, "_analytics_path", lambda: str(recorded.tmp_path))
+    monkeypatch.setattr(history, "_recorder", None)
+    monkeypatch.setattr(history, "_atexit_registered", True)
+    with caplog.at_level(logging.WARNING):
+        first = history.start_history()
+        first.join(timeout=10)
+        assert not first.is_alive()
+        assert history.start_history() is first
+    assert len(built) == 1
+    assert history.unavailable_reason() == first.refused
+    assert (
+        len(
+            [
+                record
+                for record in caplog.records
+                if "newer version" in record.getMessage()
+            ]
+        )
+        == 1
+    )
 
 
 def test_the_newer_version_imports_what_the_older_one_journalled(recorded, monkeypatch):
