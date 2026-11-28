@@ -359,3 +359,26 @@ def test_a_claim_queued_behind_another_sends_nothing_after_a_stop(monkeypatch):
     twitch.claim_drop_lock = ClaimLock()
     assert twitch.claim_drop(drop) is False
     assert requests == []
+
+
+def test_attempts_stop_before_a_retry_once_told_to(monkeypatch):
+    attempt_module = importlib.import_module(
+        "TwitchChannelPointsMiner.utils.AttemptStrategy"
+    )
+
+    monkeypatch.setattr(attempt_module.time, "sleep", lambda seconds: None)
+    attempts = []
+
+    def attempt():
+        attempts.append(1)
+        raise ValueError("down")
+
+    result = attempt_module.AttemptStrategy(attempts=3).make_attempts(
+        attempt,
+        lambda result: None,
+        lambda error: True,
+        lambda error: None,
+        should_stop=lambda: True,
+    )
+    assert isinstance(result, attempt_module.ErrorResult)
+    assert len(attempts) == 1

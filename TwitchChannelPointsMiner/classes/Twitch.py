@@ -507,6 +507,8 @@ class Twitch(object):
         )
         self.gql = (gql_factory or GQLFactory()).create(gql_client_session)
         self.gql.on_unauthorized = self.__request_authentication_restart
+        # A failed drop claim is not retried once the miner stops.
+        self.gql.claims_cancelled = self.__claims_stopping
         self.twilight_build_id_pattern = re.compile(
             r'window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
         )

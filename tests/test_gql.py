@@ -5508,3 +5508,52 @@ def test_unknown_channel_progress_hash_is_not_retried_and_is_detected():
 
     assert posts == ["DropChannelCampaignsProgress"]
     assert is_persisted_query_not_found(raised.value)
+
+
+def test_a_failed_drop_claim_is_not_retried_once_claims_stop():
+    # The miner stops while a claim request fails: no further POST.
+    posts = []
+    stopping = []
+
+    def post(url, json, headers):
+        posts.append(json["operationName"])
+        stopping.append(True)
+        raise requests.exceptions.ConnectionError("down")
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=3, attempt_interval_seconds=0),
+        post_request=post,
+    )
+    gql.claims_cancelled = lambda: bool(stopping)
+    with pytest.raises(RetryError):
+        gql.claim_drop_rewards("instance-1")
+    assert posts == ["DropsPage_ClaimDropRewards"]
+
+
+def test_a_failed_drop_claim_is_retried_while_the_miner_runs():
+    posts = []
+
+    def post(url, json, headers):
+        posts.append(json["operationName"])
+        raise requests.exceptions.ConnectionError("down")
+
+    gql = GQL(
+        client_session(),
+        attempt_strategy=AttemptStrategy(attempts=3, attempt_interval_seconds=0),
+        post_request=post,
+    )
+    gql.claims_cancelled = lambda: False
+    with pytest.raises(RetryError):
+        gql.claim_drop_rewards("instance-1")
+    assert len(posts) == 3
+
+
+def test_twitch_stops_drop_claim_retries_when_it_stops():
+    from unittest.mock import MagicMock
+
+    twitch = Twitch("someone", "agent", gql_factory=MagicMock())
+    stop = twitch.gql.claims_cancelled
+    assert stop() is False
+    twitch.running = False
+    assert stop() is True

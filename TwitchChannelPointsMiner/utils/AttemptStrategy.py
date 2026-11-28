@@ -147,6 +147,7 @@ class AttemptStrategy:
         validate: Callable[[TResult], None],
         retryable: Callable[[Exception], bool],
         exception_context: Callable[[Exception], str | None],
+        should_stop: Callable[[], bool] | None = None,
     ) -> SuccessResult[TResult] | ErrorResult:
         """
         Calls `attempt` up to `self.attempts` times until either a successful attempt is made or the maximum number of
@@ -155,6 +156,7 @@ class AttemptStrategy:
         :param validate: Function to check if the result is valid. Should throw an Exception if not.
         :param retryable: Function that returns True if a given Error can be retried.
         :param exception_context: Function that returns a context string (or None) for a given Exception.
+        :param should_stop: Checked before each retry: when it returns True, no further attempt is made.
         :return:
         """
         attempts = 0
@@ -175,4 +177,7 @@ class AttemptStrategy:
                 break
             else:
                 time.sleep(self._interval_after(attempts))
+            if should_stop is not None and should_stop():
+                logger.debug("Stopped before retrying")
+                break
         return ErrorResult(errors)

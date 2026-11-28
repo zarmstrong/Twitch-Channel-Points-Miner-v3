@@ -227,6 +227,8 @@ class GQL:
         """Callback invoked when Twitch rejects the current authorization token."""
         self.raw_query_operations: set[str] = set()
         """Operations whose persisted query hash Twitch rejected; later requests send their raw query text."""
+        self.claims_cancelled: Callable[[], bool] | None = None
+        """Returns True once drop claims must stop (the miner is stopping): a failed claim is then not retried."""
 
     @staticmethod
     def __default_post_request(url: str, json: dict | list, headers: dict[str, str]):
@@ -405,6 +407,7 @@ class GQL:
         request_json: dict,
         parse: Callable[[Any], T],
         attempt_strategy: AttemptStrategy | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> T:
         """
         Posts the given GQL request. Handles automatic retries according to the `retry_strategy`.
@@ -412,14 +415,17 @@ class GQL:
         :param request_json: The data to send.
         :param parse: The function to use to parse the data.
         :param attempt_strategy: Overrides the shared strategy for this call only.
+        :param should_stop: Checked before each retry; True makes no further attempt.
         :return: The parsed response, either a single object or a list if the request was a list.
         :raises RetryError: If one or more errors occurred while attempting the request.
         """
+        stop = {} if should_stop is None else {"should_stop": should_stop}
         result = (attempt_strategy or self.attempt_strategy).make_attempts(
             lambda: self.__post_gql_request(request_json, parse),
             validate_response,
             is_recoverable_error,
             error_context,
+            **stop,
         )
         return self.__handle_result(result, operation_name)
 
@@ -861,6 +867,8 @@ class GQL:
             GQLOperations.DropsPage_ClaimDropRewards["operationName"],
             json_data,
             self.parser.parse_drop_page_claim_drop_rewards,
+            # A claim that failed is not sent again once the miner stops.
+            should_stop=getattr(self, "claims_cancelled", None),
         )
 
     def get_user_points_contribution(
