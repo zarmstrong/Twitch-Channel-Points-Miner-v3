@@ -114,18 +114,21 @@ class HistoryRecorder(threading.Thread):
             logger.debug("%s (repeated)", message)
 
     def _initialize(self):
-        if self.refused is not None:
-            return False
-        try:
-            self.store.initialize()
-            return True
-        except HistorySchemaTooNewError as error:
-            self.refused = str(error)
-            logger.warning("%s", error)
-            return False
-        except Exception:
-            self._warn("Unable to open the History database")
-            return False
+        # Under the lock deletes and imports hold, so a refusal is decided
+        # once, and nothing opens the database after it.
+        with self._lock:
+            if self.refused is not None:
+                return False
+            try:
+                self.store.initialize()
+                return True
+            except HistorySchemaTooNewError as error:
+                self.refused = str(error)
+                logger.warning("%s", error)
+                return False
+            except Exception:
+                self._warn("Unable to open the History database")
+                return False
 
     @property
     def journal(self):
@@ -148,6 +151,8 @@ class HistoryRecorder(threading.Thread):
         """Import what is pending; returns False when it failed."""
 
         with self._lock:
+            if self.refused is not None:
+                return False
             if not self.store.ready and not self._initialize():
                 return False
             self._sync_active_run()
@@ -223,6 +228,8 @@ class HistoryRecorder(threading.Thread):
             if not streamer:
                 _remove_source(remove_source)
                 return {}
+            if self.refused is not None:
+                raise HistoryUnavailableError(self.refused)
             if not self.store.ready and not self._initialize():
                 raise HistoryUnavailableError(
                     self.refused or "History is still starting"

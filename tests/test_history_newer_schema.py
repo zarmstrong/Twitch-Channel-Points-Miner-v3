@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from types import SimpleNamespace
@@ -156,6 +157,35 @@ def test_a_failed_check_opens_nothing_for_writing(tmp_path, monkeypatch):
     assert files(crashed) == before
 
 
+def test_a_database_the_check_finds_corrupt_is_kept_as_a_backup(tmp_path, monkeypatch):
+    # No build can use a database SQLite reports as malformed: it is moved
+    # aside with every byte, as any corrupt database is, and History starts
+    # a new one.
+    path = tmp_path / "history.sqlite3"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(f"PRAGMA user_version={HISTORY_SCHEMA_VERSION}")
+    with open(str(path) + "-wal", "wb") as handle:
+        handle.write(b"not a wal file")
+    before = files(tmp_path)
+    real_connect = sqlite3.connect
+
+    def connect(database, *args, **kwargs):
+        if kwargs.get("uri"):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    store = HistoryStore(str(path))
+    store.initialize()
+    assert store.ready
+    backups = [
+        data
+        for name, data in files(tmp_path).items()
+        if name.startswith("history.sqlite3.bak-")
+    ]
+    assert sorted(backups) == sorted(before.values())
+
+
 def test_an_older_database_is_still_rebuilt(tmp_path):
     path = tmp_path / "history.sqlite3"
     with closing(sqlite3.connect(path)) as connection, connection:
@@ -273,6 +303,30 @@ def test_history_stays_off_for_the_run_with_one_warning(recorded, caplog):
         if name.startswith("history.sqlite3")
     } == database
     assert files(recorded.folder) == segments
+
+
+def test_a_refusal_is_decided_once_under_the_recorders_lock(recorded):
+    recorder = HistoryRecorder(
+        HistoryStore(recorded.path), recorded.folder, journal=recorded.journal
+    )
+    done = []
+    # The thread's first open waits for a delete or import holding the lock.
+    with recorder._lock:
+        thread = threading.Thread(
+            target=lambda: done.append(recorder._initialize()), daemon=True
+        )
+        thread.start()
+        thread.join(0.2)
+        assert done == []
+    thread.join(10)
+    assert done == [False]
+    assert recorder.refused is not None
+    # Off for the run, also if the store is ready by then (the file replaced
+    # by a compatible one meanwhile): nothing is imported or deleted.
+    recorder.store.ready = True
+    assert recorder.poll_once() is False
+    with pytest.raises(HistoryUnavailableError):
+        recorder.delete_streamer("alice")
 
 
 def test_starting_history_again_keeps_it_off(recorded, monkeypatch, caplog):
