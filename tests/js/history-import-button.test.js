@@ -6,7 +6,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { importControlState } = require(
+const { createImportControl, importControlState, importPollDelay } = require(
   path.join(__dirname, '..', '..', 'assets', 'history.js'),
 );
 
@@ -53,11 +53,12 @@ test('a running import hides the button and keeps polling', () => {
   }
 });
 
-test('an import waiting for the first journal record says so', () => {
+test('a requested import before its first step says it is importing', () => {
+  // The boundary is saved by the import's first step, not the request.
   const view = importControlState(status({ requested: true, boundary: null }));
   assert.equal(view.showButton, false);
   assert.equal(view.polling, true);
-  assert.match(view.text, /once History has recorded its first entry/);
+  assert.match(view.text, /^Importing/);
 });
 
 test('no status (History not running) offers no button', () => {
@@ -65,4 +66,120 @@ test('no status (History not running) offers no button', () => {
   assert.equal(view.showButton, false);
   assert.equal(view.polling, false);
   assert.match(view.text, /not running/);
+});
+
+test('the status is read again: soon while importing, slowly otherwise', () => {
+  assert.equal(importPollDelay({ polling: true }, false), 5000);
+  assert.equal(importPollDelay({ polling: false }, false), 30000);
+  assert.equal(importPollDelay(null, true), 15000);
+});
+
+// A control whose requests and timers the test settles by hand.
+function harness() {
+  const calls = { fetch: [], post: [], renders: [], timers: new Map(), nextTimer: 1 };
+  const pending = (list) => () => new Promise((resolve, reject) => list.push({ resolve, reject }));
+  const control = createImportControl({
+    fetchStatus: pending(calls.fetch),
+    postImport: pending(calls.post),
+    render: (view) => calls.renders.push(view),
+    setTimer: (fn, ms) => {
+      const id = calls.nextTimer++;
+      calls.timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimer: (id) => calls.timers.delete(id),
+  });
+  const timer = () => {
+    assert.equal(calls.timers.size, 1, 'one timer pending');
+    return [...calls.timers.values()][0];
+  };
+  const fire = () => {
+    const [[id, entry]] = calls.timers;
+    calls.timers.delete(id);
+    entry.fn();
+  };
+  const last = () => calls.renders[calls.renders.length - 1];
+  return { calls, control, timer, fire, last };
+}
+
+test('a finished import keeps being read, so a new streamer shows the button', async () => {
+  const h = harness();
+  const shown = h.control.show();
+  h.calls.fetch[0].resolve(status({ complete: true, streamers_waiting: 0 }));
+  await shown;
+  assert.equal(h.last().showButton, false);
+  assert.equal(h.timer().ms, 30000);
+
+  h.fire();
+  h.calls.fetch[1].resolve(status({ streamers_waiting: 1 }));
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(h.last().showButton, true);
+});
+
+test('a failed read is tried again', async () => {
+  const h = harness();
+  const shown = h.control.show();
+  h.calls.fetch[0].reject(new Error('History did not respond'));
+  await shown;
+  assert.equal(h.last().showButton, false);
+  assert.equal(h.last().text, 'History did not respond');
+  assert.equal(h.timer().ms, 15000);
+
+  h.fire();
+  h.calls.fetch[1].resolve(status({ requested: true }));
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(h.last().polling, true);
+  assert.equal(h.timer().ms, 5000);
+});
+
+test('starting the import shows its progress', async () => {
+  const h = harness();
+  const started = h.control.start();
+  h.calls.post[0].resolve(status({ requested: true }));
+  await started;
+  assert.equal(h.last().showButton, false);
+  assert.match(h.last().text, /^Importing/);
+  assert.equal(h.timer().ms, 5000);
+});
+
+test('a failed start keeps the button to try again', async () => {
+  const h = harness();
+  const started = h.control.start();
+  h.calls.post[0].reject(new Error('History is still starting'));
+  await started;
+  assert.equal(h.last().showButton, true);
+  assert.match(h.last().text, /Unable to start the import: History is still starting/);
+});
+
+test('only the newest read renders', async () => {
+  const h = harness();
+  const first = h.control.show();
+  const second = h.control.load();
+  h.calls.fetch[1].resolve(status({ complete: true, streamers_waiting: 0 }));
+  await second;
+  h.calls.fetch[0].resolve(status());
+  await first;
+  assert.equal(h.calls.renders.length, 1);
+  assert.equal(h.last().showButton, false);
+});
+
+test('leaving the Config tab stops reading', async () => {
+  const h = harness();
+  const shown = h.control.show();
+  h.control.hide();
+  h.calls.fetch[0].resolve(status());
+  await shown;
+  assert.equal(h.calls.renders.length, 0);
+  assert.equal(h.calls.timers.size, 0);
+  h.control.later(10000);
+  assert.equal(h.calls.timers.size, 0);
+});
+
+test('a config change reads again later while visible', async () => {
+  const h = harness();
+  const shown = h.control.show();
+  h.calls.fetch[0].resolve(status({ complete: true, streamers_waiting: 0 }));
+  await shown;
+  h.control.later(10000);
+  assert.equal(h.timer().ms, 10000);
 });

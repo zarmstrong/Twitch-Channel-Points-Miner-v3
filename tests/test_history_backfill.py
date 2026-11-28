@@ -8,6 +8,7 @@ from contextlib import closing
 
 import pytest
 
+from TwitchChannelPointsMiner.history import HistoryUnavailableError
 from TwitchChannelPointsMiner.history import backfill as backfill_module
 from TwitchChannelPointsMiner.history.backfill import AnalyticsBackfill
 from TwitchChannelPointsMiner.history.journal import save_delete_cutoff, segment_name
@@ -775,6 +776,80 @@ def test_a_request_with_the_automatic_import_on_is_cleared(analytics, tracked):
     assert status["requested"] is False
 
 
+@pytest.mark.parametrize("where", ["journal", "database"])
+def test_a_streamer_deleted_before_the_import_is_not_waiting(analytics, tracked, where):
+    analytics.write("alice", [entry(T0 - 300, 100), entry(T0 - 200, 110)])
+    analytics.record("run_start")
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    recorder.poll_once()
+    assert recorder.backfill.status()["complete"] is False
+
+    if where == "journal":
+        save_delete_cutoff(analytics.journal, "alice", "", 0, T0 + 5)
+    else:
+        recorder.store.record_delete("alice", "", 0, T0 + 5)
+
+    status = recorder.backfill.status()
+    assert status["streamers_waiting"] == 0
+    assert status["complete"] is True
+
+
+def test_a_stopped_history_takes_no_import_request(analytics, tracked):
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    assert recorder.accepts_imports()
+    recorder.stop()
+    assert not recorder.accepts_imports()
+    with pytest.raises(HistoryUnavailableError):
+        recorder.request_import()
+    assert recorder.backfill.status()["requested"] is False
+
+
+def test_a_finished_history_thread_takes_no_import_request(analytics, tracked):
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    recorder.start()
+    recorder.stop()
+    recorder.join(timeout=10)
+    assert not recorder.is_alive()
+    with pytest.raises(HistoryUnavailableError):
+        recorder.request_import()
+
+
+def test_the_import_routes_return_503_once_history_stopped(
+    analytics, tracked, monkeypatch
+):
+    from flask import Flask
+
+    from TwitchChannelPointsMiner.history import web as history_web
+
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    monkeypatch.setattr(history_web, "get_store", lambda: recorder.store)
+    monkeypatch.setattr(history_web, "import_status", recorder.backfill.status)
+    monkeypatch.setattr(history_web, "request_import", recorder.request_import)
+    monkeypatch.setattr(history_web, "can_import", lambda: False)
+    app = Flask(__name__)
+    history_web.register_history(app)
+    client = app.test_client()
+
+    for response in (client.get("/history/import"), client.post("/history/import")):
+        assert response.status_code == 503
+        assert "not running" in response.get_json()["error"]
+    assert recorder.backfill.status()["requested"] is False
+    # The rest of History stays readable.
+    assert client.get("/history/health").status_code == 200
+
+
+def test_can_import_follows_the_recorder(analytics, tracked, monkeypatch):
+    import TwitchChannelPointsMiner.history as history
+
+    recorder = recorder_for(analytics, tracked, automatic=False)
+    monkeypatch.setattr(history, "_recorder", recorder)
+    assert history.can_import() is True
+    recorder.stop()
+    assert history.can_import() is False
+    monkeypatch.setattr(history, "_recorder", None)
+    assert history.can_import() is False
+
+
 def test_a_request_wakes_the_history_thread(analytics, tracked):
     recorder = recorder_for(analytics, tracked, automatic=False)
     assert not recorder._wake.is_set()
@@ -797,6 +872,7 @@ def test_the_import_routes(analytics, tracked):
         patch.setattr(history_web, "get_store", lambda: recorder.store)
         patch.setattr(history_web, "import_status", recorder.backfill.status)
         patch.setattr(history_web, "request_import", recorder.request_import)
+        patch.setattr(history_web, "can_import", recorder.accepts_imports)
         client = app.test_client()
         before = client.get("/history/import").get_json()
         started = client.post("/history/import").get_json()

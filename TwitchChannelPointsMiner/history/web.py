@@ -14,6 +14,7 @@ from flask import Blueprint, jsonify, request
 
 from TwitchChannelPointsMiner.history import (
     HistoryUnavailableError,
+    can_import,
     delete_streamer_history,
     get_store,
     import_status,
@@ -175,11 +176,22 @@ def health():
     )
 
 
+def _import_available():
+    _store()
+    if not can_import():
+        # Stopped (the dashboard can outlive the miner): nothing would
+        # import a request.
+        raise HistoryApiError(
+            "History is not running, so it cannot import analytics data.",
+            status=503,
+        )
+
+
 @bp.route("/import", methods=["GET"])
 def analytics_import():
     """Whether the analytics data has been imported (the Import button)."""
 
-    _store()
+    _import_available()
     status = import_status()
     if status is None:
         raise HistoryApiError("History cannot import analytics data.", status=503)
@@ -188,7 +200,7 @@ def analytics_import():
 
 @bp.route("/import", methods=["POST"])
 def start_analytics_import():
-    _store()
+    _import_available()
     return jsonify(request_import())
 
 

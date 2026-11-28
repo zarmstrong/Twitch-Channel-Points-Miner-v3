@@ -1580,6 +1580,7 @@ function addWebConfigValue(kind, input) {
         data: JSON.stringify({ action: 'add', kind: kind, value: value })
     }).done(function (config) {
         renderWebConfig(config);
+        window.dispatchEvent(new CustomEvent('web-config-updated'));
         input.val('');
         showConfigMessage(`${value} was added. The miner will reload it shortly.`, false);
     }).fail(function (xhr) {
@@ -1599,6 +1600,7 @@ function updateWebConfig(payload, successMessage, button) {
         data: JSON.stringify(payload)
     }).done(function (config) {
         renderWebConfig(config);
+        window.dispatchEvent(new CustomEvent('web-config-updated'));
         showConfigMessage(successMessage, false);
     }).fail(function (xhr) {
         showConfigMessage(xhr.responseJSON && xhr.responseJSON.error

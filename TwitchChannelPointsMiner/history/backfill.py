@@ -35,6 +35,7 @@ from TwitchChannelPointsMiner.history.importer import (
     _number,
     _text,
 )
+from TwitchChannelPointsMiner.history.journal import read_delete_cutoffs
 from TwitchChannelPointsMiner.history.store import (
     _float_or_none,
     clean_streamer,
@@ -228,12 +229,29 @@ class AnalyticsBackfill(object):
             states = self._states(connection)
             imported = self._meta(connection, META_IMPORTED) == "1"
             requested = self._meta(connection, META_REQUESTED) == "1"
+            deleted = {
+                row["streamer"]
+                for row in connection.execute("SELECT streamer FROM deleted_streamers")
+            }
         eligible = self._eligible()
-        waiting = (
-            None
-            if eligible is None
-            else sum(1 for name in eligible if not states.get(name, {}).get("done"))
-        )
+        waiting = None
+        if eligible is not None:
+            pending = [
+                name for name in eligible if not states.get(name, {}).get("done")
+            ]
+            if pending:
+                # A deleted streamer is never imported, so it isn't waiting.
+                # Read here, not from the importer's cache, which the History
+                # thread updates.
+                try:
+                    deleted.update(
+                        read_delete_cutoffs(getattr(self.importer, "folder", None))
+                    )
+                except (OSError, TypeError):
+                    logger.debug(
+                        "Unable to read the History delete cutoffs", exc_info=True
+                    )
+            waiting = sum(1 for name in pending if name not in deleted)
         return {
             "boundary": boundary,
             "imported": imported,

@@ -86,7 +86,8 @@ a restart finishes it. Once every streamer History records has been imported,
 the button is hidden and the box says so. A streamer added to the
 configuration later shows the button again; it isn't imported until it is
 clicked. With the automatic import on, the box shows the import's progress
-instead of the button.
+instead of the button. While the miner is stopped (the Windows app can keep
+the dashboard open), History takes no import request, and the box says so.
 
 `GET /history/import` reports whether the import is done (`complete`), and
 `POST /history/import` starts it. `GET /history/health` reports the same under

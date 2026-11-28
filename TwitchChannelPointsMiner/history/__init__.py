@@ -306,6 +306,18 @@ def import_status():
     return backfill.status()
 
 
+def can_import():
+    """True while History runs and can take an import request."""
+
+    recorder = _recorder
+    return bool(
+        recorder is not None
+        and recorder.store.ready
+        and getattr(recorder, "backfill", None) is not None
+        and recorder.accepts_imports()
+    )
+
+
 def request_import():
     """Import the analytics data now (the dashboard's Import button), even
     with ``history_import_analytics`` off; returns the import's status."""
@@ -328,6 +340,7 @@ def get_store():
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
     "HistoryUnavailableError",
+    "can_import",
     "delete_streamer_history",
     "get_store",
     "history_streamers",
