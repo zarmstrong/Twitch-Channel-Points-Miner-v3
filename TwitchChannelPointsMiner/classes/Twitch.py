@@ -12970,6 +12970,10 @@ class Twitch(object):
                 extra={"emoji": ":package:"},
             )
 
+        if self.__claims_stopping():
+            # The miner stopped while this claim waited for the claim lock:
+            # no new request (one already sent is finished by its caller).
+            return False
         self.claim_requests_sent = getattr(self, "claim_requests_sent", 0) + 1
         try:
             response = self.gql.claim_drop_rewards(drop.drop_instance_id)
@@ -13276,7 +13280,18 @@ class Twitch(object):
             if threads is None:
                 threads = self.drop_claim_threads = set()
             threads.add(thread)
-            thread.start()
+            try:
+                thread.start()
+            except RuntimeError:
+                # No thread could be started (a thread limit): nothing to
+                # wait for at shutdown; the next claim pass claims the drop.
+                threads.discard(thread)
+                logger.warning(
+                    f"Unable to start the {name} thread; the next claim pass "
+                    "will claim the drop",
+                    exc_info=True,
+                )
+                return False
         return True
 
     def stop_drop_claim_workers(self):

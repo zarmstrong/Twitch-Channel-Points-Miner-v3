@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.test_twitch_drop_claim import claim_recording_twitch
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.TwitchChannelPointsMiner import TwitchChannelPointsMiner
 
@@ -50,6 +51,13 @@ def twitch(monkeypatch):
     assert twitch.join_drop_claim_workers(timeout=5) == []
 
 
+def finish(twitch):
+    # Wait for the claim threads to end on their own, without stopping them.
+    for thread in list(twitch.drop_claim_threads):
+        thread.join(5)
+        assert not thread.is_alive()
+
+
 def start_event_claim(twitch):
     twitch.claim_drops_from_event({"drop_instance_id": "i-1"})
 
@@ -61,9 +69,10 @@ def start_prompt_claim(twitch):
 @pytest.mark.parametrize("start", [start_event_claim, start_prompt_claim])
 def test_both_claim_threads_claim_and_are_waited_for(twitch, start):
     start(twitch)
-    assert twitch.join_drop_claim_workers(timeout=5) == []
+    finish(twitch)
     assert claimed(twitch) == ["claim"]
     assert twitch.drop_claim_threads == set()
+    assert twitch.join_drop_claim_workers(timeout=5) == []
 
 
 @pytest.mark.parametrize("start", [start_event_claim, start_prompt_claim])
@@ -233,9 +242,11 @@ def test_a_new_twitch_after_a_stopped_one_claims(twitch, monkeypatch):
     other.prompt_claim_last = {}
     other.drop_claim_stop_event = Event()
     start_event_claim(other)
+    finish(other)
     start_prompt_claim(other)
-    assert other.join_drop_claim_workers(timeout=5) == []
+    finish(other)
     assert claimed(other) == ["claim", "claim"]
+    assert other.join_drop_claim_workers(timeout=5) == []
 
 
 # -- shutdown ---------------------------------------------------------------------
@@ -308,3 +319,43 @@ def test_shutdown_goes_on_when_a_claim_thread_never_finishes(twitch):
     assert "Drop claim threads did not stop in time" in (
         logger.warning.call_args.args[0]
     )
+
+
+def test_a_claim_thread_that_cannot_start_is_not_waited_for(twitch, monkeypatch):
+    class Unstartable:
+        def __init__(self, target, name, daemon):
+            self.name = name
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+        def join(self, timeout=None):
+            raise RuntimeError("cannot join thread before it is started")
+
+    monkeypatch.setattr(twitch_module, "Thread", Unstartable)
+    start_event_claim(twitch)
+    start_prompt_claim(twitch)
+    assert twitch.drop_claim_threads == set()
+    # The prompt claim did not run: not debounced.
+    assert twitch.prompt_claim_last == {}
+    twitch.running = False
+    assert twitch.join_drop_claim_workers(timeout=5) == []
+
+
+def test_a_claim_queued_behind_another_sends_nothing_after_a_stop(monkeypatch):
+    # Waiting for the claim lock (another claim holds it) when the miner
+    # stops: no new request once it gets the lock.
+    twitch, drop, requests, _saved, _now = claim_recording_twitch(monkeypatch)
+    real_lock = twitch._Twitch__claim_lock()
+
+    class ClaimLock:
+        def __enter__(self):
+            twitch.running = False
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    twitch.claim_drop_lock = ClaimLock()
+    assert twitch.claim_drop(drop) is False
+    assert requests == []
