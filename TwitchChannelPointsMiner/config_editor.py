@@ -2115,16 +2115,51 @@ def _imports_binding(tree, statement):
 
 
 def _with_config_import(encoded, statement):
-    if _imports_binding(ast.parse(encoded), statement):
+    """Return encoded with the import statement added, unless it has it.
+
+    The import goes on its own line before the first top-level statement
+    after the module docstring and any __future__ imports, so it lands after
+    a coding declaration and other leading comments, and never inside a
+    docstring. The result is checked: the save is refused unless the added
+    import binds its names before the config assignments.
+    """
+    tree = ast.parse(encoded)
+    if _imports_binding(tree, statement):
         return encoded
-    # Split bytes, so a U+2028 or form feed in the first line doesn't look
-    # like a line break and push the import into the comment.
+    body = list(tree.body)
+    index = 0
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        index = 1
+    while (
+        index < len(body)
+        and isinstance(body[index], ast.ImportFrom)
+        and body[index].module == "__future__"
+    ):
+        index += 1
+    # Split bytes, so a U+2028 or form feed doesn't look like a line break.
     lines = encoded.splitlines(keepends=True)
-    insertion = 1 if lines and b"coding" in lines[0] else 0
-    lines.insert(
-        insertion, statement.encode("utf-8") + _newline(encoded).encode("utf-8")
-    )
-    return b"".join(lines)
+    newline = _newline(encoded).encode("utf-8")
+    line = body[index].lineno - 1 if index < len(body) else len(lines)
+    head = b"".join(lines[:line])
+    if head and not head.endswith((b"\n", b"\r")):
+        head += newline
+    updated = head + statement.encode("utf-8") + newline + b"".join(lines[line:])
+    try:
+        added = _imports_binding(ast.parse(updated), statement)
+    except SyntaxError:
+        added = False
+    if not added:
+        raise ConfigEditError(
+            "The dashboard couldn't add the import this change needs to "
+            f"config.py. Add `{statement}` near the top of config.py, then "
+            "try again."
+        )
+    return updated
 
 
 def _ensure_config_import(config_path, statement):

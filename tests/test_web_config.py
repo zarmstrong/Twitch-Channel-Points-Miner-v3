@@ -2697,26 +2697,32 @@ def test_analytics_enable_keeps_crlf_line_breaks(tmp_path):
     assert b"\r\r" not in written
 
 
-def test_import_insertion_refuses_a_config_it_would_break(tmp_path):
-    # An import above a __future__ import parses but does not compile, so the
-    # save must be refused before it reaches the file.
+def test_import_insertion_goes_after_a_future_import(tmp_path):
+    # An import above a __future__ import parses but does not compile.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
     config = tmp_path / "config.py"
     config.write_text(
         "from __future__ import annotations\n"
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
         'MINER_CONFIG = {"username": "x"}\n'
         "STREAMERS = []\n"
         'MINE_CONFIG = {"categories": []}\n'
         "ANALYTICS_CONFIG = None\n",
         encoding="utf-8",
     )
-    before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="would not parse"):
-        update_managed_web_config(
-            config, {"action": "update_sources", "values": {"streamers": True}}
-        )
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"streamers": True}}
+    )
 
-    assert config.read_bytes() == before
+    assert config.read_text(encoding="utf-8").startswith(
+        "from __future__ import annotations\n"
+        "from TwitchChannelPointsMiner.classes.Settings import StreamerSource\n"
+    )
+    assert StreamerSource.STREAMERS in (
+        _load_config(config).MINER_CONFIG["streamer_source_priority"]
+    )
 
 
 def test_import_insertion_after_a_non_line_break_in_the_first_line(tmp_path):
@@ -3640,26 +3646,32 @@ def test_removal_is_refused_when_the_file_cant_be_tokenized(tmp_path, monkeypatc
     assert config.read_bytes() == before
 
 
-def test_import_is_not_added_above_a_future_import(tmp_path):
+def test_import_is_added_below_a_future_import(tmp_path):
     config = tmp_path / "config.py"
     write_commented_config(config, 'STREAMERS = ["one", "two"]\n')
     source = config.read_text(encoding="utf-8").replace(
         "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n", ""
     )
     config.write_text("from __future__ import annotations\n" + source, encoding="utf-8")
-    before = config.read_bytes()
 
-    with pytest.raises(ConfigEditError, match="would not parse"):
-        update_managed_web_config(
-            config,
-            {
-                "action": "update_streamer",
-                "username": "one",
-                "settings": {"chat": "NEVER"},
-            },
-        )
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_streamer",
+            "username": "one",
+            "settings": {"chat": "NEVER"},
+        },
+    )
 
-    assert config.read_bytes() == before
+    written = config.read_text(encoding="utf-8")
+    assert written.startswith(
+        "from __future__ import annotations\n"
+        "from TwitchChannelPointsMiner.classes.Chat import ChatPresence\n"
+    )
+    assert "chat=ChatPresence.NEVER" in written
+    # Loading it would run the schema migration, which puts CONFIG_VERSION
+    # above the __future__ import (a separate bug), so only compile it.
+    compile(written, "config.py", "exec", dont_inherit=True)
 
 
 @pytest.mark.parametrize(
@@ -4894,3 +4906,41 @@ def test_logging_level_save_refuses_names_bound_at_definition_or_by_star(
         )
 
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("migrate", [False, True], ids=["save", "migration"])
+def test_logging_import_is_not_added_inside_a_leading_docstring(tmp_path, migrate):
+    # The first line mentions "coding", which used to put the import on the
+    # second line: inside the docstring.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    config.write_text(
+        '"""My coding configuration.\n'
+        "\n"
+        'More notes."""\n'
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=20),\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    if migrate:
+        (tmp_path / "web-config.json").write_text(
+            json.dumps({"logging": {"console_level": "WARNING"}}), encoding="utf-8"
+        )
+        migrate_web_config(config)
+    else:
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    loaded = _load_config(config)
+    assert loaded.__doc__.startswith("My coding configuration.")
+    assert loaded.MINER_CONFIG["logger_settings"].console_level == logging.WARNING
