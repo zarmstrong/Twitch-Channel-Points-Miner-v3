@@ -363,14 +363,20 @@ _SCHEMA_5 = (
         PRIMARY KEY (day, game, streamer)
     )
     """,
-    # The claims a streamer delete removed: Twitch can report a claim again
-    # (a stale inventory gets "already claimed"), which must not bring it
-    # back.
+    # The claims a streamer delete removed, with what the Drops data import
+    # matches claims by (see backfill.py): Twitch can report a claim again
+    # (a stale inventory gets "already claimed"), and the Drops data still
+    # lists it, neither of which may bring it back.
     """
     CREATE TABLE deleted_drop_keys (
-        dedupe_key TEXT PRIMARY KEY
+        dedupe_key TEXT PRIMARY KEY,
+        drop_id TEXT,
+        game TEXT,
+        ts REAL,
+        source TEXT
     )
     """,
+    "CREATE INDEX idx_deleted_drop_keys_drop ON deleted_drop_keys (drop_id, game)",
     "CREATE INDEX idx_daily_game_stats_game ON daily_game_stats (game, day)",
     "CREATE INDEX idx_daily_game_stats_streamer " "ON daily_game_stats (streamer, day)",
 )
@@ -650,8 +656,10 @@ class HistoryStore(object):
         counts = {}
         connection.execute(
             """
-            INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key)
-            SELECT dedupe_key FROM drops WHERE streamer = ?
+            INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key, drop_id, game,
+                                                     ts, source)
+            SELECT dedupe_key, drop_id, game, ts, source FROM drops
+            WHERE streamer = ?
             """,
             (streamer,),
         )

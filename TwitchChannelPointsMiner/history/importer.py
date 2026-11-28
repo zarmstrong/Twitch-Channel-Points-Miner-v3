@@ -489,6 +489,10 @@ class JournalImporter(object):
         streamer = clean_streamer(record.get("streamer"))
         cutoff = deleted.get(streamer) if streamer else None
         if cutoff is not None and (segment, start) < cutoff:
+            if record["kind"] == "drop":
+                # Deleted before it was imported: Twitch reporting the claim
+                # again later must not bring it back either.
+                self._delete_drop_claim(connection, record, at)
             return
         handler = getattr(self, "_apply_" + record["kind"], None)
         if handler is None:
@@ -855,9 +859,17 @@ class JournalImporter(object):
         minutes = _int(record.get("minutes_required"))
         key = f"c:{claim_key}"
         if connection.execute(
-            "SELECT 1 FROM deleted_drop_keys WHERE dedupe_key = ?", (key,)
+            """
+            SELECT 1 FROM deleted_drop_keys
+            WHERE dedupe_key = ?
+               OR (source = 'analytics' AND drop_id = ? AND game = ?
+                   AND ? <= ts + ?)
+            LIMIT 1
+            """,
+            (key, drop_id, game, at, DROP_MATCH_SECONDS),
         ).fetchone():
-            # Removed by a streamer delete; reported again since.
+            # Removed by a streamer delete (imported from the Drops data,
+            # when it matches that by the rule below), reported again since.
             return
         inserted = connection.execute(
             """
@@ -893,6 +905,21 @@ class JournalImporter(object):
                 """,
                 (drop_id, game, at - DROP_MATCH_SECONDS),
             )
+
+    @staticmethod
+    def _delete_drop_claim(connection, record, at):
+        drop_id = _text(record.get("drop_id"))
+        claim_key = _text(record.get("claim_key"))
+        if drop_id is None or claim_key is None:
+            return
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key, drop_id, game,
+                                                     ts, source)
+            VALUES (?, ?, ?, ?, 'journal')
+            """,
+            (f"c:{claim_key}", drop_id, _text(record.get("game")), at),
+        )
 
     def _apply_run_start(self, connection, record, run, seq, at, streamer):
         # Runs before this one that never wrote run_end crashed: close what

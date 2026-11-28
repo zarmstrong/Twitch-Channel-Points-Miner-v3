@@ -615,21 +615,21 @@ class AnalyticsBackfill(object):
         streamer = clean_streamer(entry.get("streamer")) or None
         if streamer is not None and streamer in deleted:
             return 0
-        if connection.execute(
-            """
-            SELECT 1 FROM drops
-            WHERE source = 'journal' AND drop_id = ? AND game = ? AND ts <= ?
-            LIMIT 1
-            """,
-            (drop_id, game, ts + DROP_MATCH_SECONDS),
-        ).fetchone():
-            # The journal recorded this claim (see the module docstring).
-            return 0
         key = f"a:{drop_id}|{game}"
-        if connection.execute(
-            "SELECT 1 FROM deleted_drop_keys WHERE dedupe_key = ?", (key,)
-        ).fetchone():
-            return 0
+        for table in ("drops", "deleted_drop_keys"):
+            # The journal recorded this claim (see the module docstring), or
+            # a streamer delete removed it.
+            if connection.execute(
+                f"""
+                SELECT 1 FROM {table}
+                WHERE (source = 'journal' AND drop_id = ? AND game = ?
+                       AND ts <= ?)
+                   OR (? = 'deleted_drop_keys' AND dedupe_key = ?)
+                LIMIT 1
+                """,
+                (drop_id, game, ts + DROP_MATCH_SECONDS, table, key),
+            ).fetchone():
+                return 0
         benefit = _text(entry.get("benefit"))
         minutes = _int(entry.get("minutes_required"))
         return max(

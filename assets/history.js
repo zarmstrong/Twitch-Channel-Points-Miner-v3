@@ -933,14 +933,19 @@
             note.style.display = text ? '' : 'none';
         }
         var items = (gamesPayload && gamesPayload.games) || [];
-        if (!items.length) {
-            container.innerHTML = '<p class="history-empty">No games recorded in this window.</p>';
-            return;
-        }
-        container.innerHTML = (selectedGame
+        // Shown even with no games, so a filter carried over from another
+        // window or streamer can always be cleared.
+        var filter = selectedGame
             ? '<p class="history-summary-line">Drops list: ' + escapeHtml(selectedGame) +
                 ' · <a href="#" data-history-game-clear>show every game</a></p>'
-            : '<p class="history-summary-line">Select a game to list only its drops.</p>') +
+            : '';
+        if (!items.length) {
+            container.innerHTML = filter +
+                '<p class="history-empty">No games recorded in this window.</p>';
+            return;
+        }
+        container.innerHTML = (filter ||
+            '<p class="history-summary-line">Select a game to list only its drops.</p>') +
             gamesTable(items, true);
     }
 

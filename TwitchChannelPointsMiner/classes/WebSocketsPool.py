@@ -499,8 +499,23 @@ class WebSocketsPool:
     @staticmethod
     def _record_history(ws, message):
         """Journal a points message or redemption for History (which applies
-        its own eligibility rule and duplicate check)."""
+        its own eligibility rule and duplicate check), and note the channel
+        a drop-progress message names."""
 
+        if message.topic == "user-drop-events":
+            try:
+                data = message.data
+                if message.type == "drop-progress" and isinstance(data, dict):
+                    # The channel credited with the drop.  user-drop-events
+                    # are per user: the channel is in the data.
+                    progressed_on = get_streamer(ws.streamers, data.get("channel_id"))
+                    if progressed_on is not None:
+                        history_journal.JOURNAL.note_drop_channel(
+                            progressed_on, data.get("drop_id")
+                        )
+            except Exception:
+                logger.debug("Unable to note a drop's channel", exc_info=True)
+            return
         if message.topic != "community-points-user-v1":
             return
         try:
@@ -530,8 +545,9 @@ class WebSocketsPool:
             message = Message(response["data"])
 
             # History dedupes points messages and redemptions itself, so it
-            # sees them before the coarse filter below, which also drops a
-            # distinct message that shares a timestamp with the previous one.
+            # sees them (and drop-progress channels) before the coarse filter
+            # below, which also drops a distinct message that shares a
+            # timestamp with the previous one.
             WebSocketsPool._record_history(ws, message)
 
             # If we have more than one PubSub connection, messages may be duplicated
@@ -555,15 +571,6 @@ class WebSocketsPool:
                 elif message.type == "drop-progress":
                     logger.debug(f"Drop progress: {message.data}")
                     ws.twitch.record_drop_progress_event(message.data)
-                    if isinstance(message.data, dict):
-                        # The channel credited with the drop, for History.
-                        progressed_on = get_streamer(
-                            ws.streamers, message.data.get("channel_id")
-                        )
-                        if progressed_on is not None:
-                            history_journal.JOURNAL.note_drop_channel(
-                                progressed_on, message.data.get("drop_id")
-                            )
                 return
 
             # History recorded the redemption above; nothing else uses it.

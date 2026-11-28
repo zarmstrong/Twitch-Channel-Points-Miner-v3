@@ -391,6 +391,44 @@ def test_a_channel_with_only_drops_counts_as_a_games_streamer(folder, importer, 
     assert (only["game"], only["drops"], only["streamers"]) == ("Game A", 1, 1)
 
 
+def test_the_drops_data_does_not_bring_back_a_deleted_claim(folder, importer, store):
+    # Imported later (the import was off at the delete): the entry names no
+    # channel, but it is the deleted claim.  An older entry is a claim of
+    # its own.
+    folder.drop(at=T0, streamer="alice")
+    importer.poll()
+    store.delete_streamer("alice", segment_name(1, 1), 10**6)
+    folder.drops_data([captured(T0 + 5), captured(T0 - 3 * 86400, drop_id="d2")])
+    folder.drop(at=T0 - 3 * 86400 + 10, drop_id="d2", run=2)
+    backfill_for(store, folder, importer).poll()
+    importer.poll()
+    assert [
+        (row["drop_id"], row["source"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("d2", "journal")]
+
+
+def test_a_claim_deleted_before_it_was_imported_stays_deleted(folder, importer, store):
+    # Journalled between the delete's last import and its cutoff.
+    folder.drop(at=T0, streamer="alice")
+    store.record_delete("alice", segment_name(1, 1), 10**6)
+    importer.poll()
+    assert rows(store, "SELECT * FROM drops") == []
+    folder.drop(at=T0 + 600, run=2, already_claimed=True)
+    importer.poll()
+    assert rows(store, "SELECT * FROM drops") == []
+
+
+def test_a_deleted_imported_claim_reported_again_stays_deleted(folder, importer, store):
+    folder.drops_data([captured(T0, streamer="alice")])
+    backfill_for(store, folder, importer).poll()
+    store.delete_streamer("alice", "", 0)
+    # The same claim (by the matching rule), and a later repeat.
+    folder.drop(at=T0 + 30, already_claimed=True)
+    folder.drop(at=T0 + 3 * 86400, claim_key="i-d1|d1#2")
+    importer.poll()
+    assert [row["ts"] for row in rows(store, "SELECT * FROM drops")] == [T0 + 3 * 86400]
+
+
 def test_retention_keeps_drops_and_game_totals(folder, importer, store):
     folder.add("live", at=T0, streamer="alice", broadcast_id="b1", game="Game A")
     folder.add("watch", at=T0 + 20, streamer="alice", broadcast_id="b1", seconds=20)
