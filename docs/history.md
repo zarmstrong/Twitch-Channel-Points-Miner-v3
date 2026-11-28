@@ -72,7 +72,8 @@ channel and the drops credited to it.
 - **Games:** watch time and points go to the game the stream showed when the
   miner recorded them. A stream that changes game moves to the new game from
   the next minute-watched request. Watch time on a stream History hasn't seen
-  live, and points earned while the channel was offline, have no game, so the
+  live, and points earned after the channel went offline (by Twitch's time
+  for the points, allowing two minutes for the clocks), have no game, so the
   game totals can add up to less than the overall totals.
 - **Older databases:** a database made by a build without game totals counts
   them from the upgrade. The tab says from when. Drops imported from the Drops
@@ -223,8 +224,9 @@ There are two ways to delete a streamer's History from the dashboard:
   their History: points, spends, predictions, watch and live sessions, watch
   streaks, the drops credited to their channel, their game totals, and their
   daily and all-time totals. A deleted drop stays deleted when Twitch reports
-  its claim again later. Their analytics data and the
-  Points tab are not changed.
+  its claim again later, and when the Drops data import runs again after the
+  database is rebuilt: History saves the deleted claims beside the journal
+  with the delete. Their analytics data and the Points tab are not changed.
 - Deleting a streamer's analytics data on the Points tab also clears that
   streamer's History.
 

@@ -17,6 +17,7 @@ import os
 import sqlite3
 import time
 
+from TwitchChannelPointsMiner.constants import WATCH_STREAK_CLOCK_SKEW_SECONDS
 from TwitchChannelPointsMiner.history.journal import (
     ACK_FILE,
     JOURNAL_FORMAT_VERSION,
@@ -25,10 +26,13 @@ from TwitchChannelPointsMiner.history.journal import (
     parse_segment_name,
     read_ack,
     read_delete_cutoffs,
+    read_deleted_drops,
     save_delete_cutoff,
+    save_deleted_drops,
     write_atomic,
 )
 from TwitchChannelPointsMiner.history.store import (
+    META_DELETED_DROPS,
     SESSION_GAP_SECONDS,
     clean_streamer,
     earliest_held,
@@ -117,6 +121,8 @@ class JournalImporter(object):
         # of them, and those apply_saved_deletes may finish.
         self._file_deletes = None
         self._finishable_deletes = None
+        # The deleted claims saved there (see restore_deleted_drops).
+        self._deleted_drops = None
         # The earliest record time of the batch being applied.
         self._first_at = None
 
@@ -129,21 +135,60 @@ class JournalImporter(object):
             self._file_deletes = read_delete_cutoffs(self.folder)
         return self._file_deletes
 
-    def save_delete(self, streamer, segment, offset, deleted_at):
+    def save_delete(self, streamer, segment, offset, deleted_at, drops=()):
         """Save a delete cutoff beside the journal before the database
-        applies it; raises ``OSError`` when it cannot be saved."""
+        applies it, with the claims (``drops``) it removes; raises
+        ``OSError`` when it cannot be saved."""
 
         cutoffs = self._load_deletes()
         finishable = self._load_finishable_deletes()
+        deleted_drops = self._load_deleted_drops()
         position = (str(segment), int(offset))
         # Raises when the line may not be durable (even if it was written):
         # the delete then fails.  Should the line have reached the file
         # anyway, a later import honours it only while it has not passed
         # the cutoff (``apply_saved_deletes``).
-        save_delete_cutoff(self.folder, streamer, segment, offset, deleted_at)
+        save_delete_cutoff(
+            self.folder, streamer, segment, offset, deleted_at, drops=drops
+        )
         for known in (cutoffs, finishable):
             if streamer not in known or position > known[streamer]:
                 known[streamer] = position
+        deleted_drops.extend(tuple(drop) for drop in drops)
+
+    def _load_deleted_drops(self):
+        if self._deleted_drops is None:
+            self._deleted_drops = read_deleted_drops(self.folder)
+        return self._deleted_drops
+
+    def restore_deleted_drops(self):
+        """Put the deleted claims saved beside the journal back into a
+        database that lacks them (rebuilt after corruption), so neither the
+        journal nor the Drops data counts them again.  Raises ``OSError``
+        when the file cannot be read."""
+
+        drops = self._load_deleted_drops()
+        if not drops:
+            return
+        with self.store._read_connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_DELETED_DROPS,)
+            ).fetchone()
+        if row is not None and row["value"] == str(len(drops)):
+            return
+        with self.store.transaction() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key, drop_id,
+                                                         game, ts, source)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                drops,
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (META_DELETED_DROPS, str(len(drops))),
+            )
 
     def _load_finishable_deletes(self):
         if self._finishable_deletes is None:
@@ -176,6 +221,7 @@ class JournalImporter(object):
         Cutoffs saved before this was done (without ``CUTOFF_VERSION``) are
         left alone."""
 
+        self.restore_deleted_drops()
         cutoffs = self._load_finishable_deletes()
         if not cutoffs:
             return
@@ -532,17 +578,35 @@ class JournalImporter(object):
         )
 
     @staticmethod
-    def _stream_game(connection, streamer, broadcast_id):
+    def _stream_game(connection, streamer, broadcast_id, earned_at=None):
         """The game the stream showed at the newest record imported so far:
-        what the miner was watching when it recorded the next one."""
+        what the miner was watching when it recorded the next one.
+
+        With ``earned_at`` (when points were earned), none once the stream
+        had gone offline by then: a points message keeps the broadcast it
+        was sent after (``journal._earned_on``) even when the channel went
+        offline in between.  A late message for points earned while it was
+        live still counts."""
 
         if broadcast_id is None:
             return None
         row = connection.execute(
-            "SELECT game FROM streams WHERE streamer = ? AND broadcast_id = ?",
+            """
+            SELECT game, ended_at, end_reason FROM streams
+            WHERE streamer = ? AND broadcast_id = ?
+            """,
             (streamer, broadcast_id),
         ).fetchone()
-        return _text(row["game"]) if row is not None else None
+        if row is None:
+            return None
+        if (
+            earned_at is not None
+            and row["ended_at"] is not None
+            and row["end_reason"] == "offline"
+            and earned_at > row["ended_at"] + WATCH_STREAK_CLOCK_SKEW_SECONDS
+        ):
+            return None
+        return _text(row["game"])
 
     @staticmethod
     def _touch_game(connection, timestamp, streamer, game, **increments):
@@ -691,7 +755,7 @@ class JournalImporter(object):
                 ts,
                 streamer,
                 self._stream_game(
-                    connection, streamer, _text(record.get("broadcast_id"))
+                    connection, streamer, _text(record.get("broadcast_id")), ts
                 ),
                 points_gained=delta,
             )
@@ -867,8 +931,9 @@ class JournalImporter(object):
         ).fetchone():
             # Removed by a streamer delete (also when it was imported from
             # the Drops data: a drop is claimed once), reported again since.
-            # Kept under this claim's own key too.
-            self._delete_drop_claim(connection, record, at)
+            # Kept under this claim's own key too (derived from the saved
+            # one, so not saved again).
+            self._tombstone(connection, (key, drop_id, game, at, "journal"))
             return
         inserted = connection.execute(
             """
@@ -905,19 +970,65 @@ class JournalImporter(object):
             )
 
     @staticmethod
-    def _delete_drop_claim(connection, record, at):
+    def _tombstone(connection, drop):
+        """Record one deleted claim, ``(key, drop_id, game, ts, source)``;
+        True when it was not recorded yet."""
+
+        return (
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key, drop_id,
+                                                         game, ts, source)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                drop,
+            ).rowcount
+            > 0
+        )
+
+    def _delete_drop_claim(self, connection, record, at):
+        """A claim journalled before its channel's delete cutoff but imported
+        after the delete: it is deleted too, with the same claim imported
+        from the Drops data without a channel (it was not credited to the
+        channel, so the delete did not remove it).  Saved beside the
+        journal like the delete's own claims."""
+
         drop_id = _text(record.get("drop_id"))
         claim_key = _text(record.get("claim_key"))
         if drop_id is None or claim_key is None:
             return
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key, drop_id, game,
-                                                     ts, source)
-            VALUES (?, ?, ?, ?, 'journal')
-            """,
-            (f"c:{claim_key}", drop_id, _text(record.get("game")), at),
-        )
+        game = _text(record.get("game"))
+        if not self._tombstone(
+            connection, (f"c:{claim_key}", drop_id, game, at, "journal")
+        ):
+            # Already recorded, and saved when it was (or restored from
+            # the file after a rebuild).
+            return
+        removed = [(f"c:{claim_key}", drop_id, game, at, "journal")]
+        if game is not None:
+            for row in connection.execute(
+                """
+                SELECT dedupe_key, ts FROM drops
+                WHERE source = 'analytics' AND streamer IS NULL
+                  AND drop_id = ? AND game = ?
+                """,
+                (drop_id, game),
+            ).fetchall():
+                drop = (row["dedupe_key"], drop_id, game, row["ts"], "analytics")
+                self._tombstone(connection, drop)
+                removed.append(drop)
+            connection.execute(
+                """
+                DELETE FROM drops
+                WHERE source = 'analytics' AND streamer IS NULL
+                  AND drop_id = ? AND game = ?
+                """,
+                (drop_id, game),
+            )
+        # Raises when it cannot be saved: the batch is rolled back and
+        # imported again later.
+        save_deleted_drops(self.folder, removed, at)
+        self._load_deleted_drops().extend(removed)
 
     def _apply_run_start(self, connection, record, run, seq, at, streamer):
         # Runs before this one that never wrote run_end crashed: close what

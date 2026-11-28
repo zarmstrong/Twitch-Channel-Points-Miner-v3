@@ -592,9 +592,11 @@ class AnalyticsBackfill(object):
                     "Unable to read %s for History; retrying: %s", DROPS_FILE, error
                 )
             return 0
-        # Raises when the cutoffs cannot be read: importing without them
-        # could bring a deleted streamer's drops back.
+        # Raise when the deletes cannot be read: importing without them
+        # could bring a deleted streamer's drops back.  A rebuilt database
+        # gets the deleted claims back first.
         file_deletes = self.importer._load_deletes()
+        self.importer.restore_deleted_drops()
         entries = payload.get("drops") if isinstance(payload, dict) else None
         added = 0
         with self.store.transaction() as connection:

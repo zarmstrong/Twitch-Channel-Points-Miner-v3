@@ -381,6 +381,9 @@ _SCHEMA_5 = (
 # meta key: when a schema 4 database gained the game totals.  Watch time and
 # points before it have no game.
 META_GAMES_SINCE = "games_since"
+# meta key: how many deleted claims saved beside the journal the database
+# holds (JournalImporter.restore_deleted_drops).
+META_DELETED_DROPS = "deleted_drops_restored"
 
 
 class HistorySchemaError(RuntimeError):
@@ -647,6 +650,23 @@ class HistoryStore(object):
         return self._delete_streamer_rows(
             connection, streamer, segment, offset, deleted_at
         )
+
+    @staticmethod
+    def drop_claims_of(streamer, connection):
+        """The claims credited to ``streamer``, as ``(key, drop_id, game, ts,
+        source)``: what ``delete_streamer`` removes and records as deleted,
+        saved with the delete's cutoff (``JournalImporter.save_delete``)."""
+
+        return [
+            (row[0], row[1], row[2], row[3], row[4])
+            for row in connection.execute(
+                """
+                SELECT dedupe_key, drop_id, game, ts, source FROM drops
+                WHERE streamer = ? ORDER BY id
+                """,
+                (clean_streamer(streamer),),
+            )
+        ]
 
     @staticmethod
     def _delete_streamer_rows(connection, streamer, segment, offset, deleted_at):

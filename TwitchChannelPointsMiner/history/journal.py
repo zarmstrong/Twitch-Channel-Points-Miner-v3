@@ -58,6 +58,9 @@ STOP_SPEND_SECONDS = 30.0
 
 # Drops whose channel note_drop_channel() remembers (the newest ones).
 DROP_CHANNELS_KEPT = 500
+# Claims record_drop() remembers having written, so a claim reported again
+# in this process is not written twice (far more than a process makes).
+DROP_CLAIMS_KEPT = 20000
 
 _WARNING_INTERVAL = 60.0
 
@@ -175,26 +178,87 @@ def read_delete_cutoffs(folder, finishable=False):
     return cutoffs
 
 
-def save_delete_cutoff(folder, streamer, segment, offset, deleted_at):
+def save_delete_cutoff(folder, streamer, segment, offset, deleted_at, drops=()):
     """Append one delete cutoff to ``DELETES_FILE`` (fsynced); raises
-    ``OSError`` when it cannot be saved."""
+    ``OSError`` when it cannot be saved.
 
+    ``drops``: the claims the delete removes, as ``(key, drop_id, game, ts,
+    source)`` (see ``read_deleted_drops``)."""
+
+    entry = {
+        "v": CUTOFF_VERSION,
+        "streamer": _clean(streamer),
+        "segment": str(segment),
+        "offset": int(offset),
+        "at": float(deleted_at),
+    }
+    if drops:
+        entry["drops"] = [list(drop) for drop in drops]
+    _append_delete_line(folder, entry)
+
+
+def save_deleted_drops(folder, drops, deleted_at):
+    """Append claims a delete removed that its cutoff line doesn't list
+    (journalled before the cutoff, imported after it) to ``DELETES_FILE``
+    (fsynced); raises ``OSError`` when they cannot be saved."""
+
+    if drops:
+        _append_delete_line(
+            folder,
+            {
+                "v": CUTOFF_VERSION,
+                "drops": [list(drop) for drop in drops],
+                "at": float(deleted_at),
+            },
+        )
+
+
+def _append_delete_line(folder, entry):
     os.makedirs(folder, exist_ok=True)
-    line = json.dumps(
-        {
-            "v": CUTOFF_VERSION,
-            "streamer": _clean(streamer),
-            "segment": str(segment),
-            "offset": int(offset),
-            "at": float(deleted_at),
-        },
-        separators=(",", ":"),
-    )
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
     with open(os.path.join(folder, DELETES_FILE), "ab") as handle:
         # A line cut off by a crash never joins this one.
         handle.write(("\n" + line + "\n").encode("utf-8"))
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def read_deleted_drops(folder):
+    """The claims streamer deletes removed, from ``DELETES_FILE``: ``(key,
+    drop_id, game, ts, source)`` tuples, oldest first.
+
+    Like the cutoffs, they outlive the database: a rebuilt one must not
+    count a deleted claim again when Twitch or the Drops data reports it.
+    Raises ``OSError`` when the file exists but cannot be read."""
+
+    found = []
+    try:
+        with open(os.path.join(folder, DELETES_FILE), "rb") as handle:
+            data = handle.read()
+    except FileNotFoundError:
+        return found
+    for raw in data.split(b"\n"):
+        try:
+            drops = json.loads(raw.decode("utf-8"))["drops"]
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+            continue
+        if not isinstance(drops, list):
+            continue
+        for drop in drops:
+            try:
+                key, drop_id, game, ts, source = drop
+                ts = float(ts)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if (
+                isinstance(key, str)
+                and isinstance(drop_id, str)
+                and (game is None or isinstance(game, str))
+                and source in ("journal", "analytics")
+                and math.isfinite(ts)
+            ):
+                found.append((key, drop_id, game, ts, source))
+    return found
 
 
 def _clean(username):
@@ -408,6 +472,11 @@ class Journal(object):
         # process; lost at a restart.
         self._drop_lock = threading.Lock()
         self._drop_channels = {}
+        # Claim keys record_drop wrote in this process, newest last; held
+        # across the append so a claim reported twice at once is written
+        # once.  Outer to the journal's own lock.
+        self._claims_lock = threading.Lock()
+        self._drop_claims = {}
 
     def _eligible(self, streamer):
         """``history_eligible`` and not removed from the miner."""
@@ -1198,21 +1267,29 @@ class Journal(object):
         game = text_or_none(game)
         if game is not None and game.lower() == "unknown":
             game = None
-        self.append(
-            "drop",
-            streamer=self.drop_channel(drop_id),
-            drop_id=drop_id,
-            claim_key=claim_key,
-            name=text_or_none(name),
-            benefits=names,
-            campaign=text_or_none(campaign),
-            campaign_id=text_or_none(campaign_id),
-            game=game,
-            quest=quest is True,
-            minutes_required=_int_or_none(minutes_required),
-            image=text_or_none(image),
-            already_claimed=already_claimed is True,
-        )
+        streamer = self.drop_channel(drop_id)
+        with self._claims_lock:
+            if claim_key in self._drop_claims:
+                return
+            written = self.append(
+                "drop",
+                streamer=streamer,
+                drop_id=drop_id,
+                claim_key=claim_key,
+                name=text_or_none(name),
+                benefits=names,
+                campaign=text_or_none(campaign),
+                campaign_id=text_or_none(campaign_id),
+                game=game,
+                quest=quest is True,
+                minutes_required=_int_or_none(minutes_required),
+                image=text_or_none(image),
+                already_claimed=already_claimed is True,
+            )
+            if written:
+                self._drop_claims[claim_key] = True
+                while len(self._drop_claims) > DROP_CLAIMS_KEPT:
+                    del self._drop_claims[next(iter(self._drop_claims))]
 
 
 # The process-wide journal.  Inert until ``start()``; every call is a no-op

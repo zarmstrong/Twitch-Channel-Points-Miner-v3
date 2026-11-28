@@ -15,8 +15,10 @@ from TwitchChannelPointsMiner.history.backfill import AnalyticsBackfill
 from TwitchChannelPointsMiner.history.importer import JournalImporter
 from TwitchChannelPointsMiner.history.journal import (
     DROP_CHANNELS_KEPT,
+    DROP_CLAIMS_KEPT,
     Journal,
     list_segments,
+    read_deleted_drops,
     save_delete_cutoff,
     segment_name,
 )
@@ -181,6 +183,28 @@ def test_only_the_newest_drop_channels_are_kept(journal):
     assert journal.drop_channel(f"d{DROP_CHANNELS_KEPT}") == "alice"
 
 
+def test_a_claim_is_written_once_per_process(journal, monkeypatch):
+    journal.record_drop("d1", "i1|d1")
+    journal.record_drop("d1", "i1|d1", already_claimed=True)
+    journal.record_drop("d1#2", "i1|d1#2")
+    assert [record["claim_key"] for record in written(journal, "drop")] == [
+        "i1|d1",
+        "i1|d1#2",
+    ]
+    # However many other claims came since.
+    for index in range(DROP_CLAIMS_KEPT - 2):
+        journal._drop_claims[f"other-{index}"] = True
+    journal.record_drop("d1", "i1|d1", already_claimed=True)
+    assert len(written(journal, "drop")) == 2
+    # A claim whose record could not be written is written when reported
+    # again.
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d2", "i2|d2")
+    monkeypatch.undo()
+    journal.record_drop("d2", "i2|d2")
+    assert [record["claim_key"] for record in written(journal, "drop")][-1] == "i2|d2"
+
+
 def test_a_claim_without_an_id_or_a_running_journal_is_not_written(journal):
     journal.record_drop("", "key")
     journal.record_drop("d1", "")
@@ -225,6 +249,34 @@ def test_watch_time_and_points_go_to_the_game_the_stream_showed(
         ("Game A", "alice"): (20.0, 10),
         ("Game B", "alice"): (20.0, 50),
     }
+
+
+def test_points_earned_after_the_stream_went_offline_have_no_game(
+    folder, importer, store
+):
+    folder.add("live", at=T0, streamer="alice", broadcast_id="b1", game="Game A")
+    folder.add("points", at=T0 + 25, streamer="alice", broadcast_id="b1", delta=10)
+    folder.add("offline", at=T0 + 600, streamer="alice", broadcast_id="b1")
+    # Earned offline, but credited to the broadcast it was sent after.
+    folder.add(
+        "points",
+        at=T0 + 1200,
+        streamer="alice",
+        broadcast_id="b1",
+        delta=5,
+        upstream_at=T0 + 1200,
+    )
+    # A late message for points earned while it was live.
+    folder.add(
+        "points",
+        at=T0 + 1300,
+        streamer="alice",
+        broadcast_id="b1",
+        delta=7,
+        upstream_at=T0 + 590,
+    )
+    importer.poll()
+    assert game_totals(store) == {("Game A", "alice"): (0, 17)}
 
 
 def test_a_journalled_claim_replaces_the_same_claim_from_the_drops_data(
@@ -451,6 +503,54 @@ def test_a_claim_deleted_before_it_was_imported_stays_deleted(folder, importer, 
     folder.drop(at=T0 + 600, run=2, already_claimed=True)
     importer.poll()
     assert rows(store, "SELECT * FROM drops") == []
+
+
+def test_a_claim_deleted_before_it_was_imported_removes_its_drops_data_twin(
+    folder, importer, store
+):
+    # The Drops data import added the claim without a channel; the claim
+    # was journalled on alice's channel just before her delete, which ran
+    # before the importer saw it.
+    folder.drops_data([captured(T0), captured(T0, drop_id="d2")])
+    backfill_for(store, folder, importer).poll()
+    folder.drop(at=T0 + 5, streamer="alice")
+    store.record_delete("alice", segment_name(1, 1), 10**6)
+    importer.poll()
+    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d2"]
+    assert sorted(drop[0] for drop in read_deleted_drops(folder.journal)) == [
+        "a:d1|Game A",
+        "c:i-d1|d1",
+    ]
+
+
+def test_a_rebuilt_database_keeps_deleted_claims_deleted(folder, store):
+    recorder = HistoryRecorder(
+        store, folder.journal, monotonic=lambda: 0.0, clock=lambda: T0 + 60
+    )
+    recorder.backfill = AnalyticsBackfill(
+        store, folder.root, recorder.importer, lambda: [], monotonic=lambda: 0.0
+    )
+    folder.drop(at=T0, streamer="alice")
+    folder.drop(at=T0, drop_id="d2", streamer="bob")
+    assert recorder._initialize()
+    recorder.poll_once()
+    recorder.delete_streamer("alice")
+    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d2"]
+    # The imported journal is gone; the Drops data names no channel.
+    for name in list_segments(folder.journal):
+        os.remove(os.path.join(folder.journal, name))
+    folder.drops_data([captured(T0 + 60), captured(T0 + 60, drop_id="d2")])
+
+    assert store.recover_if_corrupt(
+        sqlite3.DatabaseError("database disk image is malformed")
+    )
+    # Twitch reports the deleted claim again, too.
+    folder.drop(at=T0 + 600, run=2, already_claimed=True)
+    for _ in range(3):
+        recorder.poll_once()
+    assert [
+        (row["drop_id"], row["source"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("d2", "analytics")]
 
 
 def test_a_deleted_imported_claim_reported_again_stays_deleted(folder, importer, store):
