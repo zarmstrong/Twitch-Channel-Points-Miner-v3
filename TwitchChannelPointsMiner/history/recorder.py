@@ -14,7 +14,11 @@ from TwitchChannelPointsMiner.history import (
 from TwitchChannelPointsMiner.history import journal as journal_module
 from TwitchChannelPointsMiner.history.backfill import AnalyticsBackfill
 from TwitchChannelPointsMiner.history.importer import JournalImporter
-from TwitchChannelPointsMiner.history.store import HistoryStore, clean_streamer
+from TwitchChannelPointsMiner.history.store import (
+    HistorySchemaTooNewError,
+    HistoryStore,
+    clean_streamer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +78,19 @@ class HistoryRecorder(threading.Thread):
         self._last_warning = {}
         # The analytics JSON import (see backfill.py), when enabled.
         self.backfill = None
+        # Why History is off for this run (the database was written by a
+        # newer build), or None.
+        self.refused = None
 
     # -- thread ----------------------------------------------------------------
     def run(self):
         while not self._stop_event.is_set():
             if self._initialize():
                 break
+            if self.refused is not None:
+                # Off for this run: nothing to import into, and nothing to
+                # retry.  The journal keeps what it can't import.
+                return
             self._stop_event.wait(_RETRY_SECONDS)
         while not self._stop_event.is_set():
             self.poll_once()
@@ -103,9 +114,15 @@ class HistoryRecorder(threading.Thread):
             logger.debug("%s (repeated)", message)
 
     def _initialize(self):
+        if self.refused is not None:
+            return False
         try:
             self.store.initialize()
             return True
+        except HistorySchemaTooNewError as error:
+            self.refused = str(error)
+            logger.warning("%s", error)
+            return False
         except Exception:
             self._warn("Unable to open the History database")
             return False
@@ -207,7 +224,9 @@ class HistoryRecorder(threading.Thread):
                 _remove_source(remove_source)
                 return {}
             if not self.store.ready and not self._initialize():
-                raise HistoryUnavailableError("History is still starting")
+                raise HistoryUnavailableError(
+                    self.refused or "History is still starting"
+                )
             try:
                 self.importer.poll()
             except Exception:

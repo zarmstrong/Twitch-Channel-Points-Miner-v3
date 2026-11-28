@@ -314,6 +314,24 @@ class HistorySchemaError(RuntimeError):
     """The database was written by a different build than this one."""
 
 
+class HistorySchemaTooNewError(RuntimeError):
+    """The database was written by a newer build than this one.
+
+    Not a ``HistorySchemaError``: such a database is never moved aside or
+    changed.  Its journal was imported and removed, so a rebuild here would
+    lose its History, and the newer build can still use it.  History stays
+    off instead; the journal keeps what it can't import until then."""
+
+    def __init__(self, path, version):
+        super(HistorySchemaTooNewError, self).__init__(
+            f"History database {path} was written by a newer version of the "
+            f"miner (schema {version}; this version uses "
+            f"{HISTORY_SCHEMA_VERSION}); History is off and the database is "
+            "left unchanged"
+        )
+        self.version = version
+
+
 # A session listed for a window started in it or was still going in it, so a
 # watch or broadcast that began before midnight is listed for today too.  Takes
 # the window end (see _window_end) and then the window start twice.
@@ -444,12 +462,51 @@ class HistoryStore(object):
         )
         return backup
 
+    def _stored_version(self):
+        """The database's schema version, read without changing anything:
+        from the file's header, or, while a ``-wal`` file holds changes the
+        header may not show yet, through a read-only connection (which only
+        touches SQLite's ``-shm`` index).  None when there is no readable
+        SQLite file."""
+
+        try:
+            with open(self.path, "rb") as handle:
+                header = handle.read(100)
+        except OSError:
+            return None
+        if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
+            return None
+        version = int.from_bytes(header[60:64], "big", signed=True)
+        try:
+            wal_size = os.path.getsize(self.path + "-wal")
+        except OSError:
+            wal_size = 0
+        if wal_size > 0:
+            try:
+                uri = Path(self.path).resolve().as_uri() + "?mode=ro"
+                connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+                try:
+                    version = connection.execute("PRAGMA user_version").fetchone()[0]
+                finally:
+                    connection.close()
+            except sqlite3.Error:
+                return None
+        return version
+
     def _initialize_schema(self):
+        version = self._stored_version()
+        if version is not None and version > HISTORY_SCHEMA_VERSION:
+            # Checked before a write connection opens: opening one could
+            # switch the file to WAL mode or checkpoint its -wal file.
+            raise HistorySchemaTooNewError(self.path, version)
         with self._write_connection() as connection:
             # One transaction, so an interrupted creation leaves nothing
             # half-made behind (sqlite3 does not open one for DDL itself).
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > HISTORY_SCHEMA_VERSION:
+                # Became newer since the check above: nothing is changed.
+                raise HistorySchemaTooNewError(self.path, version)
             if version == HISTORY_SCHEMA_VERSION:
                 return
             if version != 0:

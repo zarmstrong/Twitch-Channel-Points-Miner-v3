@@ -141,7 +141,7 @@ minute.
 ## Recovery
 
 The schema version is stored in `PRAGMA user_version`. If the file was written
-by a different schema than the running build uses (including databases from
+by an older schema than the running build uses (including databases from
 development builds of this feature), or SQLite reports that it is corrupt, the
 file and its `-wal`/`-shm` companions are moved to a
 `history.sqlite3.bak-<timestamp>` backup and a fresh database is created from
@@ -160,6 +160,14 @@ History logs a warning and retries without affecting the miner.
   whole miner runs the size limit deleted while History was not running. It is
   a lower bound: History counts one file for each missing run. A run whose
   journal could not be opened at all also counts as one.
+
+A database written by a newer version of the miner (a higher schema version),
+for example after going back to an older Docker tag, is never moved aside or
+changed. History stays off in the older version: it logs one warning and the
+History tab says why, while mining carries on. The journal keeps what History
+couldn't import, up to its size limit, so the newer version imports it when you
+go back to it. Releases up to 3.24.0 rebuild such a database instead, which
+loses older History.
 
 ## Deleting a streamer
 

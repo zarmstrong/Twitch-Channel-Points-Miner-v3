@@ -17,6 +17,7 @@ from TwitchChannelPointsMiner.history import (
     get_store,
     import_status,
     is_recording,
+    unavailable_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,14 @@ def _streamer_arg():
 
 def _store():
     store = get_store()
+    reason = unavailable_reason() if store is None else None
+    if reason:
+        # Off for this run: the dashboard shows why instead of retrying.
+        raise HistoryApiError(
+            "History is off: its database was written by a newer version of "
+            "the miner. It is kept unchanged; update the miner to see it again.",
+            status=503,
+        )
     if store is None or not store.exists():
         raise HistoryApiError(
             "History is not available yet. It may still be starting.",

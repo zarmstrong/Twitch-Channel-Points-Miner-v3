@@ -306,6 +306,14 @@ def import_status():
     return backfill.status()
 
 
+def unavailable_reason():
+    """Why History is off for this run (its database was written by a newer
+    version of the miner), or None."""
+
+    recorder = _recorder
+    return getattr(recorder, "refused", None) if recorder is not None else None
+
+
 def get_store():
     """Return the initialized store, or None while History is unavailable."""
 
@@ -328,4 +336,5 @@ __all__ = [
     "start_journal",
     "stop_history",
     "stop_journal",
+    "unavailable_reason",
 ]
