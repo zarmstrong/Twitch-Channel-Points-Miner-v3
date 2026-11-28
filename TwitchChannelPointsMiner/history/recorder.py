@@ -130,6 +130,11 @@ class HistoryRecorder(threading.Thread):
     def poll_once(self):
         """Import what is pending; returns False when it failed."""
 
+        # A claim the journal could not write when Twitch accepted it is
+        # written now (it never raises), so this poll can import it.
+        retry = getattr(self.journal, "retry_unwritten_claims", None)
+        if retry is not None:
+            retry()
         with self._lock:
             if not self.store.ready and not self._initialize():
                 return False
@@ -233,6 +238,9 @@ class HistoryRecorder(threading.Thread):
                 with self.store.transaction() as connection:
 
                     def save(position):
+                        # Saved with the cutoff: a rebuilt database must not
+                        # count them again (restore_deleted_drops).
+                        drops = self.store.drop_claims_of(streamer, connection)
                         counts.update(
                             self.store.delete_streamer(
                                 streamer,
@@ -243,7 +251,7 @@ class HistoryRecorder(threading.Thread):
                             )
                         )
                         self.importer.save_delete(
-                            streamer, position[0], position[1], deleted_at
+                            streamer, position[0], position[1], deleted_at, drops
                         )
                         decided.append(position)
 

@@ -6,11 +6,13 @@ serve the ``/history`` API.  It lives beside the per-streamer analytics JSON,
 in its own file, because history needs indexed range queries.
 
 Raw rows are kept for ``DEFAULT_RETENTION_DAYS``; the small ``daily_stats``
-rollups are kept forever, so all-time totals survive pruning.
+and ``daily_game_stats`` rollups and the claimed ``drops`` are kept forever,
+so all-time totals survive pruning.
 
 ``PRAGMA user_version`` identifies the schema.  Versions 1-3 were written by
 development builds of the snapshot-based recorder; such a database is moved
-aside and rebuilt (it is derived data).
+aside and rebuilt (it is derived data).  Version 4 is upgraded in place to 5
+(drops and game totals): the journal it was imported from is gone.
 """
 
 import json
@@ -28,7 +30,7 @@ from TwitchChannelPointsMiner.history import DEFAULT_RETENTION_DAYS
 
 logger = logging.getLogger(__name__)
 
-HISTORY_SCHEMA_VERSION = 4
+HISTORY_SCHEMA_VERSION = 5
 # Older versions came from the snapshot-based development recorder.
 _FIRST_JOURNAL_SCHEMA = 4
 SECONDS_PER_DAY = 24 * 60 * 60
@@ -37,6 +39,13 @@ SECONDS_PER_DAY = 24 * 60 * 60
 # session or a crashed run's stream stops showing as active this long after
 # its newest record.
 SESSION_GAP_SECONDS = 180
+
+# A drop (by its id) is claimed at most once by an account: drop ids are
+# unique, and each repeat of a quest's reward group is a drop of its own
+# ("<group>#<n>").  So claims of the same drop are the same claim, whenever
+# each was written and whatever category (game) each names: one imported
+# from the dashboard's Drops data (which can list a drop under more than
+# one), a journalled one, and one recorded as deleted.
 
 # Tables holding per-streamer rows, cleared by a delete.
 _STREAMER_TABLES = (
@@ -48,6 +57,8 @@ _STREAMER_TABLES = (
     "points_keys",
     "spend_keys",
     "counted_broadcasts",
+    "daily_game_stats",
+    "drops",
 )
 
 
@@ -309,6 +320,80 @@ _SCHEMA = (
     """,
 )
 
+# Added by schema 5; a schema 4 database gains them in place (see
+# HistoryStore._initialize_schema), keeping everything it holds.
+_SCHEMA_5 = (
+    # Claimed drops and quest rewards, one row per claim.  Kept forever,
+    # like the daily rollups: there are few, and they are the account's.
+    # ``streamer`` is the channel Twitch credited, when known.  ``source``
+    # is 'journal', or 'analytics' for a claim imported from the Drops data
+    # (see backfill.py), which a journal row of the same claim replaces.
+    """
+    CREATE TABLE drops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        streamer TEXT,
+        drop_id TEXT NOT NULL,
+        name TEXT,
+        benefits TEXT,
+        campaign TEXT,
+        campaign_id TEXT,
+        game TEXT,
+        quest INTEGER NOT NULL DEFAULT 0,
+        minutes_required INTEGER,
+        image TEXT,
+        source TEXT NOT NULL DEFAULT 'journal',
+        dedupe_key TEXT NOT NULL UNIQUE
+    )
+    """,
+    "CREATE INDEX idx_drops_ts ON drops (ts)",
+    "CREATE INDEX idx_drops_streamer_ts ON drops (streamer, ts)",
+    "CREATE INDEX idx_drops_game_ts ON drops (game, ts)",
+    "CREATE INDEX idx_drops_drop_id ON drops (drop_id, game)",
+    # Watch time and points per game, credited to the game the stream
+    # showed when the miner recorded them.  Kept forever, like daily_stats.
+    """
+    CREATE TABLE daily_game_stats (
+        day TEXT NOT NULL,
+        game TEXT NOT NULL,
+        streamer TEXT NOT NULL,
+        watch_seconds REAL NOT NULL DEFAULT 0,
+        points_gained INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, game, streamer)
+    )
+    """,
+    # The claims a streamer delete removed, with what the Drops data import
+    # matches claims by (see backfill.py): Twitch can report a claim again
+    # (a stale inventory gets "already claimed"), and the Drops data still
+    # lists it, neither of which may bring it back.
+    """
+    CREATE TABLE deleted_drop_keys (
+        dedupe_key TEXT PRIMARY KEY,
+        drop_id TEXT,
+        game TEXT,
+        ts REAL,
+        source TEXT
+    )
+    """,
+    "CREATE INDEX idx_deleted_drop_keys_drop ON deleted_drop_keys (drop_id, game)",
+    "CREATE INDEX idx_daily_game_stats_game ON daily_game_stats (game, day)",
+    "CREATE INDEX idx_daily_game_stats_streamer " "ON daily_game_stats (streamer, day)",
+    # A broadcast seen live again after it went offline is one stream; the
+    # times it was offline in between, as a JSON list of [offline at, live
+    # again at] (the newest STREAM_GAPS_KEPT), so points earned then get no
+    # game (JournalImporter._stream_game).
+    "ALTER TABLE streams ADD COLUMN offline_gaps TEXT",
+)
+# How many offline gaps a stream keeps (see _SCHEMA_5).
+STREAM_GAPS_KEPT = 20
+
+# meta key: when a schema 4 database gained the game totals.  Watch time and
+# points before it have no game.
+META_GAMES_SINCE = "games_since"
+# meta key: how many deleted claims saved beside the journal the database
+# holds (JournalImporter.restore_deleted_drops).
+META_DELETED_DROPS = "deleted_drops_restored"
+
 
 class HistorySchemaError(RuntimeError):
     """The database was written by a different build than this one."""
@@ -452,12 +537,24 @@ class HistoryStore(object):
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == HISTORY_SCHEMA_VERSION:
                 return
+            if version == 4:
+                # The journal segments History imported are gone, so a
+                # rebuild would lose what this database holds: add the new
+                # tables instead.
+                for statement in _SCHEMA_5:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    (META_GAMES_SINCE, repr(float(time.time()))),
+                )
+                connection.execute(f"PRAGMA user_version={HISTORY_SCHEMA_VERSION}")
+                return
             if version != 0:
                 raise HistorySchemaError(
                     f"History database {self.path} uses schema version {version}; "
                     f"this build uses {HISTORY_SCHEMA_VERSION}"
                 )
-            for statement in _SCHEMA:
+            for statement in _SCHEMA + _SCHEMA_5:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version={HISTORY_SCHEMA_VERSION}")
 
@@ -564,8 +661,34 @@ class HistoryStore(object):
         )
 
     @staticmethod
+    def drop_claims_of(streamer, connection):
+        """The claims credited to ``streamer``, as ``(key, drop_id, game, ts,
+        source)``: what ``delete_streamer`` removes and records as deleted,
+        saved with the delete's cutoff (``JournalImporter.save_delete``)."""
+
+        return [
+            (row[0], row[1], row[2], row[3], row[4])
+            for row in connection.execute(
+                """
+                SELECT dedupe_key, drop_id, game, ts, source FROM drops
+                WHERE streamer = ? ORDER BY id
+                """,
+                (clean_streamer(streamer),),
+            )
+        ]
+
+    @staticmethod
     def _delete_streamer_rows(connection, streamer, segment, offset, deleted_at):
         counts = {}
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO deleted_drop_keys (dedupe_key, drop_id, game,
+                                                     ts, source)
+            SELECT dedupe_key, drop_id, game, ts, source FROM drops
+            WHERE streamer = ?
+            """,
+            (streamer,),
+        )
         for table in _STREAMER_TABLES:
             cursor = connection.execute(
                 f"DELETE FROM {table} WHERE streamer = ?", (streamer,)
@@ -697,6 +820,16 @@ class HistoryStore(object):
             last_watch = connection.execute(
                 "SELECT MAX(last_seen_at) FROM watch_sessions"
             ).fetchone()[0]
+            window_start = day_start(cutoff_day)
+            window_end = _window_end(now)
+            drop_counts = {
+                "window": self._drop_count(connection, window_start, window_end),
+                "today": self._drop_count(connection, day_start(today), window_end),
+                "lifetime": self._drop_count(connection, None, None),
+            }
+            games_since = connection.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_GAMES_SINCE,)
+            ).fetchone()
             imported_before = connection.execute("""
                 SELECT boundary.value FROM meta AS boundary
                 JOIN meta AS imported ON imported.key = 'backfill_imported'
@@ -718,9 +851,15 @@ class HistoryStore(object):
             "generated_at": now,
             "days": int(days),
             "since_day": cutoff_day,
-            "today": dict(today_row),
-            "window": dict(window),
-            "lifetime": dict(lifetime),
+            "today": dict(today_row, drops=drop_counts["today"]),
+            "window": dict(window, drops=drop_counts["window"]),
+            "lifetime": dict(lifetime, drops=drop_counts["lifetime"]),
+            # Watch time and points before this have no game (the database
+            # was made before History recorded games); None when it never
+            # lacked them.
+            "games_since": (
+                _float_or_none(games_since[0]) if games_since is not None else None
+            ),
             "active_watch_sessions": int(active_watch),
             "live_streams": int(live_streams),
             "last_point_at": last_point,
@@ -734,6 +873,22 @@ class HistoryStore(object):
                 else None
             ),
         }
+
+    @staticmethod
+    def _drop_count(connection, start, end, streamer=None):
+        """Claims from ``start`` until ``end`` (None: no limit)."""
+
+        return int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM drops
+                WHERE (? IS NULL OR ts >= ?) AND (? IS NULL OR ts < ?)
+                  AND (? IS NULL OR streamer = ?)
+                """,
+                (start, start, end, end, streamer, streamer),
+            ).fetchone()[0]
+            or 0
+        )
 
     def streamers(self, days=30, now=None, connection=None):
         """Per-streamer totals; ``connection`` reads within a caller's snapshot."""
@@ -930,6 +1085,16 @@ class HistoryStore(object):
                 """,
                 (streamer, cutoff, end),
             ).fetchall()
+            drop_rows = connection.execute(
+                """
+                SELECT * FROM drops WHERE streamer = ? AND ts >= ? AND ts < ?
+                ORDER BY ts DESC, id DESC LIMIT 100
+                """,
+                (streamer, cutoff, end),
+            ).fetchall()
+            games = self._game_rows(
+                connection, cutoff_day, utc_day(now), cutoff, end, streamer
+            )
             # The summary comes from the same snapshot as the rows above.
             summary = next(
                 (
@@ -957,6 +1122,8 @@ class HistoryStore(object):
         streams = []
         for row in stream_rows:
             item = dict(row)
+            # The importer's own record (see _SCHEMA_5).
+            item.pop("offline_gaps", None)
             item["active"] = live is not None and live["id"] == item["id"]
             # Measured on the server's clock, as in sessions().
             finished = item["ended_at"]
@@ -974,6 +1141,8 @@ class HistoryStore(object):
             "streams": streams,
             "events": [dict(row) for row in event_rows],
             "points": [dict(row) for row in point_rows],
+            "drops": [_drop_item(row) for row in drop_rows],
+            "games": games,
         }
 
     def daily(self, days=30, streamer=None, now=None):
@@ -1259,3 +1428,168 @@ class HistoryStore(object):
                 for name in names
             ],
         }
+
+    # -- drops and games -------------------------------------------------------
+    @staticmethod
+    def _game_rows(connection, first_day, last_day, start, end, streamer=None):
+        """Per-game totals: watch time and points from ``first_day`` to
+        ``last_day``, and the claims from ``start`` until ``end``.  Drops
+        without a game (most quests) are one row with ``game`` None."""
+
+        games = {}
+        # game -> the channels with watch time, points or drops for it.
+        channels = {}
+
+        def game(name):
+            if name not in games:
+                games[name] = {
+                    "game": name,
+                    "watch_seconds": 0.0,
+                    "points_gained": 0,
+                    "drops": 0,
+                    "quests": 0,
+                    "streamers": 0,
+                    "last_drop_at": None,
+                }
+            return games[name]
+
+        for row in connection.execute(
+            """
+            SELECT game,
+                   COALESCE(SUM(watch_seconds), 0) AS watch_seconds,
+                   COALESCE(SUM(points_gained), 0) AS points_gained
+            FROM daily_game_stats
+            WHERE day >= ? AND day <= ? AND (? IS NULL OR streamer = ?)
+            GROUP BY game
+            """,
+            (first_day, last_day, streamer, streamer),
+        ):
+            item = game(row["game"])
+            item["watch_seconds"] = float(row["watch_seconds"] or 0.0)
+            item["points_gained"] = int(row["points_gained"] or 0)
+        for row in connection.execute(
+            """
+            SELECT DISTINCT game, streamer FROM daily_game_stats
+            WHERE day >= ? AND day <= ? AND (? IS NULL OR streamer = ?)
+              AND (watch_seconds > 0 OR points_gained <> 0)
+            UNION
+            SELECT DISTINCT game, streamer FROM drops
+            WHERE ts >= ? AND ts < ? AND (? IS NULL OR streamer = ?)
+              AND streamer IS NOT NULL
+            """,
+            (first_day, last_day, streamer, streamer, start, end, streamer, streamer),
+        ):
+            channels.setdefault(row["game"], set()).add(row["streamer"])
+        for row in connection.execute(
+            """
+            SELECT game, COUNT(*) AS drops, COALESCE(SUM(quest), 0) AS quests,
+                   MAX(ts) AS last_drop_at
+            FROM drops
+            WHERE ts >= ? AND ts < ? AND (? IS NULL OR streamer = ?)
+            GROUP BY game
+            """,
+            (start, end, streamer, streamer),
+        ):
+            item = game(row["game"])
+            item["drops"] = int(row["drops"] or 0)
+            item["quests"] = int(row["quests"] or 0)
+            item["last_drop_at"] = row["last_drop_at"]
+        for name, names in channels.items():
+            if name in games:
+                games[name]["streamers"] = len(names)
+        return sorted(
+            (
+                item
+                for item in games.values()
+                if item["watch_seconds"] > 0
+                or item["points_gained"] != 0
+                or item["drops"] > 0
+            ),
+            key=lambda item: (
+                -item["watch_seconds"],
+                -item["drops"],
+                item["game"] is None,
+                (item["game"] or "").lower(),
+            ),
+        )
+
+    def games(self, days=30, streamer=None, now=None):
+        """Watch time, points and drops per game in the window."""
+
+        now = float(now or time.time())
+        first_day = first_window_day(now, days)
+        streamer = clean_streamer(streamer) if streamer else None
+        with self._read_connection() as connection:
+            games = self._game_rows(
+                connection,
+                first_day,
+                utc_day(now),
+                day_start(first_day),
+                _window_end(now),
+                streamer,
+            )
+            since = connection.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_GAMES_SINCE,)
+            ).fetchone()
+        return {
+            "days": int(days),
+            "games": games,
+            "games_since": _float_or_none(since[0]) if since is not None else None,
+        }
+
+    def drops(
+        self,
+        days=30,
+        streamer=None,
+        game=None,
+        limit=100,
+        offset=0,
+        now=None,
+    ):
+        """Claimed drops in the window, newest first."""
+
+        now = float(now or time.time())
+        cutoff = day_start(first_window_day(now, days))
+        streamer = clean_streamer(streamer) if streamer else None
+        game = str(game).strip() if game else None
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        where = (
+            "ts >= ? AND ts < ? AND (? IS NULL OR streamer = ?) "
+            "AND (? IS NULL OR game = ?)"
+        )
+        params = (cutoff, _window_end(now), streamer, streamer, game, game)
+        with self._read_connection() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM drops WHERE {where}", params
+            ).fetchone()[0]
+            rows = connection.execute(
+                f"""
+                SELECT * FROM drops WHERE {where}
+                ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                params + (limit, offset),
+            ).fetchall()
+        return {
+            "days": int(days),
+            "limit": limit,
+            "offset": offset,
+            "total": int(total or 0),
+            "drops": [_drop_item(row) for row in rows],
+        }
+
+
+def _drop_item(row):
+    item = dict(row)
+    try:
+        benefits = json.loads(item.get("benefits") or "[]")
+    except (TypeError, ValueError):
+        benefits = []
+    item["benefits"] = (
+        [str(value) for value in benefits if isinstance(value, str) and value]
+        if isinstance(benefits, list)
+        else []
+    )
+    item["quest"] = bool(item.get("quest"))
+    item.pop("dedupe_key", None)
+    return item

@@ -79,6 +79,7 @@ from TwitchChannelPointsMiner.classes.gql.Errors import (
 )
 from TwitchChannelPointsMiner.classes.gql.Integration import GQLFactory
 from TwitchChannelPointsMiner.classes.Settings import (
+    DROPS_FILE_MUTEX,
     Events,
     FollowersOrder,
     Priority,
@@ -4283,9 +4284,11 @@ class Twitch(object):
             return []
 
         try:
-            with open(analytics_file, "r", encoding="utf-8") as current:
-                data = json.load(current)
-        except (OSError, json.JSONDecodeError):
+            with DROPS_FILE_MUTEX:
+                with open(analytics_file, "rb") as current:
+                    raw = current.read()
+            data = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return []
 
         drops = data.get("drops") if isinstance(data, dict) else None
@@ -10490,7 +10493,8 @@ class Twitch(object):
         temp_file = analytics_file + ".temp"
         with open(temp_file, "w", encoding="utf-8") as temp_handle:
             json.dump(data, temp_handle, indent=4)
-        os.replace(temp_file, analytics_file)
+        with DROPS_FILE_MUTEX:
+            os.replace(temp_file, analytics_file)
 
     @staticmethod
     def __counted_repeat_waits_for_its_claim(drop, was) -> bool:
@@ -11387,6 +11391,7 @@ class Twitch(object):
             drop,
             campaign_name_override=campaign.get("name"),
             category_name_override=categories[0].get("displayName") or "Unknown",
+            campaign_id_override=campaign.get("id"),
         )
 
     @staticmethod
@@ -12217,6 +12222,79 @@ class Twitch(object):
                 json.dump(entries, temp_handle, indent=4)
             os.replace(temp_file, analytics_file)
 
+    @staticmethod
+    def __drop_report_category(
+        campaign, campaign_name_override=None, category_name_override=None
+    ):
+        """``(category, campaign name)`` a drop is reported under: the
+        dashboard's Drops data and History's drops use the same category, so
+        History can tell which of its claims the Drops data already holds."""
+        category_name = category_name_override or "Unknown"
+        campaign_name = campaign_name_override
+        if campaign is not None:
+            campaign_name = campaign_name or campaign.name
+            game = campaign.game or {}
+            category_name = (
+                category_name_override
+                or game.get("displayName")
+                or game.get("name")
+                or "Unknown"
+            )
+        return category_name, campaign_name
+
+    def __journal_drop_claim(
+        self,
+        drop,
+        variants,
+        campaign=None,
+        campaign_name_override=None,
+        category_name_override=None,
+        campaign_id=None,
+        already_claimed=False,
+    ):
+        """Write a claim Twitch accepted to History's journal; never raises."""
+        try:
+            category_name, campaign_name = self.__drop_report_category(
+                campaign, campaign_name_override, category_name_override
+            )
+            image = None
+            if getattr(self, "track_drop_item_art", False) is True:
+                image = next(
+                    (
+                        variant.get("item_art_url")
+                        for variant in variants
+                        if variant.get("item_art_url")
+                    ),
+                    None,
+                ) or getattr(drop, "item_art_url", None)
+            # Every reward the drop gives: the Drops tab shows a quest as one
+            # row (see __drop_variant_entries_from_drop), but it may give
+            # several.
+            benefits = [
+                (edge.get("benefit") or {}).get("name")
+                for edge in getattr(drop, "benefit_edges", None) or []
+                if isinstance(edge, dict) and isinstance(edge.get("benefit"), dict)
+            ]
+            if not any(benefits):
+                benefits = [variant.get("benefit") for variant in variants] or [
+                    getattr(drop, "benefit", None)
+                ]
+            history_journal.JOURNAL.record_drop(
+                drop.id,
+                f"{drop.drop_instance_id}|{drop.id}",
+                name=getattr(drop, "name", None),
+                benefits=benefits,
+                campaign=campaign_name,
+                campaign_id=str(campaign_id) if campaign_id else None,
+                game=category_name,
+                quest=self.__is_watch_reward_drop(drop.id),
+                minutes_required=getattr(drop, "minutes_required", None),
+                image=image,
+                already_claimed=already_claimed,
+            )
+        except Exception:
+            logger.debug("Unable to journal a drop claim", exc_info=True)
+
     def __save_drop_claim_analytics(
         self,
         drop,
@@ -12230,17 +12308,9 @@ class Twitch(object):
         benefit_override=None,
         item_art_url_override=None,
     ):
-        category_name = category_name_override or "Unknown"
-        campaign_name = campaign_name_override
-        if campaign is not None:
-            campaign_name = campaign_name or campaign.name
-            game = campaign.game or {}
-            category_name = (
-                category_name_override
-                or game.get("displayName")
-                or game.get("name")
-                or "Unknown"
-            )
+        category_name, campaign_name = self.__drop_report_category(
+            campaign, campaign_name_override, category_name_override
+        )
 
         # Ignore uncategorized drop entries to keep category views clean.
         if category_name == "Unknown":
@@ -12337,7 +12407,8 @@ class Twitch(object):
 
                 json.dump(data, temp_handle, indent=4)
 
-            os.replace(temp_file, analytics_file)
+            with DROPS_FILE_MUTEX:
+                os.replace(temp_file, analytics_file)
 
     def drop_report_snapshot(self):
         """Return the latest structured drop state tracked by this session."""
@@ -12470,7 +12541,8 @@ class Twitch(object):
             with open(temp_file, "w", encoding="utf-8") as temp_handle:
                 json.dump(data, temp_handle, indent=4)
 
-            os.replace(temp_file, analytics_file)
+            with DROPS_FILE_MUTEX:
+                os.replace(temp_file, analytics_file)
 
         if updated > 0:
             self.__log_drop_check(
@@ -12830,6 +12902,7 @@ class Twitch(object):
         campaign_name_override=None,
         category_name_override=None,
         campaign_link=None,
+        campaign_id_override=None,
     ):
         # Held across the request so a concurrent pass sees the accepted claim
         # instead of claiming and notifying a second time.
@@ -12841,6 +12914,7 @@ class Twitch(object):
                 campaign_name_override=campaign_name_override,
                 category_name_override=category_name_override,
                 campaign_link=campaign_link,
+                campaign_id_override=campaign_id_override,
             )
             if getattr(drop, "id", None):
                 self.__update_pending_drop_claim(
@@ -12856,6 +12930,7 @@ class Twitch(object):
         campaign_name_override=None,
         category_name_override=None,
         campaign_link=None,
+        campaign_id_override=None,
     ):
         if getattr(self, "accepted_drop_claims", None) is None:
             self.accepted_drop_claims = {}
@@ -12917,6 +12992,22 @@ class Twitch(object):
                     **self.unlinked_drop_claims,
                     instance_id: {**unlinked, "stamp": now},
                 }
+
+        def journal_claim(already_claimed):
+            # Before the Drops data entry, which can only be written later.
+            variants = self.__drop_variant_entries_from_drop(drop)
+            self.__journal_drop_claim(
+                drop,
+                variants,
+                campaign=campaign,
+                campaign_name_override=campaign_name_override,
+                category_name_override=category_name_override,
+                campaign_id=self.__link_campaign_id(campaign, campaign_link)
+                or campaign_id_override,
+                already_claimed=already_claimed,
+            )
+            return variants
+
         accepted_at = self.accepted_drop_claims.get(instance_id)
         accepted_for = getattr(self, "accepted_claim_drop_ids", None)
         if accepted_for is None:
@@ -12930,6 +13021,10 @@ class Twitch(object):
             # claim, not a retry of the accepted one.
             accepted_at = None
         if accepted_at is not None:
+            # Twitch accepted it in this process.  Writes nothing once
+            # History has the claim; a record that could not be written then
+            # is written now, whatever this pass does with the claim.
+            journal_claim(False)
             if (now - accepted_at) < ACCEPTED_CLAIM_RETRY_SECONDS:
                 # Repeats on every claim pass while the inventory lags.
                 self.__log_drop_check(
@@ -12947,6 +13042,13 @@ class Twitch(object):
                 "unclaimed after Twitch accepted it",
                 extra={"emoji": ":package:"},
             )
+        elif getattr(drop, "id", None) and history_journal.JOURNAL.has_unwritten_claim(
+            f"{drop.drop_instance_id}|{drop.id}"
+        ):
+            # Twitch accepted it before, but History's record could not be
+            # written then, and the accepted claim is no longer remembered
+            # here: written now, whatever this request does.
+            journal_claim(False)
 
         self.claim_requests_sent = getattr(self, "claim_requests_sent", 0) + 1
         try:
@@ -13024,7 +13126,10 @@ class Twitch(object):
                             f"campaign {campaign.id} final drop {drop.id} claimed; "
                             "waiting for inventory completion confirmation"
                         )
-                for variant in self.__drop_variant_entries_from_drop(drop):
+                variants = journal_claim(
+                    response.status == "DROP_INSTANCE_ALREADY_CLAIMED"
+                )
+                for variant in variants:
                     self.__save_drop_claim_analytics(
                         drop,
                         campaign=campaign,
@@ -13543,6 +13648,22 @@ class Twitch(object):
                 self.drop_inventory_progress_updated_at = time.time()
         return eligibility_changed
 
+    @staticmethod
+    def __session_channel(streamers, session):
+        """The channel a drop session credits: the miner's streamer with
+        the session's channel id, else the session's channel login, else
+        None."""
+
+        channel_id = getattr(session, "channel_id", None)
+        if channel_id:
+            for streamer in list(streamers):
+                if getattr(streamer, "channel_id", None) == channel_id:
+                    return streamer
+        login = getattr(session, "channel_login", None)
+        if isinstance(login, str) and login.strip():
+            return login
+        return None
+
     def __light_drop_progress(self, campaigns, streamers, events, now):
         reports = [(event[0], event[1], event[2]) for event in events]
         request_failed = False
@@ -13573,6 +13694,16 @@ class Twitch(object):
                     if session.errors:
                         raise ValueError("current drop session returned errors")
                     if session.has_session:
+                        # The channel credited with the drop, for History:
+                        # the one the session names.  The session is the
+                        # account's, so it can name a channel other than
+                        # the one asked about (and a reply without one
+                        # names none).
+                        credited = self.__session_channel(streamers, session)
+                        if credited is not None:
+                            history_journal.JOURNAL.note_drop_channel(
+                                credited, session.drop_id
+                            )
                         reports.append(
                             (
                                 session.drop_id,

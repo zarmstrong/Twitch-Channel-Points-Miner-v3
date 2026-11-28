@@ -63,8 +63,9 @@ ANALYTICS_CONFIG = {
 }
 ```
 
-The optional durable session, watch-time and streak history is stored in
-`analytics/<username>/history/` and `analytics/<username>/history.sqlite3`. See
+The optional durable session, watch-time, streak, drop and per-game history is
+stored in `analytics/<username>/history/` and
+`analytics/<username>/history.sqlite3`. See
 [History](history.md#history) for how it is recorded, storage, retention,
 Docker volume and SQLite network-share guidance.
 

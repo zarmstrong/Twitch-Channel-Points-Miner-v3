@@ -726,6 +726,7 @@ def test_health_reports_the_import(analytics, tracked):
         body = app.test_client().get("/history/health").get_json()
 
     assert body["analytics_import"] == {
+        "drops": {"done": True, "skipped": "no file", "added": 0},
         "boundary": T0,
         "imported": True,
         "streamers_done": 1,

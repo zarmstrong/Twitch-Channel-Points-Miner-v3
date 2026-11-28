@@ -30,13 +30,22 @@ module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
 FULL_INTERVAL = 15 * 60
 
 
-def session(current=None, drop_id="drop-1", required=100, errors=None):
+def session(
+    current=None,
+    drop_id="drop-1",
+    required=100,
+    errors=None,
+    channel_id="177128531",
+    channel_login="watched",
+):
     return SimpleNamespace(
         has_session=current is not None,
         drop_id=drop_id,
         current_minutes_watched=current,
         required_minutes_watched=required,
         errors=errors or [],
+        channel_id=channel_id,
+        channel_login=channel_login,
     )
 
 
@@ -201,6 +210,59 @@ def test_steady_loop_uses_channel_session_and_refreshes_progress(monkeypatch):
         1_010_000 + 60 * tick for tick in range(5)
     ]
     assert loop.twitch.drop_inventory_minutes_by_drop_id == {"drop-1": 4}
+
+
+def test_a_channel_session_tells_history_which_channel_earns_the_drop(
+    monkeypatch, tmp_path
+):
+    from TwitchChannelPointsMiner.history import journal as journal_module
+
+    journal = journal_module.Journal()
+    monkeypatch.setattr(journal_module, "JOURNAL", journal)
+    loop = SyncLoop(monkeypatch)
+    loop.before_tick = lambda loop: setattr(loop, "report", session(loop.tick))
+    loop.run(2)
+    assert journal.drop_channel("drop-1") == "watched"
+
+
+@pytest.mark.parametrize(
+    "channel_id, channel_login, credited",
+    [
+        # The session is the account's: it names the channel Twitch credits,
+        # which need not be the one asked about.
+        ("555", "elsewhere", "elsewhere"),
+        # A channel the miner tracks is matched by its id.
+        ("888", "Renamed", "other"),
+        # A reply without a channel names none: the channel noted before
+        # stays.
+        (None, None, "earlier"),
+        (None, "", "earlier"),
+    ],
+)
+def test_history_credits_the_channel_the_session_names(
+    monkeypatch, channel_id, channel_login, credited
+):
+    from TwitchChannelPointsMiner.history import journal as journal_module
+
+    journal = journal_module.Journal()
+    monkeypatch.setattr(journal_module, "JOURNAL", journal)
+    journal.note_drop_channel("earlier", "drop-1")
+    loop = SyncLoop(monkeypatch)
+    loop.streamers.append(
+        SimpleNamespace(
+            username="other",
+            channel_id="888",
+            is_online=False,
+            is_watching=False,
+        )
+    )
+    loop.before_tick = lambda loop: setattr(
+        loop,
+        "report",
+        session(loop.tick, channel_id=channel_id, channel_login=channel_login),
+    )
+    loop.run(2)
+    assert journal.drop_channel("drop-1") == credited
 
 
 def test_pubsub_window_includes_recent_and_since_previous_step(monkeypatch):
@@ -487,7 +549,33 @@ def test_session_parser_tolerates_null_and_missing_fields(session_data):
     assert result.required_minutes_watched == (session_data or {}).get(
         "requiredMinutesWatched"
     )
+    channel = (session_data or {}).get("channel") or {}
+    assert result.channel_id == channel.get("id")
+    assert result.channel_login == channel.get("name")
     assert result.errors == []
+
+
+@pytest.mark.parametrize(
+    "channel",
+    [None, "bobito217", [], {"id": 177128531, "name": None}, {"id": None}],
+)
+def test_session_parser_ignores_an_odd_channel(channel):
+    result = Parser().parse_drop_current_session_response(
+        {
+            "data": {
+                "currentUser": {
+                    "dropCurrentSession": {
+                        "dropID": "drop-1",
+                        "currentMinutesWatched": 5,
+                        "requiredMinutesWatched": 60,
+                        "channel": channel,
+                    }
+                }
+            }
+        }
+    )
+    assert (result.channel_id, result.channel_login) == (None, None)
+    assert (result.drop_id, result.current_minutes_watched) == ("drop-1", 5)
 
 
 def test_session_parser_carries_partial_and_error_only_responses():

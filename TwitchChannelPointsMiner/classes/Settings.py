@@ -2,6 +2,11 @@ from enum import Enum, auto
 from threading import Lock
 
 ANALYTICS_FILE_MUTEX = Lock()
+# Held while drops_by_category.json is replaced, and while it is read by code
+# that doesn't hold the miner's analytics_mutex (the dashboard, History):
+# on Windows, replacing a file another handle has open fails.  Innermost:
+# nothing else is taken while it is held.
+DROPS_FILE_MUTEX = Lock()
 
 
 class Priority(Enum):

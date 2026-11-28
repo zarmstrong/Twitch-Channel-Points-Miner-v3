@@ -16,7 +16,11 @@ from TwitchChannelPointsMiner.history.importer import (
 )
 from TwitchChannelPointsMiner.history.journal import ACK_FILE, segment_name
 from TwitchChannelPointsMiner.history.recorder import HistoryRecorder
-from TwitchChannelPointsMiner.history.store import HistoryStore, utc_day
+from TwitchChannelPointsMiner.history.store import (
+    HISTORY_SCHEMA_VERSION,
+    HistoryStore,
+    utc_day,
+)
 
 T0 = 1_800_000_000.0
 
@@ -825,7 +829,10 @@ def test_a_database_from_the_snapshot_recorder_is_rebuilt(tmp_path):
     assert store.ready
     assert any(name.startswith("history.sqlite3.bak-") for name in os.listdir(tmp_path))
     with closing(sqlite3.connect(path)) as connection, connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert (
+            connection.execute("PRAGMA user_version").fetchone()[0]
+            == HISTORY_SCHEMA_VERSION
+        )
 
 
 def test_a_watch_answered_during_a_delete_keeps_no_time_from_before_it(tmp_path):

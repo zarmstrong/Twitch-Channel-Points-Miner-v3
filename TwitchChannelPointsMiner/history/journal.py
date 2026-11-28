@@ -2,9 +2,9 @@
 
 The miner writes one JSON line per fact as it happens: a minute-watched
 request that Twitch accepted, a points message, a spend whose amount the miner
-knows, a stream going live or offline.  History reads the lines in order and
-adds them up (see ``importer.py``).  The miner never reads the journal back,
-and History never writes it.
+knows, a stream going live or offline, a drop claimed.  History reads the
+lines in order and adds them up (see ``importer.py``).  The miner never reads
+the journal back, and History never writes it.
 
 Layout, inside the account's analytics folder::
 
@@ -55,6 +55,14 @@ WATCH_CREDIT_CAP = 90.0
 STOP_LOCK_SECONDS = 5.0
 # How long stop() waits for spends still being made (see spend_in_progress).
 STOP_SPEND_SECONDS = 30.0
+
+# Drops whose channel note_drop_channel() remembers (the newest ones).
+DROP_CHANNELS_KEPT = 500
+# Claims record_drop() remembers having written, so a claim reported again
+# in this process is not written twice (far more than a process makes).
+DROP_CLAIMS_KEPT = 20000
+# Claims Twitch accepted that could not be written yet (see record_drop).
+UNWRITTEN_CLAIMS_KEPT = 1000
 
 _WARNING_INTERVAL = 60.0
 
@@ -172,26 +180,87 @@ def read_delete_cutoffs(folder, finishable=False):
     return cutoffs
 
 
-def save_delete_cutoff(folder, streamer, segment, offset, deleted_at):
+def save_delete_cutoff(folder, streamer, segment, offset, deleted_at, drops=()):
     """Append one delete cutoff to ``DELETES_FILE`` (fsynced); raises
-    ``OSError`` when it cannot be saved."""
+    ``OSError`` when it cannot be saved.
 
+    ``drops``: the claims the delete removes, as ``(key, drop_id, game, ts,
+    source)`` (see ``read_deleted_drops``)."""
+
+    entry = {
+        "v": CUTOFF_VERSION,
+        "streamer": _clean(streamer),
+        "segment": str(segment),
+        "offset": int(offset),
+        "at": float(deleted_at),
+    }
+    if drops:
+        entry["drops"] = [list(drop) for drop in drops]
+    _append_delete_line(folder, entry)
+
+
+def save_deleted_drops(folder, drops, deleted_at):
+    """Append claims a delete removed that its cutoff line doesn't list
+    (journalled before the cutoff, imported after it) to ``DELETES_FILE``
+    (fsynced); raises ``OSError`` when they cannot be saved."""
+
+    if drops:
+        _append_delete_line(
+            folder,
+            {
+                "v": CUTOFF_VERSION,
+                "drops": [list(drop) for drop in drops],
+                "at": float(deleted_at),
+            },
+        )
+
+
+def _append_delete_line(folder, entry):
     os.makedirs(folder, exist_ok=True)
-    line = json.dumps(
-        {
-            "v": CUTOFF_VERSION,
-            "streamer": _clean(streamer),
-            "segment": str(segment),
-            "offset": int(offset),
-            "at": float(deleted_at),
-        },
-        separators=(",", ":"),
-    )
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
     with open(os.path.join(folder, DELETES_FILE), "ab") as handle:
         # A line cut off by a crash never joins this one.
         handle.write(("\n" + line + "\n").encode("utf-8"))
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def read_deleted_drops(folder):
+    """The claims streamer deletes removed, from ``DELETES_FILE``: ``(key,
+    drop_id, game, ts, source)`` tuples, oldest first.
+
+    Like the cutoffs, they outlive the database: a rebuilt one must not
+    count a deleted claim again when Twitch or the Drops data reports it.
+    Raises ``OSError`` when the file exists but cannot be read."""
+
+    found = []
+    try:
+        with open(os.path.join(folder, DELETES_FILE), "rb") as handle:
+            data = handle.read()
+    except FileNotFoundError:
+        return found
+    for raw in data.split(b"\n"):
+        try:
+            drops = json.loads(raw.decode("utf-8"))["drops"]
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+            continue
+        if not isinstance(drops, list):
+            continue
+        for drop in drops:
+            try:
+                key, drop_id, game, ts, source = drop
+                ts = float(ts)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if (
+                isinstance(key, str)
+                and isinstance(drop_id, str)
+                and (game is None or isinstance(game, str))
+                and source in ("journal", "analytics")
+                and math.isfinite(ts)
+            ):
+                found.append((key, drop_id, game, ts, source))
+    return found
 
 
 def _clean(username):
@@ -400,6 +469,26 @@ class Journal(object):
         self._spends_closed = False
         self._watch_lock = threading.Lock()
         self._watch = {}
+        # drop id -> the channel Twitch last reported progress for it on
+        # (see note_drop_channel), newest last.  Kept across runs of this
+        # process; lost at a restart.
+        self._drop_lock = threading.Lock()
+        self._drop_channels = {}
+        # Claim keys record_drop wrote in this process -> (game, channel) written,
+        # newest last; and claims it could not write -> (the record, keeping
+        # whether Twitch first said "already claimed", and its channel).  The lock is held across the append so a
+        # claim reported twice at once is written once, and a drop's channel
+        # is noted under it too (note_drop_channel); outer to the drop lock
+        # and the journal's own lock.
+        self._claims_lock = threading.Lock()
+        self._drop_claims = {}
+        self._unwritten_claims = {}
+        # Claims written without a channel: drop id -> (claim key, the
+        # record written), newest last, so a channel noted for the drop
+        # later is written to the claim (note_drop_channel).  One per drop:
+        # a drop is claimed once, so the importer credits the claim from
+        # any of its records.
+        self._channelless_claims = {}
 
     def _eligible(self, streamer):
         """``history_eligible`` and not removed from the miner."""
@@ -1120,6 +1209,192 @@ class Journal(object):
                 label=label if isinstance(label, str) else None,
                 points_delta=_int_or_none(points_delta),
             )
+
+    # -- drops -------------------------------------------------------------
+    def note_drop_channel(self, streamer, drop_id):
+        """Twitch reported progress on ``drop_id`` for this channel (a
+        PubSub ``drop-progress`` message, or the channel's current drop
+        session): a claim of the drop is credited to it.
+
+        Twitch counts a drop's progress on one channel at a time, so the
+        newest report names the channel that earned it.  ``streamer`` is a
+        Streamer or a username.  Drops are the account's, so this is kept
+        whether or not History records the channel itself."""
+
+        if isinstance(streamer, str):
+            username = _clean(streamer)
+        else:
+            username = _clean(getattr(streamer, "username", None))
+        drop_id = str(drop_id or "").strip()
+        if not username or not drop_id:
+            return
+        # Noted and written under the claims lock, so a claim written
+        # meanwhile is credited to the channel noted last before it, and a
+        # claim written without one gets this one.
+        with self._claims_lock:
+            with self._drop_lock:
+                self._drop_channels.pop(drop_id, None)
+                self._drop_channels[drop_id] = username
+                while len(self._drop_channels) > DROP_CHANNELS_KEPT:
+                    del self._drop_channels[next(iter(self._drop_channels))]
+            # A claim of the drop written before its channel was known (for
+            # example claimed right after a restart, then named by a session
+            # still on it): written again with it.  A claim written with a
+            # channel keeps it.
+            pending = self._channelless_claims.get(drop_id)
+            if pending is not None:
+                self._write_claim(pending[0], pending[1], username)
+            # A claim not written yet keeps the channel noted last, also once
+            # the drop's channel is no longer remembered above.
+            for claim_key, (record, _) in list(self._unwritten_claims.items()):
+                if record["drop_id"] == drop_id:
+                    self._unwritten_claims[claim_key] = (record, username)
+
+    def has_unwritten_claim(self, claim_key):
+        """Whether a claim Twitch accepted could not be written to the journal
+        yet (``record_drop`` writes it when it is reported again)."""
+
+        with self._claims_lock:
+            return str(claim_key or "").strip() in self._unwritten_claims
+
+    def drop_channel(self, drop_id):
+        """The channel last noted for ``drop_id``, or None."""
+
+        with self._drop_lock:
+            return self._drop_channels.get(str(drop_id or "").strip())
+
+    def record_drop(
+        self,
+        drop_id,
+        claim_key,
+        name=None,
+        benefits=None,
+        campaign=None,
+        campaign_id=None,
+        game=None,
+        quest=False,
+        minutes_required=None,
+        image=None,
+        already_claimed=False,
+    ):
+        """A drop (or quest reward) Twitch accepted the claim of.
+
+        ``claim_key`` is unique per claim (the drop instance, and the drop
+        for a reward group that repeats under one instance), so History
+        counts a claim once however often it is reported.  ``already_claimed``:
+        Twitch said the drop was claimed before (by hand, or by an earlier
+        run); History then counts it only if it has not already."""
+
+        drop_id = str(drop_id or "").strip()
+        claim_key = str(claim_key or "").strip()
+        if not self.running or not drop_id or not claim_key:
+            return
+        names = []
+        for benefit in benefits or ():
+            text = benefit.strip() if isinstance(benefit, str) else ""
+            if text and text not in names:
+                names.append(text)
+
+        def text_or_none(value):
+            value = value.strip() if isinstance(value, str) else ""
+            return value or None
+
+        game = text_or_none(game)
+        if game is not None and game.lower() == "unknown":
+            game = None
+        with self._claims_lock:
+            # Under the lock, which channel notes take too: the channel
+            # noted last before this claim is written.
+            streamer = self.drop_channel(drop_id)
+            written_game, written_streamer = self._drop_claims.get(
+                claim_key, (None, None)
+            )
+            if claim_key in self._drop_claims:
+                if (game is None or written_game is not None) and (
+                    streamer is None or written_streamer is not None
+                ):
+                    # Written, and this adds nothing (a claim written without
+                    # its game or channel is written again once it is known).
+                    return
+                # Written again with what was known already, too.
+                game = written_game or game
+                streamer = written_streamer or streamer
+            record = {
+                "drop_id": drop_id,
+                "claim_key": claim_key,
+                "name": text_or_none(name),
+                "benefits": names,
+                "campaign": text_or_none(campaign),
+                "campaign_id": text_or_none(campaign_id),
+                "game": game,
+                "quest": quest is True,
+                "minutes_required": _int_or_none(minutes_required),
+                "image": text_or_none(image),
+                "already_claimed": already_claimed is True,
+                # When Twitch accepted it, also if it is written later.
+                "claimed_at": float(self.clock()),
+            }
+            self._write_claim(claim_key, record, streamer)
+
+    def retry_unwritten_claims(self):
+        """Write the claims Twitch accepted that could not be written to the
+        journal then (History's thread calls this on every poll).  Stops at
+        the first that still can't be written."""
+
+        with self._claims_lock:
+            for claim_key, (record, _) in list(self._unwritten_claims.items()):
+                if not self._write_claim(
+                    claim_key, record, self.drop_channel(record["drop_id"])
+                ):
+                    return
+
+    def _write_claim(self, claim_key, record, streamer):
+        """Write a claim's record credited to ``streamer`` (or None), and
+        remember what was written.  Called with ``_claims_lock`` held.
+        Returns whether it was written.
+
+        A claim not written before (the journal could not be written) is
+        written with everything known of it: the saved record's values win
+        (what Twitch said first, when it accepted it), this one fills what
+        it lacked, and the channel is the newest noted, else the saved one.
+        A claim written with a channel keeps it.  Saved again when it can't
+        be written."""
+
+        drop_id = record["drop_id"]
+        pending = self._unwritten_claims.get(claim_key)
+        if pending is not None:
+            saved, saved_streamer = pending
+            record = {
+                **record,
+                **{
+                    key: value
+                    for key, value in saved.items()
+                    if value is not None and value != []
+                },
+            }
+            streamer = streamer or saved_streamer
+        written = self._drop_claims.get(claim_key)
+        if written is not None and written[1] is not None:
+            streamer = written[1]
+        if not self.append("drop", streamer=streamer, **record):
+            # Written by retry_unwritten_claims once the journal can be
+            # written, also if Twitch never reports the claim again.
+            self._unwritten_claims.pop(claim_key, None)
+            self._unwritten_claims[claim_key] = (record, streamer)
+            while len(self._unwritten_claims) > UNWRITTEN_CLAIMS_KEPT:
+                del self._unwritten_claims[next(iter(self._unwritten_claims))]
+            return False
+        self._unwritten_claims.pop(claim_key, None)
+        self._drop_claims.pop(claim_key, None)
+        self._drop_claims[claim_key] = (record["game"], streamer)
+        while len(self._drop_claims) > DROP_CLAIMS_KEPT:
+            del self._drop_claims[next(iter(self._drop_claims))]
+        self._channelless_claims.pop(drop_id, None)
+        if streamer is None:
+            self._channelless_claims[drop_id] = (claim_key, record)
+            while len(self._channelless_claims) > DROP_CHANNELS_KEPT:
+                del self._channelless_claims[next(iter(self._channelless_claims))]
+        return True
 
 
 # The process-wide journal.  Inert until ``start()``; every call is a no-op

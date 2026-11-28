@@ -224,6 +224,57 @@ def pubsub_streamer(monkeypatch):
     return streamer
 
 
+def test_a_drop_progress_message_names_the_channel_credited(journal, pubsub_streamer):
+    # user-drop-events are the account's: the channel is in the data.
+    for channel_id, drop_id in (("1001", "drop-1"), ("9999", "drop-2")):
+        WebSocketsPool.on_message(
+            _websocket([pubsub_streamer]),
+            _pubsub(
+                "user-drop-events",
+                "42",
+                {
+                    "type": "drop-progress",
+                    "data": {
+                        "drop_id": drop_id,
+                        "channel_id": channel_id,
+                        "current_progress_min": 5,
+                        "required_progress_min": 60,
+                    },
+                },
+            ),
+        )
+    assert journal.drop_channel("drop-1") == "alice"
+    # A channel the miner doesn't have.
+    assert journal.drop_channel("drop-2") is None
+
+
+def test_drop_progress_for_two_drops_at_one_time_names_both_channels(
+    journal, pubsub_streamer
+):
+    # The coarse duplicate filter drops a second message of the same type,
+    # topic and time, even for another drop.
+    ws = _websocket([pubsub_streamer])
+    for drop_id in ("drop-1", "drop-2"):
+        WebSocketsPool.on_message(
+            ws,
+            _pubsub(
+                "user-drop-events",
+                "42",
+                {
+                    "type": "drop-progress",
+                    "data": {
+                        "drop_id": drop_id,
+                        "channel_id": "1001",
+                        "current_progress_min": 5,
+                        "required_progress_min": 60,
+                    },
+                },
+            ),
+        )
+    assert journal.drop_channel("drop-1") == "alice"
+    assert journal.drop_channel("drop-2") == "alice"
+
+
 def test_points_earned_is_journalled(journal, pubsub_streamer):
     _on_message(
         pubsub_streamer, "community-points-user-v1", "points-earned", POINTS_EARNED

@@ -4,9 +4,11 @@
 
 The optional **History** feature adds durable, account-scoped statistics to the
 analytics server: watch sessions and watch time, live sessions, points gained
-and spent, watch streaks and prediction events. It serves them through a JSON
-API: daily totals, an activity heatmap, streamer totals and a per-streamer
-drill-down, and the dashboard's **History** tab shows them.
+and spent, watch streaks, prediction events, claimed drops and quest rewards,
+and watch time, points and drops per game. It serves them through a JSON API:
+daily totals, an activity heatmap, streamer and game totals, the drops
+claimed and a per-streamer drill-down, and the dashboard's **History** tab
+shows them.
 
 History runs only when `MINER_CONFIG["enable_analytics"]` is `True`, and is
 served by the analytics server (`ANALYTICS_CONFIG`).
@@ -26,6 +28,9 @@ journal: one line per fact.
 - **Streams**: a channel going live or offline, and title or game changes.
 - **Streaks**: each watch-streak award Twitch sent.
 - **Events**: prediction results and placed predictions.
+- **Drops**: each drop and quest reward Twitch accepted the claim of, with
+  its rewards, campaign and game, and the channel Twitch credited it to. See
+  [Drops and games](#drops-and-games).
 
 History then adds the journal up in its own thread every few seconds. Each
 journal line has a unique position, so History never counts a line twice: a
@@ -42,6 +47,42 @@ recorded stays.
 History also imports, once, what the existing per-streamer analytics data
 holds from before it started recording: see
 [Importing existing analytics data](#importing-existing-analytics-data).
+
+## Drops and games
+
+The History tab's **Drops claimed** card and list show every drop and quest
+reward the miner claimed, and the **Games** table shows watch time, points
+gained and drops for each game in the selected window. Selecting a game lists
+only its drops. A streamer's drill-down shows the games watched on that
+channel and the drops credited to it.
+
+- **Drops** are the account's, not a channel's: History records every claim
+  Twitch accepted, also of drops earned on channels the miner tracks only to
+  farm Drops. A claim is counted once, also when a later run sees it again.
+  A drop claimed by hand in the browser is counted only if the miner also
+  tried to claim it and Twitch answered that it already was.
+- **Channel:** a drop is credited to the channel Twitch last named for its
+  progress (Twitch counts a drop's progress on one channel at a time, and can
+  name a channel other than the one the miner asked about). The miner learns
+  that while it watches, so a drop claimed before it saw any progress in this
+  run, for example right after a restart, has no channel until Twitch or the
+  Drops data names one.
+  Selecting a channel in the drops list opens its drill-down, also for a
+  channel History has no other records of.
+- **Quests** (reward campaigns) usually have no game. They're listed as
+  quests and grouped as **Quests (no game)** in the Games table.
+- **Games:** watch time and points go to the game the stream showed when the
+  miner recorded them. A stream that changes game moves to the new game from
+  the next minute-watched request. Watch time on a stream History hasn't seen
+  live, and points earned while the channel was offline (by Twitch's time
+  for the points, allowing two minutes for the clocks), also between going
+  offline and coming back live on the same broadcast, have no game, so the
+  game totals can add up to less than the overall totals. A claim first
+  recorded without its game or channel gets them when Twitch reports it with
+  them.
+- **Older databases:** a database made by a build without game totals counts
+  them from the upgrade. The tab says from when. Drops imported from the Drops
+  data still show under their game.
 
 ## Importing existing analytics data
 
@@ -75,6 +116,20 @@ account that has mined for months doesn't start with an empty History tab.
   ones. Rows older than it are pruned as soon as the import finishes, and
   their daily totals are kept.
 
+- **Drops:** the claimed drops in the Drops tab's data
+  (`analytics/<username>/drops_by_category.json`) are imported once, with
+  their category as the game. That file keeps one entry per drop and
+  category, and moves its time on whenever the miner sees the drop again, so
+  an imported drop's time can be later than its claim. A drop counts once:
+  one the journal recorded a claim of isn't imported again, whichever of the
+  two History reads first, and a drop listed under more than one category is
+  imported once. The Drops data marks a drop as
+  captured once its minutes are complete, so an imported drop whose claim
+  never went through (for example, because the game account isn't linked)
+  is counted too, as the Drops tab counts it. Imported quests aren't marked
+  as quests. Entries without a category, drops not completed, and entries
+  credited to a streamer whose History was deleted are not imported.
+
 To turn it off, set `ANALYTICS_CONFIG["history_import_analytics"]` to `False`.
 `GET /history/health` reports its progress under `analytics_import`.
 
@@ -97,8 +152,12 @@ The database uses SQLite WAL mode, indexed range queries and small daily
 rollups. Raw rows are kept for 730 days by default. Set
 `ANALYTICS_CONFIG["history_retention_days"]` to change the window; `0` keeps raw
 rows forever. The `TCPM_HISTORY_RETENTION_DAYS` environment variable overrides
-the configured value. Daily rollups are kept forever, so lifetime totals remain
-available after raw rows are pruned.
+the configured value. Daily rollups, including the per-game totals, and the
+claimed drops are kept forever, so lifetime totals remain available after raw
+rows are pruned. That holds while the database does: a rebuilt database gets
+back the claims listed in the Drops data, but the per-game totals, and claims
+recorded only in the journal, come back only from the journal files still on
+disk.
 
 Deleting the database while the miner is stopped makes History rebuild it
 from the journal files still on disk at the next start. Those are usually only
@@ -148,6 +207,11 @@ file and its `-wal`/`-shm` companions are moved to a
 the journal files on disk. Locked or unwritable databases are left alone;
 History logs a warning and retries without affecting the miner.
 
+A database from the build before drops and game totals (schema 4) is upgraded
+in place instead: the journal files it was imported from are gone, so a
+rebuild would lose its History. Going back to that build afterwards rebuilds
+the database as described above.
+
 `GET /history/health` reports the import position and counts problems:
 
 - `gaps`: journal lines lost, for example the last lines of a crash or files
@@ -167,8 +231,11 @@ There are two ways to delete a streamer's History from the dashboard:
 
 - **Delete history** in a streamer's drill-down on the History tab deletes only
   their History: points, spends, predictions, watch and live sessions, watch
-  streaks, and their daily and all-time totals. Their analytics data and the
-  Points tab are not changed.
+  streaks, the drops credited to their channel, their game totals, and their
+  daily and all-time totals. A deleted drop stays deleted when Twitch reports
+  its claim again later, and when the Drops data import runs again after the
+  database is rebuilt: History saves the deleted claims beside the journal
+  with the delete. Their analytics data and the Points tab are not changed.
 - Deleting a streamer's analytics data on the Points tab also clears that
   streamer's History.
 
@@ -233,6 +300,9 @@ stream, matching Twitch's watch-streak rules.
   seen in eight days of logs.
 - For a run that crashed, the "active" and "live" badges stop once its newest
   journal line is three minutes old.
+- Drops Twitch awards without a claim, such as game event drops, are not
+  recorded as they happen. Those the Drops data marked as captured before
+  History started are imported with it.
 - Imported points are worked out from the balances in the analytics data. A
   change made while the miner was not recording it, such as points earned or
   spent in the browser between two entries, is counted with the next entry
@@ -253,12 +323,14 @@ before it, so `days=1` is today only.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /history/overview?days=30` | Window and lifetime totals; `imported_before` is when the imported analytics data ends, if any was imported |
+| `GET /history/overview?days=30` | Window and lifetime totals, including `drops`; `imported_before` is when the imported analytics data ends, if any was imported; `games_since` is when the game totals start, for a database that gained them later |
 | `GET /history/streamers?days=30` | Streamer list and live streak state |
-| `GET /history/streamer/<name>?days=90` | Per-streamer drill-down: daily totals for the window, and the newest 100 watch sessions, streams, events and points messages in it |
+| `GET /history/streamer/<name>?days=90` | Per-streamer drill-down: daily totals and games for the window, and the newest 100 watch sessions, streams, events, points messages and drops credited to the channel in it |
 | `GET /history/daily?days=30&streamer=<name>` | Daily chart series |
 | `GET /history/sessions?kind=watch\|stream\|run` | Recent sessions |
 | `GET /history/events?type=<type>` | Recent events |
 | `GET /history/activity?days=30` | Activity heatmap data |
+| `GET /history/games?days=30&streamer=<name>` | Watch time, points and drops per game; drops without a game (most quests) are one row with `game` `null` |
+| `GET /history/drops?days=30&game=<game>&streamer=<name>` | Claimed drops, newest first (`limit`, `offset`) |
 | `GET /history/health` | Database readiness, the journal import status and the analytics data import's progress (`analytics_import`); `recording` is `false` while History is not running |
 | `DELETE /history/streamer/<name>` | Delete one streamer's History, as described in [Deleting a streamer](#deleting-a-streamer) |
