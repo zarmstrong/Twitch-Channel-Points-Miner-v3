@@ -4988,14 +4988,21 @@ def test_drop_claim_event_starts_a_background_worker(monkeypatch):
             pass
 
     monkeypatch.setattr(twitch_module, "Thread", RecordingThread)
+    ran = []
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__claim_drops_from_event_worker",
+        lambda self: ran.append("worker"),
+    )
     twitch = object.__new__(Twitch)
 
     twitch.claim_drops_from_event({"drop_instance_id": "instance-1"})
 
     assert len(started) == 1
-    target, _name, daemon = started[0]
-    assert target == twitch._Twitch__claim_drops_from_event_worker
-    assert daemon is True
+    target, name, daemon = started[0]
+    assert (name, daemon) == ("Drop claim (PubSub)", True)
+    target()
+    assert ran == ["worker"]
 
 
 @pytest.mark.parametrize(

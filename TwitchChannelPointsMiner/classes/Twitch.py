@@ -21,7 +21,15 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import choice, token_hex
-from threading import BoundedSemaphore, Event, Lock, RLock, Thread, local
+from threading import (
+    BoundedSemaphore,
+    Event,
+    Lock,
+    RLock,
+    Thread,
+    current_thread,
+    local,
+)
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -249,6 +257,11 @@ CHANNEL_BAN_RETRY_SECONDS = 5 * 60
 # after the snapshot can only be miscounted for this long.
 INVENTORY_PROGRESS_OVERLAY_SECONDS = 900
 PROMPT_CLAIM_DEBOUNCE_SECONDS = 300
+# How often a PubSub claim worker waiting for a running claim pass checks
+# whether the miner is stopping.
+DROP_CLAIM_LOCK_POLL_SECONDS = 1.0
+# How long a PubSub claim worker waits for a running claim pass.
+DROP_CLAIM_LOCK_WAIT_SECONDS = 300
 # Twitch can accept a claim while the inventory keeps listing the drop as
 # unclaimed. Wait this long before claiming the same drop instance again.
 ACCEPTED_CLAIM_RETRY_SECONDS = 60 * 60
@@ -419,6 +432,9 @@ class Twitch(object):
         "inventory_completions_lock",
         "prompt_claim_lock",
         "prompt_claim_pass_lock",
+        "drop_claim_threads",
+        "drop_claim_threads_lock",
+        "drop_claim_stop_event",
         "prompt_claim_last",
         "accepted_drop_claims",
         "unlinked_drop_claims",
@@ -597,6 +613,12 @@ class Twitch(object):
         self.prompt_claim_lock = Lock()
         self.prompt_claim_pass_lock = Lock()
         self.prompt_claim_last = {}
+        # Claim threads started by a PubSub drop-claim event or a drop that
+        # reached 100%, and the event that stops them when the miner stops
+        # (stop_drop_claim_workers, join_drop_claim_workers).
+        self.drop_claim_threads = set()
+        self.drop_claim_threads_lock = RLock()
+        self.drop_claim_stop_event = Event()
         # drop_instance_id -> monotonic time Twitch accepted its claim, or of
         # the last retry since then.
         self.accepted_drop_claims = {}
@@ -13066,7 +13088,10 @@ class Twitch(object):
                         drop = Drop(drop_dict)
                         drop.update(drop_dict["self"])
                         campaign_drops.append(drop)
-                        if drop.is_claimable is True:
+                        # Once the miner stops, nothing more is claimed (a
+                        # request already sent still completes); the drops
+                        # are still listed, so the checks below stay right.
+                        if drop.is_claimable is True and not self.__claims_stopping():
                             sent_before = getattr(self, "claim_requests_sent", 0)
                             drop.is_claimed = self.claim_drop(
                                 drop,
@@ -13079,7 +13104,7 @@ class Twitch(object):
                             # Pace requests only; a claim skipped by its
                             # backoff sent nothing.
                             if getattr(self, "claim_requests_sent", 0) != sent_before:
-                                time.sleep(random.uniform(5, 10))
+                                self.__pause_claims(random.uniform(5, 10))
                     if campaign_drops and all(
                         drop.is_claimed is True for drop in campaign_drops
                     ):
@@ -13099,23 +13124,33 @@ class Twitch(object):
         logger.debug(f"PubSub drop-claim received: {data}")
         if not data.get("drop_instance_id"):
             return
-        Thread(
-            target=self.__claim_drops_from_event_worker,
-            name="Drop claim (PubSub)",
-            daemon=True,
-        ).start()
+        self.__start_drop_claim_thread(
+            self.__claim_drops_from_event_worker, "Drop claim (PubSub)"
+        )
 
     def __claim_drops_from_event_worker(self):
-        # Give the inventory a moment to reflect the new dropInstanceID
-        time.sleep(random.uniform(2, 5))
+        # Give the inventory a moment to reflect the new dropInstanceID; a
+        # stop ends the wait at once.
+        if self.__pause_claims(random.uniform(2, 5)):
+            return
         # A running pass may hold an inventory that predates this drop: wait for
         # it to finish, then run our own sweep rather than dropping the event.
-        if not self.prompt_claim_pass_lock.acquire(timeout=300):
-            logger.warning(
-                "Drop claim after PubSub event timed out waiting for a running claim pass"
-            )
-            return
+        # Waits in short steps, so a stop is noticed while waiting.
+        deadline = time.monotonic() + DROP_CLAIM_LOCK_WAIT_SECONDS
+        while not self.prompt_claim_pass_lock.acquire(
+            timeout=DROP_CLAIM_LOCK_POLL_SECONDS
+        ):
+            if self.__claims_stopping():
+                return
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Drop claim after PubSub event timed out waiting for a running "
+                    "claim pass"
+                )
+                return
         try:
+            if self.__claims_stopping():
+                return
             self.claim_all_drops_from_inventory()
         except Exception:
             logger.error(
@@ -13143,12 +13178,10 @@ class Twitch(object):
                 for instance_id, stamp in self.prompt_claim_last.items()
                 if (now - stamp) < PROMPT_CLAIM_DEBOUNCE_SECONDS
             }
-        Thread(
-            target=self.__run_prompt_claim,
-            args=(drop, campaign),
-            name=f"prompt-claim-{campaign.id}",
-            daemon=True,
-        ).start()
+        if not self.__start_drop_claim_thread(
+            self.__run_prompt_claim, f"prompt-claim-{campaign.id}", (drop, campaign)
+        ):
+            self.__clear_prompt_claim_debounce(drop.drop_instance_id)
 
     def __clear_prompt_claim_debounce(self, drop_instance_id):
         # The debounce entry is written optimistically, before the claim is
@@ -13171,6 +13204,9 @@ class Twitch(object):
             self.__clear_prompt_claim_debounce(drop.drop_instance_id)
             return
         try:
+            if self.__claims_stopping():
+                self.__clear_prompt_claim_debounce(drop.drop_instance_id)
+                return
             logger.info(
                 f"Drop '{drop.name}' of campaign '{campaign.name}' reached 100%; "
                 "claiming inventory drops promptly"
@@ -13184,6 +13220,90 @@ class Twitch(object):
             self.__clear_prompt_claim_debounce(drop.drop_instance_id)
         finally:
             self.prompt_claim_pass_lock.release()
+
+    def __drop_claim_threads_lock(self):
+        # Reentrant: a claim thread's own end takes it, also when the thread
+        # ends inside start() (tests run threads synchronously).
+        lock = getattr(self, "drop_claim_threads_lock", None)
+        if lock is None:
+            with _drop_progress_lock_init:
+                lock = getattr(self, "drop_claim_threads_lock", None)
+                if lock is None:
+                    lock = self.drop_claim_threads_lock = RLock()
+        return lock
+
+    def __claims_stopping(self):
+        """The miner is stopping: no new claim work starts."""
+
+        event = getattr(self, "drop_claim_stop_event", None)
+        return getattr(self, "running", True) is False or (
+            event is not None and event.is_set()
+        )
+
+    def __pause_claims(self, seconds):
+        """Wait between claim steps.  Returns True (at once, when a stop ends
+        the wait) when the miner is stopping."""
+
+        event = getattr(self, "drop_claim_stop_event", None)
+        if event is None:
+            # Built without __init__ (tests): nothing can wake the wait.
+            time.sleep(seconds)
+        else:
+            event.wait(seconds)
+        return self.__claims_stopping()
+
+    def __start_drop_claim_thread(self, target, name, args=()):
+        """Start a claim thread that stop_drop_claim_workers and
+        join_drop_claim_workers know of.  Starts none once the miner is
+        stopping; returns whether it started one."""
+
+        lock = self.__drop_claim_threads_lock()
+
+        def run():
+            try:
+                target(*args)
+            finally:
+                with lock:
+                    threads.discard(thread)
+
+        with lock:
+            # Under the lock that join_drop_claim_workers takes to list the
+            # threads: either it sees this one, or this one sees the stop.
+            if self.__claims_stopping():
+                return False
+            thread = Thread(target=run, name=name, daemon=True)
+            threads = getattr(self, "drop_claim_threads", None)
+            if threads is None:
+                threads = self.drop_claim_threads = set()
+            threads.add(thread)
+            thread.start()
+        return True
+
+    def stop_drop_claim_workers(self):
+        """Start no more claim threads, and wake those waiting to claim (they
+        then end without claiming)."""
+
+        lock = self.__drop_claim_threads_lock()
+        with lock:
+            event = getattr(self, "drop_claim_stop_event", None)
+            if event is None:
+                event = self.drop_claim_stop_event = Event()
+        event.set()
+
+    def join_drop_claim_workers(self, timeout):
+        """Stop the claim threads and wait for them, up to ``timeout`` seconds
+        in all; a claim Twitch is answering is finished first.  Returns the
+        names of those still running."""
+
+        self.stop_drop_claim_workers()
+        lock = self.__drop_claim_threads_lock()
+        with lock:
+            threads = list(getattr(self, "drop_claim_threads", None) or ())
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            if thread is not current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
+        return [thread.name for thread in threads if thread.is_alive()]
 
     def __drop_state_lock(self, name):
         lock = getattr(self, name, None)
