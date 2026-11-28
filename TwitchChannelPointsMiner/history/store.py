@@ -487,13 +487,14 @@ class HistoryStore(object):
         from the file's header, or, while a ``-wal`` file holds changes the
         header may not show yet, through a read-only connection (which only
         touches SQLite's ``-shm`` index).  None when there is no SQLite file
-        to read; raises ``sqlite3.Error`` when that connection fails, so
-        nothing opens the file for writing until the version is known."""
+        to read; raises ``OSError`` or ``sqlite3.Error`` when the version
+        can't be read, so nothing opens the file for writing until it is
+        known."""
 
         try:
             with open(self.path, "rb") as handle:
                 header = handle.read(100)
-        except OSError:
+        except FileNotFoundError:
             return None
         if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
             return None
@@ -506,7 +507,7 @@ class HistoryStore(object):
         for wal in {self.path + "-wal", str(resolved) + "-wal"}:
             try:
                 wal_size = max(wal_size, os.path.getsize(wal))
-            except OSError:
+            except FileNotFoundError:
                 pass
         if wal_size > 0:
             uri = resolved.as_uri() + "?mode=ro"

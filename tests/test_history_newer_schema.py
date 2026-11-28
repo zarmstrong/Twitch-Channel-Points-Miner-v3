@@ -181,6 +181,48 @@ def test_a_failed_check_opens_nothing_for_writing(tmp_path, monkeypatch):
     assert files(crashed) == before
 
 
+@pytest.mark.parametrize("failing", ["header", "wal"])
+def test_a_file_the_check_cannot_read_opens_nothing_for_writing(
+    tmp_path, monkeypatch, failing
+):
+    # Reading the header or looking at the -wal fails for a reason other
+    # than the file being absent: the version is unknown, so nothing opens
+    # the database for writing (the recorder retries later).
+    crashed = crashed_newer_database(tmp_path)
+    path = str(crashed / "history.sqlite3")
+    before = files(crashed)
+    real_open = open
+    real_getsize = os.path.getsize
+    real_connect = sqlite3.connect
+    writes = []
+
+    def fake_open(file, *args, **kwargs):
+        if failing == "header" and str(file) == path:
+            raise PermissionError(13, "Permission denied", str(file))
+        return real_open(file, *args, **kwargs)
+
+    def getsize(name):
+        if failing == "wal" and str(name).endswith("-wal"):
+            raise PermissionError(13, "Permission denied", str(name))
+        return real_getsize(name)
+
+    def connect(database, *args, **kwargs):
+        if not kwargs.get("uri"):
+            writes.append(database)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(store_module, "open", fake_open, raising=False)
+    monkeypatch.setattr(store_module.os.path, "getsize", getsize)
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    store = HistoryStore(path)
+    with pytest.raises(PermissionError):
+        store.initialize()
+    assert writes == []
+    assert store.ready is False
+    monkeypatch.undo()
+    assert files(crashed) == before
+
+
 def test_a_database_the_check_finds_corrupt_is_kept_as_a_backup(tmp_path, monkeypatch):
     # No build can use a database SQLite reports as malformed: it is moved
     # aside with every byte, as any corrupt database is, and History starts
