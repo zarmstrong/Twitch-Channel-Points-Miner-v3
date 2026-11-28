@@ -20,6 +20,7 @@ from TwitchChannelPointsMiner.history.journal import (
     list_segments,
     read_deleted_drops,
     save_delete_cutoff,
+    save_deleted_drops,
     segment_name,
 )
 from TwitchChannelPointsMiner.history.recorder import HistoryRecorder
@@ -523,27 +524,36 @@ def test_a_claim_deleted_before_it_was_imported_removes_its_drops_data_twin(
     ]
 
 
-def test_a_rebuilt_database_keeps_deleted_claims_deleted(folder, store):
+def recorder_for(folder, store):
     recorder = HistoryRecorder(
         store, folder.journal, monotonic=lambda: 0.0, clock=lambda: T0 + 60
     )
     recorder.backfill = AnalyticsBackfill(
         store, folder.root, recorder.importer, lambda: [], monotonic=lambda: 0.0
     )
-    folder.drop(at=T0, streamer="alice")
-    folder.drop(at=T0, drop_id="d2", streamer="bob")
     assert recorder._initialize()
-    recorder.poll_once()
-    recorder.delete_streamer("alice")
-    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d2"]
-    # The imported journal is gone; the Drops data names no channel.
+    return recorder
+
+
+def rebuild(store, folder):
+    # The imported journal is gone by then.
     for name in list_segments(folder.journal):
         os.remove(os.path.join(folder.journal, name))
-    folder.drops_data([captured(T0 + 60), captured(T0 + 60, drop_id="d2")])
-
     assert store.recover_if_corrupt(
         sqlite3.DatabaseError("database disk image is malformed")
     )
+
+
+def test_a_rebuilt_database_keeps_deleted_claims_deleted(folder, store):
+    folder.drop(at=T0, streamer="alice")
+    folder.drop(at=T0, drop_id="d2", streamer="bob")
+    recorder = recorder_for(folder, store)
+    recorder.poll_once()
+    recorder.delete_streamer("alice")
+    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d2"]
+    # The Drops data names no channel.
+    folder.drops_data([captured(T0 + 60), captured(T0 + 60, drop_id="d2")])
+    rebuild(store, folder)
     # Twitch reports the deleted claim again, too.
     folder.drop(at=T0 + 600, run=2, already_claimed=True)
     for _ in range(3):
@@ -551,6 +561,65 @@ def test_a_rebuilt_database_keeps_deleted_claims_deleted(folder, store):
     assert [
         (row["drop_id"], row["source"]) for row in rows(store, "SELECT * FROM drops")
     ] == [("d2", "analytics")]
+
+
+def test_deleted_claims_that_cannot_be_saved_are_imported_again(
+    folder, importer, store, monkeypatch
+):
+    from TwitchChannelPointsMiner.history import importer as importer_module
+
+    folder.drops_data([captured(T0)])
+    backfill_for(store, folder, importer).poll()
+    folder.drop(at=T0 + 5, streamer="alice")
+    store.record_delete("alice", segment_name(1, 1), 10**6)
+
+    def disk_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(importer_module, "save_deleted_drops", disk_full)
+    with pytest.raises(Exception):
+        importer.poll()
+    # Not passed over as a damaged line: nothing changed.
+    assert rows(store, "SELECT * FROM journal_health WHERE key = 'damaged_lines'") == []
+    assert len(rows(store, "SELECT * FROM drops")) == 1
+    monkeypatch.undo()
+    importer.poll()
+    assert rows(store, "SELECT * FROM drops") == []
+    assert len(read_deleted_drops(folder.journal)) == 2
+
+
+def test_a_saved_delete_the_database_never_committed_is_finished(
+    folder, importer, store
+):
+    # Saved beside the journal, then the process stopped before the
+    # import that removed the Drops data's copy committed.
+    folder.drops_data([captured(T0), captured(T0, drop_id="d2")])
+    backfill_for(store, folder, importer).poll()
+    save_deleted_drops(
+        folder.journal,
+        [
+            ("c:i-d1|d1", "d1", "Game A", T0 + 5, "journal"),
+            ("a:d1|Game A", "d1", "Game A", T0, "analytics"),
+        ],
+        T0 + 5,
+    )
+    JournalImporter(store, folder.journal, monotonic=lambda: 0.0).poll()
+    assert [row["drop_id"] for row in rows(store, "SELECT * FROM drops")] == ["d2"]
+
+
+def test_a_claim_matched_to_a_deleted_one_stays_deleted_after_a_rebuild(folder, store):
+    recorder = recorder_for(folder, store)
+    folder.drops_data([captured(T0, streamer="alice")])
+    recorder.poll_once()
+    recorder.delete_streamer("alice")
+    # Matched by its game, then reported without it after a rebuild.
+    folder.drop(at=T0 + 30, already_claimed=True)
+    recorder.poll_once()
+    rebuild(store, folder)
+    folder.drop(at=T0 + 600, run=2, already_claimed=True, game=None)
+    for _ in range(3):
+        recorder.poll_once()
+    assert rows(store, "SELECT * FROM drops") == []
 
 
 def test_a_deleted_imported_claim_reported_again_stays_deleted(folder, importer, store):
@@ -805,6 +874,30 @@ def test_a_claim_twitch_says_was_already_made_is_journalled(journal, monkeypatch
     (record,) = written(journal, "drop")
     assert record["already_claimed"] is True
     assert record["game"] == "Game A"
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_a_claim_whose_record_was_not_written_is_journalled_when_seen_again(
+    journal, monkeypatch, retry
+):
+    from TwitchChannelPointsMiner.classes import Twitch as twitch_module
+
+    twitch = claiming_twitch(monkeypatch)
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    assert twitch.claim_drop(claimed_drop(), category_name_override="Game A")
+    assert written(journal, "drop") == []
+    monkeypatch.setattr(journal, "append", real_append)
+    if retry:
+        # Past the wait: the claim is sent again, and accepted again.
+        twitch.accepted_drop_claims["instance-1"] -= (
+            twitch_module.ACCEPTED_CLAIM_RETRY_SECONDS + 1
+        )
+    assert twitch.claim_drop(claimed_drop(), category_name_override="Game A")
+    assert twitch.claim_drop(claimed_drop(), category_name_override="Game A")
+    assert [record["claim_key"] for record in written(journal, "drop")] == [
+        "instance-1|drop-1"
+    ]
 
 
 def test_a_refused_or_unlinked_claim_is_not_journalled(journal, monkeypatch):

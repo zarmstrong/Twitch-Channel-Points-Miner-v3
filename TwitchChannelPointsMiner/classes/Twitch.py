@@ -12992,6 +12992,22 @@ class Twitch(object):
                     **self.unlinked_drop_claims,
                     instance_id: {**unlinked, "stamp": now},
                 }
+
+        def journal_claim(already_claimed):
+            # Before the Drops data entry, which can only be written later.
+            variants = self.__drop_variant_entries_from_drop(drop)
+            self.__journal_drop_claim(
+                drop,
+                variants,
+                campaign=campaign,
+                campaign_name_override=campaign_name_override,
+                category_name_override=category_name_override,
+                campaign_id=self.__link_campaign_id(campaign, campaign_link)
+                or campaign_id_override,
+                already_claimed=already_claimed,
+            )
+            return variants
+
         accepted_at = self.accepted_drop_claims.get(instance_id)
         accepted_for = getattr(self, "accepted_claim_drop_ids", None)
         if accepted_for is None:
@@ -13013,6 +13029,9 @@ class Twitch(object):
                     level=logging.DEBUG,
                 )
                 self.__mark_drop_accepted(drop)
+                # Writes nothing once History has the claim; a record that
+                # could not be written when it was accepted is written now.
+                journal_claim(False)
                 return True
             # Stamp the retry before sending it, so a failed retry also waits
             # a full interval instead of repeating on every pass.
@@ -13071,6 +13090,8 @@ class Twitch(object):
                 }
                 self.__mark_drop_accepted(drop)
                 if accepted_at is not None:
+                    # As above: only if History lacks the claim.
+                    journal_claim(response.status == "DROP_INSTANCE_ALREADY_CLAIMED")
                     return True
                 if response.status == "DROP_INSTANCE_ALREADY_CLAIMED":
                     # Claimed earlier, for example before a restart: that
@@ -13099,18 +13120,8 @@ class Twitch(object):
                             f"campaign {campaign.id} final drop {drop.id} claimed; "
                             "waiting for inventory completion confirmation"
                         )
-                variants = self.__drop_variant_entries_from_drop(drop)
-                # Before the Drops data: History matches the two by time,
-                # and the claim must not come after the entry it is in.
-                self.__journal_drop_claim(
-                    drop,
-                    variants,
-                    campaign=campaign,
-                    campaign_name_override=campaign_name_override,
-                    category_name_override=category_name_override,
-                    campaign_id=self.__link_campaign_id(campaign, campaign_link)
-                    or campaign_id_override,
-                    already_claimed=response.status == "DROP_INSTANCE_ALREADY_CLAIMED",
+                variants = journal_claim(
+                    response.status == "DROP_INSTANCE_ALREADY_CLAIMED"
                 )
                 for variant in variants:
                     self.__save_drop_claim_analytics(

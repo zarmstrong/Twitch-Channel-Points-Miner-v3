@@ -100,6 +100,11 @@ def _text(value):
     return value or None
 
 
+class _SaveFailed(Exception):
+    """Deleted claims could not be saved beside the journal: the batch is
+    imported again later, not passed over as damaged."""
+
+
 class JournalImporter(object):
     def __init__(
         self,
@@ -184,6 +189,12 @@ class JournalImporter(object):
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 drops,
+            )
+            # A claim is saved as deleted before the database commits its
+            # removal; if that never committed, it is removed now.
+            connection.executemany(
+                "DELETE FROM drops WHERE dedupe_key = ?",
+                [(drop[0],) for drop in drops],
             )
             connection.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -486,7 +497,7 @@ class JournalImporter(object):
         connection.execute("SAVEPOINT journal_line")
         try:
             self._apply_line(connection, segment, start, raw, deleted, runs)
-        except sqlite3.Error:
+        except (sqlite3.Error, _SaveFailed):
             raise
         except Exception:
             connection.execute("ROLLBACK TO journal_line")
@@ -931,9 +942,11 @@ class JournalImporter(object):
         ).fetchone():
             # Removed by a streamer delete (also when it was imported from
             # the Drops data: a drop is claimed once), reported again since.
-            # Kept under this claim's own key too (derived from the saved
-            # one, so not saved again).
-            self._tombstone(connection, (key, drop_id, game, at, "journal"))
+            # Kept under this claim's own key too, and saved: after a
+            # rebuild, the claim reported without its game must still match.
+            drop = (key, drop_id, game, at, "journal")
+            if self._tombstone(connection, drop):
+                self._save_deleted([drop], at)
             return
         inserted = connection.execute(
             """
@@ -998,13 +1011,10 @@ class JournalImporter(object):
         if drop_id is None or claim_key is None:
             return
         game = _text(record.get("game"))
-        if not self._tombstone(
-            connection, (f"c:{claim_key}", drop_id, game, at, "journal")
-        ):
-            # Already recorded, and saved when it was (or restored from
-            # the file after a rebuild).
-            return
-        removed = [(f"c:{claim_key}", drop_id, game, at, "journal")]
+        own = (f"c:{claim_key}", drop_id, game, at, "journal")
+        # Only what is not recorded yet is saved: what is was saved when it
+        # was recorded (or restored from the file after a rebuild).
+        new = [own] if self._tombstone(connection, own) else []
         if game is not None:
             for row in connection.execute(
                 """
@@ -1015,8 +1025,8 @@ class JournalImporter(object):
                 (drop_id, game),
             ).fetchall():
                 drop = (row["dedupe_key"], drop_id, game, row["ts"], "analytics")
-                self._tombstone(connection, drop)
-                removed.append(drop)
+                if self._tombstone(connection, drop):
+                    new.append(drop)
             connection.execute(
                 """
                 DELETE FROM drops
@@ -1025,10 +1035,20 @@ class JournalImporter(object):
                 """,
                 (drop_id, game),
             )
-        # Raises when it cannot be saved: the batch is rolled back and
-        # imported again later.
-        save_deleted_drops(self.folder, removed, at)
-        self._load_deleted_drops().extend(removed)
+        self._save_deleted(new, at)
+
+    def _save_deleted(self, drops, at):
+        """Save deleted claims beside the journal before the import that
+        recorded them commits; raises ``_SaveFailed`` when they cannot be
+        saved, so the batch is rolled back and imported again later."""
+
+        if not drops:
+            return
+        try:
+            save_deleted_drops(self.folder, drops, at)
+        except OSError as error:
+            raise _SaveFailed(str(error)) from error
+        self._load_deleted_drops().extend(drops)
 
     def _apply_run_start(self, connection, record, run, seq, at, streamer):
         # Runs before this one that never wrote run_end crashed: close what
