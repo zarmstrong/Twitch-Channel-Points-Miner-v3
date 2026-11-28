@@ -513,6 +513,53 @@ def test_on_message_hands_a_duplicate_drop_claim_over_once():
     websocket.twitch.claim_drops_from_event.assert_called_once()
 
 
+DROP_EVENT_HANDLERS = [
+    pytest.param("drop-progress", "record_drop_progress_event", id="progress"),
+    pytest.param("drop-claim", "claim_drops_from_event", id="claim"),
+]
+
+
+def _drop_event_data(drop_id):
+    return {
+        "drop_instance_id": f"instance-{drop_id}",
+        "drop_id": drop_id,
+        "channel_id": "2",
+        "current_progress_min": 5,
+        "required_progress_min": 60,
+        "timestamp": "2026-11-06T12:00:00Z",
+    }
+
+
+@pytest.mark.parametrize("message_type, handler", DROP_EVENT_HANDLERS)
+def test_on_message_hands_over_events_for_two_drops_sent_together(
+    message_type, handler
+):
+    # user-drop-events are per user: two drops' events can share the type,
+    # the channel and the timestamp.
+    websocket = _websocket([FakeStreamer("target", "2")])
+
+    for drop_id in ("drop-1", "drop-2"):
+        WebSocketsPool.on_message(
+            websocket, _user_drop_event(message_type, _drop_event_data(drop_id))
+        )
+
+    assert [
+        call.args[0]["drop_id"]
+        for call in getattr(websocket.twitch, handler).call_args_list
+    ] == ["drop-1", "drop-2"]
+
+
+@pytest.mark.parametrize("message_type, handler", DROP_EVENT_HANDLERS)
+def test_on_message_hands_over_a_repeated_drop_event_once(message_type, handler):
+    websocket = _websocket([FakeStreamer("target", "2")])
+    message = _user_drop_event(message_type, _drop_event_data("drop-1"))
+
+    WebSocketsPool.on_message(websocket, message)
+    WebSocketsPool.on_message(websocket, message)
+
+    getattr(websocket.twitch, handler).assert_called_once()
+
+
 def test_on_message_does_not_claim_on_drop_progress():
     streamers = [FakeStreamer("target", "2")]
     websocket = _websocket(streamers)

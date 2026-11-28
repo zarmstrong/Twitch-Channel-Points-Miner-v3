@@ -27,6 +27,13 @@ class Message(object):
         self.channel_id = self.__get_channel_id()
 
         self.identifier = f"{self.type}.{self.topic}.{self.channel_id}"
+        if self.topic == "user-drop-events" and isinstance(self.data, dict):
+            # Per user, not per channel: messages for different drops can be
+            # sent together (same type, channel and timestamp), so the drop
+            # tells them apart for WebSocketsPool's duplicate check.
+            drop_id = self.data.get("drop_id")
+            if isinstance(drop_id, str) and drop_id.strip():
+                self.identifier += f".{drop_id.strip()}"
 
     def __repr__(self):
         return f"{self.message}"
