@@ -3,6 +3,7 @@
 """Source-preserving edits for dashboard-managed Python configuration."""
 
 import ast
+import contextlib
 import errno
 import io
 import json
@@ -15,6 +16,8 @@ import tokenize
 from pathlib import Path
 
 CONFIG_FILE_MUTEX = threading.Lock()
+# The config.py bytes of the edit this thread has open (see _config_edit).
+_STAGED_CONFIG = threading.local()
 STREAMER_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 WEB_CONFIG_FILENAME = "web-config.json"
 STREAMER_SETTING_DEFAULTS = {
@@ -166,9 +169,14 @@ def _assignment(tree, name):
 
 
 def _dict_item(node, key_name):
+    """The value of a literal dict entry, or None without one.
+
+    Python keeps the last of repeated keys, so this returns the last entry
+    for key_name: the one the miner uses, and the one edits must change.
+    """
     if not isinstance(node, ast.Dict):
         return None
-    for key, value in zip(node.keys, node.values):
+    for key, value in reversed(list(zip(node.keys, node.values))):
         if isinstance(key, ast.Constant) and key.value == key_name:
             return value
     return None
@@ -264,7 +272,7 @@ def read_config_literal(source, assignment_name, key=None, default=None):
 def _base_web_config(config_path):
     from TwitchChannelPointsMiner.classes.Settings import Events
 
-    source = Path(config_path).read_text(encoding="utf-8")
+    source = _read_config_source(config_path)
     tree, streamer_nodes, category_nodes = _config_lists(source)
     miner = _simple_value(_assignment(tree, "MINER_CONFIG")) or {}
     mine = _simple_value(_assignment(tree, "MINE_CONFIG")) or {}
@@ -440,95 +448,108 @@ def migrate_web_config(config_path):
     path = _overrides_path(config_path)
     if not path.is_file():
         return False
-    overrides = load_web_overrides(config_path)
-    if "streamers" in overrides:
-        records = overrides["streamers"]
-        if not isinstance(records, list):
-            raise ConfigEditError("Managed streamers must be a list.")
-        for record in records:
-            if not isinstance(record, dict):
-                raise ConfigEditError("Each managed streamer must be an object.")
-            username = record.get("username")
-            if not isinstance(username, str) or STREAMER_RE.fullmatch(username) is None:
-                raise ConfigEditError("Each managed streamer needs a valid username.")
-            _validate_streamer_settings(record.get("settings", {}))
-        try:
-            always_write = {}
+    # Move everything into config.py in one write before retiring the file,
+    # so a refusal part-way leaves both files as they were.
+    with _config_edit(config_path):
+        overrides = load_web_overrides(config_path)
+        if "streamers" in overrides:
+            records = overrides["streamers"]
+            if not isinstance(records, list):
+                raise ConfigEditError("Managed streamers must be a list.")
             for record in records:
-                key = _username_key(record["username"])
-                # _write_streamers uses the first record for each username.
-                if key not in always_write:
-                    always_write[key] = _require_editable_settings(
-                        config_path, key, record.get("settings") or {}
+                if not isinstance(record, dict):
+                    raise ConfigEditError("Each managed streamer must be an object.")
+                username = record.get("username")
+                if (
+                    not isinstance(username, str)
+                    or STREAMER_RE.fullmatch(username) is None
+                ):
+                    raise ConfigEditError(
+                        "Each managed streamer needs a valid username."
                     )
-            _write_streamers(
-                config_path,
-                records,
-                {_username_key(str(record.get("username", ""))) for record in records},
-                always_write=always_write,
-            )
-        except ConfigEditError as error:
-            raise ConfigEditError(
-                f"Couldn't move the streamers saved in {path.name} into "
-                f"config.py. {error} To discard them instead, delete "
-                f"{path.name}."
-            ) from error
-    if "categories" in overrides:
-        categories = overrides["categories"]
-        if not isinstance(categories, list) or any(
-            not _valid_managed_category(category) for category in categories
-        ):
-            raise ConfigEditError("Managed categories must be a list of valid values.")
-        _write_config_categories(config_path, categories)
-    actions = {
-        "category": "update_category",
-        "sources": "update_sources",
-        "logging": "update_logging",
-        "updates": "update_updates",
-    }
-    for name, action in actions.items():
-        if name in overrides:
-            if not isinstance(overrides[name], dict):
-                messages = {
-                    "category": "Invalid managed category settings.",
-                    "sources": "Managed stream sources must be Boolean values.",
-                    "logging": "Invalid managed logging settings.",
-                    "updates": "Invalid managed update settings.",
+                _validate_streamer_settings(record.get("settings", {}))
+            try:
+                always_write = {}
+                for record in records:
+                    key = _username_key(record["username"])
+                    # _write_streamers uses the first record for each username.
+                    if key not in always_write:
+                        always_write[key] = _require_editable_settings(
+                            config_path, key, record.get("settings") or {}
+                        )
+                _write_streamers(
+                    config_path,
+                    records,
+                    {
+                        _username_key(str(record.get("username", "")))
+                        for record in records
+                    },
+                    always_write=always_write,
+                )
+            except ConfigEditError as error:
+                raise ConfigEditError(
+                    f"Couldn't move the streamers saved in {path.name} into "
+                    f"config.py. {error} To discard them instead, delete "
+                    f"{path.name}."
+                ) from error
+        if "categories" in overrides:
+            categories = overrides["categories"]
+            if not isinstance(categories, list) or any(
+                not _valid_managed_category(category) for category in categories
+            ):
+                raise ConfigEditError(
+                    "Managed categories must be a list of valid values."
+                )
+            _write_config_categories(config_path, categories)
+        actions = {
+            "category": "update_category",
+            "sources": "update_sources",
+            "logging": "update_logging",
+            "updates": "update_updates",
+        }
+        for name, action in actions.items():
+            if name in overrides:
+                if not isinstance(overrides[name], dict):
+                    messages = {
+                        "category": "Invalid managed category settings.",
+                        "sources": "Managed stream sources must be Boolean values.",
+                        "logging": "Invalid managed logging settings.",
+                        "updates": "Invalid managed update settings.",
+                    }
+                    raise ConfigEditError(messages[name])
+                _update_managed_web_config(
+                    config_path, {"action": action, "values": overrides[name]}
+                )
+        notifications = overrides.get("notifications", {})
+        if not isinstance(notifications, dict):
+            raise ConfigEditError("Managed notifications must be an object.")
+        for provider, update in notifications.items():
+            if provider not in NOTIFICATION_SCHEMAS or not isinstance(update, dict):
+                raise ConfigEditError("Invalid managed notification provider.")
+            if not isinstance(update.get("fields", {}), dict) or not isinstance(
+                update.get("secrets", {}), dict
+            ):
+                raise ConfigEditError(
+                    "Managed notification fields and secrets must be objects."
+                )
+            values = dict(update.get("fields", {}))
+            values.update(
+                {
+                    name: value
+                    for name, value in update.get("secrets", {}).items()
+                    if name in NOTIFICATION_SCHEMAS.get(provider, {}).get("secrets", ())
                 }
-                raise ConfigEditError(messages[name])
+            )
+            if "enabled" in update:
+                values["enabled"] = update["enabled"]
             _update_managed_web_config(
-                config_path, {"action": action, "values": overrides[name]}
+                config_path,
+                {
+                    "action": "update_notification",
+                    "provider": provider,
+                    "values": values,
+                },
             )
-    notifications = overrides.get("notifications", {})
-    if not isinstance(notifications, dict):
-        raise ConfigEditError("Managed notifications must be an object.")
-    for provider, update in notifications.items():
-        if provider not in NOTIFICATION_SCHEMAS or not isinstance(update, dict):
-            raise ConfigEditError("Invalid managed notification provider.")
-        if not isinstance(update.get("fields", {}), dict) or not isinstance(
-            update.get("secrets", {}), dict
-        ):
-            raise ConfigEditError(
-                "Managed notification fields and secrets must be objects."
-            )
-        values = dict(update.get("fields", {}))
-        values.update(
-            {
-                name: value
-                for name, value in update.get("secrets", {}).items()
-                if name in NOTIFICATION_SCHEMAS.get(provider, {}).get("secrets", ())
-            }
-        )
-        if "enabled" in update:
-            values["enabled"] = update["enabled"]
-        _update_managed_web_config(
-            config_path,
-            {
-                "action": "update_notification",
-                "provider": provider,
-                "values": values,
-            },
-        )
     os.replace(path, path.with_name(f".{WEB_CONFIG_FILENAME}.migrated.bak"))
     return True
 
@@ -557,8 +578,22 @@ def _write_web_overrides(config_path, data):
 
 def _write_config_categories(config_path, categories):
     path = Path(config_path)
-    encoded = path.read_bytes()
-    _tree, _streamers, category_node = _config_lists(encoded.decode("utf-8"))
+    encoded = _read_config_bytes(path)
+    tree, _streamers, category_node = _config_lists(encoded.decode("utf-8"))
+    _require_dict_edit_allowed(
+        _assignment(tree, "MINE_CONFIG"), "MINE_CONFIG", "categories"
+    )
+    if not all(
+        isinstance(item, ast.Constant) and isinstance(item.value, str)
+        for item in category_node.elts
+    ):
+        # The list is rewritten from the names the dashboard reads, so a
+        # variable or *unpacking in it would be dropped.
+        raise ConfigEditError(
+            "MINE_CONFIG['categories'] in config.py has entries that aren't "
+            "plain strings, so the dashboard can't change the list without "
+            "losing them. Edit the categories in config.py instead."
+        )
     encoded_lines = encoded.splitlines(keepends=True)
     start = _byte_offset(encoded_lines, category_node.lineno, category_node.col_offset)
     end = _byte_offset(
@@ -580,15 +615,14 @@ def _write_config_categories(config_path, categories):
         rendered = "[]"
     updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
     _require_parses(updated)
-    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+    _store_config_bytes(path, updated)
 
 
 def _replace_config_node(config_path, node, rendered):
     path = Path(config_path)
-    mode = stat.S_IMODE(path.stat().st_mode)
     # Read bytes, not text: read_text() translates CRLF to LF, which would
     # rewrite every line ending in the user's file.
-    encoded = path.read_bytes()
+    encoded = _read_config_bytes(path)
     # Split bytes, not str: str.splitlines() also breaks on U+2028, a form
     # feed and similar characters, which would shift the offsets and splice
     # the value into the wrong place.
@@ -597,7 +631,67 @@ def _replace_config_node(config_path, node, rendered):
     end = _byte_offset(encoded_lines, node.end_lineno, node.end_col_offset)
     updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
     _require_parses(updated)
-    _replace_config_bytes(path, updated, mode)
+    _store_config_bytes(path, updated)
+
+
+def _staged_key(config_path):
+    return os.path.abspath(os.fspath(config_path))
+
+
+def _read_config_bytes(config_path):
+    """config.py as this thread's open edit has it, or as it is on disk."""
+    staged = getattr(_STAGED_CONFIG, "files", None)
+    if staged is not None:
+        key = _staged_key(config_path)
+        if key in staged:
+            return staged[key]
+    return Path(config_path).read_bytes()
+
+
+def _read_config_source(config_path):
+    # Python's parser reads \r\n and \r line breaks itself, so the text
+    # doesn't need read_text()'s newline translation.
+    return _read_config_bytes(config_path).decode("utf-8")
+
+
+def _store_config_bytes(path, updated):
+    """Write config.py, or keep the bytes for the open edit to write later."""
+    staged = getattr(_STAGED_CONFIG, "files", None)
+    key = _staged_key(path)
+    if staged is not None and key in staged:
+        staged[key] = updated
+        return
+    path = Path(path)
+    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+
+
+@contextlib.contextmanager
+def _config_edit(config_path):
+    """Write all of an edit's changes to config.py at once, or none of them.
+
+    A dashboard action can change several parts of config.py, for example
+    MINER_CONFIG and then MINE_CONFIG. Writing each part as it goes would
+    leave the first change saved when a later part is refused, while the
+    dashboard reports the whole action as failed. Inside this block every
+    read sees the changes made so far and every write is kept in memory; the
+    result is written once when the block finishes without an error. A block
+    opened inside another one for the same file joins it.
+    """
+    key = _staged_key(config_path)
+    outer = getattr(_STAGED_CONFIG, "files", None)
+    if outer is not None and key in outer:
+        yield
+        return
+    path = Path(config_path)
+    original = path.read_bytes()
+    _STAGED_CONFIG.files = {**(outer or {}), key: original}
+    try:
+        yield
+        updated = _STAGED_CONFIG.files[key]
+    finally:
+        _STAGED_CONFIG.files = outer
+    if updated != original:
+        _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
 def _replace_config_bytes(path, updated, mode):
@@ -648,12 +742,15 @@ def _unpacked_dict_keys(node):
 
 
 def _require_dict_edit_allowed(dictionary, assignment_name, name):
-    """Refuse a dict edit that an unpacking would override at runtime.
+    """Refuse a dict edit unless the miner uses the literal entry it changes.
 
-    Python applies a later ``**`` mapping over an earlier literal entry, so the
-    dashboard could report the saved value while the miner keeps using the
-    unpacked one. An unpacked mapping whose keys can't be read may supply the
-    edited key too, and also makes the value the dashboard shows unknowable.
+    Python applies each entry in order, so a later ``**`` mapping or computed
+    key replaces an earlier literal entry. The dashboard could then report the
+    saved value while the miner keeps using another one. The edit is allowed
+    only when the last literal entry for name comes after every entry that
+    might set it, or when nothing else can set it and the edit adds the entry
+    at the end. An entry that might set it is a ``**`` mapping whose keys
+    can't all be read or that names it, or a key that isn't a constant.
     """
     index = next(
         (
@@ -664,20 +761,32 @@ def _require_dict_edit_allowed(dictionary, assignment_name, name):
         ),
         None,
     )
-    for position, value in enumerate(dictionary.values):
-        if dictionary.keys[position] is not None:
-            continue
+    for position, key in enumerate(dictionary.keys):
         if index is not None and position < index:
-            # The literal entry after the unpacking wins.
+            # The literal entry after this one wins.
             continue
-        unpacked = _unpacked_dict_keys(value)
+        if isinstance(key, ast.Constant):
+            continue
+        if key is not None:
+            raise ConfigEditError(
+                f"{assignment_name} in config.py has a key that isn't a plain "
+                "string, so the dashboard can't tell whether it sets "
+                f"{name!r}. Edit {name!r} in config.py instead."
+            )
+        unpacked = _unpacked_dict_keys(dictionary.values[position])
         if unpacked is None:
             raise ConfigEditError(
                 f"{assignment_name} in config.py unpacks a mapping whose keys "
                 "cannot be read, so the dashboard cannot edit it reliably. "
                 f"Edit {name!r} in config.py instead."
             )
-        if index is not None and index < position and name in unpacked:
+        if name in unpacked:
+            if index is None:
+                raise ConfigEditError(
+                    f"{assignment_name} in config.py sets {name!r} by "
+                    "unpacking a mapping, so the dashboard cannot edit it "
+                    f"reliably. Edit {name!r} in config.py instead."
+                )
             raise ConfigEditError(
                 f"{assignment_name} in config.py unpacks a mapping after "
                 f"{name!r} that would override it. Edit {name!r} in "
@@ -685,14 +794,48 @@ def _require_dict_edit_allowed(dictionary, assignment_name, name):
             )
 
 
-def _require_logger_settings_editable(config_path):
-    """Refuse a LoggerSettings edit that an unpacking would override."""
+def _require_call_keywords_editable(call, names, label):
+    """Refuse keyword edits that * or ** arguments of the call may conflict with.
+
+    A keyword also passed through ``**`` makes the call raise TypeError when
+    config.py runs, and arguments the dashboard can't read may supply any
+    keyword, so it can't show or change them reliably.
+    """
+    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        raise ConfigEditError(
+            f"{label} in config.py uses * arguments, so the dashboard cannot "
+            "edit it reliably. Edit it in config.py instead."
+        )
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            continue
+        unpacked = _unpacked_dict_keys(keyword.value)
+        conflicts = sorted(names if unpacked is None else set(names) & unpacked)
+        if conflicts:
+            raise ConfigEditError(
+                f"{label} in config.py passes ** arguments that may set "
+                f"{', '.join(map(repr, conflicts))}, so the dashboard cannot "
+                "edit it reliably. Edit it in config.py instead."
+            )
+
+
+def _require_logger_settings_editable(config_path, names=()):
+    """Refuse a LoggerSettings edit the miner wouldn't see as saved.
+
+    MINER_CONFIG's logger_settings entry must be the one the miner uses, and
+    the LoggerSettings(...) call must not take names through * or **.
+    """
     dictionary = _assignment(
-        ast.parse(Path(config_path).read_text(encoding="utf-8")), "MINER_CONFIG"
+        ast.parse(_read_config_source(config_path)), "MINER_CONFIG"
     )
     if not isinstance(dictionary, ast.Dict):
         raise ConfigEditError("MINER_CONFIG must be a literal dictionary.")
     _require_dict_edit_allowed(dictionary, "MINER_CONFIG", "logger_settings")
+    logger_settings = _dict_item(dictionary, "logger_settings")
+    if isinstance(logger_settings, ast.Call) and names:
+        _require_call_keywords_editable(
+            logger_settings, names, "MINER_CONFIG['logger_settings']"
+        )
 
 
 def _set_dict_items(config_path, assignment_name, values):
@@ -701,14 +844,14 @@ def _set_dict_items(config_path, assignment_name, values):
     # Check every value before writing any of them, so a refusal leaves
     # config.py exactly as it was.
     dictionary = _assignment(
-        ast.parse(Path(config_path).read_text(encoding="utf-8")), assignment_name
+        ast.parse(_read_config_source(config_path)), assignment_name
     )
     if not isinstance(dictionary, ast.Dict):
         raise ConfigEditError(f"{assignment_name} must be a literal dictionary.")
     for name in values:
         _require_dict_edit_allowed(dictionary, assignment_name, name)
     for name, rendered in values.items():
-        source = Path(config_path).read_text(encoding="utf-8")
+        source = _read_config_source(config_path)
         dictionary = _assignment(ast.parse(source), assignment_name)
         existing = {
             key.value: index
@@ -764,10 +907,10 @@ def _scan_item_tail(segment):
 def _insert_config_item(config_path, container, rendered):
     path = Path(config_path)
     # Read bytes, so the inserted line uses the file's own line endings.
-    encoded = path.read_bytes()
+    encoded = _read_config_bytes(path)
     updated = _insert_item_bytes(encoded, container, rendered)
     _require_parses(updated)
-    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+    _store_config_bytes(path, updated)
 
 
 def _require_parses(encoded):
@@ -851,15 +994,41 @@ def _set_call_keywords(call, values):
             keyword.value = value
 
 
-def _write_call_keywords(config_path, find_call, values):
+def _logger_settings_positional_fields():
+    """LoggerSettings' parameters in the order it takes them positionally."""
+    import inspect
+
+    from TwitchChannelPointsMiner.logger import LoggerSettings
+
+    return tuple(inspect.signature(LoggerSettings.__init__).parameters)[1:]
+
+
+def _write_call_keywords(
+    config_path, find_call, values, label="A constructor call", positional=()
+):
+    """Set keyword arguments of a call in config.py.
+
+    positional names the call's parameters in order. A value already passed
+    positionally is replaced where it is: adding it as a keyword too would
+    make the call raise TypeError when config.py runs.
+    """
+    if not values:
+        return
+    call = find_call(ast.parse(_read_config_source(config_path)))
+    if not isinstance(call, ast.Call):
+        raise ConfigEditError("Expected a constructor call in config.py.")
+    _require_call_keywords_editable(call, set(values), label)
     for name, rendered in values.items():
-        source = Path(config_path).read_text(encoding="utf-8")
+        source = _read_config_source(config_path)
         call = find_call(ast.parse(source))
-        if not isinstance(call, ast.Call):
-            raise ConfigEditError("Expected a constructor call in config.py.")
         keyword = _call_keyword(call, name)
+        given_positionally = tuple(positional)[: len(call.args)]
         if keyword is not None:
             _replace_config_node(config_path, keyword.value, rendered)
+        elif name in given_positionally:
+            _replace_config_node(
+                config_path, call.args[given_positionally.index(name)], rendered
+            )
         else:
             _insert_config_item(config_path, call, f"{name}={rendered}")
 
@@ -875,7 +1044,7 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
     # values it inherits from the global defaults stay inherited.
     path = Path(config_path)
     # Read bytes, so CRLF line breaks are kept.
-    original = path.read_bytes()
+    original = _read_config_bytes(path)
     # The miner uses only one entry for a duplicated username, so edits to
     # it can't be applied reliably.
     keys = [
@@ -1006,7 +1175,7 @@ def _write_streamers(config_path, records, updated_usernames=None, always_write=
 
     if encoded != original:
         _require_parses(encoded)
-        _replace_config_bytes(path, encoded, stat.S_IMODE(path.stat().st_mode))
+        _store_config_bytes(path, encoded)
 
 
 def _username_key(username):
@@ -1437,7 +1606,7 @@ def _require_editable_settings(config_path, username, names):
     """
     if not names:
         return set()
-    encoded = Path(config_path).read_bytes()
+    encoded = _read_config_bytes(config_path)
     node = next(
         (
             node
@@ -1545,29 +1714,30 @@ def enable_analytics_dashboard(
     rather than overwriting host/port/password with fresh defaults); only
     replaces it when it is still unset (e.g. `ANALYTICS_CONFIG = None`).
     """
-    source = Path(config_path).read_text(encoding="utf-8")
-    analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
-    if analytics_config_node is None:
-        raise ConfigEditError("ANALYTICS_CONFIG assignment not found in config.py.")
-    _set_dict_items(config_path, "MINER_CONFIG", {"enable_analytics": "True"})
-    if isinstance(analytics_config_node, ast.Dict):
-        return
+    with _config_edit(config_path):
+        source = _read_config_source(config_path)
+        analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
+        if analytics_config_node is None:
+            raise ConfigEditError("ANALYTICS_CONFIG assignment not found in config.py.")
+        _set_dict_items(config_path, "MINER_CONFIG", {"enable_analytics": "True"})
+        if isinstance(analytics_config_node, ast.Dict):
+            return
 
-    # The MINER_CONFIG edit may have shifted the assignment's source offsets.
-    source = Path(config_path).read_text(encoding="utf-8")
-    analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
+        # The MINER_CONFIG edit may have shifted the assignment's source offsets.
+        source = _read_config_source(config_path)
+        analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
 
-    rendered = (
-        "{\n"
-        f"    'host': {host!r},\n"
-        f"    'port': {port},\n"
-        f"    'refresh': {refresh},\n"
-        f"    'days_ago': {days_ago},\n"
-        f"    'password': {password!r},\n"
-        f"    'log_poll_interval': {log_poll_interval},\n"
-        "}"
-    ).replace("\n", _newline(Path(config_path).read_bytes()))
-    _replace_config_node(config_path, analytics_config_node, rendered)
+        rendered = (
+            "{\n"
+            f"    'host': {host!r},\n"
+            f"    'port': {port},\n"
+            f"    'refresh': {refresh},\n"
+            f"    'days_ago': {days_ago},\n"
+            f"    'password': {password!r},\n"
+            f"    'log_poll_interval': {log_poll_interval},\n"
+            "}"
+        ).replace("\n", _newline(_read_config_bytes(config_path)))
+        _replace_config_node(config_path, analytics_config_node, rendered)
 
 
 def set_miner_username(config_path, username):
@@ -1602,6 +1772,8 @@ def _write_logger_settings(config_path, values):
         config_path,
         lambda tree: _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
         rendered,
+        "MINER_CONFIG['logger_settings']",
+        _logger_settings_positional_fields(),
     )
 
 
@@ -1634,7 +1806,11 @@ def _notification_expression(provider, values, existing):
 
 
 def _write_notification(config_path, provider, values):
-    source = Path(config_path).read_text(encoding="utf-8")
+    # Check before reading the notifier: a LoggerSettings entry or argument
+    # the miner doesn't use as written would make the read below, and the
+    # decision that there's nothing to change, wrong.
+    _require_logger_settings_editable(config_path, {provider})
+    source = _read_config_source(config_path)
     tree = ast.parse(source)
     logger_settings = _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings")
     if not isinstance(logger_settings, ast.Call):
@@ -1646,32 +1822,33 @@ def _write_notification(config_path, provider, values):
     if not isinstance(existing, ast.Call) and values.get("enabled") is not True:
         return
     if values.get("enabled") is False:
-        _require_logger_settings_editable(config_path)
         _write_call_keywords(
             config_path,
             lambda tree: _dict_item(
                 _assignment(tree, "MINER_CONFIG"), "logger_settings"
             ),
             {provider: "None"},
+            "MINER_CONFIG['logger_settings']",
+            _logger_settings_positional_fields(),
         )
         return
-    else:
-        if not isinstance(existing, ast.Call):
-            _require_logger_settings_editable(config_path)
-            constructor = provider.title()
-            _ensure_config_import(
-                config_path,
-                f"from TwitchChannelPointsMiner.classes.{constructor} import {constructor}",
-            )
-            rendered = ast.unparse(_notification_expression(provider, values, None))
-            _write_call_keywords(
-                config_path,
-                lambda tree: _dict_item(
-                    _assignment(tree, "MINER_CONFIG"), "logger_settings"
-                ),
-                {provider: rendered},
-            )
-            return
+    if not isinstance(existing, ast.Call):
+        constructor = provider.title()
+        _ensure_config_import(
+            config_path,
+            f"from TwitchChannelPointsMiner.classes.{constructor} import {constructor}",
+        )
+        rendered = ast.unparse(_notification_expression(provider, values, None))
+        _write_call_keywords(
+            config_path,
+            lambda tree: _dict_item(
+                _assignment(tree, "MINER_CONFIG"), "logger_settings"
+            ),
+            {provider: rendered},
+            "MINER_CONFIG['logger_settings']",
+            _logger_settings_positional_fields(),
+        )
+        return
     rendered_values = {}
     for name, value in values.items():
         if name == "enabled" or value == "":
@@ -1681,18 +1858,18 @@ def _write_notification(config_path, provider, values):
             if name == "events"
             else repr(value)
         )
-    if rendered_values:
-        _require_logger_settings_editable(config_path)
-        _write_call_keywords(
-            config_path,
-            lambda tree: (
-                _call_keyword(
-                    _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
-                    provider,
-                ).value
-            ),
-            rendered_values,
-        )
+    _write_call_keywords(
+        config_path,
+        lambda tree: (
+            _call_keyword(
+                _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
+                provider,
+            ).value
+        ),
+        rendered_values,
+        f"The {provider} notification settings",
+        NOTIFICATION_POSITIONAL_FIELDS[provider],
+    )
 
 
 def _with_config_import(encoded, statement):
@@ -1712,11 +1889,11 @@ def _with_config_import(encoded, statement):
 def _ensure_config_import(config_path, statement):
     path = Path(config_path)
     # Read bytes, so adding an import doesn't rewrite the file's line endings.
-    encoded = path.read_bytes()
+    encoded = _read_config_bytes(path)
     updated = _with_config_import(encoded, statement)
     if updated != encoded:
         _require_parses(updated)
-        _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
+        _store_config_bytes(path, updated)
 
 
 def _validate_streamer_settings(settings):
@@ -1783,7 +1960,10 @@ def _runtime_notification_events(values):
 def update_managed_web_config(config_path, payload):
     with CONFIG_FILE_MUTEX:
         migrate_web_config(config_path)
-        return _update_managed_web_config(config_path, payload)
+        # One write for the whole action, so a refused part leaves config.py
+        # exactly as it was.
+        with _config_edit(config_path):
+            return _update_managed_web_config(config_path, payload)
 
 
 def _update_managed_web_config(config_path, payload):
@@ -1927,7 +2107,7 @@ def _update_managed_web_config(config_path, payload):
         ):
             raise ConfigEditError("Category Drops override must be true or false.")
         source_names = SOURCE_ENUM_BY_NAME
-        source = Path(config_path).read_text(encoding="utf-8")
+        source = _read_config_source(config_path)
         miner = _simple_value(_assignment(ast.parse(source), "MINER_CONFIG")) or {}
         priority = list(
             miner.get("streamer_source_priority")

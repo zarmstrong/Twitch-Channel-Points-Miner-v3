@@ -3761,3 +3761,421 @@ def test_streamer_edits_keep_crlf_line_breaks(tmp_path, payload):
     assert b"\n" in written
     assert written.count(b"\n") == written.count(b"\r\n")
     assert b"\r\r" not in written
+
+
+def _edited_config(path, *replacements):
+    write_config(path)
+    source = path.read_text(encoding="utf-8")
+    for old, new in replacements:
+        assert old in source
+        source = source.replace(old, new)
+    path.write_text(source, encoding="utf-8")
+    return path.read_bytes()
+
+
+def test_refused_source_update_leaves_the_earlier_part_unwritten(tmp_path):
+    # update_sources writes MINER_CONFIG's priority before MINE_CONFIG's
+    # followers. A refusal of the second part must not keep the first.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('"followers": False,', '"followers": True,\n    **{"followers": True},'),
+        (
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES]",
+            "[StreamerSource.STREAMERS, StreamerSource.FOLLOWERS, "
+            "StreamerSource.CATEGORIES]",
+        ),
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'followers' in config.py"):
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": False}}
+        )
+
+    assert config.read_bytes() == before
+    assert StreamerSource.FOLLOWERS in (
+        _load_config(config).MINER_CONFIG["streamer_source_priority"]
+    )
+
+
+def test_refused_category_setting_leaves_the_import_unwritten(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            "from TwitchChannelPointsMiner.classes.Settings import "
+            "CategorySort, StreamerSource\n",
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource\n",
+        ),
+        (
+            '    "category_sort": CategorySort.VIEWERS_DESC,\n',
+            "    **BASE,\n",
+        ),
+        ("MINER_CONFIG = {", "BASE = {}\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'category_sort' in config.py"):
+        update_managed_web_config(
+            config, {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}}
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "categories", "value": "gamma"},
+        {"action": "remove", "kind": "categories", "value": "alpha"},
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    ],
+    ids=["add", "remove", "reorder"],
+)
+@pytest.mark.parametrize(
+    "unpacking",
+    ['**{"categories": ["zeta"]}', "**BASE", "KEY: []"],
+    ids=["overriding", "unreadable", "computed-key"],
+)
+def test_category_edits_refuse_a_later_override(tmp_path, payload, unpacking):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('    "category_limit": 5,\n', f'    "category_limit": 5,\n    {unpacking},\n'),
+        ("MINER_CONFIG = {", "BASE = {}\nKEY = 'categories'\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)categories"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_category_migration_refuses_a_later_override_and_keeps_both_files(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            '    "category_limit": 5,\n',
+            '    "category_limit": 5,\n    **{"categories": ["zeta"]},\n',
+        ),
+    )
+    overrides = tmp_path / "web-config.json"
+    overrides.write_text(json.dumps({"categories": ["gamma"]}), encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'categories' in config.py"):
+        migrate_web_config(config)
+
+    assert config.read_bytes() == before
+    assert overrides.is_file()
+
+
+def test_failed_migration_step_leaves_earlier_steps_unwritten(tmp_path):
+    # Categories move first, then sources; a refused source change must not
+    # leave the categories moved while web-config.json still holds them.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('"followers": False,', '"followers": True,\n    **{"followers": True},'),
+    )
+    overrides = tmp_path / "web-config.json"
+    overrides.write_text(
+        json.dumps({"categories": ["gamma"], "sources": {"followers": False}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'followers' in config.py"):
+        migrate_web_config(config)
+
+    assert config.read_bytes() == before
+    assert overrides.is_file()
+
+
+@pytest.mark.parametrize(
+    "categories",
+    ['["alpha", *MORE]', '["alpha", NAME]'],
+    ids=["starred", "variable"],
+)
+def test_category_edits_refuse_entries_they_would_drop(tmp_path, categories):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ('"categories": ["alpha", "beta"]', f'"categories": {categories}'),
+        ("MINER_CONFIG = {", "MORE = ['beta']\nNAME = 'beta'\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="aren't plain strings"):
+        update_managed_web_config(
+            config, {"action": "add", "kind": "categories", "value": "gamma"}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_category_edit_changes_the_entry_the_miner_uses(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "categories": ["alpha", "beta"],\n',
+            '    "categories": ["old"],\n'
+            "    **BASE,\n"
+            '    "categories": ["alpha", "beta"],\n',
+        ),
+        ("MINER_CONFIG = {", "BASE = {}\nMINER_CONFIG = {"),
+    )
+
+    result = update_managed_web_config(
+        config, {"action": "add", "kind": "categories", "value": "gamma"}
+    )
+
+    assert result["categories"] == ["alpha", "beta", "gamma"]
+    assert _load_config(config).MINE_CONFIG["categories"] == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
+
+
+_DISCORD_LINE = (
+    '        discord=Discord(webhook_api="https://secret.example/hook", events=[]),\n'
+)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_notification_save_refuses_a_notifier_set_by_a_later_unpacking(
+    tmp_path, enabled
+):
+    # The literal LoggerSettings has no Discord, so turning it off looked
+    # like a no-op, while the unpacked one the miner uses keeps it on.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (_DISCORD_LINE, ""),
+        (
+            "    ),\n}\nSTREAMERS",
+            "    ),\n"
+            '    **{"logger_settings": LoggerSettings(discord=Discord('
+            'webhook_api="https://secret.example/hook", events=[]))},\n'
+            "}\nSTREAMERS",
+        ),
+    )
+
+    with pytest.raises(ConfigEditError, match="Edit 'logger_settings' in config.py"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "discord",
+                "values": {
+                    "enabled": enabled,
+                    "webhook_api": "https://other.example/hook",
+                    "events": [],
+                },
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['**{"discord": None}', "**OPTIONS"],
+    ids=["names-it", "unreadable"],
+)
+def test_notification_save_refuses_logger_settings_unpacking(tmp_path, arguments):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (_DISCORD_LINE, f"        {arguments},\n"),
+        ("MINER_CONFIG = {", "OPTIONS = {}\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match=r"\*\* arguments that may set 'discord'"):
+        update_managed_web_config(
+            config,
+            {
+                "action": "update_notification",
+                "provider": "discord",
+                "values": {"enabled": False},
+            },
+        )
+
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['**{"console_level": logging.INFO}', "**OPTIONS", "*ARGS"],
+    ids=["names-it", "unreadable", "starred"],
+)
+def test_logging_save_refuses_logger_settings_arguments_it_may_repeat(
+    tmp_path, arguments
+):
+    # Adding console_level= next to one passed through ** makes LoggerSettings
+    # raise TypeError when config.py runs.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        ("        console_level=logging.INFO,\n", f"        {arguments},\n"),
+        ("MINER_CONFIG = {", "OPTIONS = {}\nARGS = ()\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="(?i)arguments"):
+        update_managed_web_config(
+            config,
+            {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_logging_save_keeps_logger_settings_unpacking_it_cannot_repeat(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            "        console_level=logging.INFO,\n",
+            "        console_level=logging.INFO,\n"
+            '        **{"file_level": logging.INFO},\n',
+        ),
+        ("        file_level=logging.DEBUG,\n", ""),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    logger_settings = _load_config(config).MINER_CONFIG["logger_settings"]
+    assert logger_settings.console_level == logging.WARNING
+    assert logger_settings.file_level == logging.INFO
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_logging", "values": {"console_level": "WARNING"}},
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {"enabled": False},
+        },
+    ],
+    ids=["logging", "notification"],
+)
+def test_logger_settings_edit_changes_the_entry_the_miner_uses(tmp_path, payload):
+    # Python keeps the last logger_settings; editing the first one would be
+    # saved without any effect.
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "logger_settings": LoggerSettings(\n',
+            '    "logger_settings": LoggerSettings(),\n'
+            "    **BASE,\n"
+            '    "logger_settings": LoggerSettings(\n',
+        ),
+        ("MINER_CONFIG = {", "BASE = {}\nMINER_CONFIG = {"),
+    )
+
+    update_managed_web_config(config, payload)
+
+    assert "LoggerSettings()," in config.read_text(encoding="utf-8")
+    logger_settings = _load_config(config).MINER_CONFIG["logger_settings"]
+    if payload["action"] == "update_logging":
+        assert logger_settings.console_level == logging.WARNING
+    else:
+        assert logger_settings.discord is None
+
+
+def test_source_update_refuses_a_priority_set_only_by_unpacking(tmp_path):
+    # Starting from the default order would change which source comes first.
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            '    "streamer_source_priority": '
+            "[StreamerSource.STREAMERS, StreamerSource.CATEGORIES],\n",
+            '    **{"streamer_source_priority": '
+            "[StreamerSource.CATEGORIES, StreamerSource.STREAMERS]},\n",
+        ),
+    )
+
+    with pytest.raises(
+        ConfigEditError, match="sets 'streamer_source_priority' by unpacking"
+    ):
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"followers": True}}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_dict_edit_refuses_a_later_computed_key(tmp_path):
+    config = tmp_path / "config.py"
+    before = _edited_config(
+        config,
+        (
+            '    "username": "example",\n',
+            '    "username": "example",\n    KEY: True,\n',
+        ),
+        ("MINER_CONFIG = {", "KEY = 'update_check'\nMINER_CONFIG = {"),
+    )
+
+    with pytest.raises(ConfigEditError, match="key that isn't a plain string"):
+        update_managed_web_config(
+            config, {"action": "update_updates", "values": {"enabled": False}}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_notification_edit_replaces_positional_arguments(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            'Discord(webhook_api="https://secret.example/hook", events=[])',
+            'Discord("https://secret.example/hook", [])',
+        ),
+    )
+
+    update_managed_web_config(
+        config,
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {
+                "enabled": True,
+                "webhook_api": "https://other.example/hook",
+                "events": ["DROP_CLAIM"],
+            },
+        },
+    )
+
+    discord = _load_config(config).MINER_CONFIG["logger_settings"].discord
+    assert discord.webhook_api == "https://other.example/hook"
+    assert [str(event) for event in discord.events] == ["DROP_CLAIM"]
+
+
+def test_logging_edit_replaces_positional_arguments(tmp_path):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            '    "logger_settings": LoggerSettings(\n'
+            "        console_level=logging.INFO,\n",
+            '    "logger_settings": LoggerSettings(\n'
+            "        True,\n"
+            "        False,\n"
+            "        logging.INFO,\n",
+        ),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
