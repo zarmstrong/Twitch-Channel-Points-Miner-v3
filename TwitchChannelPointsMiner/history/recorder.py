@@ -130,6 +130,11 @@ class HistoryRecorder(threading.Thread):
     def poll_once(self):
         """Import what is pending; returns False when it failed."""
 
+        # A claim the journal could not write when Twitch accepted it is
+        # written now (it never raises), so this poll can import it.
+        retry = getattr(self.journal, "retry_unwritten_claims", None)
+        if retry is not None:
+            retry()
         with self._lock:
             if not self.store.ready and not self._initialize():
                 return False

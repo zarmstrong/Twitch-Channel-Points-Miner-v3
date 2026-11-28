@@ -370,6 +370,36 @@ def test_an_unwritten_claim_keeps_what_twitch_said_first(journal, monkeypatch):
     assert [record["already_claimed"] for record in written(journal, "drop")] == [True]
 
 
+def test_an_unwritten_claim_is_written_by_historys_next_poll(
+    journal, folder, store, monkeypatch
+):
+    # Twitch accepted it while the journal could not be written; the
+    # inventory then shows it claimed, so it is never claimed again.
+    real_append = journal.append
+    monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
+    journal.record_drop("d1", "i1|d1", game="Game A", already_claimed=True)
+    journal.note_drop_channel("alice", "d1")
+    recorder = HistoryRecorder(
+        store, journal.folder, monotonic=lambda: 0.0, clock=lambda: T0 + 60
+    )
+    recorder.poll_once()
+    assert written(journal, "drop") == []
+    monkeypatch.setattr(journal, "append", real_append)
+    recorder.poll_once()
+    (record,) = written(journal, "drop")
+    assert (record["game"], record["streamer"], record["already_claimed"]) == (
+        "Game A",
+        "alice",
+        True,
+    )
+    assert journal.has_unwritten_claim("i1|d1") is False
+    recorder.poll_once()
+    assert [
+        (row["drop_id"], row["streamer"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("d1", "alice")]
+    assert len(written(journal, "drop")) == 1
+
+
 def test_a_claim_without_an_id_or_a_running_journal_is_not_written(journal):
     journal.record_drop("", "key")
     journal.record_drop("d1", "")

@@ -61,6 +61,8 @@ DROP_CHANNELS_KEPT = 500
 # Claims record_drop() remembers having written, so a claim reported again
 # in this process is not written twice (far more than a process makes).
 DROP_CLAIMS_KEPT = 20000
+# Claims Twitch accepted that could not be written yet (see record_drop).
+UNWRITTEN_CLAIMS_KEPT = 1000
 
 _WARNING_INTERVAL = 60.0
 
@@ -473,8 +475,8 @@ class Journal(object):
         self._drop_lock = threading.Lock()
         self._drop_channels = {}
         # Claim keys record_drop wrote in this process -> (game, channel) written,
-        # newest last; and claims it could not write -> whether Twitch first
-        # said "already claimed".  The lock is held across the append so a
+        # newest last; and claims it could not write -> (the record, keeping
+        # whether Twitch first said "already claimed", and its channel).  The lock is held across the append so a
         # claim reported twice at once is written once, and a drop's channel
         # is noted under it too (note_drop_channel); outer to the drop lock
         # and the journal's own lock.
@@ -1314,7 +1316,9 @@ class Journal(object):
                 streamer = written_streamer or streamer
             if claim_key in self._unwritten_claims:
                 # Not written when Twitch accepted it: what Twitch said then.
-                already_claimed = self._unwritten_claims[claim_key]
+                already_claimed = self._unwritten_claims[claim_key][0][
+                    "already_claimed"
+                ]
             record = {
                 "drop_id": drop_id,
                 "claim_key": claim_key,
@@ -1329,9 +1333,23 @@ class Journal(object):
                 "already_claimed": already_claimed is True,
             }
             if not self._write_claim(claim_key, record, streamer):
-                self._unwritten_claims.setdefault(claim_key, already_claimed is True)
-                while len(self._unwritten_claims) > DROP_CLAIMS_KEPT:
+                # Written by retry_unwritten_claims once the journal can be
+                # written, also if Twitch never reports the claim again.
+                self._unwritten_claims.pop(claim_key, None)
+                self._unwritten_claims[claim_key] = (record, streamer)
+                while len(self._unwritten_claims) > UNWRITTEN_CLAIMS_KEPT:
                     del self._unwritten_claims[next(iter(self._unwritten_claims))]
+
+    def retry_unwritten_claims(self):
+        """Write the claims Twitch accepted that could not be written to the
+        journal then (History's thread calls this on every poll).  Stops at
+        the first that still can't be written."""
+
+        with self._claims_lock:
+            for claim_key, (record, streamer) in list(self._unwritten_claims.items()):
+                streamer = streamer or self.drop_channel(record["drop_id"])
+                if not self._write_claim(claim_key, record, streamer):
+                    return
 
     def _write_claim(self, claim_key, record, streamer):
         """Write a claim's record credited to ``streamer`` (or None), and
