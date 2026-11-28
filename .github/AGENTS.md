@@ -7,7 +7,7 @@ Read the root [AGENTS.md](../AGENTS.md) first. Its release sections explain how 
 - `workflows/tests.yml` runs on pushes to `master`, on every pull request and on manual dispatch:
   - Black (on Python 3.13) and pytest (on Python 3.11 to 3.14).
   - pytest on Windows (`Python 3.14 (Windows)`), with the Python the Windows executables use. It isn't a required check, so it skips as a whole job on documentation-only changes.
-  - The Node tests for the release scripts.
+  - The Node tests for the release scripts and for the dashboard's scripts (`tests/js/`).
   - Both Windows executables and the installer.
 
   Documentation-only pull requests skip the code work through the `changes` job. Keep that working when you add a job, and depend on `changes`:

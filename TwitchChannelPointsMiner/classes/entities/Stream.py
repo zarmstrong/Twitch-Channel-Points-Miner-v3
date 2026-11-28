@@ -80,7 +80,12 @@ class Stream(object):
         self.init_watch_streak()
 
     def encode_payload(self) -> dict:
-        json_event = json.dumps(self.payload, separators=(",", ":"))
+        return Stream.encode(self.payload)
+
+    @staticmethod
+    def encode(payload) -> dict:
+        """The minute-watched request body for ``payload``."""
+        json_event = json.dumps(payload, separators=(",", ":"))
         return {"data": (b64encode(json_event.encode("utf-8"))).decode("utf-8")}
 
     def update(

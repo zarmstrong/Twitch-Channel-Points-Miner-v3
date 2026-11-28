@@ -371,4 +371,6 @@ ANALYTICS_CONFIG = None
 #     'trust_proxy_auth': False,                # Set True only when an authenticating reverse proxy (Authelia, Traefik, oauth2-proxy, ...) is the only way to reach this port: disables Basic auth and enables the Config tab without a password
 #     'allowed_hosts': None,                    # Extra Host header names accepted by the loopback DNS-rebinding guard, e.g. ['miner.example.com']; required for a 127.0.0.1 bind behind a reverse proxy that preserves Host
 #     'log_poll_interval': 5,                   # Log viewer polling interval in seconds (1-180)
+#     'history_retention_days': 730,            # Keep raw History rows this long; 0 keeps them forever (daily totals are always kept)
+#     'history_import_analytics': True,         # Import the points and predictions in the analytics data from before History existed, once
 # }
