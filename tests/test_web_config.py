@@ -4472,3 +4472,96 @@ def test_enable_dashboard_refuses_analytics_settings_it_would_replace(
         enable_analytics_dashboard(config, password="secret")
 
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_logging", "values": {"daily_report": True}},
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {
+                "enabled": True,
+                "webhook_api": "https://other.example/hook",
+                "events": [],
+            },
+        },
+    ],
+    ids=["logging", "notification"],
+)
+def test_logger_settings_edits_refuse_a_helper_call(tmp_path, payload):
+    # make_logger(daily_report=True) would raise TypeError when config.py runs.
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    start = source.index('    "logger_settings": LoggerSettings(\n')
+    end = source.index("    ),\n", start) + len("    ),\n")
+    source = (
+        source[:start] + '    "logger_settings": make_logger(),\n' + source[end:]
+    ).replace(
+        "MINER_CONFIG = {",
+        "def make_logger():\n    return LoggerSettings()\n\n\nMINER_CONFIG = {",
+    )
+    config.write_text(source, encoding="utf-8")
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match=r"isn't written as LoggerSettings"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_bytes() == before
+
+
+def test_logging_level_save_adds_the_logging_import(tmp_path):
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    # Current schema, so loading it doesn't migrate (and add imports to) it.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        'MINER_CONFIG = {"username": "x", "logger_settings": LoggerSettings()}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "WARNING"}}
+    )
+
+    assert (
+        _load_config(config).MINER_CONFIG["logger_settings"].console_level
+        == logging.WARNING
+    )
+
+
+@pytest.mark.parametrize(
+    "import_line",
+    [
+        "from TwitchChannelPointsMiner.classes.Settings import CategorySort as Sort",
+        "# from TwitchChannelPointsMiner.classes.Settings import CategorySort",
+    ],
+    ids=["aliased", "commented"],
+)
+def test_category_sort_save_adds_an_import_the_text_only_resembles(
+    tmp_path, import_line
+):
+    config = tmp_path / "config.py"
+    _edited_config(
+        config,
+        (
+            "from TwitchChannelPointsMiner.classes.Settings import "
+            "CategorySort, StreamerSource\n",
+            f"{import_line}\n"
+            "from TwitchChannelPointsMiner.classes.Settings import StreamerSource\n",
+        ),
+        ('    "category_sort": CategorySort.VIEWERS_DESC,\n', ""),
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_category", "values": {"sort": "VIEWERS_ASC"}}
+    )
+
+    assert _load_config(config).MINE_CONFIG["category_sort"].name == "VIEWERS_ASC"

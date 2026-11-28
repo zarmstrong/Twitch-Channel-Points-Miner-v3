@@ -846,6 +846,16 @@ def _require_logger_settings_editable(config_path, names=()):
         raise ConfigEditError("MINER_CONFIG must be a literal dictionary.")
     _require_dict_edit_allowed(dictionary, "MINER_CONFIG", "logger_settings")
     logger_settings = _dict_item(dictionary, "logger_settings")
+    if isinstance(logger_settings, ast.Call) and not _is_constructor_call(
+        logger_settings, "LoggerSettings"
+    ):
+        # A helper such as make_logger() doesn't take LoggerSettings'
+        # arguments, so adding one would raise TypeError when config.py runs.
+        raise ConfigEditError(
+            "MINER_CONFIG['logger_settings'] in config.py isn't written as "
+            "LoggerSettings(...), so the dashboard can't change it. Edit it "
+            "in config.py instead."
+        )
     if isinstance(logger_settings, ast.Call) and names:
         _require_call_keywords_editable(
             logger_settings, names, "MINER_CONFIG['logger_settings']"
@@ -1821,6 +1831,9 @@ def _write_logger_settings(config_path, values):
         for name, value in values.items()
     }
     _require_logger_settings_editable(config_path)
+    if {"console_level", "file_level"} & set(values):
+        # The levels are written as logging.<LEVEL>.
+        _ensure_config_import(config_path, "import logging")
     _write_call_keywords(
         config_path,
         lambda tree: _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
@@ -2000,9 +2013,29 @@ def _write_notification(config_path, provider, values):
     )
 
 
+def _imports_binding(tree, statement):
+    """Whether config.py's top level already runs this import statement.
+
+    Matched on the parsed import, not the text: the same text with "as"
+    after it, or in a comment, doesn't bind the name the edit writes.
+    """
+    wanted = ast.parse(statement).body[0]
+    wanted_names = {(alias.name, alias.asname or alias.name) for alias in wanted.names}
+    for node in tree.body:
+        if type(node) is not type(wanted):
+            continue
+        if isinstance(node, ast.ImportFrom) and (
+            node.module != wanted.module or node.level != wanted.level
+        ):
+            continue
+        names = {(alias.name, alias.asname or alias.name) for alias in node.names}
+        if wanted_names <= names:
+            return True
+    return False
+
+
 def _with_config_import(encoded, statement):
-    source = encoded.decode("utf-8")
-    if statement in source:
+    if _imports_binding(ast.parse(encoded), statement):
         return encoded
     # Split bytes, so a U+2028 or form feed in the first line doesn't look
     # like a line break and push the import into the comment.
