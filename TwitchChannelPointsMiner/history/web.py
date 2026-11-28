@@ -149,6 +149,32 @@ def events():
     )
 
 
+@bp.route("/games", methods=["GET"])
+def games():
+    return jsonify(
+        _store().games(
+            days=_int_arg("days", 30, 1, MAX_DAYS),
+            streamer=_streamer_arg(),
+        )
+    )
+
+
+@bp.route("/drops", methods=["GET"])
+def drops():
+    game = (request.args.get("game") or "").strip()
+    if len(game) > 200:
+        raise HistoryApiError("'game' is too long")
+    return jsonify(
+        _store().drops(
+            days=_int_arg("days", 30, 1, MAX_DAYS),
+            streamer=_streamer_arg(),
+            game=game or None,
+            limit=_int_arg("limit", 100, 1, 500),
+            offset=_int_arg("offset", 0, 0, 1000000),
+        )
+    )
+
+
 @bp.route("/activity", methods=["GET"])
 def activity():
     return jsonify(

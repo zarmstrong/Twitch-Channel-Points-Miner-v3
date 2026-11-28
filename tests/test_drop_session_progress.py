@@ -203,6 +203,19 @@ def test_steady_loop_uses_channel_session_and_refreshes_progress(monkeypatch):
     assert loop.twitch.drop_inventory_minutes_by_drop_id == {"drop-1": 4}
 
 
+def test_a_channel_session_tells_history_which_channel_earns_the_drop(
+    monkeypatch, tmp_path
+):
+    from TwitchChannelPointsMiner.history import journal as journal_module
+
+    journal = journal_module.Journal()
+    monkeypatch.setattr(journal_module, "JOURNAL", journal)
+    loop = SyncLoop(monkeypatch)
+    loop.before_tick = lambda loop: setattr(loop, "report", session(loop.tick))
+    loop.run(2)
+    assert journal.drop_channel("drop-1") == "watched"
+
+
 def test_pubsub_window_includes_recent_and_since_previous_step(monkeypatch):
     loop = SyncLoop(monkeypatch)
     loop.report = session(30)

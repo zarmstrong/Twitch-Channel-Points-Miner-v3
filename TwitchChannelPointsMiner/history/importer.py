@@ -29,6 +29,7 @@ from TwitchChannelPointsMiner.history.journal import (
     write_atomic,
 )
 from TwitchChannelPointsMiner.history.store import (
+    DROP_MATCH_SECONDS,
     SESSION_GAP_SECONDS,
     clean_streamer,
     earliest_held,
@@ -528,6 +529,41 @@ class JournalImporter(object):
         )
 
     @staticmethod
+    def _stream_game(connection, streamer, broadcast_id):
+        """The game the stream showed at the newest record imported so far:
+        what the miner was watching when it recorded the next one."""
+
+        if broadcast_id is None:
+            return None
+        row = connection.execute(
+            "SELECT game FROM streams WHERE streamer = ? AND broadcast_id = ?",
+            (streamer, broadcast_id),
+        ).fetchone()
+        return _text(row["game"]) if row is not None else None
+
+    @staticmethod
+    def _touch_game(connection, timestamp, streamer, game, **increments):
+        if game is None:
+            return
+        connection.execute(
+            """
+            INSERT INTO daily_game_stats (day, game, streamer, watch_seconds,
+                                          points_gained)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(day, game, streamer) DO UPDATE SET
+                watch_seconds = watch_seconds + excluded.watch_seconds,
+                points_gained = points_gained + excluded.points_gained
+            """,
+            (
+                utc_day(timestamp),
+                game,
+                streamer,
+                increments.get("watch_seconds", 0),
+                increments.get("points_gained", 0),
+            ),
+        )
+
+    @staticmethod
     def _open_watch(connection, streamer):
         return connection.execute(
             """
@@ -562,6 +598,13 @@ class JournalImporter(object):
             return
         broadcast_id = _text(record.get("broadcast_id"))
         reason = _text(record.get("reason")) or "points"
+        self._touch_game(
+            connection,
+            at,
+            streamer,
+            self._stream_game(connection, streamer, broadcast_id),
+            watch_seconds=seconds,
+        )
         opened = self._open_watch(connection, streamer)
         if (
             opened is not None
@@ -639,6 +682,16 @@ class JournalImporter(object):
             points_gained=delta or 0,
             streak_count=1 if streak else 0,
         )
+        if delta:
+            self._touch_game(
+                connection,
+                ts,
+                streamer,
+                self._stream_game(
+                    connection, streamer, _text(record.get("broadcast_id"))
+                ),
+                points_gained=delta,
+            )
         if streak:
             connection.execute(
                 """
@@ -782,6 +835,58 @@ class JournalImporter(object):
                 f"j:{run}:{seq}",
             ),
         )
+
+    def _apply_drop(self, connection, record, run, seq, at, streamer):
+        """A claimed drop: counted once per claim, whatever run reports it."""
+
+        drop_id = _text(record.get("drop_id"))
+        claim_key = _text(record.get("claim_key"))
+        if drop_id is None or claim_key is None:
+            return
+        game = _text(record.get("game"))
+        benefits = record.get("benefits")
+        benefits = [
+            text
+            for text in (
+                _text(item) for item in (benefits if isinstance(benefits, list) else ())
+            )
+            if text is not None
+        ]
+        minutes = _int(record.get("minutes_required"))
+        inserted = connection.execute(
+            """
+            INSERT OR IGNORE INTO drops (ts, streamer, drop_id, name, benefits,
+                campaign, campaign_id, game, quest, minutes_required, image,
+                source, dedupe_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'journal', ?)
+            """,
+            (
+                at,
+                streamer or None,
+                drop_id,
+                _text(record.get("name")),
+                json.dumps(benefits, ensure_ascii=False),
+                _text(record.get("campaign")),
+                _text(record.get("campaign_id")),
+                game,
+                1 if record.get("quest") is True else 0,
+                minutes if minutes is not None and minutes >= 0 else None,
+                _text(record.get("image")),
+                f"c:{claim_key}",
+            ),
+        ).rowcount
+        if inserted > 0 and game is not None:
+            # The same claim imported from the Drops data (backfill.py): its
+            # entry was written after the claim.  The same rule decides it
+            # there, so the order of the two imports doesn't matter.
+            connection.execute(
+                """
+                DELETE FROM drops
+                WHERE source = 'analytics' AND drop_id = ? AND game = ?
+                  AND ts >= ?
+                """,
+                (drop_id, game, at - DROP_MATCH_SECONDS),
+            )
 
     def _apply_run_start(self, connection, record, run, seq, at, streamer):
         # Runs before this one that never wrote run_end crashed: close what

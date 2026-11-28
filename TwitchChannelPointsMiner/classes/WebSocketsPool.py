@@ -555,6 +555,15 @@ class WebSocketsPool:
                 elif message.type == "drop-progress":
                     logger.debug(f"Drop progress: {message.data}")
                     ws.twitch.record_drop_progress_event(message.data)
+                    if isinstance(message.data, dict):
+                        # The channel credited with the drop, for History.
+                        progressed_on = get_streamer(
+                            ws.streamers, message.data.get("channel_id")
+                        )
+                        if progressed_on is not None:
+                            history_journal.JOURNAL.note_drop_channel(
+                                progressed_on, message.data.get("drop_id")
+                            )
                 return
 
             # History recorded the redemption above; nothing else uses it.

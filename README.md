@@ -274,7 +274,7 @@ categories, and analytics.
 | [Notifications](docs/notifications.md) | Telegram, Discord, webhook, ntfy, Apprise, Matrix, Pushover, Gotify, email, events |
 | [Predictions](docs/predictions.md) | `BetSettings`, bet strategies, `FilterCondition`, `DelayMode` |
 | [Analytics](docs/analytics.md) | The analytics server, HTTPS reverse proxy, analytics storage |
-| [History](docs/history.md) | Durable streamer sessions, watch time, points and streak history |
+| [History](docs/history.md) | Durable streamer sessions, watch time, points, streak, drop and per-game history |
 | [Logs](docs/logs.md) | Full and compact log formats, the graceful-shutdown report |
 | [Docker](docs/docker.md) | Docker Hub images, the nightly image, graceful shutdowns, Portainer |
 | [Windows](docs/windows.md) | Standard and portable builds, setup, updates, the nightly build, troubleshooting |

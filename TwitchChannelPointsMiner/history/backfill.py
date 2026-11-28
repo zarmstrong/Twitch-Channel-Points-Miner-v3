@@ -17,6 +17,14 @@ the database:
   read again.  A rebuilt database starts over against its own boundary.
 - Work is done in small steps from the History thread, so a large
   analytics folder never holds up startup, the journal import or a delete.
+
+The claimed drops in the dashboard's Drops data (``drops_by_category.json``)
+are imported once too.  That file keeps one entry per drop and category, and
+moves its time on whenever the miner sees the drop again, so a time boundary
+can't tell an old claim from one the journal recorded.  A claim is skipped
+instead when the journal holds a claim of the same drop and category that is
+no later than the entry (plus ``DROP_MATCH_SECONDS``), and the importer
+removes an imported claim by the same rule when the journal's arrives later.
 """
 
 import json
@@ -32,6 +40,7 @@ from TwitchChannelPointsMiner.history.importer import (
     _text,
 )
 from TwitchChannelPointsMiner.history.store import (
+    DROP_MATCH_SECONDS,
     _float_or_none,
     clean_streamer,
     earliest_held,
@@ -48,6 +57,9 @@ META_JOURNAL_FIRST_AT = "journal_first_at"
 META_BOUNDARY = "backfill_boundary"
 META_IMPORTED = "backfill_imported"
 META_STATE_PREFIX = "backfill:"
+# The Drops data's import: {"done": bool, "skipped": reason, "added": n}.
+META_DROPS = "backfill_drops"
+DROPS_FILE = "drops_by_category.json"
 
 # Annotation colours (Streamer.persistent_annotations) -> event type.
 # WATCH_STREAK (#45c1ff) is left out: its series entry counts the streak.
@@ -208,8 +220,10 @@ class AnalyticsBackfill(object):
             boundary = self._meta_time(connection, META_BOUNDARY)
             states = self._states(connection)
             imported = self._meta(connection, META_IMPORTED) == "1"
+            drops = self._drops_state(connection)
         eligible = self._eligible()
         return {
+            "drops": drops,
             "boundary": boundary,
             "imported": imported,
             "streamers_done": sum(1 for state in states.values() if state["done"]),
@@ -227,6 +241,8 @@ class AnalyticsBackfill(object):
         finished the import for the streamers it knows of and rows were
         imported (retention should then run)."""
 
+        # Drops are the account's: no streamer list or boundary needed.
+        self._import_drops()
         names = self._eligible()
         if not names:
             return False
@@ -503,5 +519,134 @@ class AnalyticsBackfill(object):
                 VALUES (?, ?, ?, ?, NULL, ?)
                 """,
                 (name, x / 1000.0, event_type, text, f"a:{name}:a:{index}"),
+            ).rowcount,
+        )
+
+    # -- drops -----------------------------------------------------------------
+    def _drops_state(self, connection):
+        try:
+            state = json.loads(self._meta(connection, META_DROPS) or "null")
+        except ValueError:
+            state = None
+        if not isinstance(state, dict):
+            state = {}
+        return {
+            "done": state.get("done") is True,
+            "skipped": _text(state.get("skipped")),
+            "added": max(0, _int(state.get("added")) or 0),
+        }
+
+    def _save_drops_state(self, connection, done, skipped=None, added=0):
+        self._set_meta(
+            connection,
+            META_DROPS,
+            json.dumps(
+                {"done": done, "skipped": skipped, "added": int(added)},
+                separators=(",", ":"),
+            ),
+        )
+
+    def _import_drops(self):
+        """Import the claimed drops of the Drops data, once.  Returns the
+        number of claims added."""
+
+        with self.store._read_connection() as connection:
+            if self._drops_state(connection)["done"]:
+                return 0
+        path = os.path.join(self.analytics_path, DROPS_FILE)
+        try:
+            # The miner replaces this file under its own lock, which History
+            # can't reach (the dashboard's Drops tab reads it without one
+            # too); the read is short, and a failed one is tried again.
+            with open(path, "rb") as handle:
+                data = handle.read()
+            payload = json.loads(data.decode("utf-8"))
+        except FileNotFoundError:
+            payload = None
+        except ValueError as error:
+            if DROPS_FILE not in self._logged:
+                self._logged.add(DROPS_FILE)
+                logger.warning(
+                    "Not importing %s into History: it is not valid JSON (%s)",
+                    DROPS_FILE,
+                    error,
+                )
+            payload = False
+        except OSError as error:
+            if DROPS_FILE not in self._logged:
+                self._logged.add(DROPS_FILE)
+                logger.warning(
+                    "Unable to read %s for History; retrying: %s", DROPS_FILE, error
+                )
+            return 0
+        # Raises when the cutoffs cannot be read: importing without them
+        # could bring a deleted streamer's drops back.
+        file_deletes = self.importer._load_deletes()
+        entries = payload.get("drops") if isinstance(payload, dict) else None
+        added = 0
+        with self.store.transaction() as connection:
+            if self._drops_state(connection)["done"]:
+                return 0
+            if not isinstance(entries, list):
+                reason = "no file" if payload is None else "invalid"
+                self._save_drops_state(connection, True, reason)
+                return 0
+            deleted = {
+                row["streamer"]
+                for row in connection.execute("SELECT streamer FROM deleted_streamers")
+            } | set(file_deletes)
+            for entry in entries:
+                added += self._apply_drop_entry(connection, entry, deleted)
+            self._save_drops_state(connection, True, added=added)
+        return added
+
+    @staticmethod
+    def _apply_drop_entry(connection, entry, deleted):
+        if not isinstance(entry, dict) or entry.get("status") != "captured":
+            return 0
+        drop_id = _text(entry.get("drop_id"))
+        game = _text(entry.get("category"))
+        x = _number(entry.get("x"))
+        if drop_id is None or game is None or game.lower() == "unknown":
+            return 0
+        if x is None or x <= 0:
+            return 0
+        ts = x / 1000.0
+        streamer = clean_streamer(entry.get("streamer")) or None
+        if streamer is not None and streamer in deleted:
+            return 0
+        if connection.execute(
+            """
+            SELECT 1 FROM drops
+            WHERE source = 'journal' AND drop_id = ? AND game = ? AND ts <= ?
+            LIMIT 1
+            """,
+            (drop_id, game, ts + DROP_MATCH_SECONDS),
+        ).fetchone():
+            # The journal recorded this claim (see the module docstring).
+            return 0
+        benefit = _text(entry.get("benefit"))
+        minutes = _int(entry.get("minutes_required"))
+        return max(
+            0,
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO drops (ts, streamer, drop_id, name,
+                    benefits, campaign, campaign_id, game, quest,
+                    minutes_required, image, source, dedupe_key)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, 'analytics', ?)
+                """,
+                (
+                    ts,
+                    streamer,
+                    drop_id,
+                    _text(entry.get("item_name")),
+                    json.dumps([benefit] if benefit else [], ensure_ascii=False),
+                    _text(entry.get("campaign")),
+                    game,
+                    minutes if minutes is not None and minutes >= 0 else None,
+                    _text(entry.get("item_art_url")),
+                    f"a:{drop_id}|{game}",
+                ),
             ).rowcount,
         )

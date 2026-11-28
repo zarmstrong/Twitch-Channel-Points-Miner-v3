@@ -12217,6 +12217,67 @@ class Twitch(object):
                 json.dump(entries, temp_handle, indent=4)
             os.replace(temp_file, analytics_file)
 
+    @staticmethod
+    def __drop_report_category(
+        campaign, campaign_name_override=None, category_name_override=None
+    ):
+        """``(category, campaign name)`` a drop is reported under: the
+        dashboard's Drops data and History's drops use the same category, so
+        History can tell which of its claims the Drops data already holds."""
+        category_name = category_name_override or "Unknown"
+        campaign_name = campaign_name_override
+        if campaign is not None:
+            campaign_name = campaign_name or campaign.name
+            game = campaign.game or {}
+            category_name = (
+                category_name_override
+                or game.get("displayName")
+                or game.get("name")
+                or "Unknown"
+            )
+        return category_name, campaign_name
+
+    def __journal_drop_claim(
+        self,
+        drop,
+        variants,
+        campaign=None,
+        campaign_name_override=None,
+        category_name_override=None,
+        already_claimed=False,
+    ):
+        """Write a claim Twitch accepted to History's journal; never raises."""
+        try:
+            category_name, campaign_name = self.__drop_report_category(
+                campaign, campaign_name_override, category_name_override
+            )
+            image = None
+            if getattr(self, "track_drop_item_art", False) is True:
+                image = next(
+                    (
+                        variant.get("item_art_url")
+                        for variant in variants
+                        if variant.get("item_art_url")
+                    ),
+                    None,
+                ) or getattr(drop, "item_art_url", None)
+            history_journal.JOURNAL.record_drop(
+                drop.id,
+                f"{drop.drop_instance_id}|{drop.id}",
+                name=getattr(drop, "name", None),
+                benefits=[variant.get("benefit") for variant in variants]
+                or [getattr(drop, "benefit", None)],
+                campaign=campaign_name,
+                campaign_id=getattr(campaign, "id", None),
+                game=category_name,
+                quest=self.__is_watch_reward_drop(drop.id),
+                minutes_required=getattr(drop, "minutes_required", None),
+                image=image,
+                already_claimed=already_claimed,
+            )
+        except Exception:
+            logger.debug("Unable to journal a drop claim", exc_info=True)
+
     def __save_drop_claim_analytics(
         self,
         drop,
@@ -12230,17 +12291,9 @@ class Twitch(object):
         benefit_override=None,
         item_art_url_override=None,
     ):
-        category_name = category_name_override or "Unknown"
-        campaign_name = campaign_name_override
-        if campaign is not None:
-            campaign_name = campaign_name or campaign.name
-            game = campaign.game or {}
-            category_name = (
-                category_name_override
-                or game.get("displayName")
-                or game.get("name")
-                or "Unknown"
-            )
+        category_name, campaign_name = self.__drop_report_category(
+            campaign, campaign_name_override, category_name_override
+        )
 
         # Ignore uncategorized drop entries to keep category views clean.
         if category_name == "Unknown":
@@ -13024,7 +13077,18 @@ class Twitch(object):
                             f"campaign {campaign.id} final drop {drop.id} claimed; "
                             "waiting for inventory completion confirmation"
                         )
-                for variant in self.__drop_variant_entries_from_drop(drop):
+                variants = self.__drop_variant_entries_from_drop(drop)
+                # Before the Drops data: History matches the two by time,
+                # and the claim must not come after the entry it is in.
+                self.__journal_drop_claim(
+                    drop,
+                    variants,
+                    campaign=campaign,
+                    campaign_name_override=campaign_name_override,
+                    category_name_override=category_name_override,
+                    already_claimed=response.status == "DROP_INSTANCE_ALREADY_CLAIMED",
+                )
+                for variant in variants:
                     self.__save_drop_claim_analytics(
                         drop,
                         campaign=campaign,
@@ -13573,6 +13637,10 @@ class Twitch(object):
                     if session.errors:
                         raise ValueError("current drop session returned errors")
                     if session.has_session:
+                        # The channel credited with the drop, for History.
+                        history_journal.JOURNAL.note_drop_channel(
+                            streamer, session.drop_id
+                        )
                         reports.append(
                             (
                                 session.drop_id,

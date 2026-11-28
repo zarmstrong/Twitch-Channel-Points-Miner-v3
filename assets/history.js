@@ -22,6 +22,9 @@
                 REQUEST_TIMEOUT_MS: REQUEST_TIMEOUT_MS,
                 deleteButtonState: deleteButtonState,
                 detailMessageFor: detailMessageFor,
+                dropItemText: dropItemText,
+                gameLabel: gameLabel,
+                gamesNoteText: gamesNoteText,
                 importNoteText: importNoteText,
                 runDelete: runDelete
             };
@@ -33,6 +36,8 @@
         days: 30,
         streamer: '',
         sessionKind: 'watch',
+        // The game the drops list is narrowed to ('' for every game).
+        dropGame: '',
         visible: false,
         // The refresh in flight, if any.  Each selection change replaces it,
         // and only the current one may render.
@@ -136,6 +141,33 @@
         return 'History before ' + formatDate(before) + ' was imported from ' +
             'the analytics data: it has points and predictions only, without ' +
             'watch time or live sessions.';
+    }
+
+    // A game row's name.  Drops without a game are quests (Twitch gives
+    // them none) or, rarely, a drop whose campaign named none.
+    function gameLabel(item) {
+        if (item && item.game) return String(item.game);
+        if (item && item.drops > 0 && item.quests === item.drops) return 'Quests (no game)';
+        return 'No game';
+    }
+
+    // What a claimed drop gave: its rewards, or its name when Twitch sent
+    // none.
+    function dropItemText(drop) {
+        var benefits = (drop && drop.benefits) || [];
+        var name = (drop && drop.name) || '';
+        if (!benefits.length) return name || 'Drop';
+        var text = benefits.join(', ');
+        return name && benefits.indexOf(name) === -1 ? text + ' (' + name + ')' : text;
+    }
+
+    // Says from when watch time and points have a game, if not from the
+    // start (History kept watch time before it recorded games).
+    function gamesNoteText(payload, formatDate) {
+        var since = payload && payload.games_since;
+        if (since === null || since === undefined) return '';
+        return 'Watch time and points are counted per game from ' + formatDate(since) +
+            ', when History started recording games.';
     }
 
     function formatDay(day) {
@@ -302,6 +334,17 @@
             '  <h3 class="title is-5">Streaming and watch activity</h3>',
             '  <div id="history-activity" class="history-activity"></div>',
             '</div>',
+            '<div class="history-grid">',
+            '  <div class="box history-panel-box">',
+            '    <h3 class="title is-5">Games</h3>',
+            '    <p id="history-games-note" class="history-imported" style="display:none"></p>',
+            '    <div id="history-games" class="history-table-wrap"></div>',
+            '  </div>',
+            '  <div class="box history-panel-box">',
+            '    <h3 class="title is-5">Drops claimed</h3>',
+            '    <div id="history-drops" class="history-table-wrap"></div>',
+            '  </div>',
+            '</div>',
             '<div class="box history-panel-box">',
             '  <h3 class="title is-5">Streamers</h3>',
             '  <div id="history-streamers" class="history-table-wrap"></div>',
@@ -411,6 +454,19 @@
         if (darkMode) {
             darkMode.addEventListener('change', applyHistoryTheme);
         }
+        var games = byId('history-games');
+        if (games) {
+            games.addEventListener('click', function (event) {
+                var clear = event.target.closest('[data-history-game-clear]');
+                var link = event.target.closest('[data-history-game]');
+                if (!clear && !link) return;
+                event.preventDefault();
+                var game = link ? link.getAttribute('data-history-game') : '';
+                if (game === state.dropGame) return;
+                state.dropGame = game;
+                refreshHistory(true);
+            });
+        }
         var streamers = byId('history-streamers');
         if (streamers) {
             streamers.addEventListener('click', function (event) {
@@ -439,7 +495,7 @@
 
     // -- show / hide / polling --------------------------------------------
     function selectionKey() {
-        return [state.days, state.streamer, state.sessionKind].join('|');
+        return [state.days, state.streamer, state.sessionKind, state.dropGame].join('|');
     }
 
     function showHistory() {
@@ -497,6 +553,7 @@
             days: state.days,
             streamer: state.streamer,
             kind: state.sessionKind,
+            game: state.dropGame,
             key: selectionKey()
         };
         showError('');
@@ -524,7 +581,14 @@
                 streamer: selection.streamer,
                 limit: 100
             }, request),
-            fetchJson('activity', filtered, request)
+            fetchJson('activity', filtered, request),
+            fetchJson('games', filtered, request),
+            fetchJson('drops', {
+                days: selection.days,
+                streamer: selection.streamer,
+                game: selection.game,
+                limit: 100
+            }, request)
         ]).then(function (results) {
             if (state.request !== request) return;
             renderImportNote(results[0]);
@@ -536,6 +600,8 @@
             renderSessions(results[3], selection.kind);
             renderEvents(results[4]);
             renderActivity(results[5]);
+            renderGames(results[6], selection.game);
+            renderDrops(results[7], selection.game);
             state.loadedAt = Date.now();
             state.loadedKey = selection.key;
             setStatus('Updated ' + new Date().toLocaleTimeString());
@@ -602,6 +668,12 @@
                 label: 'Streak hits',
                 value: formatNumber(windowStats.streak_count),
                 meta: 'Today ' + formatNumber(today.streak_count)
+            },
+            {
+                label: 'Drops claimed',
+                value: formatNumber(windowStats.drops),
+                meta: 'Today ' + formatNumber(today.drops) +
+                    ' · All-time ' + formatNumber(lifetime.drops)
             },
             {
                 label: 'Active now',
@@ -826,6 +898,86 @@
             '<tbody>' + rows + '</tbody></table>';
     }
 
+    function gameRows(items, linked) {
+        return items.map(function (item) {
+            var label = escapeHtml(gameLabel(item));
+            var name = linked && item.game && item.drops > 0
+                ? '<a href="#" data-history-game="' + escapeHtml(item.game) + '">' + label + '</a>'
+                : label;
+            return '<tr><td>' + name + '</td>' +
+                '<td class="num">' + escapeHtml(formatDuration(item.watch_seconds)) + '</td>' +
+                '<td class="num">' + escapeHtml(formatSigned(item.points_gained)) + '</td>' +
+                '<td class="num">' + escapeHtml(formatNumber(item.drops)) + '</td>' +
+                (linked ? '<td class="num">' + escapeHtml(formatNumber(item.streamers)) + '</td>' : '') +
+                '</tr>';
+        }).join('');
+    }
+
+    function gamesTable(items, linked) {
+        return '<table class="table is-fullwidth is-narrow is-hoverable history-table">' +
+            '<thead><tr><th>Game</th><th class="num">Watch</th><th class="num">Gained</th>' +
+            '<th class="num">Drops</th>' + (linked ? '<th class="num">Streamers</th>' : '') +
+            '</tr></thead><tbody>' + gameRows(items, linked) + '</tbody></table>';
+    }
+
+    function renderGames(gamesPayload, selectedGame) {
+        var container = byId('history-games');
+        if (!container) return;
+        var note = byId('history-games-note');
+        if (note) {
+            var text = gamesNoteText(gamesPayload, function (timestamp) {
+                return new Date(timestamp * 1000).toLocaleDateString();
+            });
+            note.textContent = text;
+            note.style.display = text ? '' : 'none';
+        }
+        var items = (gamesPayload && gamesPayload.games) || [];
+        if (!items.length) {
+            container.innerHTML = '<p class="history-empty">No games recorded in this window.</p>';
+            return;
+        }
+        container.innerHTML = (selectedGame
+            ? '<p class="history-summary-line">Drops list: ' + escapeHtml(selectedGame) +
+                ' · <a href="#" data-history-game-clear>show every game</a></p>'
+            : '<p class="history-summary-line">Select a game to list only its drops.</p>') +
+            gamesTable(items, true);
+    }
+
+    function dropRows(items, showChannel) {
+        return items.map(function (drop) {
+            var game = drop.game || (drop.quest ? 'Quest' : '—');
+            return '<tr><td class="history-muted">' + escapeHtml(formatTime(drop.ts)) + '</td>' +
+                '<td>' + escapeHtml(dropItemText(drop)) +
+                (drop.quest ? ' <span class="tag is-info is-light">quest</span>' : '') + '</td>' +
+                '<td>' + escapeHtml(game) + '</td>' +
+                '<td>' + escapeHtml(drop.campaign || '—') + '</td>' +
+                (showChannel ? '<td>' + escapeHtml(drop.streamer || '—') + '</td>' : '') +
+                '</tr>';
+        }).join('');
+    }
+
+    function dropsTable(items, showChannel) {
+        return '<table class="table is-fullwidth is-narrow history-table">' +
+            '<thead><tr><th>Claimed</th><th>Reward</th><th>Game</th><th>Campaign</th>' +
+            (showChannel ? '<th>Channel</th>' : '') + '</tr></thead>' +
+            '<tbody>' + dropRows(items, showChannel) + '</tbody></table>';
+    }
+
+    function renderDrops(dropsPayload, selectedGame) {
+        var container = byId('history-drops');
+        if (!container) return;
+        var items = (dropsPayload && dropsPayload.drops) || [];
+        if (!items.length) {
+            container.innerHTML = '<p class="history-empty">' + (selectedGame
+                ? 'No ' + escapeHtml(selectedGame) + ' drops claimed in this window.'
+                : 'No drops claimed in this window.') + '</p>';
+            return;
+        }
+        container.innerHTML = '<p class="history-summary-line">Showing ' + items.length +
+            ' of ' + formatNumber(dropsPayload.total) + ' in this window.</p>' +
+            dropsTable(items, true);
+    }
+
     function renderSessions(sessionsPayload, selectedKind) {
         var container = byId('history-sessions');
         if (!container) return;
@@ -931,7 +1083,8 @@
         destroyChart('watch');
         state.lastDaily = null;
         ['history-cards', 'history-points-chart', 'history-watch-chart', 'history-activity',
-            'history-streamers', 'history-sessions', 'history-events'].forEach(function (id) {
+            'history-games', 'history-drops', 'history-streamers', 'history-sessions',
+            'history-events'].forEach(function (id) {
             var element = byId(id);
             if (element) element.innerHTML = '<p class="history-empty">Reloading…</p>';
         });
@@ -941,7 +1094,8 @@
     function confirmDeleteHistory(streamer) {
         if (!streamer || state.deleting) return;
         var message = 'This deletes everything History recorded for ' + streamer +
-            ': points, spends, predictions, watch and live sessions, watch streaks, and the ' +
+            ': points, spends, predictions, watch and live sessions, watch streaks, the drops ' +
+            'Twitch credited to their channel, their game totals, and the ' +
             'daily and all-time totals. Their analytics data and the Points tab are not changed. ' +
             'If ' + streamer + ' is still in your miner configuration, activity after the ' +
             'delete is recorded again.';
@@ -1237,6 +1391,19 @@
                     ? '<div class="history-table-wrap history-detail-table"><table class="table is-fullwidth is-narrow history-table"><thead><tr><th>Started</th><th class="num">Duration</th><th>Status</th><th>Stream</th></tr></thead><tbody>' +
                         streamRows + '</tbody></table></div>'
                     : '<p class="history-empty">No live sessions.</p>') + '</div>',
+            '</div>',
+            '<div class="history-detail-grid">',
+            '  <div><h4 class="title is-6">Games</h4>' +
+                ((detail.games || []).length
+                    ? '<div class="history-table-wrap history-detail-table">' +
+                        gamesTable(detail.games, false) + '</div>'
+                    : '<p class="history-empty">No games recorded in this window.</p>') + '</div>',
+            '  <div><h4 class="title is-6">Drops claimed on this channel</h4>' +
+                ((detail.drops || []).length
+                    ? '<div class="history-table-wrap history-detail-table">' +
+                        dropsTable(detail.drops.slice(0, 25), false) + '</div>'
+                    : '<p class="history-empty">No drops credited to this channel in this window.</p>') +
+                '</div>',
             '</div>',
             '<h4 class="title is-6">Streak history</h4>',
             streakRows

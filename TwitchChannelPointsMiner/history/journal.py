@@ -2,9 +2,9 @@
 
 The miner writes one JSON line per fact as it happens: a minute-watched
 request that Twitch accepted, a points message, a spend whose amount the miner
-knows, a stream going live or offline.  History reads the lines in order and
-adds them up (see ``importer.py``).  The miner never reads the journal back,
-and History never writes it.
+knows, a stream going live or offline, a drop claimed.  History reads the
+lines in order and adds them up (see ``importer.py``).  The miner never reads
+the journal back, and History never writes it.
 
 Layout, inside the account's analytics folder::
 
@@ -55,6 +55,9 @@ WATCH_CREDIT_CAP = 90.0
 STOP_LOCK_SECONDS = 5.0
 # How long stop() waits for spends still being made (see spend_in_progress).
 STOP_SPEND_SECONDS = 30.0
+
+# Drops whose channel note_drop_channel() remembers (the newest ones).
+DROP_CHANNELS_KEPT = 500
 
 _WARNING_INTERVAL = 60.0
 
@@ -400,6 +403,11 @@ class Journal(object):
         self._spends_closed = False
         self._watch_lock = threading.Lock()
         self._watch = {}
+        # drop id -> the channel Twitch last reported progress for it on
+        # (see note_drop_channel), newest last.  Kept across runs of this
+        # process; lost at a restart.
+        self._drop_lock = threading.Lock()
+        self._drop_channels = {}
 
     def _eligible(self, streamer):
         """``history_eligible`` and not removed from the miner."""
@@ -1120,6 +1128,91 @@ class Journal(object):
                 label=label if isinstance(label, str) else None,
                 points_delta=_int_or_none(points_delta),
             )
+
+    # -- drops -------------------------------------------------------------
+    def note_drop_channel(self, streamer, drop_id):
+        """Twitch reported progress on ``drop_id`` for this channel (a
+        PubSub ``drop-progress`` message, or the channel's current drop
+        session): a claim of the drop is credited to it.
+
+        Twitch counts a drop's progress on one channel at a time, so the
+        newest report names the channel that earned it.  ``streamer`` is a
+        Streamer or a username.  Drops are the account's, so this is kept
+        whether or not History records the channel itself."""
+
+        if isinstance(streamer, str):
+            username = _clean(streamer)
+        else:
+            username = _clean(getattr(streamer, "username", None))
+        drop_id = str(drop_id or "").strip()
+        if not username or not drop_id:
+            return
+        with self._drop_lock:
+            self._drop_channels.pop(drop_id, None)
+            self._drop_channels[drop_id] = username
+            while len(self._drop_channels) > DROP_CHANNELS_KEPT:
+                del self._drop_channels[next(iter(self._drop_channels))]
+
+    def drop_channel(self, drop_id):
+        """The channel last noted for ``drop_id``, or None."""
+
+        with self._drop_lock:
+            return self._drop_channels.get(str(drop_id or "").strip())
+
+    def record_drop(
+        self,
+        drop_id,
+        claim_key,
+        name=None,
+        benefits=None,
+        campaign=None,
+        campaign_id=None,
+        game=None,
+        quest=False,
+        minutes_required=None,
+        image=None,
+        already_claimed=False,
+    ):
+        """A drop (or quest reward) Twitch accepted the claim of.
+
+        ``claim_key`` is unique per claim (the drop instance, and the drop
+        for a reward group that repeats under one instance), so History
+        counts a claim once however often it is reported.  ``already_claimed``:
+        Twitch said the drop was claimed before (by hand, or by an earlier
+        run); History then counts it only if it has not already."""
+
+        drop_id = str(drop_id or "").strip()
+        claim_key = str(claim_key or "").strip()
+        if not self.running or not drop_id or not claim_key:
+            return
+        names = []
+        for benefit in benefits or ():
+            text = benefit.strip() if isinstance(benefit, str) else ""
+            if text and text not in names:
+                names.append(text)
+
+        def text_or_none(value):
+            value = value.strip() if isinstance(value, str) else ""
+            return value or None
+
+        game = text_or_none(game)
+        if game is not None and game.lower() == "unknown":
+            game = None
+        self.append(
+            "drop",
+            streamer=self.drop_channel(drop_id),
+            drop_id=drop_id,
+            claim_key=claim_key,
+            name=text_or_none(name),
+            benefits=names,
+            campaign=text_or_none(campaign),
+            campaign_id=text_or_none(campaign_id),
+            game=game,
+            quest=quest is True,
+            minutes_required=_int_or_none(minutes_required),
+            image=text_or_none(image),
+            already_claimed=already_claimed is True,
+        )
 
 
 # The process-wide journal.  Inert until ``start()``; every call is a no-op
