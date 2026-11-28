@@ -557,77 +557,46 @@ def _write_web_overrides(config_path, data):
 
 def _write_config_categories(config_path, categories):
     path = Path(config_path)
-    mode = stat.S_IMODE(path.stat().st_mode)
-    source = path.read_text(encoding="utf-8")
-    _tree, _streamers, category_node = _config_lists(source)
-    lines = source.splitlines(keepends=True)
-    line_start = sum(
-        len(line.encode("utf-8")) for line in lines[: category_node.lineno - 1]
+    encoded = path.read_bytes()
+    _tree, _streamers, category_node = _config_lists(encoded.decode("utf-8"))
+    encoded_lines = encoded.splitlines(keepends=True)
+    start = _byte_offset(encoded_lines, category_node.lineno, category_node.col_offset)
+    end = _byte_offset(
+        encoded_lines, category_node.end_lineno, category_node.end_col_offset
     )
-    end_line_start = sum(
-        len(line.encode("utf-8")) for line in lines[: category_node.end_lineno - 1]
-    )
-    start = line_start + category_node.col_offset
-    end = end_line_start + category_node.end_col_offset
-    indentation = lines[category_node.lineno - 1][
-        : len(lines[category_node.lineno - 1])
-        - len(lines[category_node.lineno - 1].lstrip())
-    ]
+    line = encoded_lines[category_node.lineno - 1]
+    indentation = line[: len(line) - len(line.lstrip())].decode("utf-8")
     if categories:
+        newline = _newline(encoded)
         rendered = (
-            "[\n"
-            + "".join(f"{indentation}    {category!r},\n" for category in categories)
+            "["
+            + newline
+            + "".join(
+                f"{indentation}    {category!r},{newline}" for category in categories
+            )
             + f"{indentation}]"
         )
     else:
         rendered = "[]"
-    encoded = source.encode("utf-8")
     updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
-
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", dir=str(path.parent), text=False
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as temporary:
-            temporary.write(updated)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        try:
-            os.chmod(temporary_name, mode)
-        except OSError:
-            # Some mounted and Windows filesystems do not expose POSIX modes.
-            pass
-        try:
-            os.replace(temporary_name, path)
-        except OSError as error:
-            # Docker and Podman reject replacing a directly bind-mounted file
-            # with EBUSY. The file itself can still be writable, so fall back
-            # to updating that mount in place. Directory mounts continue to
-            # use the atomic replacement above.
-            if error.errno != errno.EBUSY:
-                raise
-            with path.open("r+b") as handle:
-                handle.seek(0)
-                handle.write(updated)
-                handle.truncate()
-                handle.flush()
-                os.fsync(handle.fileno())
-    finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
+    _require_parses(updated)
+    _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
 def _replace_config_node(config_path, node, rendered):
     path = Path(config_path)
     mode = stat.S_IMODE(path.stat().st_mode)
-    source = path.read_text(encoding="utf-8")
-    lines = source.splitlines(keepends=True)
-    start = sum(len(line.encode("utf-8")) for line in lines[: node.lineno - 1])
-    start += node.col_offset
-    end = sum(len(line.encode("utf-8")) for line in lines[: node.end_lineno - 1])
-    end += node.end_col_offset
-    encoded = source.encode("utf-8")
+    # Read bytes, not text: read_text() translates CRLF to LF, which would
+    # rewrite every line ending in the user's file.
+    encoded = path.read_bytes()
+    # Split bytes, not str: str.splitlines() also breaks on U+2028, a form
+    # feed and similar characters, which would shift the offsets and splice
+    # the value into the wrong place.
+    encoded_lines = encoded.splitlines(keepends=True)
+    start = _byte_offset(encoded_lines, node.lineno, node.col_offset)
+    end = _byte_offset(encoded_lines, node.end_lineno, node.end_col_offset)
     updated = encoded[:start] + rendered.encode("utf-8") + encoded[end:]
+    _require_parses(updated)
     _replace_config_bytes(path, updated, mode)
 
 
@@ -664,12 +633,83 @@ def _expression(source):
     return ast.parse(source, mode="eval").body
 
 
+def _unpacked_dict_keys(node):
+    """The keys a ``**`` entry is known to set, or None when they can't be read."""
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = set()
+    for key in node.keys:
+        if key is None or not (
+            isinstance(key, ast.Constant) and isinstance(key.value, str)
+        ):
+            return None
+        keys.add(key.value)
+    return keys
+
+
+def _require_dict_edit_allowed(dictionary, assignment_name, name):
+    """Refuse a dict edit that an unpacking would override at runtime.
+
+    Python applies a later ``**`` mapping over an earlier literal entry, so the
+    dashboard could report the saved value while the miner keeps using the
+    unpacked one. An unpacked mapping whose keys can't be read may supply the
+    edited key too, and also makes the value the dashboard shows unknowable.
+    """
+    index = next(
+        (
+            position
+            for position in reversed(range(len(dictionary.keys)))
+            if isinstance(dictionary.keys[position], ast.Constant)
+            and dictionary.keys[position].value == name
+        ),
+        None,
+    )
+    for position, value in enumerate(dictionary.values):
+        if dictionary.keys[position] is not None:
+            continue
+        if index is not None and position < index:
+            # The literal entry after the unpacking wins.
+            continue
+        unpacked = _unpacked_dict_keys(value)
+        if unpacked is None:
+            raise ConfigEditError(
+                f"{assignment_name} in config.py unpacks a mapping whose keys "
+                "cannot be read, so the dashboard cannot edit it reliably. "
+                f"Edit {name!r} in config.py instead."
+            )
+        if index is not None and index < position and name in unpacked:
+            raise ConfigEditError(
+                f"{assignment_name} in config.py unpacks a mapping after "
+                f"{name!r} that would override it. Edit {name!r} in "
+                "config.py instead."
+            )
+
+
+def _require_logger_settings_editable(config_path):
+    """Refuse a LoggerSettings edit that an unpacking would override."""
+    dictionary = _assignment(
+        ast.parse(Path(config_path).read_text(encoding="utf-8")), "MINER_CONFIG"
+    )
+    if not isinstance(dictionary, ast.Dict):
+        raise ConfigEditError("MINER_CONFIG must be a literal dictionary.")
+    _require_dict_edit_allowed(dictionary, "MINER_CONFIG", "logger_settings")
+
+
 def _set_dict_items(config_path, assignment_name, values):
+    if not values:
+        return
+    # Check every value before writing any of them, so a refusal leaves
+    # config.py exactly as it was.
+    dictionary = _assignment(
+        ast.parse(Path(config_path).read_text(encoding="utf-8")), assignment_name
+    )
+    if not isinstance(dictionary, ast.Dict):
+        raise ConfigEditError(f"{assignment_name} must be a literal dictionary.")
+    for name in values:
+        _require_dict_edit_allowed(dictionary, assignment_name, name)
     for name, rendered in values.items():
         source = Path(config_path).read_text(encoding="utf-8")
         dictionary = _assignment(ast.parse(source), assignment_name)
-        if not isinstance(dictionary, ast.Dict):
-            raise ConfigEditError(f"{assignment_name} must be a literal dictionary.")
         existing = {
             key.value: index
             for index, key in enumerate(dictionary.keys)
@@ -723,7 +763,8 @@ def _scan_item_tail(segment):
 
 def _insert_config_item(config_path, container, rendered):
     path = Path(config_path)
-    encoded = path.read_text(encoding="utf-8").encode("utf-8")
+    # Read bytes, so the inserted line uses the file's own line endings.
+    encoded = path.read_bytes()
     updated = _insert_item_bytes(encoded, container, rendered)
     _require_parses(updated)
     _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
@@ -1525,7 +1566,7 @@ def enable_analytics_dashboard(
         f"    'password': {password!r},\n"
         f"    'log_poll_interval': {log_poll_interval},\n"
         "}"
-    )
+    ).replace("\n", _newline(Path(config_path).read_bytes()))
     _replace_config_node(config_path, analytics_config_node, rendered)
 
 
@@ -1556,6 +1597,7 @@ def _write_logger_settings(config_path, values):
         )
         for name, value in values.items()
     }
+    _require_logger_settings_editable(config_path)
     _write_call_keywords(
         config_path,
         lambda tree: _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
@@ -1604,6 +1646,7 @@ def _write_notification(config_path, provider, values):
     if not isinstance(existing, ast.Call) and values.get("enabled") is not True:
         return
     if values.get("enabled") is False:
+        _require_logger_settings_editable(config_path)
         _write_call_keywords(
             config_path,
             lambda tree: _dict_item(
@@ -1614,6 +1657,7 @@ def _write_notification(config_path, provider, values):
         return
     else:
         if not isinstance(existing, ast.Call):
+            _require_logger_settings_editable(config_path)
             constructor = provider.title()
             _ensure_config_import(
                 config_path,
@@ -1637,33 +1681,41 @@ def _write_notification(config_path, provider, values):
             if name == "events"
             else repr(value)
         )
-    _write_call_keywords(
-        config_path,
-        lambda tree: (
-            _call_keyword(
-                _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
-                provider,
-            ).value
-        ),
-        rendered_values,
-    )
+    if rendered_values:
+        _require_logger_settings_editable(config_path)
+        _write_call_keywords(
+            config_path,
+            lambda tree: (
+                _call_keyword(
+                    _dict_item(_assignment(tree, "MINER_CONFIG"), "logger_settings"),
+                    provider,
+                ).value
+            ),
+            rendered_values,
+        )
 
 
 def _with_config_import(encoded, statement):
     source = encoded.decode("utf-8")
     if statement in source:
         return encoded
-    lines = source.splitlines(keepends=True)
-    insertion = 1 if lines and "coding" in lines[0] else 0
-    lines.insert(insertion, statement + _newline(encoded))
-    return "".join(lines).encode("utf-8")
+    # Split bytes, so a U+2028 or form feed in the first line doesn't look
+    # like a line break and push the import into the comment.
+    lines = encoded.splitlines(keepends=True)
+    insertion = 1 if lines and b"coding" in lines[0] else 0
+    lines.insert(
+        insertion, statement.encode("utf-8") + _newline(encoded).encode("utf-8")
+    )
+    return b"".join(lines)
 
 
 def _ensure_config_import(config_path, statement):
     path = Path(config_path)
-    encoded = path.read_text(encoding="utf-8").encode("utf-8")
+    # Read bytes, so adding an import doesn't rewrite the file's line endings.
+    encoded = path.read_bytes()
     updated = _with_config_import(encoded, statement)
     if updated != encoded:
+        _require_parses(updated)
         _replace_config_bytes(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 

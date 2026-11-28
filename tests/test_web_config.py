@@ -1,6 +1,7 @@
 import ast
 import errno
 import json
+import logging
 import math
 import os
 import stat
@@ -2529,6 +2530,224 @@ def test_settings_insertion_indents_from_the_right_line_after_a_form_feed(tmp_pa
     assert _load_config(config).STREAMERS[0].settings.chat is ChatPresence.NEVER
 
 
+@pytest.mark.parametrize("marker", ["\u2028", "\x0c", "\x1c"])
+def test_replaced_value_keeps_its_offsets_after_a_non_line_break(tmp_path, marker):
+    # str.splitlines() treats these as line breaks while Python's tokenizer
+    # does not, so the old offset arithmetic spliced the value in the wrong
+    # place and left config.py unparseable.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"# a {marker} note\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "update_check": True,\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_updates", "values": {"enabled": False}}
+    )
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["username"] == "x"
+    assert loaded.MINER_CONFIG["update_check"] is False
+
+
+def test_replaced_call_keyword_keeps_its_offsets_after_a_non_line_break(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_text("# a\u2028note and a \x0c form feed\n" + source, encoding="utf-8")
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "DEBUG"}}
+    )
+
+    assert _load_config(config).MINER_CONFIG["logger_settings"].console_level == (
+        logging.DEBUG
+    )
+
+
+def test_analytics_enable_keeps_its_offsets_after_a_non_line_break(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "# a\u2028note and a \x0c form feed\n"
+        'MINER_CONFIG = {\n    "username": "x",\n}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    config_editor.enable_analytics_dashboard(config, "secret")
+
+    loaded = _load_config(config)
+    assert loaded.MINER_CONFIG["enable_analytics"] is True
+    assert loaded.ANALYTICS_CONFIG["port"] == 54455
+
+
+def test_replace_config_node_refuses_to_write_unparseable_config(tmp_path):
+    config = tmp_path / "config.py"
+    original = 'VALUES = {"a": 1}\n'
+    config.write_text(original, encoding="utf-8")
+    node = config_editor._assignment(ast.parse(original), "VALUES").values[0]
+
+    with pytest.raises(ConfigEditError, match="would not parse"):
+        config_editor._replace_config_node(config, node, "(")
+
+    assert config.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "categories", "value": "gamma"},
+        {"action": "remove", "kind": "categories", "value": "alpha"},
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    ],
+    ids=["add", "remove", "reorder"],
+)
+@pytest.mark.parametrize("marker", ["\u2028", "\x0c"])
+def test_category_save_keeps_its_offsets_after_a_non_line_break(
+    tmp_path, marker, payload
+):
+    # The category list is rewritten whole rather than node by node, but its
+    # offsets were computed the same broken way.
+    config = tmp_path / "config.py"
+    config.write_text(
+        f"# a {marker} note\n"
+        'MINER_CONFIG = {\n    "username": "x",\n}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {\n    "categories": ["alpha", "beta"],\n}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(config, payload)
+
+    categories = _load_config(config).MINE_CONFIG["categories"]
+    if payload["action"] == "add":
+        assert categories == ["alpha", "beta", "gamma"]
+    elif payload["action"] == "remove":
+        assert categories == ["beta"]
+    else:
+        assert categories == ["beta", "alpha"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_updates", "values": {"enabled": False}},
+        {"action": "update_login", "values": {"android": True}},
+    ],
+    ids=["replace", "insert"],
+)
+def test_dict_edits_keep_crlf_line_breaks(tmp_path, payload):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    update_managed_web_config(config, payload)
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "add", "kind": "categories", "value": "gamma"},
+        {"action": "remove", "kind": "categories", "value": "alpha"},
+        {"action": "reorder_categories", "categories": ["beta", "alpha"]},
+    ],
+    ids=["add", "remove", "reorder"],
+)
+def test_category_save_keeps_crlf_line_breaks(tmp_path, payload):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    update_managed_web_config(config, payload)
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
+
+
+def test_analytics_enable_keeps_crlf_line_breaks(tmp_path):
+    config = tmp_path / "config.py"
+    write_config(config)
+    source = config.read_text(encoding="utf-8")
+    config.write_bytes(source.replace("\n", "\r\n").encode("utf-8"))
+
+    config_editor.enable_analytics_dashboard(config, "secret")
+
+    written = config.read_bytes()
+    assert b"\n" in written
+    assert written.count(b"\n") == written.count(b"\r\n")
+    assert b"\r\r" not in written
+
+
+def test_import_insertion_refuses_a_config_it_would_break(tmp_path):
+    # An import above a __future__ import parses but does not compile, so the
+    # save must be refused before it reaches the file.
+    config = tmp_path / "config.py"
+    config.write_text(
+        "from __future__ import annotations\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    with pytest.raises(ConfigEditError, match="would not parse"):
+        update_managed_web_config(
+            config, {"action": "update_sources", "values": {"streamers": True}}
+        )
+
+    assert config.read_bytes() == before
+
+
+def test_import_insertion_after_a_non_line_break_in_the_first_line(tmp_path):
+    # The first line is treated as a coding declaration when it mentions
+    # "coding". Splitting it on U+2028 put the import inside the comment.
+    config = tmp_path / "config.py"
+    config.write_text(
+        "# coding: utf-8 \u2028 pointer\n"
+        'MINER_CONFIG = {"username": "x"}\n'
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_sources", "values": {"streamers": True}}
+    )
+
+    source = config.read_text(encoding="utf-8")
+    assert config.read_bytes().splitlines()[1] == (
+        b"from TwitchChannelPointsMiner.classes.Settings import StreamerSource"
+    )
+    namespace = {}
+    exec(compile(source, str(config), "exec"), namespace)
+    assert (
+        StreamerSource.STREAMERS
+        in namespace["MINER_CONFIG"]["streamer_source_priority"]
+    )
+
+
 def test_entry_with_a_comment_after_its_redundant_parenthesis_can_be_removed(
     tmp_path,
 ):
@@ -2791,6 +3010,146 @@ def test_update_is_written_when_unpacking_may_supply_the_defaults(tmp_path, mine
 
     assert 'Streamer("one", settings=StreamerSettings(favorite=False))' in (
         config.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    "assignment_name", ["MINER_CONFIG", "MINE_CONFIG", "ANALYTICS_CONFIG"]
+)
+def test_dict_edit_refuses_an_unpacking_that_would_override_the_value(
+    tmp_path, assignment_name
+):
+    config = tmp_path / "config.py"
+    config.write_text(
+        f'{assignment_name} = {{\n    "value": 1,\n    **{{"value": 2}},\n}}\n',
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'value' in config.py"):
+        config_editor._set_dict_items(config, assignment_name, {"value": "3"})
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_update_refuses_an_unreadable_unpacking_that_may_supply_the_key(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "BASE = {}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        "    **BASE,\n"
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'update_check' in config.py"):
+        update_managed_web_config(
+            config, {"action": "update_updates", "values": {"enabled": False}}
+        )
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "miner_body",
+    [
+        # A literal unpacking after the value that doesn't name it is safe.
+        '    "update_check": True,\n    **{"other": 1},\n',
+        # The value comes after the unpacking, so it wins at runtime.
+        '    **BASE,\n    "update_check": True,\n',
+        # The new entry is inserted after the unpacking, so it wins too.
+        '    **{"username": "y"},\n',
+    ],
+)
+def test_update_edits_when_unpacking_cannot_override_the_value(tmp_path, miner_body):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'BASE = {"update_check": True}\n'
+        "MINER_CONFIG = {\n"
+        f"{miner_body}"
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_updates", "values": {"enabled": False}}
+    )
+
+    assert _load_config(config).MINER_CONFIG["update_check"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "update_logging", "values": {"console_level": "DEBUG"}},
+        {
+            "action": "update_notification",
+            "provider": "discord",
+            "values": {
+                "enabled": True,
+                "webhook_api": "https://example/hook",
+                "events": [],
+            },
+        },
+    ],
+    ids=["logging", "notification"],
+)
+def test_nested_logger_settings_edits_refuse_an_override(tmp_path, payload):
+    # logger_settings is edited through _write_call_keywords, not
+    # _set_dict_items, but a later unpacking overrides it the same way.
+    config = tmp_path / "config.py"
+    config.write_text(
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "BASE = {}\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=logging.INFO),\n'
+        "    **BASE,\n"
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    before = config.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="Edit 'logger_settings' in config.py"):
+        update_managed_web_config(config, payload)
+
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_nested_logger_settings_edits_when_unpacking_cannot_override(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        "import logging\n"
+        "from TwitchChannelPointsMiner.logger import LoggerSettings\n"
+        "MINER_CONFIG = {\n"
+        '    "username": "x",\n'
+        '    "logger_settings": LoggerSettings(console_level=logging.INFO),\n'
+        '    **{"other": 1},\n'
+        "}\n"
+        "STREAMERS = []\n"
+        'MINE_CONFIG = {"categories": []}\n'
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+    update_managed_web_config(
+        config, {"action": "update_logging", "values": {"console_level": "DEBUG"}}
+    )
+
+    assert _load_config(config).MINER_CONFIG["logger_settings"].console_level == (
+        logging.DEBUG
     )
 
 
