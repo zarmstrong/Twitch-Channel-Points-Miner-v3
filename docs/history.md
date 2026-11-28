@@ -61,9 +61,10 @@ channel and the drops credited to it.
   farm Drops. A claim is counted once, also when a later run sees it again.
   A drop claimed by hand in the browser is counted only if the miner also
   tried to claim it and Twitch answered that it already was.
-- **Channel:** a drop is credited to the channel Twitch last reported its
-  progress on (Twitch counts a drop's progress on one channel at a time).
-  The miner learns that while it watches, so a drop claimed before it saw any
+- **Channel:** a drop is credited to the channel Twitch last named for its
+  progress (Twitch counts a drop's progress on one channel at a time, and can
+  name a channel other than the one the miner asked about). The miner learns
+  that while it watches, so a drop claimed before it saw any
   progress in this run, for example right after a restart, has no channel.
   Selecting a channel in the drops list opens its drill-down, also for a
   channel History has no other records of.
@@ -76,7 +77,8 @@ channel and the drops credited to it.
   for the points, allowing two minutes for the clocks), also between going
   offline and coming back live on the same broadcast, have no game, so the
   game totals can add up to less than the overall totals. A claim first
-  recorded without its game gets the game when Twitch reports it with one.
+  recorded without its game or channel gets them when Twitch reports it with
+  them.
 - **Older databases:** a database made by a build without game totals counts
   them from the upgrade. The tab says from when. Drops imported from the Drops
   data still show under their game.
@@ -151,7 +153,10 @@ rollups. Raw rows are kept for 730 days by default. Set
 rows forever. The `TCPM_HISTORY_RETENTION_DAYS` environment variable overrides
 the configured value. Daily rollups, including the per-game totals, and the
 claimed drops are kept forever, so lifetime totals remain available after raw
-rows are pruned.
+rows are pruned. That holds while the database does: a rebuilt database gets
+back the claims listed in the Drops data, but the per-game totals, and claims
+recorded only in the journal, come back only from the journal files still on
+disk.
 
 Deleting the database while the miner is stopped makes History rebuild it
 from the journal files still on disk at the next start. Those are usually only

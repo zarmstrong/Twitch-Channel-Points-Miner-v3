@@ -222,6 +222,25 @@ def test_a_claim_written_without_its_game_is_written_again_with_it(
     ] == [("d1", "Game A")]
 
 
+def test_a_claim_written_without_its_channel_is_written_again_with_it(journal, store):
+    journal.record_drop("d1", "i1|d1", game="Game A")
+    journal.note_drop_channel("alice", "d1")
+    journal.record_drop("d1", "i1|d1", game="Game A", already_claimed=True)
+    journal.note_drop_channel("bob", "d1")
+    journal.record_drop("d1", "i1|d1", game="Game A", already_claimed=True)
+    assert [record["streamer"] for record in written(journal, "drop")] == [
+        None,
+        "alice",
+    ]
+    # Imported, the claim counts once, credited to the channel.
+    importer = JournalImporter(store, journal.folder, monotonic=lambda: 0.0)
+    importer.poll()
+    assert [
+        (row["drop_id"], row["streamer"], row["game"])
+        for row in rows(store, "SELECT * FROM drops")
+    ] == [("d1", "alice", "Game A")]
+
+
 def test_an_unwritten_claim_keeps_what_twitch_said_first(journal, monkeypatch):
     real_append = journal.append
     monkeypatch.setattr(journal, "append", lambda kind, **fields: False)
@@ -335,6 +354,20 @@ def test_a_claim_recorded_without_its_game_learns_it(folder, importer, store):
     assert [
         (row["source"], row["game"]) for row in rows(store, "SELECT * FROM drops")
     ] == [("journal", "Game A")]
+
+
+def test_a_claim_recorded_without_its_channel_learns_it(folder, importer, store):
+    folder.drop(at=T0, game=None)
+    importer.poll()
+    folder.drop(at=T0 + 600, run=2, streamer="alice", already_claimed=True)
+    # A channel once known is kept.
+    folder.drop(at=T0 + 700, run=3, streamer="bob", already_claimed=True)
+    importer.poll()
+    assert [
+        (row["streamer"], row["game"]) for row in rows(store, "SELECT * FROM drops")
+    ] == [("alice", "Game A")]
+    # So the channel's drill-down lists it.
+    assert store.drops(days=7, streamer="alice", now=T0 + 60)["total"] == 1
 
 
 def test_a_journalled_claim_replaces_the_same_claim_from_the_drops_data(

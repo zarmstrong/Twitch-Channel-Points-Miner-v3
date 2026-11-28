@@ -200,9 +200,16 @@ class DropCurrentSessionResponse:
         current_minutes_watched=None,
         required_minutes_watched=None,
         errors=None,
+        channel_id=None,
+        channel_login=None,
     ):
         self.has_session = has_session
         self.drop_id = drop_id
         self.current_minutes_watched = current_minutes_watched
         self.required_minutes_watched = required_minutes_watched
         self.errors = errors or []
+        # The channel Twitch credits the session's progress to.  The session
+        # is the account's: it can name a channel other than the one asked
+        # about.
+        self.channel_id = channel_id
+        self.channel_login = channel_login

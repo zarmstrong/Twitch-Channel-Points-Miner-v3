@@ -472,7 +472,7 @@ class Journal(object):
         # process; lost at a restart.
         self._drop_lock = threading.Lock()
         self._drop_channels = {}
-        # Claim keys record_drop wrote in this process -> the game written,
+        # Claim keys record_drop wrote in this process -> (game, channel) written,
         # newest last; and claims it could not write -> whether Twitch first
         # said "already claimed".  The lock is held across the append so a
         # claim reported twice at once is written once; outer to the
@@ -1272,12 +1272,14 @@ class Journal(object):
             game = None
         streamer = self.drop_channel(drop_id)
         with self._claims_lock:
-            if claim_key in self._drop_claims and (
-                game is None or self._drop_claims[claim_key] is not None
-            ):
-                # Written, and this adds nothing (a claim written without its
-                # game is written again once it is known).
-                return
+            if claim_key in self._drop_claims:
+                written_game, written_streamer = self._drop_claims[claim_key]
+                if (game is None or written_game is not None) and (
+                    streamer is None or written_streamer is not None
+                ):
+                    # Written, and this adds nothing (a claim written without
+                    # its game or channel is written again once it is known).
+                    return
             if claim_key in self._unwritten_claims:
                 # Not written when Twitch accepted it: what Twitch said then.
                 already_claimed = self._unwritten_claims[claim_key]
@@ -1303,7 +1305,7 @@ class Journal(object):
                 return
             self._unwritten_claims.pop(claim_key, None)
             self._drop_claims.pop(claim_key, None)
-            self._drop_claims[claim_key] = game
+            self._drop_claims[claim_key] = (game, streamer)
             while len(self._drop_claims) > DROP_CLAIMS_KEPT:
                 del self._drop_claims[next(iter(self._drop_claims))]
 

@@ -960,8 +960,18 @@ class Parser:
                 )
                 if session is None:
                     return Drops.DropCurrentSessionResponse()
+                # Only names History's channel for the drop: a missing or
+                # odd value leaves it unknown and the minutes still count.
+                channel = session.get("channel")
+                channel = channel if isinstance(channel, dict) else {}
+                channel_id = channel.get("id")
+                channel_login = channel.get("name")
                 return Drops.DropCurrentSessionResponse(
                     has_session=True,
+                    channel_id=channel_id if isinstance(channel_id, str) else None,
+                    channel_login=(
+                        channel_login if isinstance(channel_login, str) else None
+                    ),
                     drop_id=parse_value(session, "dropID", optional_parser(expect_str)),
                     current_minutes_watched=parse_value(
                         session, "currentMinutesWatched", optional_parser(expect_int)

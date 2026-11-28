@@ -13641,6 +13641,22 @@ class Twitch(object):
                 self.drop_inventory_progress_updated_at = time.time()
         return eligibility_changed
 
+    @staticmethod
+    def __session_channel(streamers, session):
+        """The channel a drop session credits: the miner's streamer with
+        the session's channel id, else the session's channel login, else
+        None."""
+
+        channel_id = getattr(session, "channel_id", None)
+        if channel_id:
+            for streamer in list(streamers):
+                if getattr(streamer, "channel_id", None) == channel_id:
+                    return streamer
+        login = getattr(session, "channel_login", None)
+        if isinstance(login, str) and login.strip():
+            return login
+        return None
+
     def __light_drop_progress(self, campaigns, streamers, events, now):
         reports = [(event[0], event[1], event[2]) for event in events]
         request_failed = False
@@ -13671,10 +13687,16 @@ class Twitch(object):
                     if session.errors:
                         raise ValueError("current drop session returned errors")
                     if session.has_session:
-                        # The channel credited with the drop, for History.
-                        history_journal.JOURNAL.note_drop_channel(
-                            streamer, session.drop_id
-                        )
+                        # The channel credited with the drop, for History:
+                        # the one the session names.  The session is the
+                        # account's, so it can name a channel other than
+                        # the one asked about (and a reply without one
+                        # names none).
+                        credited = self.__session_channel(streamers, session)
+                        if credited is not None:
+                            history_journal.JOURNAL.note_drop_channel(
+                                credited, session.drop_id
+                            )
                         reports.append(
                             (
                                 session.drop_id,

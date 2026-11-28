@@ -1003,19 +1003,25 @@ class JournalImporter(object):
             return
         existing = connection.execute(
             """
-            SELECT dedupe_key, game FROM drops
+            SELECT dedupe_key, game, streamer FROM drops
             WHERE source = 'journal' AND (dedupe_key = ? OR drop_id = ?)
             LIMIT 1
             """,
             (key, drop_id),
         ).fetchone()
         if existing is not None:
-            # Reported again.  Recorded without its game before, perhaps:
-            # now it is known.
-            if game is not None and existing["game"] is None:
+            # Reported again.  Recorded without its game or channel before,
+            # perhaps: now it is known.  A known one is kept.
+            if (game is not None and existing["game"] is None) or (
+                streamer and existing["streamer"] is None
+            ):
                 connection.execute(
-                    "UPDATE drops SET game = ? WHERE dedupe_key = ?",
-                    (game, existing["dedupe_key"]),
+                    """
+                    UPDATE drops SET game = COALESCE(game, ?),
+                        streamer = COALESCE(streamer, ?)
+                    WHERE dedupe_key = ?
+                    """,
+                    (game, streamer or None, existing["dedupe_key"]),
                 )
         else:
             connection.execute(
